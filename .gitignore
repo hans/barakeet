@@ -1,0 +1,5 @@
+.DS_Store
+
+*.fif
+
+.ipynb_checkpoints
