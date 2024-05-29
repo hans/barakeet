@@ -14,7 +14,7 @@ rule run_notebook:
 
     shell:
         """
-        papermill {input.notebook} {output.out_notebook} \
+        papermill --log-output {input.notebook} {output.out_notebook} \
             -p outdir {output.outdir}
         """
 
