@@ -3,3 +3,5 @@
 *.fif
 
 .ipynb_checkpoints
+.snakemake
+outputs
