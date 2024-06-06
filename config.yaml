@@ -1,4 +1,9 @@
 
-notebooks:
+run_notebooks:
   mismatch_erp:
   population_decoding:
+  population_decoding_nopca:
+    notebook: population_decoding
+    params:
+      pca_num_components: null
+  population_decoding_speech_responsive:
