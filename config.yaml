@@ -1,4 +1,16 @@
 
+data:
+  subjects:
+    - EC243
+    - EC248
+    - EC250
+    - EC253
+    - EC260
+    - EC270
+    - EC278
+    - EC279
+    # - EC282 # missing ecog data
+
 run_notebooks:
   mismatch_erp:
   population_decoding:
