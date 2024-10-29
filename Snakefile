@@ -111,3 +111,19 @@ rule trf_eoi:
             parameters=dict(trf_paths=input.trf_paths,
                             outdir=str(output.outdir)),
         )
+
+rule trf_stepwise:
+    input:
+        trf_path = "outputs/trfs/{subject}/results.pkl",
+        trf_eois = "outputs/trf_eois/eois.csv",
+        epochs = "outputs/epochs_preprocessed/{subject}_epo.fif",
+        notebook = "notebooks/electrodes_of_interest-stepwise.ipynb",
+
+    output:
+        outdir = directory("outputs/trf_stepwise/{subject}"),
+        notebook = "outputs/trf_stepwise/{subject}/notebook.ipynb",
+        results = "outputs/trf_stepwise/{subject}/results.pkl",
+
+rule all_trf_stepwise:
+    input:
+        expand("outputs/trf_stepwise/{subject}/results.pkl", subject=config["data"]["subjects"])
