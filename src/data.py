@@ -19,6 +19,41 @@ def get_electrode_df(subject: str) -> pd.DataFrame:
     return ret
 
 
+# documentation for existing metadata in epochs file
+"""
+barakeet epochs info
+* epochs cropped from -200ms to +1000ms, relative to word onset
+* sample frequency: 400Hz (info in epochs.info)
+* to access the numpy array of the data, do epochs._data (word x channel x time)
+epochs.metadata:
+wav_file: wave file that was played on this trial
+stim_number: identification number for each word pair
+word_end: what word the final acoustics matches
+non_word: what is the corresponding non-word
+phoneme_pair: what phoneme continuum was manipulated
+morph_n: from the original set of 11 morph steps we made, what morph step is this onset
+base: the wav file name stripped of the path and extension
+file_format: wav file extension
+root: location of stimuli
+word_side: when visual options were presented, was the valid word of english on the left or right
+item_left: what string was displayed on the left side of the screen
+item_right: what string was presented on the right side of the screen
+resampled: what step on the 6-step morph is this item. low number means it sounds closer to the first item of "phoneme_pair"
+trials.* -- outputs from psychopy
+text.* -- outputs from psychopy
+key_resp.* -- outputs from psychopy
+[..]
+slider.response: where did the person click, where a lower number means closer to the left string, and higher number means closer to right string
+slider.rt: how long did their reaction time take (seconds)
+mouse.x: continuous timeseries of the x-axis mouse movements
+mouse.y: continuous timeseries of the y-axis mouse movements
+[..]
+Subject ID: participant code
+TDT Block: recording block (matches excel sheet for notes)
+block_type: for counter balancing which items are presented on the left/right
+"""
+
+
 
 # add computed features to epoch metadata, returning copy
 def add_metadata_features(md: pd.DataFrame) -> pd.DataFrame:
@@ -73,6 +108,18 @@ def add_metadata_features(md: pd.DataFrame) -> pd.DataFrame:
 
     # Add label for stratified evaluaton
     md["stratify_class"] = md.phoneme_pair.str.cat(md.mismatch.map({-1: "mismatch", 1: "match"}), sep=" ")
+
+    # linear representation of behavioral outcome between -1 (chose left of phoneme_pair)
+    # and 1 (chose right of phoneme_pair)
+    assert md["slider.response"].min() >= 1
+    assert md["slider.response"].max() <= 10
+    md["behavior_linear"] = (md["slider.response"] - 5.5) / 4.5
+
+    # categorical representation of behavioral outcome.
+    # -1 = clearly chose left of phoneme_pair, 1 = clearly chose right of phoneme_pair
+    # 0 = ambiguous (middle two options; 5 and 6)
+    md["behavior_categorical"] = np.sign(md["behavior_linear"])
+    md.loc[md["slider.response"].isin([5, 6]), "behavior_categorical"] = 0
 
     # TODO more features
 
