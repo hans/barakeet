@@ -103,7 +103,7 @@ def add_metadata_features(md: pd.DataFrame) -> pd.DataFrame:
 
     # mismatch*left/right: -1 if mismatch and resolving to left of phoneme_pair,
     # 1 if mismatch and resolving to right of phoneme_pair
-    md["mismatch_left_right"] = md.mismatch * md.lexical_evidence_cue
+    md["mismatch_left_right"] = (md.mismatch == 1) * md.lexical_evidence_cue
     assert md.mismatch_left_right.mean() == 0
 
     # Add label for stratified evaluaton
