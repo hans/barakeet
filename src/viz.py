@@ -230,7 +230,7 @@ def add_timit_insets(g, epoch_sources):
             epoch_df = pd.read_hdf(epoch_source, f"{subject}/epoch_df")
 
             for ax, phoneme_pair in zip(row, g.col_names):
-                plot_phonemes = list(phoneme_pair.upper())
+                plot_phonemes = sorted(list(phoneme_pair.upper()))
                 plot_epoch_dfs = [
                     epoch_df[epoch_df.epoch_label == phoneme]
                     for phoneme in plot_phonemes
