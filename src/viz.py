@@ -107,7 +107,7 @@ def plot_epochs(epochs: dict[Any, np.ndarray],
         phoneme_pair = data.phoneme_pair.iloc[0]
         col_ = data[col].iloc[0]
         
-        ax.set_title(f"{subject}_{channel + 1} {col}")
+        ax.set_title(f"{subject}_{channel + 1} {col_}")
 
         ax.axvline(0, color="gray", linestyle="--", alpha=0.5)
         ax.axhline(0, color="gray", linestyle="--", alpha=0.5)
@@ -270,6 +270,6 @@ def add_timit_insets(g, epoch_sources):
                     ax_inset.tick_params(axis="x", labelbottom=False)
 
                 # move title to left edge so insets have room
-                ax.title.set_position((0.1, 1))
+                ax.title.set_position((0.2, 1))
 
     return g
