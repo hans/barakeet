@@ -1,3 +1,4 @@
+import logging
 from typing import cast, Optional, Any
 
 import h5py
@@ -7,6 +8,9 @@ import pandas as pd
 import seaborn as sns
 
 from src.stimuli import POD_dict
+
+
+L = logging.getLogger(__name__)
 
 
 def _check_grouper(df, grouper, col,
@@ -217,10 +221,24 @@ def add_timit_insets(g, epoch_sources):
 
         # compute ymin and ymax across sources for epoched phoneme response
         ys = []
+        skip = False
         for epoch_source in epoch_sources.values():
             with h5py.File(epoch_source, "r") as f:
-                phoneme_epochs = f[subject]["epochs"][:, channel, :]
+                if subject not in f:
+                    L.warning(f"{subject} not found in {epoch_source}")
+                    skip = True
+                    continue
+                phoneme_epochs = f[subject]["epochs"]
+                if channel >= phoneme_epochs.shape[1]:
+                    L.warning(f"{subject} {channel} not found in {epoch_source}")
+                    skip = True
+                    continue
+
+                phoneme_epochs = phoneme_epochs[:, channel, :]
                 ys.append(phoneme_epochs.flatten())
+
+        if skip:
+            continue
         ys = np.concatenate(ys)
         ymin = np.percentile(ys, 10)
         ymax = np.percentile(ys, 90)
