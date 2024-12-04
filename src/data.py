@@ -110,8 +110,8 @@ def add_metadata_features(md: pd.DataFrame) -> pd.DataFrame:
     md["stratify_class"] = md.phoneme_pair.str.cat(md.mismatch.map({-1: "mismatch", 1: "match"}), sep=" ")
 
     # Add label for visualization
-    md["label_acoustic"] = md.apply(lambda row: row.phoneme_pair[int(row.categorical_acoustic_cue == -1)], axis=1)
-    md["label_lexical"] = md.apply(lambda row: row.phoneme_pair[int(row.lexical_evidence_cue == -1)], axis=1)
+    md["label_acoustic"] = md.apply(lambda row: row.phoneme_pair[int(row.categorical_acoustic_cue == 1)], axis=1)
+    md["label_lexical"] = md.apply(lambda row: row.phoneme_pair[int(row.lexical_evidence_cue == 1)], axis=1)
     md["label"] = md.label_acoustic.str.cat(md.label_lexical, sep="→")
 
     # linear representation of behavioral outcome between -1 (chose left of phoneme_pair)
