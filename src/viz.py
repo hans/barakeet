@@ -1,5 +1,5 @@
 import logging
-from typing import cast, Optional, Any
+from typing import Literal, cast, Optional, Any
 
 import h5py
 import matplotlib.pyplot as plt
@@ -17,15 +17,16 @@ def _check_grouper(df, grouper, col,
                    order: Optional[list[Any] | dict[str, Any]] = None,
                    bins=None,
                    share_groupers=True,
-                   grouper_type="hue", palette="tab10"
+                   grouper_type="hue",
+                   palette="tab10"
                    ) -> tuple[list[Any], list[Any]] | \
                         tuple[dict[str, list[Any]], dict[Any, list[Any]]]:
     if grouper is None:
         return [], []
 
     col_values = cast(list[Any], df[col].unique())
-    # if grouper is continuous, bin first
-    if df[grouper].dtype == float:
+    # if we weren't given an order and grouper is continuous, bin first
+    if order is None and df[grouper].dtype == float:
         if bins is not None:
             df[grouper] = pd.cut(df[grouper], bins)
             if df[grouper].isna().any():
@@ -52,14 +53,20 @@ def _check_grouper(df, grouper, col,
             order = {col_: sorted(df[df[col] == col_][grouper].unique())
                      for col_ in col_values}
         else:
-            if not isinstance(order, dict):
-                raise ValueError("If not share_groupers, order must be a dict")
+            if isinstance(order, dict):
+                pass
+            elif isinstance(order, list):
+                order = {col_: order for col_ in col_values}
+            else:
+                raise ValueError("If not share_groupers, order must be a dict or a list")
+
             if set(order.keys()) != set(df[col].unique()):
                 raise ValueError("order keys must match unique values of col")
         
         if grouper_type == "hue":
             styles = {col_: list(sns.color_palette(palette, len(order[col_]))) for col_ in order}
         elif grouper_type == "style":
+            assert all(len(order[col_]) <= len(_style_list) for col_ in order)
             styles = {col_: _style_list[:len(order[col_])] for col_ in order}
 
         return order, styles
@@ -69,10 +76,13 @@ def plot_epochs(epochs: dict[Any, np.ndarray],
                 epochs_df: pd.DataFrame,
                 hue=None, style=None,
                 hue_bins=None, hue_order=None, style_order=None,
+                palette="tab10",
                 col="phoneme_pair",
+                errorbar="se",
                 epoch_times=None,
                 close=False,
                 share_groupers=True,
+                fix_ylim: Literal[None, "percentile"] = None,
                 smoke_test=False):
     """
     Args:
@@ -82,11 +92,17 @@ def plot_epochs(epochs: dict[Any, np.ndarray],
             In this case, `hue_order` and `style_order` should be dicts mapping from column
             variable to list of levels.
     """
+    # the below modify epochs_df inplace, so we'll copy here
+    epochs_df = epochs_df.copy()
     hue_order, cmap = _check_grouper(epochs_df, hue, col, hue_order, hue_bins,
-                                     share_groupers=share_groupers, grouper_type="hue")
+                                     share_groupers=share_groupers, grouper_type="hue",
+                                     palette=palette)
     style_order, style_mapper = _check_grouper(epochs_df, style, col, style_order,
                                                share_groupers=share_groupers, grouper_type="style")
     
+    if errorbar not in ["se", None]:
+        raise ValueError("Only 'se' and None are supported for errorbar")
+
     if epoch_times is None:
         epoch_times = np.arange(next(iter(epochs.values())).shape[1])
 
@@ -102,6 +118,15 @@ def plot_epochs(epochs: dict[Any, np.ndarray],
                       col=col, col_order=col_order,
                       height=4, aspect=2,
                       gridspec_kws={"hspace": 0.55})
+    
+    if fix_ylim == "percentile":
+        # compute ylims across all data
+        sites = set((subject, channel) for subject, channel, _ in epochs_df.index)
+        all_data = np.concatenate([epochs[subject, channel].flatten()
+                                   for subject, channel in sites])
+        ylim = tuple(np.percentile(all_data, [2.5, 97.5]))
+    else:
+        ylim = None
 
     def f(data, **f_kwargs):
         ax = plt.gca()
@@ -115,6 +140,9 @@ def plot_epochs(epochs: dict[Any, np.ndarray],
 
         ax.axvline(0, color="gray", linestyle="--", alpha=0.5)
         ax.axhline(0, color="gray", linestyle="--", alpha=0.5)
+
+        if ylim is not None:
+            ax.set_ylim(ylim)
 
         if hue is None:
             hue_order_ = [-1]
@@ -164,10 +192,11 @@ def plot_epochs(epochs: dict[Any, np.ndarray],
                             color=color, linestyle=linestyle)
                     seen_hues.add(hue_level)
 
-                    # fillbetween with sem
-                    sem = eps_ij.std(axis=0) / np.sqrt(eps_ij.shape[0])
-                    ax.fill_between(epoch_times, eps_ij.mean(axis=0) - sem, eps_ij.mean(axis=0) + sem, alpha=0.3,
-                                    label=None, color=color)
+                    if errorbar == "se":
+                        # fillbetween with sem
+                        sem = eps_ij.std(axis=0) / np.sqrt(eps_ij.shape[0])
+                        ax.fill_between(epoch_times, eps_ij.mean(axis=0) - sem, eps_ij.mean(axis=0) + sem, alpha=0.3,
+                                        label=None, color=color)
 
         # annotate point of disambiguation
         pod = POD_dict[phoneme_pair]
@@ -216,7 +245,7 @@ def add_timit_insets(g, epoch_sources):
         inset_width, inset_height = 0.25, 0.2
         inset_wspace = 0.025
         inset_anchor_x = 1 - num_insets * (inset_width + inset_wspace)
-        inset_anchor_y = 1.2
+        inset_anchor_y = 1.3
         assert inset_anchor_x >= 0
 
         # compute ymin and ymax across sources for epoched phoneme response

@@ -106,25 +106,62 @@ def add_metadata_features(md: pd.DataFrame) -> pd.DataFrame:
     md["mismatch_left_right"] = (md.mismatch == 1) * md.lexical_evidence_cue
     assert md.mismatch_left_right.mean() == 0
 
+    # describes the degree of belief change from acoustic to lexical evidence
+    # maximum of -1 indicates complete revision of belief toward left;
+    # 1 indicates complete revision of belief toward right
+    # this is based on the linear acoustic cue, so this is a graded measure on [-1, 1]
+    md["belief_update"] = (md.lexical_evidence_cue - md.linear_acoustic_cue) / 2
+    for phoneme_pair, group in md.groupby("phoneme_pair"):
+        np.testing.assert_allclose(group.belief_update.min(), -1)
+        np.testing.assert_allclose(group.belief_update.max(), 1)
+        np.testing.assert_allclose(group.belief_update.mean(), 0, atol=1e-6)
+    md["belief_update_int"] = (md.belief_update * 5).astype(int)
+    md["belief_update_int_coarse"] = md.belief_update_int.map({-5: -5, -4: -5,
+                                                               -3: -2, -2: -2, -1: -2,
+                                                               0: 0,
+                                                               1: 2, 2: 2, 3: 2,
+                                                               4: 5, 5: 5})
+    # belief update coarse which drops non-mismatch options
+    md["belief_update_int_coarse_mismatch_only"] = md.belief_update_int.map({
+        -5: -5, -4: -5, -3: -2, 3: 2, 4: 5, 5: 5,
+        -2: np.nan, -1: np.nan, 0: np.nan, 1: np.nan, 2: np.nan
+    })
+
     # Add label for stratified evaluaton
-    md["stratify_class"] = md.phoneme_pair.str.cat(md.mismatch.map({-1: "mismatch", 1: "match"}), sep=" ")
+    md["stratify_class"] = md.phoneme_pair.str.cat(md.mismatch.map({-1: "match", 1: "mismatch"}), sep=" ")
 
     # Add label for visualization
     md["label_acoustic"] = md.apply(lambda row: row.phoneme_pair[int(row.categorical_acoustic_cue == 1)], axis=1)
     md["label_lexical"] = md.apply(lambda row: row.phoneme_pair[int(row.lexical_evidence_cue == 1)], axis=1)
     md["label"] = md.label_acoustic.str.cat(md.label_lexical, sep="→")
 
+    # slider response is given relative to the trial-specific presentation
+    # of left and right word. convert this into a cross-trial representaton which
+    # describes behavior as a choice of a phoneme within a pair
+    # `switched_sides` is True iff the left word's first phoneme is the
+    # second phoneme of the pair string
+    switched_sides = md.item_left.str[0] != md.phoneme_pair.str[0]
+    md["behavior_sign"] = 1
+    md.loc[switched_sides, "behavior_sign"] = -1
+
     # linear representation of behavioral outcome between -1 (chose left of phoneme_pair)
     # and 1 (chose right of phoneme_pair)
     assert md["slider.response"].min() >= 1
     assert md["slider.response"].max() <= 10
-    md["behavior_linear"] = (md["slider.response"] - 5.5) / 4.5
+    md["behavior_linear"] = md.behavior_sign * (md["slider.response"] - 5.5) / 4.5
 
     # categorical representation of behavioral outcome.
     # -1 = clearly chose left of phoneme_pair, 1 = clearly chose right of phoneme_pair
     # 0 = ambiguous (middle two options; 5 and 6)
     md["behavior_categorical"] = np.sign(md["behavior_linear"])
     md.loc[md["slider.response"].isin([5, 6]), "behavior_categorical"] = 0
+
+    md["label_behavior"] = "~"
+    md.loc[md.behavior_categorical == -1, "label_behavior"] = md[md.behavior_categorical == -1].phoneme_pair.str[0]
+    md.loc[md.behavior_categorical == 1, "label_behavior"] = md[md.behavior_categorical == 1].phoneme_pair.str[1]
+
+    md["label_acoustic_emoji"] = "A" + md.label_acoustic
+    md["label_behavior_emoji"] = "B" + md.label_behavior
 
     # TODO more features
 
