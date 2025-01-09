@@ -123,7 +123,59 @@ rule trf_stepwise:
         outdir = directory("outputs/trf_stepwise/{subject}"),
         notebook = "outputs/trf_stepwise/{subject}/notebook.ipynb",
         results = "outputs/trf_stepwise/{subject}/results.pkl",
+    
+    run:
+        execute_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(trf_path=input.trf_path,
+                            eois_path=input.trf_eois,
+                            epochs_path=input.epochs,
+                            outdir=str(output.outdir)),
+        )
 
+all_stepwise_results = expand("outputs/trf_stepwise/{subject}/results.pkl", subject=config["data"]["subjects"])
 rule all_trf_stepwise:
     input:
-        expand("outputs/trf_stepwise/{subject}/results.pkl", subject=config["data"]["subjects"])
+        all_stepwise_results
+
+rule analyze_stepwise:
+    input:
+        stepwise_results = all_stepwise_results,
+        notebook = "notebooks/analyze_stepwise.ipynb",
+
+    output:
+        outdir = directory("outputs/analyze_stepwise"),
+        notebook = "outputs/analyze_stepwise/notebook.ipynb",
+        eois = "outputs/analyze_stepwise/eois.csv",
+
+    run:
+        execute_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(stepwise_results=input.stepwise_results,
+                            outdir=str(output.outdir)),
+        )
+
+
+rule trf_epoched_plots:
+    input:
+        trf_eois = "outputs/trf_eois/eois.csv",
+        trf_stepwise_eois = "outputs/analyze_stepwise/eois.csv",
+        notebook = "notebooks/epoched_plots.ipynb",
+        epochs = lambda _: expand("outputs/epochs_preprocessed/{subject}_epo.fif",
+                                  subject=glob_wildcards("outputs/epochs_preprocessed/{subject}_epo.fif")[0]),
+
+    output:
+        outdir = directory("outputs/epoch_plots"),
+        notebook = "outputs/epoch_plots/epoched_plots.ipynb",
+
+    run:
+        execute_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(trf_eois=input.trf_eois,
+                            trf_stepwise_eois=input.trf_stepwise_eois,
+                            epoch_paths=input.epochs,
+                            outdir=str(output.outdir)),
+        )
