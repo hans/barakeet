@@ -9,7 +9,8 @@ data:
     - EC270
     - EC278
     - EC279
-    # - EC282 # missing ecog data
+    - EC282
+    - EC287
 
 run_notebooks:
   mismatch_erp:
