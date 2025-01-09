@@ -154,11 +154,19 @@ def add_metadata_features(md: pd.DataFrame) -> pd.DataFrame:
     # -1 = clearly chose left of phoneme_pair, 1 = clearly chose right of phoneme_pair
     # 0 = ambiguous (middle two options; 5 and 6)
     md["behavior_categorical"] = np.sign(md["behavior_linear"])
-    md.loc[md["slider.response"].isin([5, 6]), "behavior_categorical"] = 0
+    # md.loc[md["slider.response"].isin([5, 6]), "behavior_categorical"] = 0
+    md["behavior_categorical_forced"] = np.sign(md["behavior_linear"])
+    md["behavior_dummy_forced"] = (md.behavior_categorical_forced > 0).astype(int)
 
     md["label_behavior"] = "~"
     md.loc[md.behavior_categorical == -1, "label_behavior"] = md[md.behavior_categorical == -1].phoneme_pair.str[0]
     md.loc[md.behavior_categorical == 1, "label_behavior"] = md[md.behavior_categorical == 1].phoneme_pair.str[1]
+
+    # Higher-level behavior descriptions
+    md["follows_acoustics"] = md.behavior_categorical_forced == md.categorical_acoustic_cue
+    md["ignores_both_cues"] = (md.label_lexical == md.label_acoustic) & (md.label_lexical != md.label_behavior)
+
+    md["label_lexical_behavior"] = "L" + md.label_lexical + "B" + md.label_behavior
 
     md["label_acoustic_emoji"] = "A" + md.label_acoustic
     md["label_behavior_emoji"] = "B" + md.label_behavior
