@@ -77,12 +77,15 @@ def plot_epochs(epochs: dict[Any, np.ndarray],
                 hue=None, style=None,
                 hue_bins=None, hue_order=None, style_order=None,
                 palette="tab10",
+                row="facet_label",
                 col="phoneme_pair",
                 errorbar="se",
+                height=4, aspect=2,
                 epoch_times=None,
                 close=False,
                 share_groupers=True,
                 fix_ylim: Literal[None, "percentile"] = None,
+                drop_minority_traces: Optional[int] = None,
                 smoke_test=False):
     """
     Args:
@@ -91,6 +94,9 @@ def plot_epochs(epochs: dict[Any, np.ndarray],
             If False, each column has its own hue/style and legend is shown on each axis.
             In this case, `hue_order` and `style_order` should be dicts mapping from column
             variable to list of levels.
+        fix_ylim: If "percentile", fix ylims of each epoch chart to 2.5th and 97.5th percentiles
+            of all data. Otherwise, ylims are determined by matplotlib.
+        drop_minority_traces: If not None, drop traces with fewer than this many epochs.
     """
     # the below modify epochs_df inplace, so we'll copy here
     epochs_df = epochs_df.copy()
@@ -112,13 +118,6 @@ def plot_epochs(epochs: dict[Any, np.ndarray],
         plot_sites = epochs_df.site.unique()[:2]
         epochs_df = epochs_df[epochs_df.site.isin(plot_sites)]
 
-    col_order = sorted(epochs_df[col].unique())
-    g = sns.FacetGrid(data=epochs_df.reset_index(["subject", "channel"]),
-                      row="facet_label",
-                      col=col, col_order=col_order,
-                      height=4, aspect=2,
-                      gridspec_kws={"hspace": 0.55})
-    
     if fix_ylim == "percentile":
         # compute ylims across all data
         sites = set((subject, channel) for subject, channel, _ in epochs_df.index)
@@ -127,6 +126,22 @@ def plot_epochs(epochs: dict[Any, np.ndarray],
         ylim = tuple(np.percentile(all_data, [2.5, 97.5]))
     else:
         ylim = None
+
+    if drop_minority_traces is not None:
+        grouper_factors = [row, col]
+        if hue is not None:
+            grouper_factors.append(hue)
+        if style is not None:
+            grouper_factors.append(style)
+        epochs_df = epochs_df.groupby(grouper_factors) \
+            .filter(lambda x: len(x) >= drop_minority_traces)
+
+    col_order = sorted(epochs_df[col].unique())
+    g = sns.FacetGrid(data=epochs_df.reset_index(["subject", "channel"]),
+                      row=row,
+                      col=col, col_order=col_order,
+                      height=height, aspect=aspect,
+                      gridspec_kws={"hspace": 0.55})
 
     def f(data, **f_kwargs):
         ax = plt.gca()
@@ -206,8 +221,15 @@ def plot_epochs(epochs: dict[Any, np.ndarray],
 
     for row in g.axes:
         if share_groupers:
+            legend_title = []
+            if hue is not None:
+                legend_title.append(hue)
+            if style is not None:
+                legend_title.append(style)
+            legend_title = " ".join(legend_title)
+
             # add legend on final axis outside of data, left-aligned to the axis edge
-            row[-1].legend(loc="center left", bbox_to_anchor=(1.1, 0.75), title=hue)
+            row[-1].legend(loc="center left", bbox_to_anchor=(1.1, 0.75), title=legend_title)
         else:
             for ax in row:
                 ax.legend(loc="center right", bbox_to_anchor=(1.15, 0.5))
