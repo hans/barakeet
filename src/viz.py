@@ -258,6 +258,43 @@ def add_uv_annotation(g, feature_block, eoi_df):
     return g
 
 
+def add_behavior_insets(g, ep_df):
+    for row, name in zip(g.axes, g.row_names):
+        subject, _ = name.split("_")
+        
+        inset_width, inset_height = 0.25, 0.2
+        inset_wspace = 0.025
+        inset_anchor_x = 0.025
+        inset_anchor_y = 1.3
+
+        for ax, phoneme_pair in zip(row, g.col_names):
+            ep_df_i = ep_df.query("subject == @subject and phoneme_pair == @phoneme_pair")
+
+            ax_inset = ax.inset_axes([inset_anchor_x,
+                                      inset_anchor_y - inset_height,
+                                      inset_width, inset_height])
+            
+            md = ep_df_i.groupby("label").label_behavior.value_counts(normalize=True) \
+                .sort_index(key=lambda s: s.str[0].map({**{phon: idx for idx, phon in enumerate(phoneme_pair)},
+                                                        **{"~": 2}})) \
+                .unstack()
+            
+            # reorder
+            md = md.reindex(columns=[*phoneme_pair, "~"], fill_value=0)
+            md.plot(kind="barh", stacked=True, color=sns.color_palette()[:3], width=0.95, ax=ax_inset)
+            # remove border
+            ax_inset.spines[:].set_visible(False)
+            ax_inset.set_xlabel(None)
+            ax_inset.set_ylabel(None)
+            ax_inset.set_xticks(np.linspace(0, 1, 5))
+            ax_inset.set_xticklabels([])
+            # add gridlines
+            ax_inset.grid(axis="x", linestyle="--", alpha=0.8)
+            ax_inset.legend(loc="upper right", bbox_to_anchor=(1.6, 1.15),
+                            labelspacing=0.15, fontsize=10, title_fontsize=10, title="behavior")
+
+
+
 def add_timit_insets(g, epoch_sources):
     for row, name in zip(g.axes, g.row_names):
         subject, channel_name = name.split("_")
