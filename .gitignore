@@ -1,6 +1,12 @@
 .DS_Store
 *.pyc
 *.fif
+*.pkl
+*.TextGrid
+*.csv
+*.pdf
+*.pt
+*.zip
 
 .ipynb_checkpoints
 .snakemake
