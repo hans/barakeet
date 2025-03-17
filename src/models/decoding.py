@@ -1,4 +1,6 @@
 
+from typing import Literal
+
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import StratifiedKFold, cross_validate
@@ -11,7 +13,11 @@ from tqdm.auto import tqdm
 
 def run_decoding_analysis_single_electrode(
         epochs, electrode_df, stride, window_size,
-        target="lexical_evidence"):
+        target: Literal["lexical_evidence", "mismatch", "mismatch_left_right"] = "lexical_evidence",
+        filter_speech_responsive=True,
+        return_outcomes=True,
+        smoke_test=False,
+        randomize=False):
     """
     stride: in samples
     window_size: in samples
@@ -35,7 +41,11 @@ def run_decoding_analysis_single_electrode(
 
     phoneme_pairs = next(iter(epochs.values())).metadata.phoneme_pair.unique()
 
-    electrodes = electrode_df.query("speech_responsive").reset_index()
+    if filter_speech_responsive:
+        electrodes = electrode_df.query("speech_responsive").reset_index()
+    else:
+        # include all electrodes
+        electrodes = electrode_df.reset_index()
 
     for _, row in tqdm(electrodes.iterrows(), total=len(electrodes)):
         for smin, smax in windows:
@@ -63,6 +73,10 @@ def run_decoding_analysis_single_electrode(
 
                 num_classes = len(set(y))
                 # stratify_class = epochs_ij.metadata.stratify_class[selection].values
+
+                if randomize:
+                    # Randomize the labels
+                    y = np.random.permutation(y)
 
                 ####
 
@@ -94,15 +108,16 @@ def run_decoding_analysis_single_electrode(
                     train_scores[result_key] = fitted["train_score"]
                     test_scores[result_key] = fitted["test_score"]
 
-                # onl store outcomes on test folds
-                outcomes[result_key] = pd.concat([
-                    pd.DataFrame({"decoder_target": y[test_idxs],
-                                "decoder_prediction": estimator.predict(X[test_idxs]),
-                                "decoder_proba": estimator.predict_proba(X[test_idxs])[:, 1],
-                                "fold": fold},
-                                index=test_idxs)
-                    for fold, ((_, test_idxs), estimator) in enumerate(zip(cv_outer.split(X, y), fitted["estimator"]))
-                ])
+                if return_outcomes:
+                    # only store outcomes on test folds
+                    outcomes[result_key] = pd.concat([
+                        pd.DataFrame({"decoder_target": y[test_idxs],
+                                    "decoder_prediction": estimator.predict(X[test_idxs]),
+                                    "decoder_proba": estimator.predict_proba(X[test_idxs])[:, 1],
+                                    "fold": fold},
+                                    index=test_idxs)
+                        for fold, ((_, test_idxs), estimator) in enumerate(zip(cv_outer.split(X, y), fitted["estimator"]))
+                    ])
 
                 models[result_key] = fitted["estimator"]
 
