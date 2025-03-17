@@ -63,6 +63,8 @@ def add_metadata_features(md: pd.DataFrame) -> pd.DataFrame:
 
     assert set(md.resampled) == set(range(1, int(md.resampled.max()) + 1))
 
+    md["textgrid_path"] = md.apply(lambda x: x.wav_file.replace(x.root, "").replace(".wav", ".TextGrid"), axis=1)
+
     # Prepare regression features
 
     # linear acoustic cue: `resampled` centered and scaled to [-1, 1]
@@ -92,6 +94,9 @@ def add_metadata_features(md: pd.DataFrame) -> pd.DataFrame:
         assert group.lexical_evidence_cue.min() == -1
         assert group.lexical_evidence_cue.max() == 1
         assert group.lexical_evidence_cue.mean() == 0
+
+    # ambiguity: 0 for extreme edges of scale; 1 for maximally ambiguous (resampled = 3, 4)
+    md["ambiguity"] = (2.5 - np.abs(md.resampled - 3.5)) / 2
 
     # mismatch: 1 if mismatch (conflict of lexical evidence and categorical acoustic cue), 0 otherwise
     md["mismatch"] = (md.lexical_evidence_cue != md.categorical_acoustic_cue).astype(int) * 2 - 1
@@ -171,6 +176,9 @@ def add_metadata_features(md: pd.DataFrame) -> pd.DataFrame:
     md["label_acoustic_emoji"] = "A" + md.label_acoustic
     md["label_behavior_emoji"] = "B" + md.label_behavior
 
-    # TODO more features
+    # interaction features
+    md["feat_behavior_acoustic"] = md.behavior_categorical * md.categorical_acoustic_cue
+    md["feat_behavior_lexical"] = md.behavior_categorical * md.lexical_evidence_cue
+    md["feat_behavior_mismatch_left_right"] = md.behavior_categorical * md.mismatch_left_right
 
     return md
