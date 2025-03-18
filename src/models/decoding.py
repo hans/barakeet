@@ -16,6 +16,7 @@ def run_decoding_analysis_single_electrode(
         target: Literal["lexical_evidence", "mismatch", "mismatch_left_right"] = "lexical_evidence",
         filter_speech_responsive=True,
         return_outcomes=True,
+        include_only_full_windows=True,
         smoke_test=False,
         randomize=False):
     """
@@ -29,8 +30,10 @@ def run_decoding_analysis_single_electrode(
     global_min_sample = 0
     global_max_sample = min([epoch.get_data().shape[2] for epoch in epochs.values()])
     windows_left = np.arange(global_min_sample, global_max_sample, stride)
-    windows_right = np.minimum(global_max_sample, windows_left + window_size)
-    windows = list(zip(windows_left, windows_right))
+    windows_right = windows_left + window_size
+    windows = np.array(list(zip(windows_left, windows_right)))
+    if include_only_full_windows:
+        windows = windows[windows[:, 1] <= global_max_sample]
 
     # `outcomes` stores prediction outcomes for each epoch under the optimal model
     outcomes = {}
@@ -46,6 +49,9 @@ def run_decoding_analysis_single_electrode(
     else:
         # include all electrodes
         electrodes = electrode_df.reset_index()
+
+    if smoke_test:
+        electrodes = electrodes.iloc[:5]
 
     for _, row in tqdm(electrodes.iterrows(), total=len(electrodes)):
         for smin, smax in windows:
