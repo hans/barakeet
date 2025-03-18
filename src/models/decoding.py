@@ -86,17 +86,17 @@ def run_decoding_analysis_single_electrode(
 
                 ####
 
-                cv_inner = StratifiedKFold(3, shuffle=True, random_state=42)
-                cv_outer = StratifiedKFold(3, shuffle=True, random_state=42)
+                cv_inner = StratifiedKFold(2, shuffle=True, random_state=42)
+                cv_outer = StratifiedKFold(2, shuffle=True, random_state=42)
 
-                Cs = np.logspace(-6, 6, 6)
+                Cs = np.logspace(-3, 2, 6)
 
                 pipeline = [StandardScaler()]
 
                 solver = "liblinear" if num_classes == 2 else "saga"
                 pipeline.append(LogisticRegressionCV(
                     Cs=Cs, cv=cv_inner, max_iter=100000, n_jobs=1,
-                    class_weight="balanced",
+                    class_weight="balanced", fit_intercept=False,
                     solver=solver))
                 model = make_pipeline(*pipeline)
                 scoring = ["roc_auc", "f1_macro", "accuracy"] if num_classes == 2 else ["f1_macro", "accuracy"]
