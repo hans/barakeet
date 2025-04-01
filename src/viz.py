@@ -1,11 +1,14 @@
 import logging
+from pathlib import Path
 from typing import Literal, cast, Optional, Any
 
 import h5py
 import matplotlib.pyplot as plt
+from matplotlib import transforms
 import numpy as np
 import pandas as pd
 import seaborn as sns
+import textgrid
 
 from src.stimuli import POD_dict
 
@@ -84,6 +87,7 @@ def plot_epochs(epochs: dict[Any, np.ndarray],
                 epoch_times=None,
                 close=False,
                 share_groupers=True,
+                onset_vline=False,
                 fix_ylim: Literal[None, "percentile"] = None,
                 drop_minority_traces: Optional[int] = None,
                 smoke_test=False):
@@ -153,7 +157,8 @@ def plot_epochs(epochs: dict[Any, np.ndarray],
         
         ax.set_title(f"{subject}_{channel + 1} {col_}")
 
-        ax.axvline(0, color="gray", linestyle="--", alpha=0.5)
+        if onset_vline:
+            ax.axvline(0, color="gray", linestyle="--", alpha=0.5)
         ax.axhline(0, color="gray", linestyle="--", alpha=0.5)
 
         if ylim is not None:
@@ -196,7 +201,7 @@ def plot_epochs(epochs: dict[Any, np.ndarray],
 
                 # eps_ij_idxs = eps_ij_idxs_[eps_ij_idxs_ < all_plot_epochs[subject, channel].shape[0]]
                 if len(eps_ij_idxs) == 0:
-                    print(f"yerp, no epochs for {subject} {channel} {col} {hue_level} {style_level}")
+                    print(f"yerp, no epochs for {subject} {channel} {col_} {hue_level} {style_level}")
 
                     # still add a legend handle
                     ax.plot([], [], label=label, color=color, linestyle=linestyle)
@@ -242,7 +247,8 @@ def plot_epochs(epochs: dict[Any, np.ndarray],
 
 def add_pod_line(g):
     for row in g.axes:
-        for ax, phoneme_pair in zip(row, g.col_names):
+        for ax, col_name in zip(row, g.col_names):
+            phoneme_pair = col_name.split()[0].strip()
             pod = POD_dict[phoneme_pair]
             ax.axvline(pod, color="black", linestyle="dotted")
 
@@ -258,16 +264,50 @@ def add_uv_annotation(g, feature_block, eoi_df):
     return g
 
 
-def add_behavior_insets(g, ep_df):
+def add_textgrid(g, textgrid_path, ep_df):
+    for row, name in zip(g.axes, g.row_names):
+        for ax, col_name in zip(row, g.col_names):
+            phoneme_pair = col_name.split()[0].strip()
+            subject, _ = name.split("_")
+
+            ep_df_i = ep_df.query("subject == @subject and phoneme_pair == @phoneme_pair")
+            textgrid_path_i = ep_df_i.textgrid_path.iloc[0]
+
+            tg = textgrid.TextGrid.fromFile(Path(textgrid_path) / textgrid_path_i)
+            assert tg.getNames() == ["phonemes"]
+            
+            for interval in tg.tiers[0].intervals:
+                if interval.mark is None or not interval.mark.strip():
+                    continue
+                ax.axvline(interval.minTime, linestyle="--", alpha=0.5, color="salmon")
+                ax.text(interval.minTime, 0.025, interval.mark.strip(), rotation=90,
+                        ha="right", va="bottom",
+                        transform=transforms.blended_transform_factory(ax.transData, ax.transAxes))
+
+    return g
+
+
+def add_behavior_insets(g, ep_df, plot_only_once: Optional[Literal["row", "global"]] = "row"):
+    seen_plots = set()
     for row, name in zip(g.axes, g.row_names):
         subject, _ = name.split("_")
+        if plot_only_once == "row":
+            # refresh seen_plots for each row
+            seen_plots = set()
         
         inset_width, inset_height = 0.25, 0.2
         inset_wspace = 0.025
         inset_anchor_x = 0.025
         inset_anchor_y = 1.3
 
-        for ax, phoneme_pair in zip(row, g.col_names):
+        for ax, col_name in zip(row, g.col_names):
+            phoneme_pair = col_name.split()[0].strip()
+
+            plot_id = (subject, phoneme_pair)
+            if plot_only_once and plot_id in seen_plots:
+                continue
+            seen_plots.add(plot_id)
+
             ep_df_i = ep_df.query("subject == @subject and phoneme_pair == @phoneme_pair")
 
             ax_inset = ax.inset_axes([inset_anchor_x,
@@ -292,7 +332,8 @@ def add_behavior_insets(g, ep_df):
             ax_inset.grid(axis="x", linestyle="--", alpha=0.8)
             ax_inset.legend(loc="upper right", bbox_to_anchor=(1.6, 1.15),
                             labelspacing=0.15, fontsize=10, title_fontsize=10, title="behavior")
-
+            
+    return g
 
 
 def add_timit_insets(g, epoch_sources):
@@ -335,7 +376,9 @@ def add_timit_insets(g, epoch_sources):
         for i, (epoch_source_name, epoch_source) in enumerate(epoch_sources.items()):
             epoch_df = pd.read_hdf(epoch_source, f"{subject}/epoch_df")
 
-            for ax, phoneme_pair in zip(row, g.col_names):
+            for ax, col_name in zip(row, g.col_names):
+                phoneme_pair = col_name.split()[0].strip()
+
                 plot_phonemes = list(phoneme_pair.upper())
                 plot_epoch_dfs = [
                     epoch_df[epoch_df.epoch_label == phoneme]

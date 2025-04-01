@@ -1,14 +1,14 @@
 from functools import partial
 from pathlib import Path
 import re
-from typing import Callable, Union
+from typing import Callable, Optional, Union
 
 import pandas as pd
 
 
 def concat_df_with_indices(path_glob: str,
-                           path_patterns: list[Union[str, re.Pattern, Callable[[Path], str]]],
-                           index_names: list[str],
+                           path_patterns: Optional[list[Union[str, re.Pattern, Callable[[Path], str]]]] = None,
+                           index_names: Optional[list[str]] = None,
                            reader=None,
                            **kwargs):
     """
@@ -30,7 +30,12 @@ def concat_df_with_indices(path_glob: str,
         else:
             raise ValueError("Unknown file format")
         
-    assert len(path_patterns) == len(index_names)
+    if path_patterns is not None:
+        assert index_names is not None
+        assert len(path_patterns) == len(index_names)
+    else:
+        path_patterns = []
+        index_names = []
 
     paths = list(Path().glob(path_glob))
     dfs = [reader(p, **kwargs) for p in paths]
@@ -45,12 +50,14 @@ def concat_df_with_indices(path_glob: str,
         index = pd.MultiIndex.from_tuples([], names=index_names + ['file'])
         return pd.DataFrame(index=index)
 
-    return pd.concat(dfs, keys=index_keys, names=index_names)
+    return pd.concat(dfs,
+                     keys=index_keys if index_names else None,
+                     names=index_names if index_names else None)
 
 
 def concat_csv_with_indices(path_glob: str,
-                            path_patterns: list[Union[str, re.Pattern, Callable[[Path], str]]],
-                            index_names: list[str],
+                            path_patterns: Optional[list[Union[str, re.Pattern, Callable[[Path], str]]]] = None,
+                            index_names: Optional[list[str]] = None,
                             **kwargs):
     return concat_df_with_indices(path_glob, path_patterns, index_names,
                                   reader=pd.read_csv, **kwargs)
