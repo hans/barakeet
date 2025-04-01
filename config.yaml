@@ -24,9 +24,12 @@ run_notebooks:
 
 decoding:
   targets:
+    - acoustic
     - mismatch
     - lexical_evidence
     - mismatch_left_right
+
+  num_random_runs: 3
 
   window_sizes:
     - 10

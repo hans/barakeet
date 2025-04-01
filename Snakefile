@@ -293,16 +293,43 @@ rule single_electrode_decoding_specific_window:
         )
 
 
+rule single_electrode_decoding_full_window_random:
+    input:
+        epochs = "outputs/epochs_preprocessed",
+        notebook = "notebooks/single_electrode_decoding.ipynb",
+    
+    output:
+        outdir = directory("outputs/single_electrode_decoding-random_{run}/full_window/{target}"),
+        notebook = "outputs/single_electrode_decoding-random_{run}/full_window/{target}/notebook.ipynb",
+        scores = "outputs/single_electrode_decoding-random_{run}/full_window/{target}/scores.csv",
+        outcomes = "outputs/single_electrode_decoding-random_{run}/full_window/{target}/outcomes.pt",
+
+    run:
+        execute_notebook(
+            str(input.notebook),
+            output_path=str(output.notebook),
+            parameters=dict(epochs_path=input.epochs,
+                            outdir=str(output.outdir),
+                            prediction_target=wildcards.target,
+                            window_size=max_decoding_window_size,
+                            stride=max_decoding_window_size,
+                            randomize=True,
+                            save_outcomes=False),
+            log_output=True,
+            progress_bar=True,
+        )
+
+
 rule single_electrode_decoding_specific_window_random:
     input:
         epochs = "outputs/epochs_preprocessed",
         notebook = "notebooks/single_electrode_decoding.ipynb",
     
     output:
-        outdir = directory("outputs/single_electrode_decoding_random/{window}/{target}"),
-        notebook = "outputs/single_electrode_decoding_random/{window}/{target}/notebook.ipynb",
-        scores = "outputs/single_electrode_decoding_random/{window}/{target}/scores.csv",
-        outcomes = "outputs/single_electrode_decoding_random/{window}/{target}/outcomes.pt",
+        outdir = directory("outputs/single_electrode_decoding-random_{run}/{window}/{target}"),
+        notebook = "outputs/single_electrode_decoding-random_{run}/{window}/{target}/notebook.ipynb",
+        scores = "outputs/single_electrode_decoding-random_{run}/{window}/{target}/scores.csv",
+        outcomes = "outputs/single_electrode_decoding-random_{run}/{window}/{target}/outcomes.pt",
 
     run:
         window_size = int(wildcards.window)
@@ -331,6 +358,10 @@ rule single_electrode_decoding_all_results:
         expand("outputs/single_electrode_decoding/{window}/{target}/scores.csv",
                window=config["decoding"]["window_sizes"],
                target=config["decoding"]["targets"]),
+        expand("outputs/single_electrode_decoding-random_{run}/{window}/{target}/scores.csv",
+                window=config["decoding"]["window_sizes"] + ["full_window"],
+                target=config["decoding"]["targets"],
+                run=list(range(config["decoding"]["num_random_runs"]))),
 
 
 # TODO find optimum window size
