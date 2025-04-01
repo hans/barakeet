@@ -13,7 +13,7 @@ from tqdm.auto import tqdm
 
 def run_decoding_analysis_single_electrode(
         epochs, electrode_df, stride, window_size,
-        target: Literal["lexical_evidence", "mismatch", "mismatch_left_right"] = "lexical_evidence",
+        target: Literal["acoustic", "lexical_evidence", "mismatch", "mismatch_left_right"] = "lexical_evidence",
         filter_speech_responsive=True,
         return_outcomes=True,
         include_only_full_windows=True,
@@ -24,7 +24,7 @@ def run_decoding_analysis_single_electrode(
     window_size: in samples
     """
 
-    if target not in ["lexical_evidence", "mismatch", "mismatch_left_right"]:
+    if target not in ["acoustic", "lexical_evidence", "mismatch", "mismatch_left_right"]:
         raise ValueError(f"Invalid target {target}")
 
     global_min_sample = 0
@@ -66,7 +66,9 @@ def run_decoding_analysis_single_electrode(
                 # num_trials * num_times
                 X = epochs_ij.get_data(picks=[row.electrode_idx])[selection][:, 0, smin:smax]
 
-                if target == "lexical_evidence":
+                if target == "acoustic":
+                    y = epochs_ij.metadata.categorical_acoustic_cue[selection].values
+                elif target == "lexical_evidence":
                     y = (epochs_ij.metadata.word_end.str[0] == phoneme_pair[0])[selection].values
                 elif target == "mismatch":
                     y = epochs_ij.metadata.mismatch[selection].values
