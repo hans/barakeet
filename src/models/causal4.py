@@ -3,6 +3,7 @@ from dataclasses import dataclass
 import mne
 import numpy as np
 import pandas as pd
+from scipy.stats import pearsonr, spearmanr
 from sklearn.decomposition import PCA
 from sklearn.discriminant_analysis import StandardScaler
 from sklearn.linear_model import LogisticRegression, LogisticRegressionCV
@@ -78,3 +79,90 @@ def run_causal4_analysis(epochs, subject, phoneme_pair,
         phase1_val_score=roc_auc,
         phase1_test_scores=fitted['test_score'],
     )
+
+
+def evaluate_counterfactual_correlation(
+        A_source, B_source, B_electrode_idx, B_window_start, B_window_end,
+        searchlight_decoder_outputs,
+        searchlight_electrode_activations,
+        left=True):
+    A_subject, A_phoneme_pair, A_population_A = A_source
+    B_subject, B_phoneme_pair, B_population_A = B_source
+
+    assert A_phoneme_pair == B_phoneme_pair, "Phoneme pairs must match for counterfactual evaluation."
+
+    A_activations = searchlight_electrode_activations[A_subject, A_phoneme_pair, A_population_A, B_window_start, B_window_end]
+    B_activations = searchlight_electrode_activations[B_subject, B_phoneme_pair, B_population_A, B_window_start, B_window_end]
+
+    A_metadata = A_activations["metadata"].copy()
+    B_metadata = B_activations["metadata"]
+    A_mask_left = A_activations["mask_left"]
+    B_mask_left = B_activations["mask_left"]
+
+    if left:
+        A_metadata = A_metadata[A_mask_left]
+        B_metadata = B_metadata[B_mask_left]
+
+        A_p_gt_phoneme = searchlight_decoder_outputs[A_subject, A_phoneme_pair, A_population_A]["p_gt_phoneme_mean"][A_mask_left]
+        B_response = B_activations["window_data_left_mean"][:, B_electrode_idx]
+    else:
+        A_metadata = A_metadata[~A_mask_left]
+        B_metadata = B_metadata[~B_mask_left]
+
+        A_p_gt_phoneme = searchlight_decoder_outputs[A_subject, A_phoneme_pair, A_population_A]["p_gt_phoneme_mean"][~A_mask_left]
+        B_response = B_activations["window_data_right_mean"][:, B_electrode_idx]
+
+    if len(A_metadata) != len(B_metadata):
+        # resample A to have the same number of trials as B
+        B_grouped = B_metadata.groupby(["resampled", "lexical_evidence"])
+        draw_A_idxs = A_metadata.groupby(["resampled", "lexical_evidence"], as_index=False).apply(
+                lambda xs: xs.iloc[np.random.choice(len(xs),
+                                                    size=len(B_grouped.groups[xs.name]),
+                                                    replace=len(B_grouped.groups[xs.name]) > len(xs))]) \
+            .reset_index(level=0, drop=True).sort_values(["resampled", "lexical_evidence"]).index
+        A_metadata["local_idx"] = np.arange(len(A_metadata))
+        A_metadata = A_metadata.loc[draw_A_idxs]
+        A_p_gt_phoneme = A_p_gt_phoneme[A_metadata.local_idx]
+    else:
+        # resort A
+        A_metadata = A_metadata.reset_index().sort_values(["resampled", "lexical_evidence"])
+        A_p_gt_phoneme = A_p_gt_phoneme[A_metadata.index]
+    
+    # align
+    B_resorted = B_metadata.reset_index().sort_values(["resampled", "lexical_evidence"]).index
+    B_response = B_response[B_resorted]
+
+    return spearmanr(A_p_gt_phoneme, B_response)
+
+
+def counterfactual_baseline(subject, phoneme_pair, population_A, electrode_idx, window_start, window_end,
+                            searchlight_decoder_outputs, searchlight_electrode_activations,
+                            left=True,
+                            sanity_check=False):
+    if sanity_check:
+        # DEV sanity check: only use the same subject and phoneme pair
+        control_alternative_keys = [(subject_alt, phoneme_pair_alt, population_A_alt) for subject_alt, phoneme_pair_alt, population_A_alt in searchlight_decoder_outputs.keys()
+                                    if subject_alt == subject and phoneme_pair_alt == phoneme_pair]
+    else:
+        control_alternative_keys = [(subject_alt, phoneme_pair_alt, population_A_alt) for subject_alt, phoneme_pair_alt, population_A_alt in searchlight_decoder_outputs.keys()
+                                    if subject_alt != subject and phoneme_pair_alt == phoneme_pair]
+
+    ret = []
+    for key in control_alternative_keys:
+        try:
+            val = evaluate_counterfactual_correlation(
+                (subject, phoneme_pair, population_A),
+                key,
+                electrode_idx,
+                window_start,
+                window_end,
+                searchlight_decoder_outputs,
+                searchlight_electrode_activations,
+                left=left
+            )
+            ret.append((key, val))
+        except Exception as e:
+            raise
+            # print(f"Error evaluating counterfactual for {key}: {e}")
+            # continue
+    return ret
