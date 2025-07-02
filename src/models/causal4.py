@@ -33,6 +33,11 @@ class Causal4AnalysisResult:
     computed from population A.
     """
 
+    p_left_phoneme: np.ndarray
+    """
+    Test output: probability of the left phoneme
+    computed from population A."""
+
     phase1_val_score: float
     """Score on the data that will be passed to phase2"""
 
@@ -77,6 +82,7 @@ def run_causal4_analysis(epochs, subject, phoneme_pair,
         test_trial_metadata=metadata.iloc[idxs_val],
 
         p_gt_phoneme=p_gt_phoneme,
+        p_left_phoneme=y_proba_val[:, 0],
         phase1_val_score=roc_auc,
         phase1_test_scores=fitted['test_score'],
     )
@@ -98,8 +104,9 @@ def evaluate_counterfactual_correlation(
 
     assert A_phoneme_pair == B_phoneme_pair, "Phoneme pairs must match for counterfactual evaluation."
 
-    A_activations = searchlight_electrode_activations[A_subject, A_phoneme_pair, A_population_A, B_window_start, B_window_end]
-    B_activations = searchlight_electrode_activations[B_subject, B_phoneme_pair, B_population_A, B_window_start, B_window_end]
+    activation_key = "left" if left else "right"
+    A_activations = searchlight_electrode_activations[A_subject, A_phoneme_pair, A_population_A, B_window_start, B_window_end, activation_key]
+    B_activations = searchlight_electrode_activations[B_subject, B_phoneme_pair, B_population_A, B_window_start, B_window_end, activation_key]
     # print("--", B_subject, B_phoneme_pair, B_population_A, B_window_start, B_window_end)
 
     A_metadata = A_activations["metadata"].copy()
@@ -107,19 +114,16 @@ def evaluate_counterfactual_correlation(
     A_mask_left = A_activations["mask_left"]
     B_mask_left = B_activations["mask_left"]
 
-    # print("here", A_source, B_source, B_window_start, B_window_end, B_electrode_idx, B_activations["window_data_left_mean"].shape, B_activations["window_data_right_mean"].shape)
+    B_response = B_activations["window_data_mean"][:, B_electrode_idx]
+
     if left:
         A_metadata = A_metadata[A_mask_left]
         B_metadata = B_metadata[B_mask_left]
-
         A_p_gt_phoneme = searchlight_decoder_outputs[A_subject, A_phoneme_pair, A_population_A]["p_gt_phoneme_mean"][A_mask_left]
-        B_response = B_activations["window_data_left_mean"][:, B_electrode_idx]
     else:
         A_metadata = A_metadata[~A_mask_left]
         B_metadata = B_metadata[~B_mask_left]
-
         A_p_gt_phoneme = searchlight_decoder_outputs[A_subject, A_phoneme_pair, A_population_A]["p_gt_phoneme_mean"][~A_mask_left]
-        B_response = B_activations["window_data_right_mean"][:, B_electrode_idx]
 
     # resample and resort data.
     # resample: make sure that A and B have the same number of trials
@@ -168,26 +172,26 @@ def counterfactual_baseline(subject, phoneme_pair, population_A, electrode_idx, 
         control_alternative_keys = [(subject_alt, phoneme_pair_alt, population_A_alt) for subject_alt, phoneme_pair_alt, population_A_alt in searchlight_decoder_outputs.keys()
                                     if (subject_alt != subject and phoneme_pair_alt == phoneme_pair)]
 
-    n_trials = searchlight_electrode_activations[(subject, phoneme_pair, population_A, window_start, window_end)]["metadata"].shape[0]
+    n_trials = searchlight_electrode_activations[subject, phoneme_pair, population_A,
+                                                 window_start, window_end, "left"]["metadata"].shape[0] + \
+                searchlight_electrode_activations[subject, phoneme_pair, population_A,
+                                                 window_start, window_end, "right"]["metadata"].shape[0]
 
     ret = []
     for key in control_alternative_keys:
         subject_alt, phoneme_pair_alt, population_A_alt = key
-        if (subject_alt, phoneme_pair_alt, population_A_alt, window_start, window_end) not in searchlight_electrode_activations:
+        if (subject_alt, phoneme_pair_alt, population_A_alt, window_start, window_end, "left") not in searchlight_electrode_activations:
             # Activations for the counterfactual key are not available at this time window.
             # It's likely that the counterfactual key couldn't draw on this time region because
             # its corresponding population A was overlapping.
             continue
 
-        # # DEV
-        # if subject_alt != "EC282" or phoneme_pair_alt != "dn" or population_A_alt != "5":
-        #     continue
-
         if sanity_check:
             n_runs = 1
         else:
             n_runs = 5
-            n_counterfactual_trials = searchlight_electrode_activations[*key, window_start, window_end]["metadata"].shape[0]
+            n_counterfactual_trials = searchlight_electrode_activations[*key, window_start, window_end, "left"]["metadata"].shape[0] + \
+                searchlight_electrode_activations[*key, window_start, window_end, "right"]["metadata"].shape[0]
             if n_counterfactual_trials != n_trials:
                 # We will be stochastically resampling the trials in order to align
                 # counterfactual and real target trials. Do this multiple times so
@@ -257,7 +261,8 @@ def realign_epochs_by_behavior(epochs, new_anchor_idx=50):
 
 ## visualization functions
 
-def plot_causal4_scatter(plot_meta, plot_meta_df, subject, population_B_window):
+def plot_causal4_scatter(plot_meta, plot_meta_df, subject, population_B_window,
+                         statistic: Literal["spearmanr", "pearsonr"] = "spearmanr"):
     """
     Plot scatter plots relating P(gt phoneme) from population A
     to the HGA from population B.
@@ -322,8 +327,13 @@ def plot_causal4_scatter(plot_meta, plot_meta_df, subject, population_B_window):
             ax=ax,
         )
 
-        corr, corr_p = stats.pearsonr(data.p_gt_phoneme, plot_epoch_data)
-        control_corr, control_corr_p = stats.pearsonr(data.resampled, plot_epoch_data)
+        if statistic == "spearmanr":
+            corr, corr_p = spearmanr(data.p_gt_phoneme, plot_epoch_data)
+            control_corr, control_corr_p = spearmanr(data.resampled, plot_epoch_data)
+        elif statistic == "pearsonr":
+            corr, corr_p = stats.pearsonr(data.p_gt_phoneme, plot_epoch_data)
+            control_corr, control_corr_p = stats.pearsonr(data.resampled, plot_epoch_data)
+
         ax.text(0.05, 0.95, f"$r$ = {corr:.2f} ($p$ = {corr_p:.2g})\ncontrol $r$ = {control_corr:.2f} ($p$ = {control_corr_p:.2g})",
                 transform=ax.transAxes, ha="left", va="top",
                 bbox=dict(facecolor="white", alpha=0.5, edgecolor="none"))
@@ -338,7 +348,8 @@ def plot_causal4_scatter(plot_meta, plot_meta_df, subject, population_B_window):
     return g_scatter
 
 
-def plot_causal4_evoked(plot_meta, plot_meta_df, subject, population_B_window,
+def plot_causal4_evoked(plot_meta, plot_meta_df, subject,
+                        population_A_window, population_B_window,
                         hue: Literal["resampled", "p_gt_phoneme_bin_center"] = "p_gt_phoneme_bin_center"):
     """
     Plot evoked responses for each electrode in population B,
@@ -369,6 +380,7 @@ def plot_causal4_evoked(plot_meta, plot_meta_df, subject, population_B_window,
         plot_epoch_data = plot_epochs.copy().pick(electrode_idx).get_data().squeeze(1)
         assert plot_epoch_data.ndim == 2  # n_trials * n_times
 
+        ax.axvspan(*plot_epochs.times[list(population_A_window)], color="red", alpha=0.1)
         ax.axvspan(*plot_epochs.times[list(population_B_window)], color="gray", alpha=0.2)
 
         plot_times = plot_epochs.times
