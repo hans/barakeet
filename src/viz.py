@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 import textgrid
+from tqdm.auto import tqdm
 
 from src.stimuli import POD_dict
 
@@ -334,6 +335,77 @@ def add_behavior_insets(g, ep_df, plot_only_once: Optional[Literal["row", "globa
                             labelspacing=0.15, fontsize=10, title_fontsize=10, title="behavior")
             
     return g
+
+
+def precompute_timit_bounds(epoch_sources, subjects,
+                            percentile_bounds=(10, 90)):
+    """
+    pre-compute plot bounds for TIMIT plots on the given subjects
+    """
+
+    results = {}
+    for subject in tqdm(subjects):
+        for epoch_source in epoch_sources.values():
+            with h5py.File(epoch_source, "r") as f:
+                if subject not in f:
+                    L.warning(f"{subject} not found in {epoch_source}")
+                    continue
+                phoneme_epochs = f[subject]["epochs"]
+                
+                # n_channels * 2
+                results[subject, epoch_source] = np.percentile(phoneme_epochs[()], percentile_bounds, axis=(0, 2)).T
+
+    return results
+
+
+def timit_subplots(subject, channel, plot_phonemes, epoch_sources,
+                   timit_bounds_dict: Optional[dict] = None,
+                   n_cols=2, cell_height=4, cell_aspect=2):
+    n_cols = 2
+    n_rows = len(epoch_sources) // n_cols + (len(epoch_sources) % n_cols > 0)
+    fig, axs = plt.subplots(n_rows, n_cols,
+                            figsize=(cell_height * cell_aspect * n_cols, cell_height * n_rows),
+                            sharex=True)
+
+    for i, (ax, (epoch_source_name, epoch_source)) in enumerate(zip(axs.flat, epoch_sources.items())):
+        epoch_df = pd.read_hdf(epoch_source, f"{subject}/epoch_df")
+
+        plot_epoch_dfs = [
+            epoch_df[epoch_df.epoch_label == phoneme]
+            for phoneme in plot_phonemes
+        ]
+
+        with h5py.File(epoch_source, "r") as f:
+            epoch_tmin = cast(int, f[subject].attrs["epoch_tmin"])
+            epoch_tmax = cast(int, f[subject].attrs["epoch_tmax"])
+            epoch_sfreq = cast(int, f[subject].attrs["sfreq"])
+            plot_epochs_ij = cast(list[np.ndarray], [
+                f[subject]["epochs"][plot_epoch_df.index, channel, :]
+                for phoneme, plot_epoch_df in zip(plot_phonemes, plot_epoch_dfs)
+            ])
+
+        ax.axvline(0, color="gray", linestyle="--", alpha=0.5)
+        ax.axhline(0, color="gray", linestyle="--", alpha=0.5)
+        for phoneme, ph_df, ph_epochs in zip(plot_phonemes, plot_epoch_dfs, plot_epochs_ij):
+            times = np.arange(ph_epochs.shape[1]) / epoch_sfreq + epoch_tmin
+            ax.plot(times, ph_epochs.mean(axis=0), label=phoneme)
+            sem = ph_epochs.std(axis=0) / np.sqrt(ph_epochs.shape[0])
+            ax.fill_between(times, ph_epochs.mean(axis=0) - sem, ph_epochs.mean(axis=0) + sem, alpha=0.3)
+
+        ax.set_title(epoch_source_name, fontsize="small")
+        ax.set_xlim(epoch_tmin, epoch_tmax)
+
+        if timit_bounds_dict is not None and (subject, epoch_source) in timit_bounds_dict:
+            # use pre-computed bounds
+            subject_bounds = timit_bounds_dict[subject, epoch_source]
+            ymin, ymax = subject_bounds[channel]
+            ax.set_ylim(ymin, ymax)
+
+        # if we're on the top right cell, add a legend
+        if i == min(len(epoch_sources), n_cols) - 1:
+            ax.legend(loc="upper right", bbox_to_anchor=(1.3, 1.))
+
+    return fig
 
 
 def add_timit_insets(g, epoch_sources):

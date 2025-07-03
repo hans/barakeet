@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
 
 from matplotlib import transforms
@@ -9,7 +10,9 @@ from scipy import stats
 from scipy.stats import pearsonr, spearmanr
 import seaborn as sns
 import matplotlib.pyplot as plt
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
+from sklearn.model_selection import StratifiedKFold, cross_val_score
 import textgrid
 from src.models.causal import run_phase1
 
@@ -46,6 +49,14 @@ class Causal4AnalysisResult:
     # post-init validation checks
     def __post_init__(self):
         assert len(self.p_gt_phoneme) == len(self.test_trial_metadata)
+
+
+@dataclass
+class SearchlightSpec:
+    align_to: Literal["onset", "word_offset"]
+    window_size: float
+    window_start: float
+    window_end: float
 
 
 def run_causal4_analysis(epochs, subject, phoneme_pair,
@@ -88,6 +99,105 @@ def run_causal4_analysis(epochs, subject, phoneme_pair,
     )
 
 
+def prepare_searchlight_windows(searchlight_spec: SearchlightSpec,
+                                epochs: mne.Epochs,
+                                textgrid_dir=None,
+                                global_tmin=None):
+    """
+    Prepare searchlight windows for the given epochs and the given searchlight
+    spec.
+
+    Arguments:
+        searchlight_spec: A dictionary containing the searchlight parameters.   
+        epochs: MNE Epochs object containing the epochs data.
+        global_tmin: The global minimum time point for any searchlight window.
+
+    Returns:
+        A list of tuples, each containing
+
+            (absolute_window_start, absolute_window_end,
+             relative_window_start, relative_window_end)
+
+        for each searchlight window, each in units of time samples of `epochs`.
+        Absolute samples are given relative to the start of the epoch;
+        relative samples are given relative to the searchlight's `align_to`.
+    """
+
+    window_size = searchlight_spec.window_size
+    window_start = searchlight_spec.window_start
+
+    # searchlight window should end at latest at the 80% percentile of the behavioral onset
+    behavior_onsets = epochs.metadata["slider.rt"].values
+    behavior_cutoff = np.percentile(behavior_onsets, 80)
+    window_end = min(searchlight_spec.window_end, behavior_cutoff)
+
+    # convert to samples
+    sfreq = epochs.info["sfreq"]
+    window_size_samp = int(window_size * sfreq)
+
+    if searchlight_spec.align_to == "onset":
+        alignment_point = 0
+    elif searchlight_spec.align_to == "word_offset":
+        assert textgrid_dir is not None, "textgrid_dir must be provided for word_offset alignment"
+        tg = textgrid.TextGrid.fromFile(str(Path(textgrid_dir) / epochs.metadata.textgrid_path.iloc[0]))
+        phoneme_intervals = [interval for interval in tg.tiers[0].intervals
+                             if interval.mark is not None and interval.mark.strip()]
+        alignment_point = phoneme_intervals[-1].maxTime
+        # TODO ensure same phase?
+    alignment_sample = epochs.time_as_index(alignment_point)[0]
+    # print(f"Alignment point: {alignment_point} s, sample: {alignment_sample}", epochs.metadata.word_end.iloc[0])
+
+    window_start += alignment_point
+    window_end += alignment_point
+
+    if global_tmin is not None:
+        window_start = max(window_start, global_tmin)
+
+    # TODO not sure if phase alignment is necessary
+    # # if we shifted, make sure the window is still aligned to the requested start + n * window_size
+    # if (window_start - searchlight_spec.window_start) % window_size != 0:
+    #     window_start += (window_size - (window_start - searchlight_spec.window_start) % window_size)
+
+    window_start_samp = epochs.time_as_index(window_start)[0]
+    window_end_samp = epochs.time_as_index(window_end)[0]
+
+    window_starts = np.arange(window_start_samp,
+                              window_end_samp - window_size_samp + 1,
+                              window_size_samp)
+    window_ends = window_starts + window_size_samp
+
+    relative_window_starts = window_starts - alignment_sample
+    relative_window_ends = window_ends - alignment_sample
+
+    return list(zip(window_starts, window_ends, relative_window_starts, relative_window_ends))
+
+
+def decode_behavior(subject, phoneme_pair, population_A, electrode_idx, window_start, window_end,
+                    searchlight_electrode_activations, left=True, n_splits=3):
+    if np.isnan(window_start) or np.isnan(window_end):
+        return np.nan
+    # Attempt to decode behavior
+    side = "left" if left else "right"
+    behav_activations = searchlight_electrode_activations[subject, phoneme_pair, population_A,
+                                                          window_start, window_end, side]
+    behav_mask = behav_activations["mask_left"] if side == "left" else ~behav_activations["mask_left"]
+    behav_y = behav_activations["metadata"][behav_mask].behavior_dummy_forced
+    behav_X = behav_activations["window_data_mean"][:, [electrode_idx]]
+    assert behav_y.shape[0] == behav_X.shape[0]
+
+    if behav_y.nunique() < 2:
+        # not enough variability in the behavior to decode
+        return np.nan
+    if behav_y.value_counts().min() < n_splits:
+        n_splits = max(2, behav_y.value_counts().min() // 2)
+
+    cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+    clf = LogisticRegression(max_iter=1000, class_weight="balanced", random_state=42)
+    scores = cross_val_score(clf, behav_X, behav_y, cv=cv, scoring="roc_auc")
+    
+    return scores.mean()
+
+
 def evaluate_counterfactual_correlation(
         A_source, B_source, B_electrode_idx, B_window_start, B_window_end,
         searchlight_decoder_outputs,
@@ -105,13 +215,13 @@ def evaluate_counterfactual_correlation(
     assert A_phoneme_pair == B_phoneme_pair, "Phoneme pairs must match for counterfactual evaluation."
 
     activation_key = "left" if left else "right"
-    A_activations = searchlight_electrode_activations[A_subject, A_phoneme_pair, A_population_A, B_window_start, B_window_end, activation_key]
+    A_decoder_outputs = searchlight_decoder_outputs[A_subject, A_phoneme_pair, A_population_A]
     B_activations = searchlight_electrode_activations[B_subject, B_phoneme_pair, B_population_A, B_window_start, B_window_end, activation_key]
     # print("--", B_subject, B_phoneme_pair, B_population_A, B_window_start, B_window_end)
 
-    A_metadata = A_activations["metadata"].copy()
+    A_metadata = A_decoder_outputs["test_trial_metadata"].copy()
     B_metadata = B_activations["metadata"]
-    A_mask_left = A_activations["mask_left"]
+    A_mask_left = A_decoder_outputs["mask_left"]
     B_mask_left = B_activations["mask_left"]
 
     B_response = B_activations["window_data_mean"][:, B_electrode_idx]
@@ -172,15 +282,17 @@ def counterfactual_baseline(subject, phoneme_pair, population_A, electrode_idx, 
         control_alternative_keys = [(subject_alt, phoneme_pair_alt, population_A_alt) for subject_alt, phoneme_pair_alt, population_A_alt in searchlight_decoder_outputs.keys()
                                     if (subject_alt != subject and phoneme_pair_alt == phoneme_pair)]
 
-    n_trials = searchlight_electrode_activations[subject, phoneme_pair, population_A,
-                                                 window_start, window_end, "left"]["metadata"].shape[0] + \
-                searchlight_electrode_activations[subject, phoneme_pair, population_A,
-                                                 window_start, window_end, "right"]["metadata"].shape[0]
+    n_trials = 0
+    activation_key_prefix = (subject, phoneme_pair, population_A, window_start, window_end)
+    if (*activation_key_prefix, "left") in searchlight_electrode_activations:
+        n_trials += searchlight_electrode_activations[*activation_key_prefix, "left"]["metadata"].shape[0]
+    if (*activation_key_prefix, "right") in searchlight_electrode_activations:
+        n_trials += searchlight_electrode_activations[*activation_key_prefix, "right"]["metadata"].shape[0]
 
     ret = []
     for key in control_alternative_keys:
-        subject_alt, phoneme_pair_alt, population_A_alt = key
-        if (subject_alt, phoneme_pair_alt, population_A_alt, window_start, window_end, "left") not in searchlight_electrode_activations:
+        if (*key, window_start, window_end, "left") not in searchlight_electrode_activations and \
+           (*key, window_start, window_end, "right") not in searchlight_electrode_activations:
             # Activations for the counterfactual key are not available at this time window.
             # It's likely that the counterfactual key couldn't draw on this time region because
             # its corresponding population A was overlapping.
@@ -190,8 +302,11 @@ def counterfactual_baseline(subject, phoneme_pair, population_A, electrode_idx, 
             n_runs = 1
         else:
             n_runs = 5
-            n_counterfactual_trials = searchlight_electrode_activations[*key, window_start, window_end, "left"]["metadata"].shape[0] + \
-                searchlight_electrode_activations[*key, window_start, window_end, "right"]["metadata"].shape[0]
+            n_counterfactual_trials = 0
+            if (*key, window_start, window_end, "left") in searchlight_electrode_activations:
+                n_counterfactual_trials += searchlight_electrode_activations[*key, window_start, window_end, "left"]["metadata"].shape[0]
+            if (*key, window_start, window_end, "right") in searchlight_electrode_activations:
+                n_counterfactual_trials += searchlight_electrode_activations[*key, window_start, window_end, "right"]["metadata"].shape[0]
             if n_counterfactual_trials != n_trials:
                 # We will be stochastically resampling the trials in order to align
                 # counterfactual and real target trials. Do this multiple times so
@@ -440,7 +555,7 @@ def plot_causal4_evoked(plot_meta, plot_meta_df, subject,
 
 
 def plot_causal4_raster(plot_meta, plot_meta_df, subject, population_B_window,
-                        sort_by: Literal["p_gt_phoneme", "resampled"] = "p_gt_phoneme",
+                        sort_by: Literal["p_gt_phoneme", "resampled", "behavior_linear"] = "p_gt_phoneme",
                         rasterized=True,
                         clip_zscore=(-3, 3),
                         parameter_cache=None):
@@ -455,9 +570,9 @@ def plot_causal4_raster(plot_meta, plot_meta_df, subject, population_B_window,
     def plot_facet_raster(data, color, sort_by="p_gt_phoneme",
                           clip_zscore=(-3, 3),
                           rasterized=True, **kwargs):
-        if sort_by not in ["p_gt_phoneme", "resampled"]:
+        if sort_by not in ["p_gt_phoneme", "resampled", "behavior_linear"]:
             raise NotImplementedError(f"Sorting by {sort_by} is not implemented. "
-                                      "Use 'p_gt_phoneme' or 'resampled'.")
+                                      "Use 'p_gt_phoneme', 'resampled', or 'behavior_linear'.")
         # re-sort according to sort_by
         data = data.sort_values(sort_by)
 
@@ -488,16 +603,23 @@ def plot_causal4_raster(plot_meta, plot_meta_df, subject, population_B_window,
         ax_line.spines['top'].set_visible(False)
         ax_line.spines['left'].set_visible(False)
         ax_line.spines['bottom'].set_visible(False)
+        ax_line.set_xticklabels([])
 
         assert data.label_lexical.nunique() == 1
         if sort_by == "p_gt_phoneme":
             ax_line.set_xlabel(f"P(/{data.label_lexical.iloc[0]}/)")
             ax_line.set_xlim(0, 1)
             ax_line.set_xticks(np.linspace(0, 1, 5))
+            xticklabels = ["" for _ in range(5)]
+            xticklabels[0] = "0"
+            xticklabels[-1] = "1"
+            ax_line.set_xticklabels(xticklabels)
         elif sort_by == "resampled":
             ax_line.set_xlabel("Stimulus step")
             ax_line.set_xlim(data.resampled.min() - 1, data.resampled.max() + 1)
-        ax_line.set_xticklabels([])
+        elif sort_by == "behavior_linear":
+            ax_line.set_xlabel("Slider position")
+            ax_line.set_xlim(-1, 1)
 
         ax.set_xlabel("Time since word onset (sec)")
         ax.set_ylabel("Trial")
