@@ -495,8 +495,8 @@ def plot_causal4_evoked(plot_meta, plot_meta_df, subject,
         plot_epoch_data = plot_epochs.copy().pick(electrode_idx).get_data().squeeze(1)
         assert plot_epoch_data.ndim == 2  # n_trials * n_times
 
-        ax.axvspan(*plot_epochs.times[list(population_A_window)], color="red", alpha=0.1)
-        ax.axvspan(*plot_epochs.times[list(population_B_window)], color="gray", alpha=0.2)
+        ax.axvspan(*plot_epochs.times[list(population_A_window)], color="red", alpha=0.05)
+        ax.axvspan(*plot_epochs.times[list(population_B_window)], color="gray", alpha=0.1)
 
         plot_times = plot_epochs.times
         plot_epoch_data_mean = plot_epoch_data.mean(0)
@@ -557,7 +557,7 @@ def plot_causal4_evoked(plot_meta, plot_meta_df, subject,
 def plot_causal4_raster(plot_meta, plot_meta_df, subject, population_B_window,
                         sort_by: Literal["p_gt_phoneme", "resampled", "behavior_linear"] = "p_gt_phoneme",
                         rasterized=True,
-                        clip_zscore=(-3, 3),
+                        clip_zscore=(-2, 2),
                         parameter_cache=None):
     g_raster = sns.FacetGrid(
         plot_meta_df,
