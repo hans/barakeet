@@ -179,10 +179,10 @@ def decode_behavior(subject, phoneme_pair, population_A, electrode_idx, window_s
     # Attempt to decode behavior
     side = "left" if left else "right"
     behav_activations = searchlight_electrode_activations[subject, phoneme_pair, population_A,
-                                                          window_start, window_end, side]
+                                                          window_start, window_end]
     behav_mask = behav_activations["mask_left"] if side == "left" else ~behav_activations["mask_left"]
     behav_y = behav_activations["metadata"][behav_mask].behavior_dummy_forced
-    behav_X = behav_activations["window_data_mean"][:, [electrode_idx]]
+    behav_X = behav_activations[f"window_data_{side}_mean"][:, [electrode_idx]]
     assert behav_y.shape[0] == behav_X.shape[0]
 
     if behav_y.nunique() < 2:
@@ -216,7 +216,7 @@ def evaluate_counterfactual_correlation(
 
     activation_key = "left" if left else "right"
     A_decoder_outputs = searchlight_decoder_outputs[A_subject, A_phoneme_pair, A_population_A]
-    B_activations = searchlight_electrode_activations[B_subject, B_phoneme_pair, B_population_A, B_window_start, B_window_end, activation_key]
+    B_activations = searchlight_electrode_activations[B_subject, B_phoneme_pair, B_population_A, B_window_start, B_window_end]
     # print("--", B_subject, B_phoneme_pair, B_population_A, B_window_start, B_window_end)
 
     A_metadata = A_decoder_outputs["test_trial_metadata"].copy()
@@ -224,16 +224,18 @@ def evaluate_counterfactual_correlation(
     A_mask_left = A_decoder_outputs["mask_left"]
     B_mask_left = B_activations["mask_left"]
 
-    B_response = B_activations["window_data_mean"][:, B_electrode_idx]
-
     if left:
         A_metadata = A_metadata[A_mask_left]
         B_metadata = B_metadata[B_mask_left]
+        
         A_p_gt_phoneme = searchlight_decoder_outputs[A_subject, A_phoneme_pair, A_population_A]["p_gt_phoneme_mean"][A_mask_left]
+        B_response = B_activations["window_data_left_mean"][:, B_electrode_idx]
     else:
         A_metadata = A_metadata[~A_mask_left]
         B_metadata = B_metadata[~B_mask_left]
+
         A_p_gt_phoneme = searchlight_decoder_outputs[A_subject, A_phoneme_pair, A_population_A]["p_gt_phoneme_mean"][~A_mask_left]
+        B_response = B_activations["window_data_right_mean"][:, B_electrode_idx]
 
     # resample and resort data.
     # resample: make sure that A and B have the same number of trials
@@ -282,17 +284,12 @@ def counterfactual_baseline(subject, phoneme_pair, population_A, electrode_idx, 
         control_alternative_keys = [(subject_alt, phoneme_pair_alt, population_A_alt) for subject_alt, phoneme_pair_alt, population_A_alt in searchlight_decoder_outputs.keys()
                                     if (subject_alt != subject and phoneme_pair_alt == phoneme_pair)]
 
-    n_trials = 0
-    activation_key_prefix = (subject, phoneme_pair, population_A, window_start, window_end)
-    if (*activation_key_prefix, "left") in searchlight_electrode_activations:
-        n_trials += searchlight_electrode_activations[*activation_key_prefix, "left"]["metadata"].shape[0]
-    if (*activation_key_prefix, "right") in searchlight_electrode_activations:
-        n_trials += searchlight_electrode_activations[*activation_key_prefix, "right"]["metadata"].shape[0]
+    n_trials = searchlight_electrode_activations[(subject, phoneme_pair, population_A, window_start, window_end)]["metadata"].shape[0]
 
     ret = []
     for key in control_alternative_keys:
-        if (*key, window_start, window_end, "left") not in searchlight_electrode_activations and \
-           (*key, window_start, window_end, "right") not in searchlight_electrode_activations:
+        subject_alt, phoneme_pair_alt, population_A_alt = key
+        if (subject_alt, phoneme_pair_alt, population_A_alt, window_start, window_end) not in searchlight_electrode_activations:
             # Activations for the counterfactual key are not available at this time window.
             # It's likely that the counterfactual key couldn't draw on this time region because
             # its corresponding population A was overlapping.
@@ -302,11 +299,7 @@ def counterfactual_baseline(subject, phoneme_pair, population_A, electrode_idx, 
             n_runs = 1
         else:
             n_runs = 5
-            n_counterfactual_trials = 0
-            if (*key, window_start, window_end, "left") in searchlight_electrode_activations:
-                n_counterfactual_trials += searchlight_electrode_activations[*key, window_start, window_end, "left"]["metadata"].shape[0]
-            if (*key, window_start, window_end, "right") in searchlight_electrode_activations:
-                n_counterfactual_trials += searchlight_electrode_activations[*key, window_start, window_end, "right"]["metadata"].shape[0]
+            n_counterfactual_trials = searchlight_electrode_activations[*key, window_start, window_end]["metadata"].shape[0]
             if n_counterfactual_trials != n_trials:
                 # We will be stochastically resampling the trials in order to align
                 # counterfactual and real target trials. Do this multiple times so
