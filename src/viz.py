@@ -393,7 +393,8 @@ def timit_subplots(subject, channel, plot_phonemes, epoch_sources,
             ax.fill_between(times, ph_epochs.mean(axis=0) - sem, ph_epochs.mean(axis=0) + sem, alpha=0.3)
 
         ax.set_title(epoch_source_name, fontsize="small")
-        ax.set_xlim(epoch_tmin, epoch_tmax)
+        # ax.set_xlim(epoch_tmin, epoch_tmax)
+        ax.set_xlim(times[0], times[-1])
 
         if timit_bounds_dict is not None and (subject, epoch_source) in timit_bounds_dict:
             # use pre-computed bounds
@@ -403,7 +404,7 @@ def timit_subplots(subject, channel, plot_phonemes, epoch_sources,
 
         # if we're on the top right cell, add a legend
         if i == min(len(epoch_sources), n_cols) - 1:
-            ax.legend(loc="upper right", bbox_to_anchor=(1.3, 1.))
+            ax.legend(loc="upper right", bbox_to_anchor=(1.15, 1.))
 
     return fig
 
