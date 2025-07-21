@@ -7,7 +7,12 @@
 *.pdf
 *.pt
 *.zip
+*.wav
 
 .ipynb_checkpoints
 .snakemake
 outputs
+
+# scratch notebooks
+2024*.ipynb
+2025*.ipynb
