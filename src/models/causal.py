@@ -131,7 +131,7 @@ def run_phase1(epochs, subject, phoneme_pair,
         X_val, y_val = X[idxs_val], y[idxs_val]
 
     cv_inner = StratifiedKFold(2, shuffle=True)
-    cv_outer = StratifiedKFold(3, shuffle=True)
+    cv_outer = StratifiedKFold(2, shuffle=True)
 
     pipeline = [StandardScaler()]
     if pca_num_components is not None:
@@ -141,8 +141,6 @@ def run_phase1(epochs, subject, phoneme_pair,
     pipeline.append(LogisticRegressionCV(Cs=Cs, cv=cv_inner, max_iter=1000))
     model = make_pipeline(*pipeline)
     fitted = cross_validate(model, X_train, y_train, cv=cv_outer, scoring="roc_auc", return_estimator=True)
-
-    print("Cross-validated ROC-AUC of phoneme prediction: ", fitted["test_score"])
 
     # Now get ensembled predictions on the held-out val set; average in logit space
     logits_val = np.stack([est.predict_log_proba(X_val) for est in fitted["estimator"]]).mean(0)
