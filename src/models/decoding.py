@@ -1,19 +1,25 @@
 
-from typing import Literal
+import itertools
+from typing import Literal, Optional, cast
 
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import StratifiedKFold, cross_validate
-from sklearn.linear_model import LogisticRegressionCV
+from sklearn.base import BaseEstimator
+from sklearn.model_selection import StratifiedKFold, cross_validate, train_test_split
+from sklearn.linear_model import LogisticRegression, LogisticRegressionCV
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import make_scorer
+from sklearn.metrics import check_scoring, make_scorer
 from tqdm.auto import tqdm
 
 
 def run_decoding_analysis_single_electrode(
-        epochs, electrode_df, stride, window_size,
+        epochs, electrode_df,
+        stride: int, window_size: int,
+        global_min_sample: int = 0,
+        global_max_sample: Optional[int] = None,
         target: Literal["acoustic", "lexical_evidence", "mismatch", "mismatch_left_right"] = "lexical_evidence",
+        strategy: Literal["nested-cv", "train-test"] = "nested-cv",
         filter_speech_responsive=True,
         return_outcomes=True,
         include_only_full_windows=True,
@@ -26,9 +32,23 @@ def run_decoding_analysis_single_electrode(
 
     if target not in ["acoustic", "lexical_evidence", "mismatch", "mismatch_left_right"]:
         raise ValueError(f"Invalid target {target}")
+    if strategy not in ["nested-cv", "train-test"]:
+        raise ValueError(f"Invalid strategy {strategy}")
+    
+    if global_max_sample is not None:
+        assert global_max_sample > global_min_sample, \
+            f"global_max_sample ({global_max_sample}) must be greater than global_min_sample ({global_min_sample})"
 
-    global_min_sample = 0
-    global_max_sample = min([epoch.get_data().shape[2] for epoch in epochs.values()])
+    data_max_sample = min([epoch.get_data().shape[2] for epoch in epochs.values()])
+    if global_max_sample is None:
+        global_max_sample = cast(int, data_max_sample)
+    else:
+        global_max_sample = min(global_max_sample, data_max_sample)
+
+    if global_max_sample - global_min_sample < window_size:
+        raise ValueError(f"Window size ({window_size}) is larger than the available data range "
+                         f"({global_max_sample - global_min_sample}). Please adjust the parameters.")
+
     windows_left = np.arange(global_min_sample, global_max_sample, stride)
     windows_right = windows_left + window_size
     windows = np.array(list(zip(windows_left, windows_right)))
@@ -88,24 +108,13 @@ def run_decoding_analysis_single_electrode(
 
                 ####
 
-                cv_inner = StratifiedKFold(2, shuffle=True, random_state=42)
-                cv_outer = StratifiedKFold(2, shuffle=True, random_state=42)
-
-                Cs = np.logspace(-3, 2, 6)
-
-                pipeline = [StandardScaler()]
-
-                solver = "liblinear" if num_classes == 2 else "saga"
-                pipeline.append(LogisticRegressionCV(
-                    Cs=Cs, cv=cv_inner, max_iter=100000, n_jobs=1,
-                    class_weight="balanced", fit_intercept=False,
-                    solver=solver))
-                model = make_pipeline(*pipeline)
                 scoring = ["roc_auc", "f1_macro", "accuracy"] if num_classes == 2 else ["f1_macro", "accuracy"]
-                fitted = cross_validate(model, X, y, cv=cv_outer, scoring=scoring,
-                                        return_estimator=True,
-                                        return_train_score=True,
-                                        n_jobs=2)
+
+                if strategy == "nested-cv":
+                    fitted = fit_nested_cv(X, y, num_classes=num_classes, scoring=scoring)
+                elif strategy == "train-test":
+                    fitted = fit_train_test(X, y, num_classes=num_classes, scoring=scoring,
+                                            num_repeats=5)
 
                 result_key = (row.subject, row.electrode_idx, phoneme_pair, smin, smax)
 
@@ -124,9 +133,95 @@ def run_decoding_analysis_single_electrode(
                                     "decoder_proba": estimator.predict_proba(X[test_idxs])[:, 1],
                                     "fold": fold},
                                     index=test_idxs)
-                        for fold, ((_, test_idxs), estimator) in enumerate(zip(cv_outer.split(X, y), fitted["estimator"]))
+                        for fold, (test_idxs, estimator) in enumerate(zip(fitted["test_idxs"], fitted["estimator"]))
                     ])
 
                 models[result_key] = fitted["estimator"]
 
     return train_scores, test_scores, outcomes, models
+
+
+def fit_nested_cv(X, y, num_classes: int, scoring: list[str],
+                  num_outer_folds=2, num_inner_folds=2, random_state=42):
+    """
+    Fit a nested cross-validation model with logistic regression.
+    Returns a fitted model and cross-validation results.
+    """
+    cv_inner = StratifiedKFold(num_inner_folds, shuffle=True, random_state=random_state)
+    cv_outer = StratifiedKFold(num_outer_folds, shuffle=True, random_state=random_state)
+
+    Cs = np.logspace(-3, 2, 6)
+
+    pipeline: list[BaseEstimator] = [StandardScaler()]
+
+    solver = "liblinear" if num_classes == 2 else "saga"
+    pipeline.append(LogisticRegressionCV(
+        Cs=Cs, cv=cv_inner, max_iter=100000,
+        class_weight="balanced", fit_intercept=False,
+        solver=solver))
+    model = make_pipeline(*pipeline)
+    fitted = cross_validate(model, X, y, cv=cv_outer, scoring=scoring,
+                            return_estimator=True,
+                            return_train_score=True)
+    
+    # add information about the item idxs in each train/test fold
+    fitted["train_idxs"] = []
+    fitted["test_idxs"] = []
+    for train_idxs, test_idxs in cv_outer.split(X, y):
+        fitted["train_idxs"].append(train_idxs)
+        fitted["test_idxs"].append(test_idxs)
+
+    return fitted
+
+
+def fit_train_test(X, y, num_classes: int, scoring: list[str],
+                   test_fraction=0.2, num_folds=3,
+                   num_repeats=1, random_state=42):
+    seeds = np.random.RandomState(random_state).randint(0, 10000, num_repeats)
+
+    results = []
+    for seed in seeds:
+        X_train, X_test, y_train, y_test, idxs_train, idxs_test = \
+            train_test_split(X, y, np.arange(len(X)),
+                            test_size=test_fraction, stratify=y, random_state=seed)
+
+        Cs = np.logspace(-3, 2, 6)
+
+        pipeline: list[BaseEstimator] = [StandardScaler()]
+        solver = "liblinear" if num_classes == 2 else "saga"
+        pipeline.append(LogisticRegressionCV(
+            Cs=Cs, cv=StratifiedKFold(num_folds, shuffle=True, random_state=seed),
+            max_iter=100000, class_weight="balanced", fit_intercept=False,
+            solver=solver))
+        model = make_pipeline(*pipeline)
+        model.fit(X_train, y_train)
+
+        # Get optimal C
+        if num_classes == 2:
+            best_C = model[-1].C_[0]
+        else:
+            best_C = model[-1].C_
+
+        # re-fit on whole training set
+        refit_model = make_pipeline(*pipeline[:-1], LogisticRegression(
+            C=best_C, class_weight="balanced", fit_intercept=False,
+            solver=solver))
+        refit_model.fit(X_train, y_train)
+
+        scorer = check_scoring(refit_model, scoring=scoring)
+
+        train_scores = scorer(refit_model, X_train, y_train)
+        test_scores = scorer(refit_model, X_test, y_test)
+        results.append({
+            **{f"train_{k}": np.array([v]) for k, v in train_scores.items()},
+            **{f"test_{k}": np.array([v]) for k, v in test_scores.items()},
+            "train_idxs": [idxs_train],
+            "test_idxs": [idxs_test],
+            "estimator": [refit_model]
+        })
+
+    # Concatenate results from all repeats
+    fitted = {k: np.concatenate([r[k] for r in results]) if isinstance(results[0][k], np.ndarray)
+              else list(itertools.chain.from_iterable(r[k] for r in results))
+              for k in results[0].keys()}
+    return fitted

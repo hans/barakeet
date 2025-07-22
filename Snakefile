@@ -6,6 +6,8 @@ from ploomber_engine import execute_notebook
 
 configfile: "config.yaml"
 
+include: "workflows/causal4.Snakefile"
+
 DEFAULT_NOTEBOOKS = {run_name: run_dict if run_dict else {"notebook": run_name}
                      for run_name, run_dict in config["run_notebooks"].items()}
 
@@ -358,11 +360,7 @@ rule single_electrode_decoding_all_results:
         expand("outputs/single_electrode_decoding/{window}/{target}/scores.csv",
                window=config["decoding"]["window_sizes"],
                target=config["decoding"]["targets"]),
-        expand("outputs/single_electrode_decoding-random_{run}/{window}/{target}/scores.csv",
-                window=config["decoding"]["window_sizes"] + ["full_window"],
-                target=config["decoding"]["targets"],
-                run=list(range(config["decoding"]["num_random_runs"]))),
-
-
-# TODO find optimum window size
-# TODO run specific random baseline for that selected window size
+        # expand("outputs/single_electrode_decoding-random_{run}/{window}/{target}/scores.csv",
+        #         window=config["decoding"]["window_sizes"] + ["full_window"],
+        #         target=config["decoding"]["targets"],
+        #         run=list(range(config["decoding"]["num_random_runs"]))),

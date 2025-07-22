@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from ploomber_engine import execute_notebook
 
 
@@ -12,7 +14,7 @@ rule find_speech_responsive:
         results = "outputs/causal4/find_speech_responsive/{subject}_results.csv"
 
     run:
-        outdir = output.notebook.parent
+        outdir = Path(output.notebook).parent
         execute_notebook(
             str(input.notebook),
             str(output.notebook),
@@ -26,7 +28,7 @@ rule find_speech_responsive:
 rule find_As:
     input:
         epochs = "outputs/epochs_preprocessed/{subject}_epo.fif",
-        speech_responsive = "outputs/find_speech_responsive/{subject}_results.csv",
+        speech_responsive = "outputs/causal4/find_speech_responsive/{subject}_results.csv",
         notebook = "notebooks/causal4/find_As.ipynb"
 
     output:
@@ -35,7 +37,7 @@ rule find_As:
         decoders = "outputs/causal4/find_As/{subject}_decoders.pt"
 
     run:
-        outdir = output.notebook.parent
+        outdir = Path(output.notebook).parent
         execute_notebook(
             str(input.notebook),
             str(output.notebook),
@@ -44,17 +46,22 @@ rule find_As:
         )
 
 
+rule find_As_all:
+    input:
+        expand("outputs/causal4/find_As/{subject}.ipynb", subject=config["data"]["subjects"])
+
+
 rule run_A_intrinsics:
     input:
-        all_epochs = expand("outputs/epochs_preprocessed/{subject}_epo.fif", subject=config["subjects"]),
-        all_results = expand("outputs/causal4/find_As/{subject}_results.csv", subject=config["subjects"]),
+        all_epochs = expand("outputs/epochs_preprocessed/{subject}_epo.fif", subject=config["data"]["subjects"]),
+        all_results = expand("outputs/causal4/find_As/{subject}_results.csv", subject=config["data"]["subjects"]),
         notebook = "notebooks/causal4/run_A_intrinsics.ipynb"
 
     output:
         notebook = "outputs/causal4/run_A_intrinsics/run_A_intrinsics.ipynb",
 
     run:
-        outdir = output.notebook.parent
+        outdir = Path(output.notebook).parent
         execute_notebook(
             str(input.notebook),
             str(output.notebook),
@@ -68,7 +75,7 @@ rule run_A_intrinsics:
 # and/or function.
 rule unify_As:
     input:
-        all_results = expand("outputs/causal4/find_As/{subject}_results.csv", subject=config["subjects"]),
+        all_results = expand("outputs/causal4/find_As/{subject}_results.csv", subject=config["data"]["subjects"]),
         notebook = "notebooks/causal4/unify_As.ipynb"
 
     output:
@@ -76,7 +83,7 @@ rule unify_As:
         results = "outputs/causal4/unify_As/unified_results.csv"
 
     run:
-        outdir = output.notebook.parent
+        outdir = Path(output.notebook).parent
         execute_notebook(
             str(input.notebook),
             str(output.notebook),
@@ -98,7 +105,7 @@ rule find_Bs:
         decoders = "outputs/causal4/find_Bs/{subject}_decoders.pt"
 
     run:
-        outdir = output.notebook.parent
+        outdir = Path(output.notebook).parent
         execute_notebook(
             str(input.notebook),
             str(output.notebook),
@@ -111,15 +118,15 @@ rule find_Bs:
 
 rule run_B_intrinsics:
     input:
-        all_epochs = expand("outputs/epochs_preprocessed/{subject}_epo.fif", subject=config["subjects"]),
-        all_results = expand("outputs/causal4/find_Bs/{subject}_results.csv", subject=config["subjects"]),
+        all_epochs = expand("outputs/epochs_preprocessed/{subject}_epo.fif", subject=config["data"]["subjects"]),
+        all_results = expand("outputs/causal4/find_Bs/{subject}_results.csv", subject=config["data"]["subjects"]),
         notebook = "notebooks/causal4/run_B_intrinsics.ipynb"
 
     output:
         notebook = "outputs/causal4/run_B_intrinsics/run_B_intrinsics.ipynb",
 
     run:
-        outdir = output.notebook.parent
+        outdir = Path(output.notebook).parent
         execute_notebook(
             str(input.notebook),
             str(output.notebook),
@@ -131,10 +138,10 @@ rule run_B_intrinsics:
 
 rule analyze:
     input:
-        all_A_results = expand("outputs/causal4/find_As/{subject}_results.csv", subject=config["subjects"]),
-        all_A_decoders = expand("outputs/causal4/find_As/{subject}_decoders.pt", subject=config["subjects"]),
-        all_B_results = expand("outputs/causal4/find_Bs/{subject}_results.csv", subject=config["subjects"]),
-        all_B_decoders = expand("outputs/causal4/find_Bs/{subject}_decoders.pt", subject=config["subjects"]),
+        all_A_results = expand("outputs/causal4/find_As/{subject}_results.csv", subject=config["data"]["subjects"]),
+        all_A_decoders = expand("outputs/causal4/find_As/{subject}_decoders.pt", subject=config["data"]["subjects"]),
+        all_B_results = expand("outputs/causal4/find_Bs/{subject}_results.csv", subject=config["data"]["subjects"]),
+        all_B_decoders = expand("outputs/causal4/find_Bs/{subject}_decoders.pt", subject=config["data"]["subjects"]),
         notebook = "notebooks/causal4/analyze.ipynb"
 
     output:
@@ -142,7 +149,7 @@ rule analyze:
         results = "outputs/causal4/analyze/analysis_results.csv"
 
     run:
-        outdir = output.notebook.parent
+        outdir = Path(output.notebook).parent
         execute_notebook(
             str(input.notebook),
             str(output.notebook),
