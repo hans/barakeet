@@ -135,14 +135,19 @@ def run_decoding_analysis_single_electrode(
 
                 if return_outcomes:
                     # only store outcomes on test folds
-                    outcomes[result_key] = pd.concat([
-                        pd.DataFrame({"decoder_target": y[test_idxs],
-                                      "decoder_prediction": estimator.predict(X[test_idxs]),
-                                      "decoder_proba": estimator.predict_proba(X[test_idxs])[:, 1],
-                                      "fold": fold},
-                                    index=test_idxs)
-                        for fold, (test_idxs, estimator) in enumerate(zip(fitted["test_idxs"], fitted["estimator"]))
-                    ])
+                    fold_results = []
+                    for fold, (test_idxs, estimator) in enumerate(zip(fitted["test_idxs"], fitted["estimator"])):
+                        # test_idxs are indices into X, y, which themselves are indices into epochs_ij[selection]
+                        test_epoch_idxs = epochs_ij.metadata.index[selection][test_idxs]
+                        fold_results.append(pd.DataFrame({
+                            "decoder_target": y[test_idxs],
+                            "decoder_prediction": estimator.predict(X[test_idxs]),
+                            "decoder_proba": estimator.predict_proba(X[test_idxs])[:, 1],
+                            "fold": fold,
+                            "epoch_idx": test_epoch_idxs,
+                        }))
+
+                    outcomes[result_key] = pd.concat(fold_results)
 
                 models[result_key] = fitted["estimator"]
 
