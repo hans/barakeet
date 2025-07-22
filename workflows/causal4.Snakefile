@@ -42,6 +42,7 @@ rule find_As:
             str(input.notebook),
             str(output.notebook),
             parameters=dict(epochs_path=input.epochs,
+                            speech_responsive=input.speech_responsive,
                             outdir=str(outdir)),
         )
 
@@ -55,6 +56,8 @@ rule run_A_intrinsics:
     input:
         all_epochs = expand("outputs/epochs_preprocessed/{subject}_epo.fif", subject=config["data"]["subjects"]),
         all_results = expand("outputs/causal4/find_As/{subject}_results.csv", subject=config["data"]["subjects"]),
+        all_decoders = expand("outputs/causal4/find_As/{subject}_decoders.pt", subject=config["data"]["subjects"]),
+        all_electrode_dfs = expand("outputs/causal4/find_speech_responsive/{subject}_results.csv", subject=config["data"]["subjects"]),
         notebook = "notebooks/causal4/run_A_intrinsics.ipynb"
 
     output:
@@ -67,6 +70,8 @@ rule run_A_intrinsics:
             str(output.notebook),
             parameters=dict(all_epochs=input.all_epochs,
                             all_results=input.all_results,
+                            all_decoders=input.all_decoders,
+                            all_electrode_dfs=input.all_electrode_dfs,
                             outdir=str(outdir)),
         )
 
