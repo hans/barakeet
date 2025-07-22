@@ -1,7 +1,8 @@
 
 import itertools
-from typing import Literal, Optional, cast
+from typing import Literal, Optional, cast, TypeAlias
 
+import mne
 import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator
@@ -11,6 +12,9 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import check_scoring, make_scorer
 from tqdm.auto import tqdm
+
+
+DecoderFitKey: TypeAlias = tuple[str, int, str, int, int]  # (subject, electrode_idx, phoneme_pair, smin, smax)
 
 
 def run_decoding_analysis_single_electrode(
@@ -24,7 +28,11 @@ def run_decoding_analysis_single_electrode(
         return_outcomes=True,
         include_only_full_windows=True,
         smoke_test=False,
-        randomize=False):
+        randomize=False
+        ) -> tuple[dict[DecoderFitKey, dict[str, float]],
+                   dict[DecoderFitKey, dict[str, float]],
+                   dict[DecoderFitKey, pd.DataFrame],
+                   dict[DecoderFitKey, list[BaseEstimator]]]:
     """
     stride: in samples
     window_size: in samples
@@ -129,9 +137,9 @@ def run_decoding_analysis_single_electrode(
                     # only store outcomes on test folds
                     outcomes[result_key] = pd.concat([
                         pd.DataFrame({"decoder_target": y[test_idxs],
-                                    "decoder_prediction": estimator.predict(X[test_idxs]),
-                                    "decoder_proba": estimator.predict_proba(X[test_idxs])[:, 1],
-                                    "fold": fold},
+                                      "decoder_prediction": estimator.predict(X[test_idxs]),
+                                      "decoder_proba": estimator.predict_proba(X[test_idxs])[:, 1],
+                                      "fold": fold},
                                     index=test_idxs)
                         for fold, (test_idxs, estimator) in enumerate(zip(fitted["test_idxs"], fitted["estimator"]))
                     ])
@@ -225,3 +233,42 @@ def fit_train_test(X, y, num_classes: int, scoring: list[str],
               else list(itertools.chain.from_iterable(r[k] for r in results))
               for k in results[0].keys()}
     return fitted
+
+
+def get_ensemble_predictions(model_key: DecoderFitKey,
+                             models: list[BaseEstimator],
+                             epochs: dict[str, mne.Epochs]) -> pd.DataFrame:
+    """
+    Get predictions from an ensemble of fit models on held-out epochs,
+    subsetting appropriately to match the properties of the data the model
+    was fit on.
+
+    Args:
+        model_key: tuple of `(subject, electrode_idx, phoneme_pair, smin, smax)`;
+            i.e. the keys of the dictionary returned by `run_decoding_analysis_single_electrode`
+        models: list of fitted models
+        epochs: mne.Epochs object containing the held-out epochs
+    """
+    subject, electrode_idx, phoneme_pair, smin, smax = model_key
+
+    epochs_ij = epochs[subject]
+    selection = epochs_ij.metadata.phoneme_pair == phoneme_pair
+    if selection.sum() == 0:
+        raise ValueError(f"No epochs found for subject {subject}, "
+                         f"phoneme pair {phoneme_pair} in the given epochs.")
+    
+    X = epochs_ij.get_data(picks=[electrode_idx])[selection][:, 0, smin:smax]
+
+    outcomes = []
+    for i, model in enumerate(models):
+        y_pred = model.predict(X)
+        y_proba = model.predict_proba(X)[:, 1]
+        outcomes.append(pd.DataFrame({
+            "epoch_idx": epochs_ij.metadata.index[selection].values,
+            "decoder_target": epochs_ij.metadata.categorical_acoustic_cue[selection].values,
+            "decoder_prediction": y_pred,
+            "decoder_proba": y_proba,
+            "fold": i
+        }))
+
+    return pd.concat(outcomes)
