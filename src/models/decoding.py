@@ -12,12 +12,143 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import check_scoring, make_scorer
 from tqdm.auto import tqdm
+from sklearn.decomposition import PCA
 
 
 DecoderFitKey: TypeAlias = tuple[str, int, str, int, int]  # (subject, electrode_idx, phoneme_pair, smin, smax)
+"""Result of a single electrode decoder analysis."""
+
+PopulationDecoderFitKey: TypeAlias = tuple[str, str, str, int, int]  # (subject, population_name, phoneme_pair, smin, smax)
+"""Result of a population decoder analysis"""
 
 
-def run_decoding_analysis_single_electrode(
+def run_decoding_population(
+        epochs_i: mne.Epochs,
+        electrode_idxs: list[int],
+        phoneme_pair: str,
+        subject: str,
+        population_name: str,
+        stride: int, window_size: int,
+        global_min_sample: int = 0,
+        global_max_sample: Optional[int] = None,
+        target: Literal["acoustic", "lexical_evidence", "mismatch", "mismatch_left_right"] = "lexical_evidence",
+        strategy: Literal["nested-cv", "train-test"] = "nested-cv",
+        pca_num_components: Optional[float] = None,
+        return_outcomes=True,
+        include_only_full_windows=True,
+        smoke_test=False,
+        randomize=False):
+    
+    if target not in ["acoustic", "lexical_evidence", "mismatch", "mismatch_left_right"]:
+        raise ValueError(f"Invalid target {target}")
+    if strategy not in ["nested-cv", "train-test"]:
+        raise ValueError(f"Invalid strategy {strategy}")
+    assert epochs_i.metadata is not None
+    
+    if global_max_sample is not None:
+        assert global_max_sample > global_min_sample, \
+            f"global_max_sample ({global_max_sample}) must be greater than global_min_sample ({global_min_sample})"
+
+    data_max_sample = epochs_i.get_data().shape[2]
+    if global_max_sample is None:
+        global_max_sample = cast(int, data_max_sample)
+    else:
+        global_max_sample = min(global_max_sample, data_max_sample)
+
+    if global_max_sample - global_min_sample < window_size:
+        raise ValueError(f"Window size ({window_size}) is larger than the available data range "
+                         f"({global_max_sample - global_min_sample}). Please adjust the parameters.")
+
+    windows_left = np.arange(global_min_sample, global_max_sample, stride)
+    windows_right = windows_left + window_size
+    windows = np.array(list(zip(windows_left, windows_right)))
+    if include_only_full_windows:
+        windows = windows[windows[:, 1] <= global_max_sample]
+
+    # `outcomes` stores prediction outcomes for each epoch under the optimal model
+    outcomes = {}
+    # `test_scores` stores cross-validated estimates of held-out generalization
+    train_scores, test_scores = {}, {}
+    # `models` stores the fitted models
+    models = {}
+
+    selection = epochs_i.metadata.phoneme_pair == phoneme_pair
+    if selection.sum() == 0:
+        raise ValueError(f"No epochs found for phoneme pair {phoneme_pair} in the given epochs.")
+    
+    X = epochs_i.get_data(picks=electrode_idxs)[selection]
+
+    for smin, smax in windows:
+        # num_trials * num_electrodes * num_times
+        X_window = X[:, :, smin:smax]
+        # flatten space * time
+        X_window = X_window.reshape(X_window.shape[0], -1)
+
+        if target == "acoustic":
+            y = epochs_i.metadata.categorical_acoustic_cue[selection].values
+        elif target == "lexical_evidence":
+            y = (epochs_i.metadata.word_end.str[0] == phoneme_pair[0])[selection].values
+        elif target == "mismatch":
+            y = epochs_i.metadata.mismatch[selection].values
+        elif target == "mismatch_left_right":
+            y = epochs_i.metadata.mismatch_left_right[selection].values
+
+            # Subset data to only include mismatch trials
+            X_window = X_window[y != 0]
+            y = y[y != 0]
+
+        num_classes = len(set(y))
+        # stratify_class = epochs_ij.metadata.stratify_class[selection].values
+
+        if randomize:
+            # Randomize the labels
+            y = np.random.permutation(y)
+
+        ####
+
+        scoring = ["roc_auc", "f1_macro", "accuracy"] if num_classes == 2 else ["f1_macro", "accuracy"]
+
+        if strategy == "nested-cv":
+            fitted = fit_nested_cv(X_window, y, num_classes=num_classes,
+                                   pca_num_components=pca_num_components,
+                                   scoring=scoring)
+        elif strategy == "train-test":
+            fitted = fit_train_test(X_window, y, num_classes=num_classes,
+                                    pca_num_components=pca_num_components,
+                                    scoring=scoring,
+                                    num_repeats=5)
+
+        result_key = (subject, population_name, phoneme_pair, smin, smax)
+
+        if isinstance(scoring, list):
+            train_scores[result_key] = {k: fitted["train_" + k] for k in scoring}
+            test_scores[result_key] = {k: fitted["test_" + k] for k in scoring}
+        else:
+            train_scores[result_key] = fitted["train_score"]
+            test_scores[result_key] = fitted["test_score"]
+
+        if return_outcomes:
+            # only store outcomes on test folds
+            fold_results = []
+            for fold, (test_idxs, estimator) in enumerate(zip(fitted["test_idxs"], fitted["estimator"])):
+                # test_idxs are indices into X, y, which themselves are indices into epochs_ij[selection]
+                test_epoch_idxs = epochs_i.metadata.index[selection][test_idxs]
+                fold_results.append(pd.DataFrame({
+                    "decoder_target": y[test_idxs],
+                    "decoder_prediction": estimator.predict(X_window[test_idxs]),
+                    "decoder_proba": estimator.predict_proba(X_window[test_idxs])[:, 1],
+                    "fold": fold,
+                    "epoch_idx": test_epoch_idxs,
+                }))
+
+            outcomes[result_key] = pd.concat(fold_results)
+
+        models[result_key] = fitted["estimator"]
+
+    return train_scores, test_scores, outcomes, models
+
+
+def run_decoding_searchlight_single_electrode(
         epochs, electrode_df,
         stride: int, window_size: int,
         global_min_sample: int = 0,
@@ -155,7 +286,9 @@ def run_decoding_analysis_single_electrode(
 
 
 def fit_nested_cv(X, y, num_classes: int, scoring: list[str],
-                  num_outer_folds=2, num_inner_folds=2, random_state=42):
+                  num_outer_folds=2, num_inner_folds=2,
+                  pca_num_components: Optional[float] = None,
+                  random_state=42):
     """
     Fit a nested cross-validation model with logistic regression.
     Returns a fitted model and cross-validation results.
@@ -166,6 +299,8 @@ def fit_nested_cv(X, y, num_classes: int, scoring: list[str],
     Cs = np.logspace(-3, 2, 6)
 
     pipeline: list[BaseEstimator] = [StandardScaler()]
+    if pca_num_components is not None:
+        pipeline.append(PCA(n_components=pca_num_components))
 
     solver = "liblinear" if num_classes == 2 else "saga"
     pipeline.append(LogisticRegressionCV(
@@ -189,6 +324,7 @@ def fit_nested_cv(X, y, num_classes: int, scoring: list[str],
 
 def fit_train_test(X, y, num_classes: int, scoring: list[str],
                    test_fraction=0.2, num_folds=3,
+                   pca_num_components: Optional[float] = None,
                    num_repeats=1, random_state=42):
     seeds = np.random.RandomState(random_state).randint(0, 10000, num_repeats)
 
@@ -201,6 +337,9 @@ def fit_train_test(X, y, num_classes: int, scoring: list[str],
         Cs = np.logspace(-3, 2, 6)
 
         pipeline: list[BaseEstimator] = [StandardScaler()]
+        if pca_num_components is not None:
+            pipeline.append(PCA(n_components=pca_num_components))
+
         solver = "liblinear" if num_classes == 2 else "saga"
         pipeline.append(LogisticRegressionCV(
             Cs=Cs, cv=StratifiedKFold(num_folds, shuffle=True, random_state=seed),
@@ -244,7 +383,7 @@ def get_ensemble_predictions(model_key: DecoderFitKey,
                              models: list[BaseEstimator],
                              epochs: dict[str, mne.Epochs]) -> pd.DataFrame:
     """
-    Get predictions from an ensemble of fit models on held-out epochs,
+    Get predictions from an ensemble of fit single-electrode models on held-out epochs,
     subsetting appropriately to match the properties of the data the model
     was fit on.
 
@@ -252,7 +391,7 @@ def get_ensemble_predictions(model_key: DecoderFitKey,
         model_key: tuple of `(subject, electrode_idx, phoneme_pair, smin, smax)`;
             i.e. the keys of the dictionary returned by `run_decoding_analysis_single_electrode`
         models: list of fitted models
-        epochs: mne.Epochs object containing the held-out epochs
+        epochs: dict mapping from subject to mne.Epochs containing the held-out epochs
     """
     subject, electrode_idx, phoneme_pair, smin, smax = model_key
 
@@ -271,6 +410,46 @@ def get_ensemble_predictions(model_key: DecoderFitKey,
         outcomes.append(pd.DataFrame({
             "epoch_idx": epochs_ij.metadata.index[selection].values,
             "decoder_target": epochs_ij.metadata.categorical_acoustic_cue[selection].values,
+            "decoder_prediction": y_pred,
+            "decoder_proba": y_proba,
+            "fold": i
+        }))
+
+    return pd.concat(outcomes)
+
+
+def get_population_ensemble_predictions(model_key: PopulationDecoderFitKey,
+                                        models: list[BaseEstimator],
+                                        electrode_idxs: list[int],
+                                        epochs: mne.Epochs) -> pd.DataFrame:
+    """
+    Get predictions from an ensemble of fit single-electrode models on held-out epochs,
+    subsetting appropriately to match the properties of the data the model
+    was fit on.
+
+    Args:
+        model_key: tuple of `(subject, population_name, phoneme_pair, smin, smax)`;
+            i.e. the keys of the dictionary returned by `run_decoding_population`
+        models: list of fitted models
+        epochs: mne.Epochs object containing the held-out epochs
+    """
+    subject, population_name, phoneme_pair, smin, smax = model_key
+
+    selection = epochs.metadata.phoneme_pair == phoneme_pair
+    if selection.sum() == 0:
+        raise ValueError(f"No epochs found for subject {subject}, "
+                         f"phoneme pair {phoneme_pair} in the given epochs.")
+
+    X = epochs.get_data(picks=electrode_idxs)[selection][:, :, smin:smax]
+    X = X.reshape(X.shape[0], -1)  # flatten space * time
+
+    outcomes = []
+    for i, model in enumerate(models):
+        y_pred = model.predict(X)
+        y_proba = model.predict_proba(X)[:, 1]
+        outcomes.append(pd.DataFrame({
+            "epoch_idx": epochs.metadata.index[selection].values,
+            "decoder_target": epochs.metadata.categorical_acoustic_cue[selection].values,
             "decoder_prediction": y_pred,
             "decoder_proba": y_proba,
             "fold": i

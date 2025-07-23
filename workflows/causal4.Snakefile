@@ -81,11 +81,15 @@ rule run_A_intrinsics:
 rule unify_As:
     input:
         all_results = expand("outputs/causal4/find_As/{subject}_results.csv", subject=config["data"]["subjects"]),
+        all_decoders = expand("outputs/causal4/find_As/{subject}_decoders.pt", subject=config["data"]["subjects"]),
+        all_electrode_dfs = expand("outputs/causal4/find_speech_responsive/{subject}_results.csv", subject=config["data"]["subjects"]),
+        all_epochs = expand("outputs/epochs_preprocessed/{subject}_epo.fif", subject=config["data"]["subjects"]),
         notebook = "notebooks/causal4/unify_As.ipynb"
 
     output:
         notebook = "outputs/causal4/unify_As/unify_As.ipynb",
-        results = "outputs/causal4/unify_As/unified_results.csv"
+        results = "outputs/causal4/unify_As/results.csv",
+        decoders = "outputs/causal4/unify_As/unified_decoders.pt"
 
     run:
         outdir = Path(output.notebook).parent
@@ -93,6 +97,9 @@ rule unify_As:
             str(input.notebook),
             str(output.notebook),
             parameters=dict(all_results=input.all_results,
+                            all_decoders=input.all_decoders,
+                            all_electrode_dfs=input.all_electrode_dfs,
+                            all_epochs=input.all_epochs,
                             outdir=str(outdir)),
         )
 
