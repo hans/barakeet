@@ -104,17 +104,21 @@ rule unify_As:
         )
 
 
+# TODO unified A intrinsics
+# - neurometric response functions
+
+
 rule find_Bs:
     input:
         epochs = "outputs/epochs_preprocessed/{subject}_epo.fif",
         speech_responsive = "outputs/causal4/find_speech_responsive/{subject}_results.csv",
-        unified_As = "outputs/causal4/unify_As/unified_results.csv",
+        unified_As = "outputs/causal4/unify_As/results.csv",
+        unified_A_decoders = "outputs/causal4/unify_As/unified_decoders.pt",
         notebook = "notebooks/causal4/find_Bs.ipynb"
 
     output:
         notebook = "outputs/causal4/find_Bs/{subject}.ipynb",
-        results = "outputs/causal4/find_Bs/{subject}_results.csv",
-        decoders = "outputs/causal4/find_Bs/{subject}_decoders.pt"
+        results = "outputs/causal4/find_Bs/{subject}_results.csv"
 
     run:
         outdir = Path(output.notebook).parent
@@ -122,10 +126,16 @@ rule find_Bs:
             str(input.notebook),
             str(output.notebook),
             parameters=dict(epochs_path=input.epochs,
-                            speech_responsive=input.speech_responsive,
-                            unified_As=input.unified_As,
+                            speech_responsive_path=input.speech_responsive,
+                            As_path=input.unified_As,
+                            A_decoders_path=input.unified_A_decoders,
                             outdir=str(outdir)),
         )
+
+
+rule find_Bs_all:
+    input:
+        expand("outputs/causal4/find_Bs/{subject}.ipynb", subject=config["data"]["subjects"])
 
 
 rule run_B_intrinsics:
