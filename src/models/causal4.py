@@ -369,7 +369,7 @@ def realign_epochs_by_behavior(epochs, new_anchor_idx=50):
 
 ## visualization functions
 
-def plot_causal4_scatter(plot_meta, plot_meta_df, subject, population_B_window,
+def plot_causal4_scatter(epochs, plot_meta_df, subject, population_B_window,
                          statistic: Literal["spearmanr", "pearsonr"] = "spearmanr",
                          height=3, aspect=1):
     """
@@ -395,7 +395,7 @@ def plot_causal4_scatter(plot_meta, plot_meta_df, subject, population_B_window,
         is_left = data.lexical_evidence.iloc[0] == 0
 
         # plot epoched response at this electrode
-        plot_epochs = plot_meta.epochs[epoch_idxs]
+        plot_epochs = epochs[epoch_idxs]
         plot_epoch_data = plot_epochs.copy().pick(electrode_idx).get_data()
         
         window_start_samp, window_end_samp = population_B_window
@@ -457,7 +457,7 @@ def plot_causal4_scatter(plot_meta, plot_meta_df, subject, population_B_window,
     return g_scatter
 
 
-def plot_causal4_evoked(plot_meta, plot_meta_df, subject,
+def plot_causal4_evoked(epochs, plot_meta_df, subject,
                         population_A_window, population_B_window,
                         height=3, aspect=3,
                         highlight_A_span=False,
@@ -488,7 +488,7 @@ def plot_causal4_evoked(plot_meta, plot_meta_df, subject,
         ax.set_title(f"{subject} {electrode_idx + 1}, {word_end}")
 
         # plot epoched response at this electrode
-        plot_epochs = plot_meta.epochs[epoch_idxs]
+        plot_epochs = epochs[epoch_idxs]
         plot_epoch_data = plot_epochs.copy().pick(electrode_idx).get_data().squeeze(1)
         assert plot_epoch_data.ndim == 2  # n_trials * n_times
 
@@ -553,13 +553,14 @@ def plot_causal4_evoked(plot_meta, plot_meta_df, subject,
     return g
 
 
-def plot_causal4_raster(plot_meta, plot_meta_df, subject, population_B_window,
+def plot_causal4_raster(epochs, plot_meta_df, subject, population_B_window,
                         sort_by: Literal["p_gt_phoneme", "resampled", "behavior_linear"] = "p_gt_phoneme",
                         rasterized=True,
                         height=3, aspect=3,
                         clip_zscore=(-2, 2),
                         plot_extremes=False,
-                        parameter_cache=None):
+                        parameter_cache=None,
+                        cbar=True):
     g_raster = sns.FacetGrid(
         plot_meta_df,
         row="electrode_idx",
@@ -591,23 +592,26 @@ def plot_causal4_raster(plot_meta, plot_meta_df, subject, population_B_window,
         ## prepare epoch data
 
         # plot epoched response at this electrode
-        all_epochs = plot_meta.epochs
-        plot_epochs = all_epochs[epoch_idxs]
+        plot_epochs = epochs[epoch_idxs]
         plot_epoch_data = plot_epochs.copy().pick(electrode_idx).get_data().squeeze(1)
         assert plot_epoch_data.ndim == 2
 
         # get extreme-left options
-        plot_extreme_left_epochs = all_epochs[(all_epochs.metadata.phoneme_pair == phoneme_pair) &
-                                              (all_epochs.metadata.resampled == 1)]
-        plot_extreme_right_epochs = all_epochs[(all_epochs.metadata.phoneme_pair == phoneme_pair) &
-                                               (all_epochs.metadata.resampled == 6)]
+        plot_extreme_left_idxs = epochs.metadata.query("phoneme_pair == @phoneme_pair and resampled == 1") \
+            .sort_values("lexical_evidence").index
+        plot_extreme_left_epochs = epochs[plot_extreme_left_idxs]
+        # get extreme-right options
+        plot_extreme_right_idxs = epochs.metadata.query("phoneme_pair == @phoneme_pair and resampled == 6") \
+            .sort_values("lexical_evidence").index
+        plot_extreme_right_epochs = epochs[plot_extreme_right_idxs]
+    
         plot_extreme_left_data = plot_extreme_left_epochs.copy().pick(electrode_idx).get_data().squeeze(1)
         plot_extreme_right_data = plot_extreme_right_epochs.copy().pick(electrode_idx).get_data().squeeze(1)
 
         # z-score across trials and time points
         if (subject, electrode_idx) not in parameter_cache:
             # cache mean and std for z-scoring
-            all_epoch_data = plot_meta.epochs.copy().pick(electrode_idx).get_data().squeeze(1)
+            all_epoch_data = epochs.copy().pick(electrode_idx).get_data().squeeze(1)
             hga_mean = all_epoch_data.flatten().mean()
             hga_std = all_epoch_data.flatten().std()
             parameter_cache[subject, electrode_idx] = (hga_mean, hga_std)
@@ -623,16 +627,29 @@ def plot_causal4_raster(plot_meta, plot_meta_df, subject, population_B_window,
         plot_extreme_left_data = np.clip(plot_extreme_left_data, clip_zscore[0], clip_zscore[1])
         plot_extreme_right_data = np.clip(plot_extreme_right_data, clip_zscore[0], clip_zscore[1])
 
-        # now figure out how to order them
+        # compute x-positions for extreme left, right values
+        if sort_by == "p_gt_phoneme":
+            extreme_keys = [0, 1]
+        elif sort_by == "resampled":
+            extreme_keys = [1, 6]
+        elif sort_by == "behavior_linear":
+            extreme_keys = [-1, 1]
+
+        # now figure out how to order the extremes
         if sort_by == "p_gt_phoneme":
             gt_is_extreme_left = gt_phoneme == phoneme_pair[0]
             if gt_is_extreme_left:
                 top_data, bottom_data = plot_extreme_left_data, plot_extreme_right_data
+                extreme_top, extreme_bottom = extreme_keys
             else:
                 top_data, bottom_data = plot_extreme_right_data, plot_extreme_left_data
+                extreme_top, extreme_bottom = extreme_keys[::-1]
         else:
             # doesn't change as a function of gt phoneme
             top_data, bottom_data = plot_extreme_left_data, plot_extreme_right_data
+            extreme_top, extreme_bottom = extreme_keys
+
+        
 
         # grab the existing Axes
         ax = plt.gca()
@@ -648,10 +665,12 @@ def plot_causal4_raster(plot_meta, plot_meta_df, subject, population_B_window,
 
         if plot_extremes:
             # plot top extreme
-            ax_line.plot(np.repeat(1, len(top_data)),
-                        np.arange(offset, offset + len(top_data)),
-                        linestyle="-", linewidth=10)
+            ax_line.plot(np.repeat(extreme_top, len(top_data)),
+                         np.arange(offset, offset + len(top_data)),
+                         linestyle="-", linewidth=6)
             offset += len(top_data)
+            ax_line.axhline(offset, color="gray", linestyle="--", linewidth=2)
+            offset += 1  # leave a gap for the line
 
         # plot unseen data
         ax_line.plot(data[sort_by], np.arange(offset, offset + len(data)), linestyle='-', linewidth=4)
@@ -659,9 +678,12 @@ def plot_causal4_raster(plot_meta, plot_meta_df, subject, population_B_window,
 
         if plot_extremes:
             # plot bottom extreme
-            ax_line.plot(np.repeat(0, len(bottom_data)),
-                        np.arange(offset, offset + len(bottom_data)),
-                        linestyle="-", linewidth=10)
+            ax_line.axhline(offset, color="gray", linestyle="--", linewidth=2)
+            # leave a gap for the line
+            offset += 1
+            ax_line.plot(np.repeat(extreme_bottom, len(bottom_data)),
+                         np.arange(offset, offset + len(bottom_data)),
+                         linestyle="-", linewidth=6)
 
         ax_line.invert_yaxis()            # so trial 0 is at top (same as heatmap)
         ax_line.xaxis.set_label_position("top")
@@ -698,7 +720,11 @@ def plot_causal4_raster(plot_meta, plot_meta_df, subject, population_B_window,
         if plot_extremes:
             plot_all_data = np.concatenate([
                 top_data,
+                # leave a gap for the line
+                np.full((1, plot_epoch_data.shape[1]), np.nan),
                 plot_epoch_data,
+                # leave a gap for the line
+                np.full((1, plot_epoch_data.shape[1]), np.nan),
                 bottom_data,
             ])
         else:
@@ -710,6 +736,11 @@ def plot_causal4_raster(plot_meta, plot_meta_df, subject, population_B_window,
             yticklabels=False,
             rasterized=rasterized,
         )
+
+        if plot_extremes:
+            # add hlines separating extreme data
+            ax.axhline(len(top_data), color="gray", linestyle="--", linewidth=2)
+            ax.axhline(len(top_data) + len(plot_epoch_data), color="gray", linestyle="--", linewidth=2)
 
         # Plot a subsample of time points
         zero_idx = plot_epochs.time_as_index(0)[0]
@@ -733,15 +764,22 @@ def plot_causal4_raster(plot_meta, plot_meta_df, subject, population_B_window,
     g_raster.map_dataframe(plot_facet_raster, sort_by=sort_by, clip_zscore=clip_zscore,
                            rasterized=rasterized)
     
-    sort_label = "P(gt phoneme)" if sort_by == "p_gt_phoneme" else "Stimulus step"
+    sort_labels = {
+        "p_gt_phoneme": "P(gt phoneme)",
+        "resampled": "Stimulus step",
+        "behavior_linear": "Slider position"
+    }
+    sort_label = sort_labels.get(sort_by, "???")
     g_raster.fig.suptitle(f"Rasters sorted by {sort_label}", y=1.1)
 
-    # add colorbar
-    norm = plt.Normalize(clip_zscore[0], clip_zscore[1])
-    sm = plt.cm.ScalarMappable(cmap="plasma", norm=norm)
-    sm.set_array([])
-    cax_f, cax = plt.subplots(figsize=(2, 6))
-    cax_f.colorbar(sm, cax=cax, label="HGA (z)",
-                          ticks=np.linspace(clip_zscore[0], clip_zscore[1], 5))
+    cax_f = None
+    if cbar:
+        # add colorbar
+        norm = plt.Normalize(clip_zscore[0], clip_zscore[1])
+        sm = plt.cm.ScalarMappable(cmap="plasma", norm=norm)
+        sm.set_array([])
+        cax_f, cax = plt.subplots(figsize=(2, 6))
+        cax_f.colorbar(sm, cax=cax, label="HGA (z)",
+                            ticks=np.linspace(clip_zscore[0], clip_zscore[1], 5))
 
     return g_raster, cax_f
