@@ -627,29 +627,25 @@ def plot_causal4_raster(epochs, plot_meta_df, subject, population_B_window,
         plot_extreme_left_data = np.clip(plot_extreme_left_data, clip_zscore[0], clip_zscore[1])
         plot_extreme_right_data = np.clip(plot_extreme_right_data, clip_zscore[0], clip_zscore[1])
 
-        # compute x-positions for extreme left, right values
+        # compute x-positions for extreme top, bottom values
         if sort_by == "p_gt_phoneme":
             extreme_keys = [0, 1]
         elif sort_by == "resampled":
             extreme_keys = [1, 6]
         elif sort_by == "behavior_linear":
             extreme_keys = [-1, 1]
+        extreme_bottom, extreme_top = extreme_keys
 
         # now figure out how to order the extremes
         if sort_by == "p_gt_phoneme":
             gt_is_extreme_left = gt_phoneme == phoneme_pair[0]
             if gt_is_extreme_left:
                 top_data, bottom_data = plot_extreme_left_data, plot_extreme_right_data
-                extreme_top, extreme_bottom = extreme_keys
             else:
                 top_data, bottom_data = plot_extreme_right_data, plot_extreme_left_data
-                extreme_top, extreme_bottom = extreme_keys[::-1]
         else:
             # doesn't change as a function of gt phoneme
             top_data, bottom_data = plot_extreme_left_data, plot_extreme_right_data
-            extreme_top, extreme_bottom = extreme_keys
-
-        
 
         # grab the existing Axes
         ax = plt.gca()
