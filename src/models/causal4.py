@@ -411,6 +411,8 @@ class Causal4Plotter:
     def __call__(self, row, smoke_test=False):
         subject = row.subject
         phoneme_pair = row.phoneme_pair
+        left_phoneme, right_phoneme = phoneme_pair
+
         population_A = row.population_name
         population_B = [row.electrode_idx]
         left = row.left_is_best
@@ -473,6 +475,35 @@ class Causal4Plotter:
 
         ####
 
+        # Concatenate extreme data
+        A_extreme_outcomes = self.A_decoders["outcomes"][subject, population_A, phoneme_pair]
+        plot_extreme_meta_df = pd.merge(
+            A_extreme_outcomes.groupby("epoch_idx").decoder_proba.mean().reset_index(),
+            epochs_i.metadata,
+            how="left", left_on="epoch_idx", right_index=True
+        )
+        assert len(set(plot_extreme_meta_df.epoch_idx) & set(plot_meta_df.epoch_idx)) == 0, \
+            "Expected no overlap between extreme and regular outcomes"
+        plot_extreme_meta_df["p_gt_phoneme"] = plot_extreme_meta_df.groupby("label_lexical").decoder_proba.transform(
+            lambda xs: 1 - xs if xs.name == phoneme_pair[0] else xs)
+
+        all_A_df = pd.concat([plot_meta_df, plot_extreme_meta_df], ignore_index=True)
+
+        # Plot A relationship between stimulus step and P(phoneme)
+        g_A = sns.catplot(data=all_A_df, x="resampled", y="decoder_proba", hue="label_lexical",
+                          kind="strip", height=3, aspect=1.25)
+        g_A.set_axis_labels("Stimulus step", f"P(/{right_phoneme}/)")
+        g_A.ax.set_title(f"{subject} {population_A} {phoneme_pair}")
+        g_A.legend.set_title("Lexical\nevidence")
+        g_A.ax.axhline(0.5, color="gray", linestyle="--", linewidth=1)
+
+        # Add correlation information
+        corr, p_val = spearmanr(all_A_df["resampled"], all_A_df["decoder_proba"])
+        g_A.ax.text(0.05, 0.95, f"$r$ = {corr:.2f} ($p$ = {p_val:.2g})",
+                    transform=g_A.ax.transAxes)
+
+        ####
+        
         g_scatter = plot_causal4_scatter(
             epochs_i, plot_meta_df, subject, population_B_window)
 
@@ -558,11 +589,13 @@ class Causal4Plotter:
         
         g_raster_resampled = plot_causal4_raster(
             epochs_i, plot_meta_df, subject, population_B_window,
-            sort_by="resampled", parameter_cache=self._parameter_cache, cbar=False)
+            sort_by="resampled", parameter_cache=self._parameter_cache,
+            cbar=False)
 
         g_raster_behavior = plot_causal4_raster(
             epochs_i, plot_meta_df, subject, population_B_window,
-            sort_by="behavior_linear", parameter_cache=self._parameter_cache, cbar=False)
+            sort_by="behavior_linear", parameter_cache=self._parameter_cache,
+            cbar=False)
 
         ####
 
@@ -574,7 +607,7 @@ class Causal4Plotter:
             timit_bounds_dict=self._timit_bounds)
         timit_fig.suptitle(f"TIMIT responses for {subject} {population_B[0] + 1}")
 
-        return (g_scatter, g_displot,
+        return (g_A, g_scatter, g_displot,
                 g, g_evoked_by_behavior, g_evoked_resampled,
                 g_raster, g_raster_resampled, g_raster_behavior,
                 timit_fig)
@@ -774,7 +807,8 @@ def plot_causal4_raster(epochs, plot_meta_df, subject, population_B_window,
                         clip_zscore=(-2, 2),
                         plot_extremes=False,
                         parameter_cache=None,
-                        cbar=True):
+                        cbar=True,
+                        smoke_test=False):
     g_raster = sns.FacetGrid(
         plot_meta_df,
         row="electrode_idx",
@@ -793,6 +827,9 @@ def plot_causal4_raster(epochs, plot_meta_df, subject, population_B_window,
                                       "Use 'p_gt_phoneme', 'resampled', or 'behavior_linear'.")
         # re-sort according to sort_by
         data = data.sort_values(sort_by, ascending=sort_ascending)
+
+        if smoke_test:
+            data = data.sample(10)
 
         electrode_idx = data.electrode_idx.iloc[0]
         epoch_idxs = data.epoch_idx
