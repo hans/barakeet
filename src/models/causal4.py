@@ -420,6 +420,7 @@ class Causal4Plotter:
 
         A_row = self.A_results[(self.A_results.subject == subject) & (self.A_results.phoneme_pair == phoneme_pair) & (self.A_results.population_name == population_A)]
         assert len(A_row) == 1, f"Expected one row for {subject} {phoneme_pair} {population_A}, got {len(A_row)}"
+        A_row = A_row.iloc[0]
 
         plot_key = (subject, phoneme_pair, population_A)
         plot_num_quantiles = 4
@@ -475,6 +476,9 @@ class Causal4Plotter:
 
         ####
 
+        # Plot: A-population output vs. stimulus step
+        # (Underlying Q: How closely tied is this A-population to stimulus vs. internal state?)
+
         # Concatenate extreme data
         A_extreme_outcomes = self.A_decoders["outcomes"][subject, population_A, phoneme_pair]
         plot_extreme_meta_df = pd.merge(
@@ -487,10 +491,12 @@ class Causal4Plotter:
         plot_extreme_meta_df["p_gt_phoneme"] = plot_extreme_meta_df.groupby("label_lexical").decoder_proba.transform(
             lambda xs: 1 - xs if xs.name == phoneme_pair[0] else xs)
 
-        all_A_df = pd.concat([plot_meta_df, plot_extreme_meta_df], ignore_index=True)
+        all_A_df = pd.concat([plot_meta_df, plot_extreme_meta_df], ignore_index=True) \
+            .astype({"resampled": int})
 
         # Plot A relationship between stimulus step and P(phoneme)
-        g_A = sns.catplot(data=all_A_df, x="resampled", y="decoder_proba", hue="label_lexical",
+        g_A = sns.catplot(data=all_A_df, x="resampled", y="decoder_proba",
+                          hue="label_lexical", hue_order=list(phoneme_pair),
                           kind="strip", height=3, aspect=1.25)
         g_A.set_axis_labels("Stimulus step", f"P(/{right_phoneme}/)")
         g_A.ax.set_title(f"{subject} {population_A} {phoneme_pair}")
@@ -501,6 +507,27 @@ class Causal4Plotter:
         corr, p_val = spearmanr(all_A_df["resampled"], all_A_df["decoder_proba"])
         g_A.ax.text(0.05, 0.95, f"$r$ = {corr:.2f} ($p$ = {p_val:.2g})",
                     transform=g_A.ax.transAxes)
+
+        ####
+
+        # Plot: B-population output in A-window vs. stimulus step
+        # (Underlying Q: Is this B-population also an A?)
+
+        s_epoch_idxs = plot_meta_df.epoch_idx
+        s_epochs = epochs_i[s_epoch_idxs].copy().pick(population_B).get_data().squeeze()
+        s_epoch_data = s_epochs[:, A_row.smin:A_row.smax]
+
+        plot_meta_df["A_window_B_activation"] = s_epoch_data.mean(axis=1)
+
+        g_B_at_A = sns.catplot(
+            data=plot_meta_df, x="resampled", y="A_window_B_activation",
+            hue="label_lexical", hue_order=list(phoneme_pair),
+            kind="strip", height=3, aspect=1.25)
+
+        # Add correlation information
+        corr, p_val = spearmanr(plot_meta_df["resampled"], plot_meta_df["A_window_B_activation"])
+        g_B_at_A.ax.text(0.05, 0.95, f"$r$ = {corr:.2f} ($p$ = {p_val:.2g})",
+                         transform=g_B_at_A.ax.transAxes)
 
         ####
         
@@ -585,7 +612,8 @@ class Causal4Plotter:
         g_raster = plot_causal4_raster(
             epochs_i, plot_meta_df, subject, population_B_window,
             plot_extremes=True,
-            sort_by="p_gt_phoneme", parameter_cache=self._parameter_cache)
+            sort_by="p_gt_phoneme", parameter_cache=self._parameter_cache,
+            cbar=False)
         
         g_raster_resampled = plot_causal4_raster(
             epochs_i, plot_meta_df, subject, population_B_window,
@@ -607,9 +635,9 @@ class Causal4Plotter:
             timit_bounds_dict=self._timit_bounds)
         timit_fig.suptitle(f"TIMIT responses for {subject} {population_B[0] + 1}")
 
-        return (g_A, g_scatter, g_displot,
+        return (g_A, g_B_at_A, g_scatter, g_displot,
                 g, g_evoked_by_behavior, g_evoked_resampled,
-                g_raster, g_raster_resampled, g_raster_behavior,
+                *g_raster, *g_raster_resampled, *g_raster_behavior,
                 timit_fig)
 
 
@@ -688,7 +716,7 @@ def plot_causal4_scatter(epochs, plot_meta_df, subject, population_B_window,
 
         ax.text(0.05, 0.95, f"$r$ = {corr:.2f} ($p$ = {corr_p:.2g})\ncontrol $r$ = {control_corr:.2f} ($p$ = {control_corr_p:.2g})",
                 transform=ax.transAxes, ha="left", va="top",
-                fontsize=16,
+                fontsize=12,
                 bbox=dict(facecolor="white", alpha=0.5, edgecolor="none"))
 
         return ax

@@ -368,7 +368,11 @@ def timit_subplots(subject, channel, plot_phonemes, epoch_sources,
                             sharex=True)
 
     for i, (ax, (epoch_source_name, epoch_source)) in enumerate(zip(axs.flat, epoch_sources.items())):
-        epoch_df = pd.read_hdf(epoch_source, f"{subject}/epoch_df")
+        try:
+            epoch_df = pd.read_hdf(epoch_source, f"{subject}/epoch_df")
+        except KeyError:
+            L.warning(f"{subject} not found in {epoch_source}")
+            continue
 
         plot_epoch_dfs = [
             epoch_df[epoch_df.epoch_label == phoneme]
