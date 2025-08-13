@@ -14,7 +14,9 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import StratifiedKFold, cross_val_score
 import textgrid
+
 from src.models.causal import run_phase1
+import src.viz as viz
 
 
 @dataclass
@@ -369,6 +371,215 @@ def realign_epochs_by_behavior(epochs, new_anchor_idx=50):
 
 ## visualization functions
 
+
+class Causal4Plotter:
+
+    def __init__(self, epochs: dict[str, mne.Epochs],
+                 A_results: pd.DataFrame, B_results: pd.DataFrame,
+                 A_decoders,
+                 electrode_df: pd.DataFrame,
+                 textgrid_dir: str,
+                 timit_epoch_sources: dict[str, str]):
+        """
+        Args:
+            epochs: MNE Epochs
+            A_results: 
+            B_results:
+            A_decoders:
+            electrode_df:
+            textgrid_dir:
+            timit_epoch_sources: A dictionary mapping TIMIT epoch category names to pre-computed paths
+        """
+
+        self.epochs = epochs
+        self.A_results = A_results
+        self.B_results = B_results
+
+        self.A_decoders = A_decoders
+
+        self.electrode_df = electrode_df
+        self.textgrid_dir = textgrid_dir
+
+        self.timit_epoch_sources = timit_epoch_sources
+        # pre-compute TIMIT bounds
+        self._timit_bounds = viz.precompute_timit_bounds(
+            timit_epoch_sources, subjects=self.epochs.keys()
+        )
+
+        self._parameter_cache = {}
+
+    def __call__(self, row, smoke_test=False):
+        subject = row.subject
+        phoneme_pair = row.phoneme_pair
+        population_A = row.population_name
+        population_B = [row.electrode_idx]
+        left = row.left_is_best
+        population_B_window = (int(row.window_start_samp), int(row.window_end_samp))
+
+        A_row = self.A_results[(self.A_results.subject == subject) & (self.A_results.phoneme_pair == phoneme_pair) & (self.A_results.population_name == population_A)]
+        assert len(A_row) == 1, f"Expected one row for {subject} {phoneme_pair} {population_A}, got {len(A_row)}"
+
+        plot_key = (subject, phoneme_pair, population_A)
+        plot_num_quantiles = 4
+
+        epochs_i = self.epochs[subject]
+
+        # convert to samples
+        population_A_window = (
+            epochs_i.time_as_index(A_row.smin)[0],
+            epochs_i.time_as_index(A_row.smax)[0],
+        )
+
+        A_outcomes = self.A_decoders["held_out_outcomes"][subject, population_A, phoneme_pair]
+
+        # sanity check: test trials are the same across repeats
+        test_trial_indices = A_outcomes.groupby("fold").apply(lambda xs: xs.epoch_idx.unique()).values
+        for i in range(1, len(test_trial_indices)):
+            np.testing.assert_array_equal(
+                test_trial_indices[i],
+                test_trial_indices[0],
+            )
+
+        # merge estimated probabilities from repeats
+        plot_meta_df = pd.merge(
+            A_outcomes.groupby("epoch_idx").decoder_proba.mean().reset_index(),
+            epochs_i.metadata,
+            how="left", left_on="epoch_idx", right_index=True
+        )
+
+        # p(gt phoneme) is decoder probability if we are looking at the right phoneme,
+        # or 1 - decoder probability if we are looking at the left phoneme
+        plot_meta_df["p_gt_phoneme"] = plot_meta_df.groupby("label_lexical").decoder_proba.transform(
+            lambda xs: 1 - xs if xs.name == phoneme_pair[0] else xs)
+        plot_meta_df["p_gt_phoneme_binned"] = pd.qcut(
+            plot_meta_df.p_gt_phoneme, plot_num_quantiles,
+            # labels=[f"Q{i+1}" for i in range(plot_num_quantiles)]
+        )
+        plot_meta_df["p_gt_phoneme_bin_center"] = plot_meta_df.p_gt_phoneme_binned.apply(
+            lambda x: x.mid
+        ).astype(float).round(3)
+
+        # TODO concat outcomes from extremes
+
+        def get_textgrid_path(row):
+            return Path(self.textgrid_dir) / (Path(row.wav_file).with_suffix(".TextGrid").name)
+        plot_meta_df["textgrid_path"] = plot_meta_df.apply(get_textgrid_path, axis=1)
+
+        # cross by electrodes
+        plot_meta_df = pd.merge(
+            plot_meta_df,
+            self.electrode_df.loc[subject].loc[population_B].reset_index(),
+            how="cross")
+
+        ####
+
+        g_scatter = plot_causal4_scatter(
+            epochs_i, plot_meta_df, subject, population_B_window)
+
+        ####
+
+        # # displot showing spearmanr results
+        # spearmanr_results = np.array(row.counterfactual_spearmanr_list)
+        # g_displot = sns.displot(
+        #     spearmanr_results,
+        #     kind="kde", fill=True, color="blue",
+        #     height=2.5, aspect=3,
+        # )
+        # spearmanr_obs = row.corr_left if row.p_val_left < row.p_val_right else row.corr_right
+        # g_displot.ax.axvline(spearmanr_obs, color="red", linestyle="--", label="Observed", linewidth=2)
+        # g_displot.ax.set_xlabel("Spearman correlation")
+        # g_displot.ax.set_title(f"Permutation baseline results\n(z={row.counterfactual_test_z:.2f}, p={row.counterfactual_test_p:.2g})")
+        g_displot = None
+
+        ####
+
+        g = plot_causal4_evoked(
+            epochs_i, plot_meta_df, subject, population_A_window, population_B_window,
+            hue="p_gt_phoneme_bin_center", smoke_test=smoke_test
+        )
+
+        ####
+
+        # # plot re-aligned to behavior
+        # def plot_facet_evoked_align_behavior(data, color, **kwargs):
+        #     electrode_idx = data.electrode_idx.iloc[0]
+        #     epoch_idxs = data.epoch_idx
+
+        #     word_end = data.word_end.iloc[0]
+        #     tg_path = data.textgrid_path.iloc[0]
+        #     tg = textgrid.TextGrid.fromFile(str(tg_path))
+
+        #     ax = plt.gca()
+        #     ax.set_xlabel("Time relative to behavior onset (sec)")
+        #     ax.set_ylabel("HGA")
+        #     ax.set_title(f"{subject} {electrode_idx + 1}, {word_end}")
+
+        #     # plot epoched response at this electrode
+        #     plot_epochs = epochs[subject][epoch_idxs]
+        #     plot_epochs = causal4.realign_epochs_by_behavior(plot_epochs)
+
+        #     plot_epoch_data = plot_epochs.copy().pick(electrode_idx).get_data().squeeze(1)
+        #     assert plot_epoch_data.ndim == 2  # n_trials * n_times
+
+        #     plot_times = plot_epochs.times
+        #     plot_epoch_data_mean = np.nanmean(plot_epoch_data, 0)
+        #     plot_epoch_data_sem = np.nanstd(plot_epoch_data, 0) / np.sqrt((~np.isnan(plot_epoch_data)).sum(0))
+        #     ax.plot(plot_times, plot_epoch_data_mean, color=color, alpha=0.5, **kwargs)
+        #     ax.fill_between(plot_times, plot_epoch_data_mean - plot_epoch_data_sem,
+        #                     plot_epoch_data_mean + plot_epoch_data_sem, color=color, alpha=0.2)
+            
+        #     ax.set_xlim(plot_epochs.times[0], plot_epochs.times[-1])
+
+        #     return ax
+        
+        # g_evoked_by_behavior = sns.FacetGrid(
+        #     plot_meta_df,
+        #     row="electrode_idx",
+        #     hue="p_gt_phoneme_bin_center", palette="plasma",
+        #     col="lexical_evidence",
+        #     aspect=3, height=3, sharey="row"
+        # ).map_dataframe(plot_facet_evoked_align_behavior).add_legend()
+        # g_evoked_by_behavior.fig.suptitle("Evoked responses by P(gt phoneme), aligned to behavior onset")
+        g_evoked_by_behavior = None
+
+        ####
+
+        g_evoked_resampled = plot_causal4_evoked(
+            epochs_i, plot_meta_df, subject, population_A_window, population_B_window,
+            hue="resampled", smoke_test=smoke_test
+        )
+
+        ####
+
+        g_raster = plot_causal4_raster(
+            epochs_i, plot_meta_df, subject, population_B_window,
+            plot_extremes=True,
+            sort_by="p_gt_phoneme", parameter_cache=self._parameter_cache)
+        
+        g_raster_resampled = plot_causal4_raster(
+            epochs_i, plot_meta_df, subject, population_B_window,
+            sort_by="resampled", parameter_cache=self._parameter_cache, cbar=False)
+
+        g_raster_behavior = plot_causal4_raster(
+            epochs_i, plot_meta_df, subject, population_B_window,
+            sort_by="behavior_linear", parameter_cache=self._parameter_cache, cbar=False)
+
+        ####
+
+        timit_fig = viz.timit_subplots(
+            subject, population_B[0],
+            plot_phonemes=[ph.upper() for ph in phoneme_pair],
+            cell_aspect=1.5,
+            epoch_sources=self.timit_epoch_sources,
+            timit_bounds_dict=self._timit_bounds)
+        timit_fig.suptitle(f"TIMIT responses for {subject} {population_B[0] + 1}")
+
+        return (g_scatter, g_displot,
+                g, g_evoked_by_behavior, g_evoked_resampled,
+                g_raster, g_raster_resampled, g_raster_behavior,
+                timit_fig)
+
+
 def plot_causal4_scatter(epochs, plot_meta_df, subject, population_B_window,
                          statistic: Literal["spearmanr", "pearsonr"] = "spearmanr",
                          height=3, aspect=1):
@@ -462,7 +673,8 @@ def plot_causal4_evoked(epochs, plot_meta_df, subject,
                         height=3, aspect=3,
                         highlight_A_span=False,
                         highlight_B_span=True,
-                        hue: Literal["resampled", "p_gt_phoneme_bin_center"] = "p_gt_phoneme_bin_center"):
+                        hue: Literal["resampled", "p_gt_phoneme_bin_center"] = "p_gt_phoneme_bin_center",
+                        smoke_test=False):
     """
     Plot evoked responses for each electrode in population B,
     grouped by P(gt phoneme) from population A or by stimulus step.
@@ -501,8 +713,10 @@ def plot_causal4_evoked(epochs, plot_meta_df, subject,
         plot_epoch_data_mean = plot_epoch_data.mean(0)
         plot_epoch_data_sem = plot_epoch_data.std(0) / np.sqrt(plot_epoch_data.shape[0])
         ax.plot(plot_times, plot_epoch_data_mean, color=color, alpha=0.5, **kwargs)
-        ax.fill_between(plot_times, plot_epoch_data_mean - plot_epoch_data_sem,
-                        plot_epoch_data_mean + plot_epoch_data_sem, color=color, alpha=0.2)
+
+        if not smoke_test:
+            ax.fill_between(plot_times, plot_epoch_data_mean - plot_epoch_data_sem,
+                            plot_epoch_data_mean + plot_epoch_data_sem, color=color, alpha=0.2)
         
         ax.set_xlim(plot_epochs.times[0], plot_epochs.times[-1])
         
