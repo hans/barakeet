@@ -158,6 +158,36 @@ rule run_B_intrinsics:
         )
 
 
+rule plot_B_study:
+    input:
+        notebook = "notebooks/causal4/plot_B_study.ipynb",
+        all_epochs = expand("outputs/epochs_preprocessed/{subject}_epo.fif", subject=config["data"]["subjects"]),
+        textgrids = "textgrids",
+        all_speech_responsive = expand("outputs/causal4/find_speech_responsive/{subject}_results.csv", subject=config["data"]["subjects"]),
+        unified_As = "outputs/causal4/unify_As/results.csv",
+        unified_A_decoders = "outputs/causal4/unify_As/unified_decoders.pt",
+        all_results = expand("outputs/causal4/find_Bs/{subject}_results.csv", subject=config["data"]["subjects"])
+
+    output:
+        notebook = "outputs/causal4/plot_B_study/plot_B_study.ipynb",
+        results = "outputs/causal4/plot_B_study/B_study_results.csv",
+        pdf = "outputs/causal4/plot_B_study/B_study.pdf"
+
+    run:
+        outdir = Path(output.notebook).parent
+        execute_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(epochs_paths=input.all_epochs,
+                            tg_dir=input.textgrids,
+                            electrodes_paths=input.all_speech_responsive,
+                            A_result_path=input.unified_As,
+                            A_decoders_path=input.unified_A_decoders,
+                            all_B_result_paths=input.all_results,
+                            outdir=str(outdir)),
+        )
+
+
 rule analyze:
     input:
         all_A_results = expand("outputs/causal4/find_As/{subject}_results.csv", subject=config["data"]["subjects"]),
