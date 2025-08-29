@@ -27,7 +27,7 @@ decoding:
     - acoustic
     - mismatch
     - lexical_evidence
-    - mismatch_left_right
+    # - mismatch_left_right
     - behavior_categorical
 
   num_random_runs: 3
