@@ -160,7 +160,7 @@ def add_metadata_features(md: pd.DataFrame) -> pd.DataFrame:
     # -1 = clearly chose left of phoneme_pair, 1 = clearly chose right of phoneme_pair
     # 0 = ambiguous (middle two options; 5 and 6)
     md["behavior_categorical"] = np.sign(md["behavior_linear"])
-    # md.loc[md["slider.response"].isin([5, 6]), "behavior_categorical"] = 0
+    md.loc[md["slider.response"].isin([5, 6]), "behavior_categorical"] = 0
     md["behavior_categorical_forced"] = np.sign(md["behavior_linear"])
     md["behavior_dummy_forced"] = (md.behavior_categorical_forced > 0).astype(int)
 

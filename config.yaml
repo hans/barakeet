@@ -28,13 +28,14 @@ decoding:
     - mismatch
     - lexical_evidence
     - mismatch_left_right
+    - behavior_categorical
 
   num_random_runs: 3
 
   window_sizes:
-    - 10
-    - 20
+    # - 10
+    # - 20
     - 30
-    - 60
-    - 90
-    - 120
+    # - 60
+    # - 90
+    # - 120

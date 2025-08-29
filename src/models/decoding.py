@@ -11,6 +11,7 @@ from sklearn.linear_model import LogisticRegression, LogisticRegressionCV
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import check_scoring, make_scorer
+from sklearn.metrics._scorer import _MultimetricScorer, _check_multimetric_scoring
 from tqdm.auto import tqdm
 from sklearn.decomposition import PCA
 
@@ -153,7 +154,7 @@ def run_decoding_searchlight_single_electrode(
         stride: int, window_size: int,
         global_min_sample: int = 0,
         global_max_sample: Optional[int] = None,
-        target: Literal["acoustic", "lexical_evidence", "mismatch", "mismatch_left_right"] = "lexical_evidence",
+        target: Literal["acoustic", "lexical_evidence", "mismatch", "mismatch_left_right", "behavior_categorical"] = "lexical_evidence",
         strategy: Literal["nested-cv", "train-test"] = "nested-cv",
         filter_speech_responsive=True,
         return_outcomes=True,
@@ -169,7 +170,7 @@ def run_decoding_searchlight_single_electrode(
     window_size: in samples
     """
 
-    if target not in ["acoustic", "lexical_evidence", "mismatch", "mismatch_left_right"]:
+    if target not in ["acoustic", "lexical_evidence", "mismatch", "mismatch_left_right", "behavior_categorical"]:
         raise ValueError(f"Invalid target {target}")
     if strategy not in ["nested-cv", "train-test"]:
         raise ValueError(f"Invalid strategy {strategy}")
@@ -237,6 +238,8 @@ def run_decoding_searchlight_single_electrode(
                     # Subset data to only include mismatch trials
                     X = X[y != 0]
                     y = y[y != 0]
+                elif target == "behavior_categorical":
+                    y = epochs_ij.metadata.behavior_dummy_forced[selection].values
 
                 num_classes = len(set(y))
                 # stratify_class = epochs_ij.metadata.stratify_class[selection].values
@@ -360,10 +363,17 @@ def fit_train_test(X, y, num_classes: int, scoring: list[str],
             solver=solver))
         refit_model.fit(X_train, y_train)
 
-        scorer = check_scoring(refit_model, scoring=scoring)
+        if callable(scoring):
+            scorers = scoring
+        elif scoring is None or isinstance(scoring, str):
+            scorers = check_scoring(refit_model, scoring)
+        else:
+            scorers = _check_multimetric_scoring(refit_model, scoring)
+            # _check_refit_for_multimetric(scorers)
+            scorers = _MultimetricScorer(scorers=scorers)
 
-        train_scores = scorer(refit_model, X_train, y_train)
-        test_scores = scorer(refit_model, X_test, y_test)
+        train_scores = scorers(refit_model, X_train, y_train)
+        test_scores = scorers(refit_model, X_test, y_test)
         results.append({
             **{f"train_{k}": np.array([v]) for k, v in train_scores.items()},
             **{f"test_{k}": np.array([v]) for k, v in test_scores.items()},
