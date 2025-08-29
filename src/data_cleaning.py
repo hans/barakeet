@@ -2,6 +2,25 @@ import numpy as np
 import pandas as pd
 
 
+# Post-hoc relabeling of particular ROIs, after manual inspection
+# This really should happen prior to unifying the As, but for now
+# we are sticking to the current results and relabeling post-hoc
+roi_updates = {
+    # TODO
+    # EC279 [] pb: 158
+
+    ("EC287", "[]", "dn"): "precentral",
+    ("EC287", "Left-Cerebral-White-Matter", "dn"): "insula",
+    ("EC287", "Left-Cerebral-White-Matter", "pb"): "cingulate",
+    ("EC279", "ctx_rh_S_circular_insula_sup", "dn"): "frontal operculum",
+    ("EC279", "ctx_rh_S_circular_insula_inf", "dn"): "temporal operculum",
+    ("EC279", "ctx_rh_G_temp_sup-G_T_transv", "dn"): "temporal operculum",
+    ("EC279", "Right-Cerebral-White-Matter", "bm"): "temporal operculum",
+    ("EC279", "Right-Cerebral-White-Matter", "dn"): "temporal operculum",
+    ("EC279", "Unknown", "bm"): "temporal operculum",
+}
+
+
 def prepare_AB_results(A_path, B_path,
                        acoustic_decoding_path=None,
                        trf_results_path=None):
@@ -87,27 +106,6 @@ def prepare_AB_results(A_path, B_path,
 
     # Post-hoc aggregate A-site values according to updated ROI information
     # We should integrate this into the early unify-A pipeline eventually
-    roi_updates = {
-        # ("EC287", (190,)): "precentral",
-        # ("EC287", (185,)): "insula",
-        # ("EC287", (199,)): "cingulate",
-        # ("EC279", (205,)): "frontal operculum",
-        # ("EC279", (166, 167, 168, 169, 170, 171, 172, 173, 174, 175)): "temporal operculum",
-
-        # TODO
-        # EC279 [] pb: 158
-
-        ("EC287", "[]", "dn"): "precentral",
-        ("EC287", "Left-Cerebral-White-Matter", "dn"): "insula",
-        ("EC287", "Left-Cerebral-White-Matter", "pb"): "cingulate",
-        ("EC279", "ctx_rh_S_circular_insula_sup", "dn"): "frontal operculum",
-        ("EC279", "ctx_rh_S_circular_insula_inf", "dn"): "temporal operculum",
-        ("EC279", "ctx_rh_G_temp_sup-G_T_transv", "dn"): "temporal operculum",
-        ("EC279", "Right-Cerebral-White-Matter", "bm"): "temporal operculum",
-        ("EC279", "Right-Cerebral-White-Matter", "dn"): "temporal operculum",
-        ("EC279", "Unknown", "bm"): "temporal operculum",
-    }
-
     A_results["population_name_fixed"] = A_results["population_name"]
     for (subject, population_name, phoneme_pair), fixed_roi in roi_updates.items():
         A_results.loc[(A_results.subject == subject) & (A_results.population_name == population_name) & (A_results.phoneme_pair == phoneme_pair), "population_name_fixed"] = fixed_roi
