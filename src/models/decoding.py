@@ -23,24 +23,29 @@ PopulationDecoderFitKey: TypeAlias = tuple[str, str, str, int, int]  # (subject,
 """Result of a population decoder analysis"""
 
 
-def run_decoding_population(
+def _prepare_decoding_population(
         epochs_i: mne.Epochs,
         electrode_idxs: list[int],
         phoneme_pair: str,
-        subject: str,
-        population_name: str,
         stride: int, window_size: int,
         global_min_sample: int = 0,
         global_max_sample: Optional[int] = None,
-        target: Literal["acoustic", "lexical_evidence", "mismatch", "mismatch_left_right"] = "lexical_evidence",
+        target: Literal["acoustic", "lexical_evidence", "mismatch", "mismatch_left_right", "behavior_categorical"] = "lexical_evidence",
         strategy: Literal["nested-cv", "train-test"] = "nested-cv",
-        pca_num_components: Optional[float] = None,
-        return_outcomes=True,
         include_only_full_windows=True,
-        smoke_test=False,
         randomize=False):
-    
-    if target not in ["acoustic", "lexical_evidence", "mismatch", "mismatch_left_right"]:
+    """
+    Prepare windowed decoding inputs/targets for the given parameters.
+
+    Yields tuples for each window of form:
+        - smin: start sample of window
+        - smax: end sample of window
+        - selection: boolean array indicating selected epochs in `epochs_i`
+        - X_window: windowed input data
+        - y: target labels
+    """
+
+    if target not in ["acoustic", "lexical_evidence", "mismatch", "mismatch_left_right", "behavior_categorical"]:
         raise ValueError(f"Invalid target {target}")
     if strategy not in ["nested-cv", "train-test"]:
         raise ValueError(f"Invalid strategy {strategy}")
@@ -66,13 +71,6 @@ def run_decoding_population(
     if include_only_full_windows:
         windows = windows[windows[:, 1] <= global_max_sample]
 
-    # `outcomes` stores prediction outcomes for each epoch under the optimal model
-    outcomes = {}
-    # `test_scores` stores cross-validated estimates of held-out generalization
-    train_scores, test_scores = {}, {}
-    # `models` stores the fitted models
-    models = {}
-
     selection = epochs_i.metadata.phoneme_pair == phoneme_pair
     if selection.sum() == 0:
         raise ValueError(f"No epochs found for phoneme pair {phoneme_pair} in the given epochs.")
@@ -97,16 +95,63 @@ def run_decoding_population(
             # Subset data to only include mismatch trials
             X_window = X_window[y != 0]
             y = y[y != 0]
+        elif target == "behavior_categorical":
+            y = epochs_i.metadata.behavior_categorical[selection].values
 
-        num_classes = len(set(y))
+        
         # stratify_class = epochs_ij.metadata.stratify_class[selection].values
 
         if randomize:
             # Randomize the labels
             y = np.random.permutation(y)
 
+        yield smin, smax, selection, X_window, y
+
+        
+
+def run_decoding_population(
+        epochs_i: mne.Epochs,
+        electrode_idxs: list[int],
+        phoneme_pair: str,
+        subject: str,
+        population_name: str,
+        stride: int, window_size: int,
+        global_min_sample: int = 0,
+        global_max_sample: Optional[int] = None,
+        target: Literal["acoustic", "lexical_evidence", "mismatch", "mismatch_left_right", "behavior_categorical"] = "lexical_evidence",
+        strategy: Literal["nested-cv", "train-test"] = "nested-cv",
+        pca_num_components: Optional[float] = None,
+        return_outcomes=True,
+        include_only_full_windows=True,
+        smoke_test=False,
+        randomize=False):
+
+    _gen = _prepare_decoding_population(
+        epochs_i=epochs_i,
+        electrode_idxs=electrode_idxs,
+        phoneme_pair=phoneme_pair,
+        stride=stride,
+        window_size=window_size,
+        global_min_sample=global_min_sample,
+        global_max_sample=global_max_sample,
+        target=target,
+        strategy=strategy,
+        include_only_full_windows=include_only_full_windows,
+        randomize=randomize
+    )
+
+    # `outcomes` stores prediction outcomes for each epoch under the optimal model
+    outcomes = {}
+    # `test_scores` stores cross-validated estimates of held-out generalization
+    train_scores, test_scores = {}, {}
+    # `models` stores the fitted models
+    models = {}
+
+    for smin, smax, selection, X_window, y in _gen:
+
         ####
 
+        num_classes = len(set(y))
         scoring = ["roc_auc", "f1_macro", "accuracy"] if num_classes == 2 else ["f1_macro", "accuracy"]
 
         if strategy == "nested-cv":
