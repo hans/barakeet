@@ -2,6 +2,7 @@
 import itertools
 from typing import Literal, Optional, cast, TypeAlias
 
+from loguru import logger as L
 import mne
 import numpy as np
 import pandas as pd
@@ -10,7 +11,7 @@ from sklearn.model_selection import StratifiedKFold, cross_validate, train_test_
 from sklearn.linear_model import LogisticRegression, LogisticRegressionCV
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import check_scoring, make_scorer
+from sklearn.metrics import check_scoring, make_scorer, roc_auc_score
 from sklearn.metrics._scorer import _MultimetricScorer, _check_multimetric_scoring
 from tqdm.auto import tqdm
 from sklearn.decomposition import PCA
@@ -107,7 +108,7 @@ def _prepare_decoding_population(
 
         yield smin, smax, selection, X_window, y
 
-        
+
 
 def run_decoding_population(
         epochs_i: mne.Epochs,
@@ -192,6 +193,103 @@ def run_decoding_population(
         models[result_key] = fitted["estimator"]
 
     return train_scores, test_scores, outcomes, models
+
+
+def run_decoding_model_comparison_population(
+        epochs_i: mne.Epochs,
+        electrode_idxs: list[int],
+        phoneme_pair: str,
+        subject: str,
+        population_name: str,
+        stride: int, window_size: int,
+        baseline_features: list[str],
+        global_min_sample: int = 0,
+        global_max_sample: Optional[int] = None,
+        target: Literal["acoustic", "lexical_evidence", "mismatch", "mismatch_left_right", "behavior_categorical"] = "lexical_evidence",
+        strategy: Literal["nested-cv", "train-test"] = "nested-cv",
+        pca_num_components: Optional[float] = None,
+        include_only_full_windows=True,
+        smoke_test=False,
+        randomize=False):
+    """
+    Run a model comparison evaluating target prediction using either
+    `baseline_features` (indexing into the epoch metadata) or the
+    combination of `baseline_features` plus ECoG data.
+    """
+
+    _gen = _prepare_decoding_population(
+        epochs_i=epochs_i,
+        electrode_idxs=electrode_idxs,
+        phoneme_pair=phoneme_pair,
+        stride=stride,
+        window_size=window_size,
+        global_min_sample=global_min_sample,
+        global_max_sample=global_max_sample,
+        target=target,
+        strategy=strategy,
+        include_only_full_windows=include_only_full_windows,
+        randomize=randomize
+    )
+
+    seed = 42
+    results = []
+
+    def _fit(X, y, num_classes, random_state):
+        if strategy == "nested-cv":
+            return fit_nested_cv(X, y, num_classes=num_classes,
+                                 pca_num_components=pca_num_components,
+                                 scoring=["roc_auc"], random_state=random_state)
+        elif strategy == "train-test":
+            return fit_train_test(X, y, num_classes=num_classes,
+                                  pca_num_components=pca_num_components,
+                                  scoring=["roc_auc"],
+                                  num_repeats=5, random_state=random_state)
+        else:
+            raise ValueError("Unknown strategy: {}".format(strategy))
+
+    for smin, smax, selection, X_window, y in _gen:
+
+        num_classes = len(set(y))
+        if num_classes != 2:
+            L.warning(f"Skipping model comparison for {subject}, {population_name}, {phoneme_pair}, {smin}-{smax} because num_classes={num_classes} != 2")
+            continue
+
+        # Prepare baseline features
+        X_baseline = epochs_i.metadata[selection][baseline_features].values
+        X_full = np.concatenate([X_baseline, X_window], axis=1)
+
+        # Fit N baseline models
+        baseline_results = _fit(X_baseline, y, num_classes, random_state=seed)
+        # Fit N full models
+        full_results = _fit(X_full, y, num_classes, random_state=seed)
+
+        # Because we matched seeds above, the fold of the ith baseline model
+        # has the same samples as the fold of the ith full model.
+        # So we will now do a paired comparison of ROC-AUC outcomes
+        for fold, (baseline_test_idxs, baseline_estimator) in enumerate(zip(baseline_results["test_idxs"], baseline_results["estimator"])):
+            full_test_idxs = full_results["test_idxs"][fold]
+            full_estimator = full_results["estimator"][fold]
+
+            # Just validate the assumption first
+            assert full_test_idxs.tolist() == baseline_test_idxs.tolist()
+
+            baseline_proba = baseline_estimator.predict_proba(X_baseline[baseline_test_idxs])[:, 1]
+            full_proba = full_estimator.predict_proba(X_full[full_test_idxs])[:, 1]
+
+            results.append({
+                "subject": subject,
+                "population": population_name,
+                "phoneme_pair": phoneme_pair,
+                "smin": smin,
+                "smax": smax,
+                "fold": fold,
+
+                "baseline_roc_auc": roc_auc_score(y[baseline_test_idxs], baseline_proba),
+                "full_roc_auc": roc_auc_score(y[full_test_idxs], full_proba)
+            })
+
+    return pd.DataFrame(results)
+    
 
 
 def run_decoding_searchlight_single_electrode(
