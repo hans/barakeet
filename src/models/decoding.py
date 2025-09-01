@@ -97,7 +97,7 @@ def _prepare_decoding_population(
             X_window = X_window[y != 0]
             y = y[y != 0]
         elif target == "behavior_categorical":
-            y = epochs_i.metadata.behavior_categorical[selection].values
+            y = epochs_i.metadata.behavior_dummy_forced[selection].values
 
         
         # stratify_class = epochs_ij.metadata.stratify_class[selection].values
