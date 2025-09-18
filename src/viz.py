@@ -128,7 +128,7 @@ def plot_epochs(epochs: dict[Any, np.ndarray],
         sites = set((subject, channel) for subject, channel, _ in epochs_df.index)
         all_data = np.concatenate([epochs[subject, channel].flatten()
                                    for subject, channel in sites])
-        ylim = tuple(np.percentile(all_data, [2.5, 97.5]))
+        ylim = tuple(np.percentile(all_data, [1, 99]))
     else:
         ylim = None
 
@@ -296,7 +296,7 @@ def add_behavior_insets(g, ep_df, plot_only_once: Optional[Literal["row", "globa
             # refresh seen_plots for each row
             seen_plots = set()
         
-        inset_width, inset_height = 0.25, 0.2
+        inset_width, inset_height = 0.25, 0.3
         inset_wspace = 0.025
         inset_anchor_x = 0.025
         inset_anchor_y = 1.3
@@ -329,6 +329,8 @@ def add_behavior_insets(g, ep_df, plot_only_once: Optional[Literal["row", "globa
             ax_inset.set_ylabel(None)
             ax_inset.set_xticks(np.linspace(0, 1, 5))
             ax_inset.set_xticklabels([])
+            # put xticks on top
+            ax_inset.xaxis.set_ticks_position('top')
             # add gridlines
             ax_inset.grid(axis="x", linestyle="--", alpha=0.8)
             ax_inset.legend(loc="upper right", bbox_to_anchor=(1.6, 1.15),
