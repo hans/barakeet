@@ -52,6 +52,29 @@ rule find_As_all:
         expand("outputs/causal4/find_As/{subject}.ipynb", subject=config["data"]["subjects"])
 
 
+rule A_stepwise_trf:
+    input:
+        epochs = "outputs/epochs_preprocessed_{subject}_epo.fif",
+        A_results = "outputs/causal4/find_As/{subject}_results.csv",
+        notebook = "notebooks/causal4/A_stepwise_trf.ipynb"
+    
+    output:
+        outdir = directory("outputs/causal4/A_stepwise_trf/{subject}"),
+        notebook = "outputs/causal4/A_stepwise_trf/{subject}/notebook.ipynb",
+        results_csv = "outputs/causal4/A_stepwise_trf/{subject}/results.csv",
+        results_pkl = "outputs/causal4/A_stepwise_trf/{subject}/results.pkl"
+
+    run:
+        execute_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(subject=wildcards.subject,
+                            epochs_path=input.epochs,
+                            A_results_path=input.A_results,
+                            outdir=str(output.outdir)),
+        )
+
+
 rule run_A_intrinsics:
     input:
         all_epochs = expand("outputs/epochs_preprocessed/{subject}_epo.fif", subject=config["data"]["subjects"]),
@@ -193,7 +216,11 @@ rule analyze:
         all_A_results = expand("outputs/causal4/find_As/{subject}_results.csv", subject=config["data"]["subjects"]),
         all_A_decoders = expand("outputs/causal4/find_As/{subject}_decoders.pt", subject=config["data"]["subjects"]),
         all_B_results = expand("outputs/causal4/find_Bs/{subject}_results.csv", subject=config["data"]["subjects"]),
-        all_B_decoders = expand("outputs/causal4/find_Bs/{subject}_decoders.pt", subject=config["data"]["subjects"]),
+        annotated_B_results = "outputs/causal4/annotated_B_results.csv",
+        single_electrode_decoding_results = "outputs/single_electrode_decoding/30/acoustic/scores.csv",
+
+        trf_scores = "/userdata/jgauthier/projects/big-trf/outputs/encoder_summary/timit-no_repeats/word.csv",
+
         notebook = "notebooks/causal4/analyze.ipynb"
 
     output:
@@ -208,3 +235,36 @@ rule analyze:
             parameters=dict(all_results=input.all_results,
                             outdir=str(outdir)),
         )
+
+
+rule behavior_decoding:
+    input:
+        all_epochs = "outputs/epochs_preprocessed/{subject}_epo.fif",
+        all_electrodes = "outputs/causal4/find_speech_responsive/{subject}_results.csv",
+        annotated_B_results = "outputs/causal4/annotated_B_results.csv",
+        unified_A_results = "outputs/causal4/unify_As/results.csv",
+        unified_A_decoders = "outputs/causal4/unify_As/unified_decoders.pt",
+        notebook = "notebooks/causal4/behavior_decoding.ipynb"
+
+    output:
+        notebook = "outputs/causal4/behavior_decoding/{subject}/behavior_decoding.ipynb",
+        results = "outputs/causal4/behavior_decoding/{subject}/results.pt",
+
+    run:
+        outdir = Path(output.notebook).parent
+        execute_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(epochs_paths=input.all_epochs,
+                            electrodes_paths=input.all_electrodes,
+                            B_annotated_path=input.annotated_B_results,
+                            A_result_path=input.unified_A_results,
+                            A_decoders_path=input.unified_A_decoders,
+                            outdir=str(outdir)),
+        )
+
+
+rule behavior_decoding_all:
+    input:
+        expand("outputs/causal4/behavior_decoding/{subject}/behavior_decoding.ipynb",
+               subject=config["data"]["subjects"])

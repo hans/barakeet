@@ -23,9 +23,11 @@ DecoderFitKey: TypeAlias = tuple[str, int, str, int, int]  # (subject, electrode
 PopulationDecoderFitKey: TypeAlias = tuple[str, str, str, int, int]  # (subject, population_name, phoneme_pair, smin, smax)
 """Result of a population decoder analysis"""
 
+Epochs: TypeAlias = mne.Epochs | mne.epochs.EpochsFIF
+
 
 def _prepare_decoding_population(
-        epochs_i: mne.Epochs,
+        epochs_i: Epochs,
         electrode_idxs: list[int],
         phoneme_pair: str,
         stride: int, window_size: int,
@@ -33,12 +35,18 @@ def _prepare_decoding_population(
         global_max_sample: Optional[int] = None,
         target: Literal["acoustic", "lexical_evidence", "mismatch", "mismatch_left_right", "behavior_categorical"] = "lexical_evidence",
         strategy: Literal["nested-cv", "train-test"] = "nested-cv",
+        groupby: Optional[list[str]] = None,
         include_only_full_windows=True,
         randomize=False):
     """
     Prepare windowed decoding inputs/targets for the given parameters.
 
+    Args:
+        groupby: Yield separate samples for each combination of these grouping variables.
+
     Yields tuples for each window of form:
+        - name: tuple of grouping values, same length as `groupby`.
+            Empty tuple if `groupby` is None.
         - smin: start sample of window
         - smax: end sample of window
         - selection: boolean array indicating selected epochs in `epochs_i`
@@ -76,42 +84,50 @@ def _prepare_decoding_population(
     if selection.sum() == 0:
         raise ValueError(f"No epochs found for phoneme pair {phoneme_pair} in the given epochs.")
     
-    X = epochs_i.get_data(picks=electrode_idxs)[selection]
+    X = epochs_i.get_data(picks=electrode_idxs)
 
-    for smin, smax in windows:
-        # num_trials * num_electrodes * num_times
-        X_window = X[:, :, smin:smax]
-        # flatten space * time
-        X_window = X_window.reshape(X_window.shape[0], -1)
+    grouper = epochs_i.metadata.groupby(groupby) if groupby is not None else [((), epochs_i.metadata)]
 
-        if target == "acoustic":
-            y = epochs_i.metadata.categorical_acoustic_cue[selection].values
-        elif target == "lexical_evidence":
-            y = (epochs_i.metadata.word_end.str[0] == phoneme_pair[0])[selection].values
-        elif target == "mismatch":
-            y = epochs_i.metadata.mismatch[selection].values
-        elif target == "mismatch_left_right":
-            y = epochs_i.metadata.mismatch_left_right[selection].values
+    for name, metadata_subset in grouper:
+        selection = (epochs_i.metadata.phoneme_pair == phoneme_pair) & \
+            epochs_i.metadata.index.isin(metadata_subset.index)
+        if selection.sum() == 0:
+            continue
 
-            # Subset data to only include mismatch trials
-            X_window = X_window[y != 0]
-            y = y[y != 0]
-        elif target == "behavior_categorical":
-            y = epochs_i.metadata.behavior_dummy_forced[selection].values
+        for smin, smax in windows:
+            # num_trials * num_electrodes * num_times
+            X_window = X[selection][:, :, smin:smax]
+            # flatten space * time
+            X_window = X_window.reshape(X_window.shape[0], -1)
 
-        
-        # stratify_class = epochs_ij.metadata.stratify_class[selection].values
+            if target == "acoustic":
+                y = epochs_i.metadata.categorical_acoustic_cue[selection].values
+            elif target == "lexical_evidence":
+                y = (epochs_i.metadata.word_end.str[0] == phoneme_pair[0])[selection].values
+            elif target == "mismatch":
+                y = epochs_i.metadata.mismatch[selection].values
+            elif target == "mismatch_left_right":
+                y = epochs_i.metadata.mismatch_left_right[selection].values
 
-        if randomize:
-            # Randomize the labels
-            y = np.random.permutation(y)
+                # Subset data to only include mismatch trials
+                X_window = X_window[y != 0]
+                y = y[y != 0]
+            elif target == "behavior_categorical":
+                y = epochs_i.metadata.behavior_dummy_forced[selection].values
 
-        yield smin, smax, selection, X_window, y
+            
+            # stratify_class = epochs_ij.metadata.stratify_class[selection].values
+
+            if randomize:
+                # Randomize the labels
+                y = np.random.permutation(y)
+
+            yield name, smin, smax, selection, X_window, y
 
 
 
 def run_decoding_population(
-        epochs_i: mne.Epochs,
+        epochs_i: Epochs,
         electrode_idxs: list[int],
         phoneme_pair: str,
         subject: str,
@@ -121,6 +137,7 @@ def run_decoding_population(
         global_max_sample: Optional[int] = None,
         target: Literal["acoustic", "lexical_evidence", "mismatch", "mismatch_left_right", "behavior_categorical"] = "lexical_evidence",
         strategy: Literal["nested-cv", "train-test"] = "nested-cv",
+        groupby: Optional[list[str]] = None,
         pca_num_components: Optional[float] = None,
         return_outcomes=True,
         include_only_full_windows=True,
@@ -137,6 +154,7 @@ def run_decoding_population(
         global_max_sample=global_max_sample,
         target=target,
         strategy=strategy,
+        groupby=groupby,
         include_only_full_windows=include_only_full_windows,
         randomize=randomize
     )
@@ -148,7 +166,7 @@ def run_decoding_population(
     # `models` stores the fitted models
     models = {}
 
-    for smin, smax, selection, X_window, y in _gen:
+    for name, smin, smax, selection, X_window, y in _gen:
 
         ####
 
@@ -165,7 +183,7 @@ def run_decoding_population(
                                     scoring=scoring,
                                     num_repeats=5)
 
-        result_key = (subject, population_name, phoneme_pair, smin, smax)
+        result_key = (subject, population_name, phoneme_pair, name, smin, smax)
 
         if isinstance(scoring, list):
             train_scores[result_key] = {k: fitted["train_" + k] for k in scoring}
@@ -196,7 +214,7 @@ def run_decoding_population(
 
 
 def run_decoding_model_comparison_population(
-        epochs_i: mne.Epochs,
+        epochs_i: Epochs,
         electrode_idxs: list[int],
         phoneme_pair: str,
         subject: str,
@@ -207,6 +225,7 @@ def run_decoding_model_comparison_population(
         global_max_sample: Optional[int] = None,
         target: Literal["acoustic", "lexical_evidence", "mismatch", "mismatch_left_right", "behavior_categorical"] = "lexical_evidence",
         strategy: Literal["nested-cv", "train-test"] = "nested-cv",
+        groupby: Optional[list[str]] = None,
         pca_num_components: Optional[float] = None,
         include_only_full_windows=True,
         smoke_test=False,
@@ -227,6 +246,7 @@ def run_decoding_model_comparison_population(
         global_max_sample=global_max_sample,
         target=target,
         strategy=strategy,
+        groupby=groupby,
         include_only_full_windows=include_only_full_windows,
         randomize=randomize
     )
@@ -247,11 +267,10 @@ def run_decoding_model_comparison_population(
         else:
             raise ValueError("Unknown strategy: {}".format(strategy))
 
-    for smin, smax, selection, X_window, y in _gen:
-
+    for name, smin, smax, selection, X_window, y in _gen:
         num_classes = len(set(y))
         if num_classes != 2:
-            L.warning(f"Skipping model comparison for {subject}, {population_name}, {phoneme_pair}, {smin}-{smax} because num_classes={num_classes} != 2")
+            L.warning(f"Skipping model comparison for {subject}, {population_name}, {phoneme_pair}, {name}, {smin}-{smax} because num_classes={num_classes} != 2")
             continue
 
         # Prepare baseline features
@@ -276,7 +295,7 @@ def run_decoding_model_comparison_population(
             baseline_proba = baseline_estimator.predict_proba(X_baseline[baseline_test_idxs])[:, 1]
             full_proba = full_estimator.predict_proba(X_full[full_test_idxs])[:, 1]
 
-            results.append({
+            result_i = {
                 "subject": subject,
                 "population": population_name,
                 "phoneme_pair": phoneme_pair,
@@ -286,7 +305,12 @@ def run_decoding_model_comparison_population(
 
                 "baseline_roc_auc": roc_auc_score(y[baseline_test_idxs], baseline_proba),
                 "full_roc_auc": roc_auc_score(y[full_test_idxs], full_proba)
-            })
+            }
+            for groupby_variable, value in zip(groupby or [], name):
+                result_i[groupby_variable] = value
+
+            results.append(result_i)
+
 
     return pd.DataFrame(results)
     
