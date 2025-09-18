@@ -15,21 +15,26 @@ class TRF(BaseEstimator):
     combines data prep + model fitting in a single estimator
     """
     def __init__(self, estimator, ep: mne.Epochs, features_per_phoneme_pair,
-                 fit_electrodes: Optional[list[int]] = None):
+                 fit_electrodes: Optional[list[int]] = None,
+                 global_features: Optional[list[tuple[str, str]]] = None):
         self.estimator = estimator
         self.ep = ep
         self.features_per_phoneme_pair = features_per_phoneme_pair
         self.fit_electrodes = fit_electrodes
+        self.global_features = global_features or []
 
         self._update_metadata()
 
     def _update_metadata(self):
         self.phoneme_pairs = sorted(set(self.ep.metadata.phoneme_pair))
-        self.feature_names = [
+
+        global_feature_names = [feature_name for feature_name, _ in self.global_features]
+        per_phoneme_feature_names = [
             f"{feature_name}-{phoneme_pair}"
             for feature_name, _ in self.features_per_phoneme_pair
             for phoneme_pair in self.phoneme_pairs
         ]
+        self.feature_names = global_feature_names + per_phoneme_feature_names
 
     def set_params(self, **params):
         super().set_params(**params)
@@ -53,6 +58,16 @@ class TRF(BaseEstimator):
 
             # build up design matrix for this trial by column
             Xi = []
+            for feature_name, feature_alignment in self.global_features:
+                Xij = np.zeros((ep_i.shape[1], 1))
+                if feature_alignment == "onset":
+                    onset_time = 0. - self.ep.tmin
+                    onset_sample = int(onset_time * self.ep.info["sfreq"])
+                    Xij[onset_sample] = md_i[feature_name]
+                else:
+                    raise ValueError(f"Unknown feature alignment: {feature_alignment}")
+                Xi.append(Xij)
+
             for feature_name, feature_alignment in self.features_per_phoneme_pair:
                 for phoneme_pair in self.phoneme_pairs:
                     Xij = np.zeros((ep_i.shape[1], 1))
@@ -72,6 +87,9 @@ class TRF(BaseEstimator):
             X.append(Xi)
 
             Y.append(ep_i)
+
+        if len(X) == 0:
+            raise ValueError("No features")
 
         X = np.concatenate(X, axis=0)
         Y = np.concatenate(Y, axis=1)
