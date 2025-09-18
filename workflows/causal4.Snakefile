@@ -239,8 +239,8 @@ rule analyze:
 
 rule behavior_decoding:
     input:
-        all_epochs = "outputs/epochs_preprocessed/{subject}_epo.fif",
-        all_electrodes = "outputs/causal4/find_speech_responsive/{subject}_results.csv",
+        epochs = "outputs/epochs_preprocessed/{subject}_epo.fif",
+        electrodes = "outputs/causal4/find_speech_responsive/{subject}_results.csv",
         annotated_B_results = "outputs/causal4/annotated_B_results.csv",
         unified_A_results = "outputs/causal4/unify_As/results.csv",
         unified_A_decoders = "outputs/causal4/unify_As/unified_decoders.pt",
@@ -255,8 +255,8 @@ rule behavior_decoding:
         execute_notebook(
             str(input.notebook),
             str(output.notebook),
-            parameters=dict(epochs_paths=input.all_epochs,
-                            electrodes_paths=input.all_electrodes,
+            parameters=dict(epochs_path=input.epochs,
+                            electrodes_paths=input.electrodes,
                             B_annotated_path=input.annotated_B_results,
                             A_result_path=input.unified_A_results,
                             A_decoders_path=input.unified_A_decoders,
