@@ -1,3 +1,4 @@
+from matplotlib import axis
 import mne
 import numpy as np
 import pandas as pd
@@ -23,14 +24,19 @@ roi_updates = {
 }
 
 
-def prepare_AB_results(A_path, B_path,
-                       acoustic_decoding_path=None,
-                       trf_results_path=None):
+def prepare_ABC_results(A_path, B_path, C_path,
+                        acoustic_decoding_path=None,
+                        trf_results_path=None):
     """
     Do post-hoc cleaning on the results of the causal4 pipeline.
     """
     A_results = pd.read_csv(A_path)
     B_results = pd.read_csv(B_path)
+    C_results = pd.read_csv(C_path)
+
+    C_results = C_results[~C_results["Temporal pattern"].isin(("dupe", "drop"))]
+    C_results = C_results[~C_results["Temporal pattern"].isna()]
+    C_results = C_results.drop_duplicates(subset=["subject", "electrode_idx", "phoneme_pair"])
 
     if trf_results_path is not None:
         trf_results = pd.read_csv(trf_results_path)
@@ -42,6 +48,9 @@ def prepare_AB_results(A_path, B_path,
         # Merge this into B_results
         B_results = B_results.join(trf_results.rename("trf_r2"), on=["subject", "electrode_idx"])
 
+        # Merge this into C_results
+        C_results = C_results.join(trf_results.rename("trf_r2"), on=["subject", "electrode_idx"])
+
     if acoustic_decoding_path is not None:
         acoustic_decoding_scores = pd.read_csv(acoustic_decoding_path)
         acoustic_decoding_scores["tmin"] = acoustic_decoding_scores.smin / 100 - 0.4
@@ -51,10 +60,18 @@ def prepare_AB_results(A_path, B_path,
         # Merge into B_results
         B_results["acoustic_decoding_roc_auc"] = B_results.apply(
             lambda row: acoustic_decoding_scores.loc[row.subject, row.electrode_idx, row.phoneme_pair].query("tmax < @row.window_start").roc_auc.max(), axis=1)
+        
+        # Merge into C_results
+        C_results["acoustic_decoding_roc_auc"] = C_results.apply(
+            lambda row: acoustic_decoding_scores.loc[row.subject, row.electrode_idx, row.phoneme_pair].query("tmax < @row.window_start").roc_auc.max(), axis=1)
 
     # Check B schema.
     assert {"Temporal pattern", "Morphology", "Left polarity", "Right polarity",
             "Tracking resampled in A window?", "Timit tuning"} < set(B_results.columns)
+
+    # Check C schema
+    assert {"Temporal pattern", "Morphology", "Left polarity", "Right polarity",
+            "Tracking resampled in A window?", "Timit tuning"} < set(C_results.columns)
 
     polarity_columns = ["Left polarity", "Right polarity"]
     for col in polarity_columns:
@@ -118,7 +135,7 @@ def prepare_AB_results(A_path, B_path,
 
     ####
 
-    return A_results, B_results
+    return A_results, B_results, C_results
 
 
 
