@@ -1,5 +1,7 @@
+import mne
 import numpy as np
 import pandas as pd
+from scipy import stats
 
 
 # Post-hoc relabeling of particular ROIs, after manual inspection
@@ -117,3 +119,52 @@ def prepare_AB_results(A_path, B_path,
     ####
 
     return A_results, B_results
+
+
+
+def compute_stimulus_correlation(As: pd.DataFrame,
+                                 A_decoders: dict[str, dict],
+                                 epochs: dict[str, mne.Epochs | mne.epochs.EpochsFIF],
+                                 metric: str = "spearmanr",
+                                 return_outcomes=False
+                                 ) -> pd.Series | tuple[pd.Series, pd.DataFrame]:
+    """
+    For each A site, compute correlation between A population decoder
+    output and ground-truth stimulus feature (resampled).
+    """
+    if metric not in ("spearmanr", "pearsonr"):
+        raise ValueError(f"Invalid metric {metric}")
+
+    results = {}
+    all_outcomes = {}
+
+    for row in As.itertuples():
+        subject = str(row.subject)
+        outcomes = pd.concat([
+            # decoder outputs computed on held-out test folds of the training data distribution
+            A_decoders[subject]["outcomes"][subject, row.electrode_idx, row.phoneme_pair, row.smin, row.smax],
+            # decoder outputs on never-seen held-out test data
+            # (typically the non-extreme stimulus steps)
+            A_decoders[subject]["held_out_outcomes"][subject, row.electrode_idx, row.phoneme_pair, row.smin, row.smax]
+        ])
+
+        # Take mean over predictions from multiple folds
+        outcomes = outcomes.groupby("epoch_idx").decoder_proba.mean().reset_index()
+
+        # Now merge with epoch information so we can run correlation
+        outcomes = pd.merge(outcomes, epochs[subject].metadata,
+                            how="left", left_on="epoch_idx", right_index=True,
+                            validate="1:1")
+
+        if metric == "spearmanr":
+            corr, pval = stats.spearmanr(outcomes.decoder_proba, outcomes.resampled)
+        elif metric == "pearsonr":
+            corr, pval = stats.pearsonr(outcomes.decoder_proba, outcomes.resampled)
+
+        results[row.Index] = corr
+        all_outcomes[row.Index] = outcomes
+
+    if return_outcomes:
+        return pd.Series(results), pd.concat(all_outcomes, names=["A_idx"]).droplevel(-1).set_index("epoch_idx", append=True)
+    else:
+        return pd.Series(results)
