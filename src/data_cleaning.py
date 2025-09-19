@@ -134,6 +134,11 @@ def compute_stimulus_correlation(As: pd.DataFrame,
     """
     if metric not in ("spearmanr", "pearsonr"):
         raise ValueError(f"Invalid metric {metric}")
+    if As.empty:
+        if return_outcomes:
+            return pd.Series(dtype=float), pd.DataFrame()
+        else:
+            return pd.Series(dtype=float)
 
     results = {}
     all_outcomes = {}
