@@ -99,6 +99,31 @@ rule run_A_intrinsics:
         )
 
 
+rule compute_A_stimulus_correlations:
+    input:
+        all_epochs = expand("outputs/epochs_preprocessed/{subject}_epo.fif", subject=config["data"]["subjects"]),
+        all_results = expand("outputs/causal4/find_As/{subject}_results.csv",
+                            subject=config["data"]["subjects"]),
+        all_decoders = expand("outputs/causal4/find_As/{subject}_decoders.pt",
+                              subject=config["data"]["subjects"]),
+        notebook = "notebooks/causal4/compute_A_stimulus_correlations.ipynb"
+
+    output:
+        notebook = "outputs/causal4/compute_A_stimulus_correlations/compute_A_stimulus_correlations.ipynb",
+        results = "outputs/causal4/compute_A_stimulus_correlations/results.csv"
+
+    run:
+        outdir = Path(output.notebook).parent
+        execute_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(all_epochs=input.all_epochs,
+                            all_results=input.all_results,
+                            all_decoders=input.all_decoders,
+                            outdir=str(outdir)),
+        )
+
+
 # Form unions of As within-subject based on similarity in space
 # and/or function.
 rule unify_As:
@@ -269,8 +294,11 @@ rule behavior_decoding:
         epochs = "outputs/epochs_preprocessed/{subject}_epo.fif",
         electrodes = "outputs/causal4/find_speech_responsive/{subject}_results.csv",
         annotated_B_results = "outputs/causal4/annotated_B_results.csv",
+        annotated_C_results = "outputs/causal4/annotated_C_results.csv",
         unified_A_results = "outputs/causal4/unify_As/results.csv",
         unified_A_decoders = "outputs/causal4/unify_As/unified_decoders.pt",
+        all_A_results = "outputs/causal4/find_As/{subject}_results.csv",
+        all_A_decoders = "outputs/causal4/find_As/{subject}_decoders.pt",
         notebook = "notebooks/causal4/behavior_decoding.ipynb"
 
     output:
@@ -285,8 +313,11 @@ rule behavior_decoding:
             parameters=dict(epochs_path=input.epochs,
                             electrodes_paths=input.electrodes,
                             B_annotated_path=input.annotated_B_results,
+                            C_annotated_path=input.annotated_C_results,
                             A_result_path=input.unified_A_results,
                             A_decoders_path=input.unified_A_decoders,
+                            all_A_result_path=input.all_A_results,
+                            all_A_decoders_path=input.all_A_decoders,
                             outdir=str(outdir)),
         )
 
