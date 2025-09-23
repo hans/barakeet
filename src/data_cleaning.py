@@ -34,9 +34,8 @@ def prepare_ABC_results(A_path, B_path, C_path,
     B_results = pd.read_csv(B_path)
     C_results = pd.read_csv(C_path)
 
-    C_results = C_results[~C_results["Temporal pattern"].isin(("dupe", "drop"))]
-    C_results = C_results[~C_results["Temporal pattern"].isna()]
     C_results = C_results.drop_duplicates(subset=["subject", "electrode_idx", "phoneme_pair"])
+    C_results = C_results[~C_results["Temporal pattern"].isna()]
 
     if trf_results_path is not None:
         trf_results = pd.read_csv(trf_results_path)
@@ -65,63 +64,69 @@ def prepare_ABC_results(A_path, B_path, C_path,
         C_results["acoustic_decoding_roc_auc"] = C_results.apply(
             lambda row: acoustic_decoding_scores.loc[row.subject, row.electrode_idx, row.phoneme_pair].query("tmax < @row.window_start").roc_auc.max(), axis=1)
 
-    # Check B schema.
-    assert {"Temporal pattern", "Morphology", "Left polarity", "Right polarity",
-            "Tracking resampled in A window?", "Timit tuning"} < set(B_results.columns)
+    integration_dfs = {"B": B_results, "C": C_results}
+    new_integration_dfs = {}
+    for key, integration_df in integration_dfs.items():
+        # Check schema.
+        assert {"Temporal pattern", "Morphology", "Left polarity", "Right polarity",
+                "Tracking resampled in A window?", "Timit tuning"} < set(integration_df.columns)
 
-    # Check C schema
-    assert {"Temporal pattern", "Morphology", "Left polarity", "Right polarity",
-            "Tracking resampled in A window?", "Timit tuning"} < set(C_results.columns)
+        polarity_columns = ["Left polarity", "Right polarity"]
+        for col in polarity_columns:
+            assert set(integration_df[col].unique()) == {"+", "-", np.nan}
+            new_col = col.lower().replace(" ", "_")
+            integration_df[new_col] = integration_df[col].replace({"+": 1, "-": -1, np.nan: 0}).astype(int)
 
-    polarity_columns = ["Left polarity", "Right polarity"]
-    for col in polarity_columns:
-        assert set(B_results[col].unique()) == {"+", "-", np.nan}
-        new_col = col.lower().replace(" ", "_")
-        B_results[new_col] = B_results[col].replace({"+": 1, "-": -1, np.nan: 0}).astype(int)
+        integration_df["one_sided_positive"] = False
+        integration_df["one_sided_negative"] = False
+        integration_df.loc[((integration_df["left_polarity"] == 1) & (integration_df["right_polarity"] == 0)) |
+                    ((integration_df["left_polarity"] == 0) & (integration_df["right_polarity"] == 1)),
+                    "one_sided_positive"] = True
+        integration_df.loc[((integration_df["left_polarity"] == -1) & (integration_df["right_polarity"] == 0)) |
+                    ((integration_df["left_polarity"] == 0) & (integration_df["right_polarity"] == -1)),
+                    "one_sided_negative"] = True
+        integration_df["one_sided"] = integration_df.one_sided_negative | integration_df.one_sided_positive
 
-    B_results["one_sided_positive"] = False
-    B_results["one_sided_negative"] = False
-    B_results.loc[((B_results["left_polarity"] == 1) & (B_results["right_polarity"] == 0)) |
-                ((B_results["left_polarity"] == 0) & (B_results["right_polarity"] == 1)),
-                "one_sided_positive"] = True
-    B_results.loc[((B_results["left_polarity"] == -1) & (B_results["right_polarity"] == 0)) |
-                ((B_results["left_polarity"] == 0) & (B_results["right_polarity"] == -1)),
-                "one_sided_negative"] = True
+        # Make sure one_sided_negative and one_sided_positive are exclusive
+        assert not (integration_df["one_sided_negative"] & integration_df["one_sided_positive"]).any()
 
-    # Make sure one_sided_negative and one_sided_positive are exclusive
-    assert not (B_results["one_sided_negative"] & B_results["one_sided_positive"]).any()
+        def simplify_tracking_resampled(value):
+            if value == "n": return False
+            elif value == np.nan: return None
+            else: return True
+        integration_df["tracking_resampled_A"] = integration_df["Tracking resampled in A window?"] \
+            .map(simplify_tracking_resampled)
 
-    def simplify_tracking_resampled(value):
-        if value == "n": return False
-        elif value == np.nan: return None
-        else: return True
-    B_results["tracking_resampled_A"] = B_results["Tracking resampled in A window?"] \
-        .map(simplify_tracking_resampled)
+        integration_df = integration_df[~integration_df["Temporal pattern"].isin(("drop", "dupe")) &
+                                        ~integration_df["Temporal pattern"].isna()]
+        
+        integration_df[["left_phoneme", "right_phoneme"]] = integration_df.phoneme_pair.str.extract(r"([a-z])([a-z])")
+        integration_df["left_dominance_str"] = "/" + integration_df.left_phoneme + "/ > /" + integration_df.right_phoneme + "/"
+        integration_df["right_dominance_str"] = "/" + integration_df.right_phoneme + "/ > /" + integration_df.left_phoneme + "/"
 
-    B_results = B_results[(B_results["Temporal pattern"] != "drop") &
-                        ~B_results["Temporal pattern"].isna()]
-    
-    B_results[["left_phoneme", "right_phoneme"]] = B_results.phoneme_pair.str.extract(r"([a-z])([a-z])")
-    B_results["left_dominance_str"] = "/" + B_results.left_phoneme + "/ > /" + B_results.right_phoneme + "/"
-    B_results["right_dominance_str"] = "/" + B_results.right_phoneme + "/ > /" + B_results.left_phoneme + "/"
+        integration_df["timit_left_dominant"] = integration_df["Timit tuning"] == integration_df.left_dominance_str
+        integration_df["timit_right_dominant"] = integration_df["Timit tuning"] == integration_df.right_dominance_str
+        integration_df = integration_df.drop(columns=["left_dominance_str", "right_dominance_str"])
+        integration_df["timit_one"] = integration_df["timit_left_dominant"] | integration_df["timit_right_dominant"]
+        integration_df["timit_both"] = integration_df["Timit tuning"].str.contains("=")
 
-    B_results["timit_left_dominant"] = B_results["Timit tuning"] == B_results.left_dominance_str
-    B_results["timit_right_dominant"] = B_results["Timit tuning"] == B_results.right_dominance_str
-    B_results = B_results.drop(columns=["left_dominance_str", "right_dominance_str"])
-    B_results["timit_one"] = B_results["timit_left_dominant"] | B_results["timit_right_dominant"]
-    B_results["timit_both"] = B_results["Timit tuning"].str.contains("=")
+        assert not (integration_df.timit_left_dominant & integration_df.timit_right_dominant).any()
+        assert not (integration_df.timit_one & integration_df.timit_both).any()
 
-    assert not (B_results.timit_left_dominant & B_results.timit_right_dominant).any()
-    assert not (B_results.timit_one & B_results.timit_both).any()
+        # Drop duplicates (effects at the same site + phoneme pair)
+        duplicate_effects = integration_df.groupby(["subject", "electrode_idx", "phoneme_pair", "roi"]).size()
+        duplicate_effects = duplicate_effects[duplicate_effects > 1]
+        print(f"Sites with duplicate effects ({len(duplicate_effects)}, {len(duplicate_effects) / len(integration_df.groupby(['subject', 'electrode_idx', 'phoneme_pair'])) * 100:.2f}%):")
+        print(duplicate_effects.sort_values())
 
-    # Drop duplicates (effects at the same site + phoneme pair)
-    duplicate_effects = B_results.groupby(["subject", "electrode_idx", "phoneme_pair", "roi"]).size()
-    duplicate_effects = duplicate_effects[duplicate_effects > 1]
-    print(f"Sites with duplicate effects ({len(duplicate_effects)}, {len(duplicate_effects) / len(B_results.groupby(['subject', 'electrode_idx', 'phoneme_pair'])) * 100:.2f}%):")
-    print(duplicate_effects.sort_values())
+        new_integration_dfs[key] = integration_df
+
+    B_results = new_integration_dfs["B"]
+    C_results = new_integration_dfs["C"]
 
     # Take the strongest effect for each site + phoneme-pair
     B_results = B_results.sort_values("p_val_min").groupby(["subject", "electrode_idx", "phoneme_pair"], as_index=False).first()
+    C_results = C_results.sort_values("stim_control_p_val_min").groupby(["subject", "electrode_idx", "phoneme_pair"], as_index=False).first()
 
     # Post-hoc aggregate A-site values according to updated ROI information
     # We should integrate this into the early unify-A pipeline eventually
