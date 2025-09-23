@@ -10,8 +10,9 @@ from src.stimuli import POD_dict
 IMAGING_PATH = "/data_store2/imaging/subjects"
 
 
-def get_electrode_df(subject: str) -> pd.DataFrame:
-    electrode_path = Path(IMAGING_PATH) / subject / "elecs" / "TDT_elecs_all.mat"
+def get_electrode_df(subject: str, warped=True) -> pd.DataFrame:
+    fname = "TDT_elecs_all_warped.mat" if warped else "TDT_elecs_all.mat"
+    electrode_path = Path(IMAGING_PATH) / subject / "elecs" / fname
     elecs = loadmat(electrode_path, simplify_cells=True)
     ret = pd.DataFrame(elecs["anatomy"], columns=["electrode_name", "long_name", "type", "roi"])
     ret = pd.concat([ret, pd.DataFrame(elecs["elecmatrix"], columns=["x", "y", "z"])], axis=1)
