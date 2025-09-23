@@ -11,7 +11,7 @@ from sklearn.model_selection import StratifiedKFold, cross_validate, train_test_
 from sklearn.linear_model import LogisticRegression, LogisticRegressionCV
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import check_scoring, make_scorer, roc_auc_score
+from sklearn.metrics import check_scoring, make_scorer, precision_recall_fscore_support, roc_auc_score
 from sklearn.metrics._scorer import _MultimetricScorer, _check_multimetric_scoring
 from tqdm.auto import tqdm
 from sklearn.decomposition import PCA
@@ -295,6 +295,15 @@ def run_decoding_model_comparison_population(
             baseline_proba = baseline_estimator.predict_proba(X_baseline[baseline_test_idxs])[:, 1]
             full_proba = full_estimator.predict_proba(X_full[full_test_idxs])[:, 1]
 
+            baseline_prediction = baseline_estimator.predict(X_baseline[baseline_test_idxs])
+            full_prediction = full_estimator.predict(X_full[full_test_idxs])
+
+            # compute precision/recall
+            baseline_precision, baseline_recall, _, _ = \
+                precision_recall_fscore_support(y[baseline_test_idxs], baseline_prediction, average="binary")
+            full_precision, full_recall, _, _ = \
+                precision_recall_fscore_support(y[full_test_idxs], full_prediction, average="binary")
+
             result_i = {
                 "subject": subject,
                 "population": population_name,
@@ -304,7 +313,13 @@ def run_decoding_model_comparison_population(
                 "fold": fold,
 
                 "baseline_roc_auc": roc_auc_score(y[baseline_test_idxs], baseline_proba),
-                "full_roc_auc": roc_auc_score(y[full_test_idxs], full_proba)
+                "full_roc_auc": roc_auc_score(y[full_test_idxs], full_proba),
+
+                "baseline_precision": baseline_precision,
+                "full_precision": full_precision,
+
+                "baseline_recall": baseline_recall,
+                "full_recall": full_recall,
             }
             for groupby_variable, value in zip(groupby or [], name):
                 result_i[groupby_variable] = value
