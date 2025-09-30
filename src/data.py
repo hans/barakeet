@@ -165,6 +165,16 @@ def add_metadata_features(md: pd.DataFrame) -> pd.DataFrame:
     md["behavior_categorical_forced"] = np.sign(md["behavior_linear"])
     md["behavior_dummy_forced"] = (md.behavior_categorical_forced > 0).astype(int)
 
+    # Translate acoustic step to the behavior scale.
+    behavior_min, behavior_max = md.behavior_linear.min(), md.behavior_linear.max()
+    behavior_range = behavior_max - behavior_min
+    md["resampled_on_behavior"] = (md.resampled - 1) / 5 * behavior_range + behavior_min
+    assert md.resampled_on_behavior.min() >= -1
+    assert md.resampled_on_behavior.max() <= 1
+
+    # describes the degree of belief change from acoustic evidence to behavior
+    md["behavior_based_belief_update"] = md.behavior_linear - md.resampled_on_behavior
+
     md["label_behavior"] = "~"
     md.loc[md.behavior_categorical == -1, "label_behavior"] = md[md.behavior_categorical == -1].phoneme_pair.str[0]
     md.loc[md.behavior_categorical == 1, "label_behavior"] = md[md.behavior_categorical == 1].phoneme_pair.str[1]
