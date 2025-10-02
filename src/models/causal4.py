@@ -4,7 +4,6 @@ from typing import Literal
 
 from matplotlib import transforms
 import mne
-import mne.io
 import numpy as np
 import pandas as pd
 from scipy import stats
@@ -375,7 +374,7 @@ def realign_epochs_by_behavior(epochs, new_anchor_idx=50):
 
 class Causal4Plotter:
 
-    def __init__(self, epochs: dict[str, mne.Epochs | mne.io.EpochsFIF],
+    def __init__(self, epochs: dict[str, mne.Epochs | mne.epochs.EpochsFIF],
                  A_results: pd.DataFrame, B_results: pd.DataFrame,
                  A_decoders,
                  electrode_df: pd.DataFrame,
