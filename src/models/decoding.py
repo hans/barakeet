@@ -228,6 +228,7 @@ def run_decoding_model_comparison_population(
         groupby: Optional[list[str]] = None,
         pca_num_components: Optional[float] = None,
         include_only_full_windows=True,
+        return_estimators=False,
         smoke_test=False,
         randomize=False):
     """
@@ -266,6 +267,8 @@ def run_decoding_model_comparison_population(
                                   num_repeats=5, random_state=random_state)
         else:
             raise ValueError("Unknown strategy: {}".format(strategy))
+
+    all_estimators = {}
 
     for name, smin, smax, selection, X_window, y in _gen:
         num_classes = len(set(y))
@@ -326,9 +329,20 @@ def run_decoding_model_comparison_population(
 
             results.append(result_i)
 
+            if return_estimators:
+                key = (
+                    subject, population_name, phoneme_pair,
+                    name, smin, smax, fold
+                )
+                all_estimators[key] = {
+                    "electrode_idxs": electrode_idxs,
+                    "estimator": full_estimator
+                }
 
-    return pd.DataFrame(results)
-    
+    if return_estimators:
+        return pd.DataFrame(results), all_estimators
+    else:
+        return pd.DataFrame(results)
 
 
 def run_decoding_searchlight_single_electrode(
