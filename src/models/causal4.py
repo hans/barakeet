@@ -4,6 +4,7 @@ from typing import Literal
 
 from matplotlib import transforms
 import mne
+import mne.io
 import numpy as np
 import pandas as pd
 from scipy import stats
@@ -374,7 +375,7 @@ def realign_epochs_by_behavior(epochs, new_anchor_idx=50):
 
 class Causal4Plotter:
 
-    def __init__(self, epochs: dict[str, mne.Epochs],
+    def __init__(self, epochs: dict[str, mne.Epochs | mne.io.EpochsFIF],
                  A_results: pd.DataFrame, B_results: pd.DataFrame,
                  A_decoders,
                  electrode_df: pd.DataFrame,
@@ -408,47 +409,45 @@ class Causal4Plotter:
 
         self._parameter_cache = {}
 
-    def __call__(self, row, smoke_test=False):
-        subject = row.subject
-        phoneme_pair = row.phoneme_pair
-        left_phoneme, right_phoneme = phoneme_pair
-
-        population_A = row.population_name
-        population_B = [row.electrode_idx]
-        left = row.left_is_best
-        population_B_window = (int(row.window_start_samp), int(row.window_end_samp))
-
+    def _get_A_result(self, subject, phoneme_pair, population_name):
         A_row = self.A_results[(self.A_results.subject == subject) & (self.A_results.phoneme_pair == phoneme_pair) & (self.A_results.population_name == population_A)]
         assert len(A_row) == 1, f"Expected one row for {subject} {phoneme_pair} {population_A}, got {len(A_row)}"
         A_row = A_row.iloc[0]
+        return A_row
+
+    def _prepare_plot_meta_df(self, row):
+        subject = row.subject
+        phoneme_pair = row.phoneme_pair
+
+        population_A = row.population_name if hasattr(row, "population_name") else None
+        population_B = [row.electrode_idx]
+        left = row.left_is_best
 
         plot_key = (subject, phoneme_pair, population_A)
         plot_num_quantiles = 4
 
         epochs_i = self.epochs[subject]
 
-        # convert to samples
-        population_A_window = (
-            epochs_i.time_as_index(A_row.smin)[0],
-            epochs_i.time_as_index(A_row.smax)[0],
-        )
+        if population_A is not None:
+            A_outcomes = self.A_decoders["held_out_outcomes"][subject, population_A, phoneme_pair]
 
-        A_outcomes = self.A_decoders["held_out_outcomes"][subject, population_A, phoneme_pair]
+            # sanity check: test trials are the same across repeats
+            test_trial_indices = A_outcomes.groupby("fold").apply(lambda xs: xs.epoch_idx.unique()).values
+            for i in range(1, len(test_trial_indices)):
+                np.testing.assert_array_equal(
+                    test_trial_indices[i],
+                    test_trial_indices[0],
+                )
 
-        # sanity check: test trials are the same across repeats
-        test_trial_indices = A_outcomes.groupby("fold").apply(lambda xs: xs.epoch_idx.unique()).values
-        for i in range(1, len(test_trial_indices)):
-            np.testing.assert_array_equal(
-                test_trial_indices[i],
-                test_trial_indices[0],
+            # merge estimated probabilities from repeats
+            plot_meta_df = pd.merge(
+                A_outcomes.groupby("epoch_idx").decoder_proba.mean().reset_index(),
+                epochs_i.metadata,
+                how="left", left_on="epoch_idx", right_index=True
             )
-
-        # merge estimated probabilities from repeats
-        plot_meta_df = pd.merge(
-            A_outcomes.groupby("epoch_idx").decoder_proba.mean().reset_index(),
-            epochs_i.metadata,
-            how="left", left_on="epoch_idx", right_index=True
-        )
+        else:
+            plot_meta_df = epochs_i.metadata.query("phoneme_pair == @phoneme_pair").rename_axis("epoch_idx").reset_index()
+            plot_meta_df["decoder_proba"] = np.nan
 
         # p(gt phoneme) is decoder probability if we are looking at the right phoneme,
         # or 1 - decoder probability if we are looking at the left phoneme
@@ -456,6 +455,7 @@ class Causal4Plotter:
             lambda xs: 1 - xs if xs.name == phoneme_pair[0] else xs)
         plot_meta_df["p_gt_phoneme_binned"] = pd.qcut(
             plot_meta_df.p_gt_phoneme, plot_num_quantiles,
+            duplicates="drop",
             # labels=[f"Q{i+1}" for i in range(plot_num_quantiles)]
         )
         plot_meta_df["p_gt_phoneme_bin_center"] = plot_meta_df.p_gt_phoneme_binned.apply(
@@ -473,6 +473,32 @@ class Causal4Plotter:
             plot_meta_df,
             self.electrode_df.loc[subject].loc[population_B].reset_index(),
             how="cross")
+
+        return plot_meta_df
+
+    def __call__(self, row, smoke_test=False):
+        subject = row.subject
+        phoneme_pair = row.phoneme_pair
+        left_phoneme, right_phoneme = phoneme_pair
+
+        population_A = row.population_name
+        population_B = [row.electrode_idx]
+        left = row.left_is_best
+        population_B_window = (int(row.window_start_samp), int(row.window_end_samp))
+
+        A_row = self._get_A_result(subject, phoneme_pair, population_A)
+        # convert to samples
+        population_A_window = (
+            epochs_i.time_as_index(A_row.smin)[0],
+            epochs_i.time_as_index(A_row.smax)[0],
+        )
+
+        plot_key = (subject, phoneme_pair, population_A)
+        plot_num_quantiles = 4
+
+        epochs_i = self.epochs[subject]
+
+        plot_meta_df = self._prepare_plot_meta_df(row)
 
         ####
 
@@ -729,8 +755,11 @@ def plot_causal4_scatter(epochs, plot_meta_df, subject, population_B_window,
     return g_scatter
 
 
-def plot_causal4_evoked(epochs, plot_meta_df, subject,
-                        population_A_window, population_B_window,
+def plot_causal4_evoked(epochs: mne.Epochs,
+                        plot_meta_df: pd.DataFrame,
+                        subject: str,
+                        population_A_window: tuple[int, int],
+                        population_B_window: tuple[int, int],
                         height=3, aspect=3,
                         highlight_A_span=False,
                         highlight_B_span=True,
