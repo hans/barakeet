@@ -501,3 +501,162 @@ def add_timit_insets(g, epoch_sources):
                 ax.title.set_position((0.2, 1))
 
     return g
+
+
+def plot_timit_epochs_faceted(plot_subject, plot_electrode_idx,
+                              phoneme_order,
+                              timit_epoch_sources,
+                              timit_bounds: Optional[dict] = None,
+                              epoch_source: str = "All",
+                              show_traces=False, baseline=True,
+                              facetgrid_kwargs: Optional[dict] = None):
+    """Plot epoched phoneme responses."""
+    epoch_source_path = timit_epoch_sources[epoch_source]
+    epoch_df = pd.read_hdf(epoch_source_path, f"{plot_subject}/epoch_df")
+
+    facetgrid_kwargs = {
+        "height": 1.5,
+        "sharey": True,
+        "col_wrap": 8,
+        **(facetgrid_kwargs or {})
+    }
+    g = sns.FacetGrid(data=epoch_df, col="epoch_label",
+                      col_order=phoneme_order,
+                      **facetgrid_kwargs)
+
+    def plot_phoneme_epochs(data, **kwargs):
+        if data.empty:
+            return
+        phoneme = data.epoch_label.iloc[0]
+        
+        with h5py.File(epoch_source_path, "r") as f:
+            tmin = cast(int, f[plot_subject].attrs["epoch_tmin"])
+            tmax = cast(int, f[plot_subject].attrs["epoch_tmax"])
+            sfreq = cast(int, f[plot_subject].attrs["sfreq"])
+
+            plot_epochs = cast(np.ndarray, f[plot_subject]["epochs"][data.epoch_idx, plot_electrode_idx, :])
+
+        ax = plt.gca()
+        ax.axvline(0, color="gray", linestyle="--", alpha=0.5)
+        ax.axhline(0, color="gray", linestyle="--", alpha=0.5)
+
+        if baseline:
+            # baseline by pre-zero region
+            assert tmin < 0
+            baseline_start_idx = 0
+            baseline_end_idx = int(0 - tmin * sfreq)
+            baseline_data = plot_epochs[:, baseline_start_idx:baseline_end_idx]
+            baseline_mean = baseline_data.mean(axis=1, keepdims=True)
+            plot_epochs = plot_epochs - baseline_mean
+
+        times = np.arange(plot_epochs.shape[1]) / sfreq + tmin
+        ax.plot(times, plot_epochs.mean(axis=0), label=phoneme)
+        sem = plot_epochs.std(axis=0) / np.sqrt(plot_epochs.shape[0])
+
+        if show_traces:
+            for epoch in plot_epochs:
+                ax.plot(times, epoch, color="gray", alpha=0.05)
+        else:
+            ax.fill_between(times, plot_epochs.mean(axis=0) - sem, plot_epochs.mean(axis=0) + sem, alpha=0.3)
+
+        if timit_bounds is not None and (plot_subject, epoch_source_path) in timit_bounds:
+            # use pre-computed bounds
+            subject_bounds = timit_bounds[plot_subject, epoch_source_path]
+            ymin, ymax = subject_bounds[plot_electrode_idx]
+            ax.set_ylim(ymin, ymax)
+
+    for ax, (label, data) in zip(tqdm(g.axes.flat), g.facet_data()):
+        plt.sca(ax)
+        plot_phoneme_epochs(data)
+
+    g.set_titles(col_template="{col_name}")
+    g.tight_layout()
+    g.fig.suptitle(f"Subject {plot_subject}, electrode {plot_electrode_idx + 1}\nTIMIT tuning", y=1.03)
+    return g
+
+
+def plot_timit_epochs_faceted_by_feature(
+        plot_subject, plot_electrode_idx,
+        feature_order, feature_map: dict[str, str],
+        timit_epoch_sources,
+        timit_bounds: Optional[dict] = None,
+        epoch_source: str = "All",
+        show_traces=False, baseline=True,
+        facetgrid_kwargs: Optional[dict] = None):
+    """
+    Plot epoched phonetic feature responses.
+    
+    Args:
+        feature_map: Maps phoneme to to list of features.
+    """
+    epoch_source_path = timit_epoch_sources[epoch_source]
+    epoch_df = pd.read_hdf(epoch_source_path, f"{plot_subject}/epoch_df")
+
+    facetgrid_kwargs = {
+        "height": 1.5,
+        "sharey": True,
+        "col_wrap": 4,
+        **(facetgrid_kwargs or {})
+    }
+    
+    feature_df = pd.DataFrame.from_dict(feature_map, orient="index") \
+        .rename_axis("phoneme").reset_index().melt(id_vars=["phoneme"], value_name="feature") \
+        .drop(columns=["variable"]).dropna()
+    epoch_df = pd.merge(epoch_df, feature_df, left_on="epoch_label", right_on="phoneme", how="left")
+    g = sns.FacetGrid(data=epoch_df, col="feature",
+                      col_order=feature_order,
+                      **facetgrid_kwargs)
+
+    def plot_feature_epochs(data, **kwargs):
+        if data.empty:
+            return
+        feature = data.feature.iloc[0]
+        phonemes = sorted(data.epoch_label.unique())
+        
+        with h5py.File(epoch_source_path, "r") as f:
+            tmin = cast(int, f[plot_subject].attrs["epoch_tmin"])
+            tmax = cast(int, f[plot_subject].attrs["epoch_tmax"])
+            sfreq = cast(int, f[plot_subject].attrs["sfreq"])
+
+            plot_epochs = np.concatenate([
+                cast(np.ndarray, f[plot_subject]["epochs"][ph_data.epoch_idx, plot_electrode_idx, :])
+                for _, ph_data in data.groupby("epoch_label")
+            ])
+
+        ax = plt.gca()
+        ax.axvline(0, color="gray", linestyle="--", alpha=0.5)
+        ax.axhline(0, color="gray", linestyle="--", alpha=0.5)
+
+        if baseline:
+            # baseline by pre-zero region
+            assert tmin < 0
+            baseline_start_idx = 0
+            baseline_end_idx = int(0 - tmin * sfreq)
+            baseline_data = plot_epochs[:, baseline_start_idx:baseline_end_idx]
+            baseline_mean = baseline_data.mean(axis=1, keepdims=True)
+            plot_epochs = plot_epochs - baseline_mean
+
+        times = np.arange(plot_epochs.shape[1]) / sfreq + tmin
+        ax.plot(times, plot_epochs.mean(axis=0), label=feature)
+        sem = plot_epochs.std(axis=0) / np.sqrt(plot_epochs.shape[0])
+
+        if show_traces:
+            for epoch in plot_epochs:
+                ax.plot(times, epoch, color="gray", alpha=0.05)
+        else:
+            ax.fill_between(times, plot_epochs.mean(axis=0) - sem, plot_epochs.mean(axis=0) + sem, alpha=0.3)
+
+        if timit_bounds is not None and (plot_subject, epoch_source_path) in timit_bounds:
+            # use pre-computed bounds
+            subject_bounds = timit_bounds[plot_subject, epoch_source_path]
+            ymin, ymax = subject_bounds[plot_electrode_idx]
+            ax.set_ylim(ymin, ymax)
+
+    for ax, (label, data) in zip(tqdm(g.axes.flat), g.facet_data()):
+        plt.sca(ax)
+        plot_feature_epochs(data)
+
+    g.set_titles(col_template="{col_name}")
+    g.fig.suptitle(f"Subject {plot_subject}, electrode {plot_electrode_idx + 1}\nTIMIT tuning", y=1.03)
+    g.tight_layout()
+    return g
