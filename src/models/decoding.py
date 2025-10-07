@@ -7,7 +7,7 @@ import mne
 import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator
-from sklearn.model_selection import StratifiedKFold, cross_validate, train_test_split
+from sklearn.model_selection import KFold, StratifiedKFold, cross_validate, train_test_split
 from sklearn.linear_model import LogisticRegression, LogisticRegressionCV
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
@@ -229,6 +229,7 @@ def run_decoding_model_comparison_population(
         target: Literal["acoustic", "lexical_evidence", "mismatch", "mismatch_left_right", "behavior_categorical"] = "lexical_evidence",
         strategy: Literal["nested-cv", "train-test"] = "nested-cv",
         groupby: Optional[list[str]] = None,
+        stratify: tuple[str, ...] = ("resampled", "lexical_evidence"),
         pca_num_components: Optional[float] = None,
         include_only_full_windows=True,
         return_estimators=False,
@@ -258,13 +259,15 @@ def run_decoding_model_comparison_population(
     seed = 42
     results = []
 
-    def _fit(X, y, num_classes, random_state):
+    def _fit(X, y, num_classes, stratify, random_state):
         if strategy == "nested-cv":
             return fit_nested_cv(X, y, num_classes=num_classes,
+                                 stratify=stratify,
                                  pca_num_components=pca_num_components,
                                  scoring=["roc_auc"], random_state=random_state)
         elif strategy == "train-test":
             return fit_train_test(X, y, num_classes=num_classes,
+                                  stratify=stratify,
                                   pca_num_components=pca_num_components,
                                   scoring=["roc_auc"],
                                   num_repeats=5, random_state=random_state)
@@ -279,14 +282,23 @@ def run_decoding_model_comparison_population(
             L.warning(f"Skipping model comparison for {subject}, {population_name}, {phoneme_pair}, {name}, {smin}-{smax} because num_classes={num_classes} != 2")
             continue
 
+        md = epochs_i.metadata[selection]
+
         # Prepare baseline features
-        X_baseline = epochs_i.metadata[selection][baseline_features].values
+        X_baseline = md[baseline_features].values
         X_full = np.concatenate([X_baseline, X_window], axis=1)
 
+        # Prepare codes for stratified sampling of data
+        stratify_codes = None
+        if stratify is not None:
+            stratify_codes = pd.factorize(md[list(stratify)].apply(tuple, axis=1))[0]
+
         # Fit N baseline models
-        baseline_results = _fit(X_baseline, y, num_classes, random_state=seed)
+        baseline_results = _fit(X_baseline, y, num_classes,
+                                stratify=stratify_codes, random_state=seed)
         # Fit N full models
-        full_results = _fit(X_full, y, num_classes, random_state=seed)
+        full_results = _fit(X_full, y, num_classes,
+                            stratify=stratify_codes, random_state=seed)
 
         # Because we matched seeds above, the fold of the ith baseline model
         # has the same samples as the fold of the ith full model.
@@ -326,6 +338,9 @@ def run_decoding_model_comparison_population(
 
                 "baseline_recall": baseline_recall,
                 "full_recall": full_recall,
+
+                "baseline_best_C": baseline_results["C"][fold],
+                "full_best_C": full_results["C"][fold],
             }
             for groupby_variable, value in zip(groupby or [], name):
                 result_i[groupby_variable] = value
@@ -525,6 +540,7 @@ def fit_nested_cv(X, y, num_classes: int, scoring: list[str],
 
 
 def fit_train_test(X, y, num_classes: int, scoring: list[str],
+                   stratify: Optional[np.ndarray] = None,
                    test_fraction=0.2, num_folds=3,
                    pca_num_components: Optional[float] = None,
                    num_repeats=1, random_state=42):
@@ -534,19 +550,29 @@ def fit_train_test(X, y, num_classes: int, scoring: list[str],
     for seed in seeds:
         X_train, X_test, y_train, y_test, idxs_train, idxs_test = \
             train_test_split(X, y, np.arange(len(X)),
-                            test_size=test_fraction, stratify=y, random_state=seed)
+                            test_size=test_fraction,
+                            stratify=stratify,
+                            random_state=seed)
 
-        Cs = np.logspace(-3, 2, 6).tolist()
+        # Prepare stratified CV inner splits
+        if stratify is None:
+            cv_inner = KFold(num_folds, shuffle=True, random_state=seed)
+            splits = list(cv_inner.split(X_train))
+        else:
+            cv_inner = StratifiedKFold(num_folds, shuffle=True, random_state=seed)
+            splits = list(cv_inner.split(X_train, stratify[idxs_train]))
+
+        Cs = np.logspace(-8, 3, 20).tolist()
 
         pipeline: list[BaseEstimator] = [StandardScaler()]
-        if pca_num_components is not None:
+        if pca_num_components is not None and X.shape[1] > 1:
             pipeline.append(PCA(n_components=pca_num_components))
 
         solver = "liblinear" if num_classes == 2 else "saga"
+        logreg_kwargs = dict(max_iter=100000, class_weight="balanced",
+                             fit_intercept=False, solver=solver)
         pipeline.append(LogisticRegressionCV(
-            Cs=Cs, cv=StratifiedKFold(num_folds, shuffle=True, random_state=seed),
-            max_iter=100000, class_weight="balanced", fit_intercept=False,
-            solver=solver))
+            Cs=Cs, cv=splits, **logreg_kwargs))
         model = make_pipeline(*pipeline)
         model.fit(X_train, y_train)
 
@@ -557,9 +583,9 @@ def fit_train_test(X, y, num_classes: int, scoring: list[str],
             best_C = model[-1].C_
 
         # re-fit on whole training set
-        refit_model = make_pipeline(*pipeline[:-1], LogisticRegression(
-            C=best_C, class_weight="balanced", fit_intercept=False,
-            solver=solver))
+        refit_model = make_pipeline(
+            *pipeline[:-1],
+            LogisticRegression(C=best_C, **logreg_kwargs))
         refit_model.fit(X_train, y_train)
 
         if callable(scoring):
@@ -578,7 +604,8 @@ def fit_train_test(X, y, num_classes: int, scoring: list[str],
             **{f"test_{k}": np.array([v]) for k, v in test_scores.items()},
             "train_idxs": [idxs_train],
             "test_idxs": [idxs_test],
-            "estimator": [refit_model]
+            "estimator": [refit_model],
+            "C": [best_C]
         })
 
     # Concatenate results from all repeats
