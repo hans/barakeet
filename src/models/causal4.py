@@ -409,8 +409,8 @@ class Causal4Plotter:
         self._parameter_cache = {}
 
     def _get_A_result(self, subject, phoneme_pair, population_name):
-        A_row = self.A_results[(self.A_results.subject == subject) & (self.A_results.phoneme_pair == phoneme_pair) & (self.A_results.population_name == population_A)]
-        assert len(A_row) == 1, f"Expected one row for {subject} {phoneme_pair} {population_A}, got {len(A_row)}"
+        A_row = self.A_results[(self.A_results.subject == subject) & (self.A_results.phoneme_pair == phoneme_pair) & (self.A_results.population_name == population_name)]
+        assert len(A_row) == 1, f"Expected one row for {subject} {phoneme_pair} {population_name}, got {len(A_row)}"
         A_row = A_row.iloc[0]
         return A_row
 
@@ -475,6 +475,24 @@ class Causal4Plotter:
 
         return plot_meta_df
 
+    def _prepare_extreme_plot_meta_df(self, row):
+        subject = row.subject
+        phoneme_pair = row.phoneme_pair
+        population_A = row.population_name if hasattr(row, "population_name") else None
+        epochs_i = self.epochs[subject]
+
+        # Concatenate extreme data
+        A_extreme_outcomes = self.A_decoders["outcomes"][subject, population_A, phoneme_pair]
+        plot_extreme_meta_df = pd.merge(
+            A_extreme_outcomes.groupby("epoch_idx").decoder_proba.mean().reset_index(),
+            epochs_i.metadata,
+            how="left", left_on="epoch_idx", right_index=True
+        )
+        plot_extreme_meta_df["p_gt_phoneme"] = plot_extreme_meta_df.groupby("label_lexical").decoder_proba.transform(
+            lambda xs: 1 - xs if xs.name == phoneme_pair[0] else xs)
+
+        return plot_extreme_meta_df
+
     def __call__(self, row, smoke_test=False):
         subject = row.subject
         phoneme_pair = row.phoneme_pair
@@ -484,6 +502,8 @@ class Causal4Plotter:
         population_B = [row.electrode_idx]
         left = row.left_is_best
         population_B_window = (int(row.window_start_samp), int(row.window_end_samp))
+
+        epochs_i = self.epochs[subject]
 
         A_row = self._get_A_result(subject, phoneme_pair, population_A)
         # convert to samples
@@ -495,8 +515,6 @@ class Causal4Plotter:
         plot_key = (subject, phoneme_pair, population_A)
         plot_num_quantiles = 4
 
-        epochs_i = self.epochs[subject]
-
         plot_meta_df = self._prepare_plot_meta_df(row)
 
         ####
@@ -504,17 +522,9 @@ class Causal4Plotter:
         # Plot: A-population output vs. stimulus step
         # (Underlying Q: How closely tied is this A-population to stimulus vs. internal state?)
 
-        # Concatenate extreme data
-        A_extreme_outcomes = self.A_decoders["outcomes"][subject, population_A, phoneme_pair]
-        plot_extreme_meta_df = pd.merge(
-            A_extreme_outcomes.groupby("epoch_idx").decoder_proba.mean().reset_index(),
-            epochs_i.metadata,
-            how="left", left_on="epoch_idx", right_index=True
-        )
+        plot_extreme_meta_df = self._prepare_extreme_plot_meta_df(row)
         assert len(set(plot_extreme_meta_df.epoch_idx) & set(plot_meta_df.epoch_idx)) == 0, \
             "Expected no overlap between extreme and regular outcomes"
-        plot_extreme_meta_df["p_gt_phoneme"] = plot_extreme_meta_df.groupby("label_lexical").decoder_proba.transform(
-            lambda xs: 1 - xs if xs.name == phoneme_pair[0] else xs)
 
         all_A_df = pd.concat([plot_meta_df, plot_extreme_meta_df], ignore_index=True) \
             .astype({"resampled": int})
