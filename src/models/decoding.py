@@ -1,6 +1,6 @@
 
 import itertools
-from typing import Literal, Optional, cast, TypeAlias
+from typing import Literal, Optional, cast, TypeAlias, Protocol
 
 from loguru import logger as L
 import mne
@@ -24,6 +24,12 @@ PopulationDecoderFitKey: TypeAlias = tuple[str, str, str, int, int]  # (subject,
 """Result of a population decoder analysis"""
 
 Epochs: TypeAlias = mne.Epochs | mne.epochs.EpochsFIF
+
+
+class ClassifierLike(Protocol):
+    def fit(self, X: np.ndarray, y: np.ndarray) -> None: ...
+    def predict(self, X: np.ndarray) -> np.ndarray: ...
+    def predict_proba(self, X: np.ndarray) -> np.ndarray: ...
 
 
 def _prepare_decoding_population(
@@ -141,6 +147,7 @@ def run_decoding_population(
         smoke_test=False,
         randomize=False):
 
+    assert epochs_i.metadata is not None
     _gen = _prepare_decoding_population(
         epochs_i=epochs_i,
         electrode_idxs=electrode_idxs,
@@ -233,6 +240,7 @@ def run_decoding_model_comparison_population(
     combination of `baseline_features` plus ECoG data.
     """
 
+    assert epochs_i.metadata is not None
     _gen = _prepare_decoding_population(
         epochs_i=epochs_i,
         electrode_idxs=electrode_idxs,
@@ -490,7 +498,7 @@ def fit_nested_cv(X, y, num_classes: int, scoring: list[str],
     cv_inner = StratifiedKFold(num_inner_folds, shuffle=True, random_state=random_state)
     cv_outer = StratifiedKFold(num_outer_folds, shuffle=True, random_state=random_state)
 
-    Cs = np.logspace(-3, 2, 6)
+    Cs = np.logspace(-3, 2, 6).tolist()
 
     pipeline: list[BaseEstimator] = [StandardScaler()]
     if pca_num_components is not None:
@@ -528,7 +536,7 @@ def fit_train_test(X, y, num_classes: int, scoring: list[str],
             train_test_split(X, y, np.arange(len(X)),
                             test_size=test_fraction, stratify=y, random_state=seed)
 
-        Cs = np.logspace(-3, 2, 6)
+        Cs = np.logspace(-3, 2, 6).tolist()
 
         pipeline: list[BaseEstimator] = [StandardScaler()]
         if pca_num_components is not None:
@@ -581,7 +589,7 @@ def fit_train_test(X, y, num_classes: int, scoring: list[str],
 
 
 def get_ensemble_predictions(model_key: DecoderFitKey,
-                             models: list[BaseEstimator],
+                             models: list[ClassifierLike],
                              epochs: dict[str, mne.Epochs]) -> pd.DataFrame:
     """
     Get predictions from an ensemble of fit single-electrode models on held-out epochs,
@@ -597,6 +605,7 @@ def get_ensemble_predictions(model_key: DecoderFitKey,
     subject, electrode_idx, phoneme_pair, smin, smax = model_key
 
     epochs_ij = epochs[subject]
+    assert epochs_ij.metadata is not None
     selection = epochs_ij.metadata.phoneme_pair == phoneme_pair
     if selection.sum() == 0:
         raise ValueError(f"No epochs found for subject {subject}, "
@@ -620,7 +629,7 @@ def get_ensemble_predictions(model_key: DecoderFitKey,
 
 
 def get_population_ensemble_predictions(model_key: PopulationDecoderFitKey,
-                                        models: list[BaseEstimator],
+                                        models: list[ClassifierLike],
                                         electrode_idxs: list[int],
                                         epochs: mne.Epochs) -> pd.DataFrame:
     """
@@ -636,6 +645,7 @@ def get_population_ensemble_predictions(model_key: PopulationDecoderFitKey,
     """
     subject, population_name, phoneme_pair, smin, smax = model_key
 
+    assert epochs.metadata is not None
     selection = epochs.metadata.phoneme_pair == phoneme_pair
     if selection.sum() == 0:
         raise ValueError(f"No epochs found for subject {subject}, "
