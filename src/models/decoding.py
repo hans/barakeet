@@ -7,9 +7,10 @@ import mne
 import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator
-from sklearn.model_selection import KFold, StratifiedKFold, cross_validate, train_test_split
+from sklearn.compose import ColumnTransformer, make_column_transformer
+from sklearn.model_selection import GridSearchCV, KFold, StratifiedKFold, cross_validate, train_test_split
 from sklearn.linear_model import LogisticRegression, LogisticRegressionCV
-from sklearn.pipeline import make_pipeline
+from sklearn.pipeline import Pipeline, make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import check_scoring, make_scorer, precision_recall_fscore_support, roc_auc_score
 from sklearn.metrics._scorer import _MultimetricScorer, _check_multimetric_scoring
@@ -230,7 +231,7 @@ def run_decoding_model_comparison_population(
         strategy: Literal["nested-cv", "train-test"] = "nested-cv",
         groupby: Optional[list[str]] = None,
         stratify: tuple[str, ...] = ("resampled", "lexical_evidence"),
-        pca_num_components: Optional[float] = None,
+        pca_num_components: Optional[float | Literal["auto"]] = None,
         include_only_full_windows=True,
         return_estimators=False,
         smoke_test=False,
@@ -259,16 +260,18 @@ def run_decoding_model_comparison_population(
     seed = 42
     results = []
 
-    def _fit(X, y, num_classes, stratify, random_state):
+    def _fit(X, y, num_classes, stratify, random_state, pca_dimensions=None):
         if strategy == "nested-cv":
             return fit_nested_cv(X, y, num_classes=num_classes,
                                  stratify=stratify,
                                  pca_num_components=pca_num_components,
+                                 pca_dimensions=pca_dimensions,
                                  scoring=["roc_auc"], random_state=random_state)
         elif strategy == "train-test":
             return fit_train_test(X, y, num_classes=num_classes,
                                   stratify=stratify,
                                   pca_num_components=pca_num_components,
+                                  pca_dimensions=pca_dimensions,
                                   scoring=["roc_auc"],
                                   num_repeats=5, random_state=random_state)
         else:
@@ -298,7 +301,9 @@ def run_decoding_model_comparison_population(
                                 stratify=stratify_codes, random_state=seed)
         # Fit N full models
         full_results = _fit(X_full, y, num_classes,
-                            stratify=stratify_codes, random_state=seed)
+                            stratify=stratify_codes,
+                            pca_dimensions=np.arange(X_baseline.shape[1], X_full.shape[1]),
+                            random_state=seed)
 
         # Because we matched seeds above, the fold of the ith baseline model
         # has the same samples as the fold of the ith full model.
@@ -322,6 +327,16 @@ def run_decoding_model_comparison_population(
             full_precision, full_recall, _, _ = \
                 precision_recall_fscore_support(y[full_test_idxs], full_prediction, average="binary")
 
+            # # extract PCA num components
+            # if pca_num_components is not None:
+            #     pca_m = full_estimator.named_steps["columntransformer"].named_transformers_["pca"].named_steps["pca"]
+            #     if isinstance(pca_num_components, float):
+            #         n_pca_components = pca_m.n_components_
+            #     else:
+            #         n_pca_components = pca_num_components
+            # else:
+            #     n_pca_components = None
+
             result_i = {
                 "subject": subject,
                 "population": population_name,
@@ -338,12 +353,15 @@ def run_decoding_model_comparison_population(
 
                 "baseline_recall": baseline_recall,
                 "full_recall": full_recall,
-
-                "baseline_best_C": baseline_results["C"][fold],
-                "full_best_C": full_results["C"][fold],
             }
             for groupby_variable, value in zip(groupby or [], name):
                 result_i[groupby_variable] = value
+
+            # add hparam fits
+            for param, val in baseline_estimator.best_params_.items():
+                result_i["baseline_" + param] = val
+            for param, val in full_estimator.best_params_.items():
+                result_i["full_" + param] = val
 
             results.append(result_i)
 
@@ -503,6 +521,7 @@ def run_decoding_searchlight_single_electrode(
 
 
 def fit_nested_cv(X, y, num_classes: int, scoring: list[str],
+                  stratify: Optional[np.ndarray] = None,
                   num_outer_folds=2, num_inner_folds=2,
                   pca_num_components: Optional[float] = None,
                   random_state=42):
@@ -510,6 +529,9 @@ def fit_nested_cv(X, y, num_classes: int, scoring: list[str],
     Fit a nested cross-validation model with logistic regression.
     Returns a fitted model and cross-validation results.
     """
+    if stratify is not None:
+        raise NotImplementedError("Custom stratified nested CV not implemented yet.")
+
     cv_inner = StratifiedKFold(num_inner_folds, shuffle=True, random_state=random_state)
     cv_outer = StratifiedKFold(num_outer_folds, shuffle=True, random_state=random_state)
 
@@ -542,7 +564,8 @@ def fit_nested_cv(X, y, num_classes: int, scoring: list[str],
 def fit_train_test(X, y, num_classes: int, scoring: list[str],
                    stratify: Optional[np.ndarray] = None,
                    test_fraction=0.2, num_folds=3,
-                   pca_num_components: Optional[float] = None,
+                   pca_num_components: Optional[float | Literal["auto"]] = None,
+                   pca_dimensions: Optional[np.ndarray] = None,
                    num_repeats=1, random_state=42):
     seeds = np.random.RandomState(random_state).randint(0, 10000, num_repeats)
 
@@ -550,9 +573,10 @@ def fit_train_test(X, y, num_classes: int, scoring: list[str],
     for seed in seeds:
         X_train, X_test, y_train, y_test, idxs_train, idxs_test = \
             train_test_split(X, y, np.arange(len(X)),
-                            test_size=test_fraction,
-                            stratify=stratify,
-                            random_state=seed)
+                             test_size=test_fraction,
+                             stratify=stratify,
+                             shuffle=True,
+                             random_state=seed)
 
         # Prepare stratified CV inner splits
         if stratify is None:
@@ -562,50 +586,59 @@ def fit_train_test(X, y, num_classes: int, scoring: list[str],
             cv_inner = StratifiedKFold(num_folds, shuffle=True, random_state=seed)
             splits = list(cv_inner.split(X_train, stratify[idxs_train]))
 
-        Cs = np.logspace(-8, 3, 20).tolist()
+        Cs = np.logspace(-8, 3, 10).tolist()
+        pca_num_components = [0.25, 0.5, 0.9] if pca_num_components == "auto" \
+            else pca_num_components
 
-        pipeline: list[BaseEstimator] = [StandardScaler()]
+        pipeline = []
         if pca_num_components is not None and X.shape[1] > 1:
-            pipeline.append(PCA(n_components=pca_num_components))
+            pca_m = PCA(n_components=pca_num_components)
+            if pca_dimensions is not None:
+                non_pca_dimensions = np.setdiff1d(np.arange(X.shape[1]), pca_dimensions)
+                pipeline.append(("prep", ColumnTransformer([
+                    ("baseline", StandardScaler(), non_pca_dimensions),
+                    ("pca", make_pipeline(StandardScaler(), pca_m), pca_dimensions)
+                ])))
+            else:
+                pipeline.append(("pca", pca_m))
 
         solver = "liblinear" if num_classes == 2 else "saga"
         logreg_kwargs = dict(max_iter=100000, class_weight="balanced",
                              fit_intercept=False, solver=solver)
-        pipeline.append(LogisticRegressionCV(
-            Cs=Cs, cv=splits, **logreg_kwargs))
-        model = make_pipeline(*pipeline)
-        model.fit(X_train, y_train)
+        pipeline.append(("clf", LogisticRegression(**logreg_kwargs)))
+        model = Pipeline(pipeline)
 
-        # Get optimal C
-        if num_classes == 2:
-            best_C = model[-1].C_[0]
-        else:
-            best_C = model[-1].C_
+        param_grid = {
+            "clf__C": Cs
+        }
+        if pca_num_components is not None:
+            if "pca" in model.named_steps:
+                param_grid["pca__n_components"] = pca_num_components
+            elif "prep" in model.named_steps:
+                param_grid["prep__pca__pca__n_components"] = pca_num_components
 
-        # re-fit on whole training set
-        refit_model = make_pipeline(
-            *pipeline[:-1],
-            LogisticRegression(C=best_C, **logreg_kwargs))
-        refit_model.fit(X_train, y_train)
+        gs = GridSearchCV(model, param_grid, cv=splits,
+                          scoring="roc_auc" if num_classes == 2 else "accuracy",
+                          refit=True)
+        gs.fit(X_train, y_train)
 
         if callable(scoring):
             scorers = scoring
         elif scoring is None or isinstance(scoring, str):
-            scorers = check_scoring(refit_model, scoring)
+            scorers = check_scoring(gs, scoring)
         else:
-            scorers = _check_multimetric_scoring(refit_model, scoring)
+            scorers = _check_multimetric_scoring(gs, scoring)
             # _check_refit_for_multimetric(scorers)
             scorers = _MultimetricScorer(scorers=scorers)
 
-        train_scores = scorers(refit_model, X_train, y_train)
-        test_scores = scorers(refit_model, X_test, y_test)
+        train_scores = scorers(gs, X_train, y_train)
+        test_scores = scorers(gs, X_test, y_test)
         results.append({
             **{f"train_{k}": np.array([v]) for k, v in train_scores.items()},
             **{f"test_{k}": np.array([v]) for k, v in test_scores.items()},
             "train_idxs": [idxs_train],
             "test_idxs": [idxs_test],
-            "estimator": [refit_model],
-            "C": [best_C]
+            "estimator": [gs],
         })
 
     # Concatenate results from all repeats
