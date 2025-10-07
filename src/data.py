@@ -156,6 +156,8 @@ def add_metadata_features(md: pd.DataFrame) -> pd.DataFrame:
     assert md["slider.response"].min() >= 1
     assert md["slider.response"].max() <= 10
     md["behavior_linear"] = md.behavior_sign * (md["slider.response"] - 5.5) / 4.5
+    bin_centers = ((np.linspace(-1, 1, 7) + (np.linspace(-1, 1, 7) + 1/3)) / 2)[:-1]
+    md["behavior_binned"] = pd.cut(md.behavior_linear, bins=[-1.1, -2/3, -1/3, 0, 1/3, 2/3, 1.1], labels=bin_centers).astype(float)
 
     # categorical representation of behavioral outcome.
     # -1 = clearly chose left of phoneme_pair, 1 = clearly chose right of phoneme_pair
@@ -174,6 +176,7 @@ def add_metadata_features(md: pd.DataFrame) -> pd.DataFrame:
 
     # describes the degree of belief change from acoustic evidence to behavior
     md["behavior_based_belief_update"] = md.behavior_linear - md.resampled_on_behavior
+    md["behavior_bin_based_belief_update"] = md.behavior_binned - md.resampled_on_behavior
 
     md["label_behavior"] = "~"
     md.loc[md.behavior_categorical == -1, "label_behavior"] = md[md.behavior_categorical == -1].phoneme_pair.str[0]
