@@ -34,7 +34,6 @@ def _prepare_decoding_population(
         global_min_sample: int = 0,
         global_max_sample: Optional[int] = None,
         target: Literal["acoustic", "lexical_evidence", "mismatch", "mismatch_left_right", "behavior_categorical"] = "lexical_evidence",
-        strategy: Literal["nested-cv", "train-test"] = "nested-cv",
         groupby: Optional[list[str]] = None,
         include_only_full_windows=True,
         randomize=False):
@@ -56,8 +55,6 @@ def _prepare_decoding_population(
 
     if target not in ["acoustic", "lexical_evidence", "mismatch", "mismatch_left_right", "behavior_categorical"]:
         raise ValueError(f"Invalid target {target}")
-    if strategy not in ["nested-cv", "train-test"]:
-        raise ValueError(f"Invalid strategy {strategy}")
     assert epochs_i.metadata is not None
     
     if global_max_sample is not None:
@@ -153,7 +150,6 @@ def run_decoding_population(
         global_min_sample=global_min_sample,
         global_max_sample=global_max_sample,
         target=target,
-        strategy=strategy,
         groupby=groupby,
         include_only_full_windows=include_only_full_windows,
         randomize=randomize
@@ -246,7 +242,6 @@ def run_decoding_model_comparison_population(
         global_min_sample=global_min_sample,
         global_max_sample=global_max_sample,
         target=target,
-        strategy=strategy,
         groupby=groupby,
         include_only_full_windows=include_only_full_windows,
         randomize=randomize
