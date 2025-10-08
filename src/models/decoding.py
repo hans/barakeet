@@ -316,28 +316,19 @@ def run_decoding_model_comparison_population(
 
             # Just validate the assumption first
             assert full_test_idxs.tolist() == baseline_test_idxs.tolist()
+            test_idxs = full_test_idxs
 
-            baseline_proba = baseline_estimator.predict_proba(X_baseline[baseline_test_idxs])[:, 1]
-            full_proba = full_estimator.predict_proba(X_full[full_test_idxs])[:, 1]
+            baseline_proba = baseline_estimator.predict_proba(X_baseline[test_idxs])[:, 1]
+            full_proba = full_estimator.predict_proba(X_full[test_idxs])[:, 1]
 
-            baseline_prediction = baseline_estimator.predict(X_baseline[baseline_test_idxs])
-            full_prediction = full_estimator.predict(X_full[full_test_idxs])
+            baseline_prediction = baseline_estimator.predict(X_baseline[test_idxs])
+            full_prediction = full_estimator.predict(X_full[test_idxs])
 
             # compute precision/recall
             baseline_precision, baseline_recall, _, _ = \
-                precision_recall_fscore_support(y[baseline_test_idxs], baseline_prediction, average="binary")
+                precision_recall_fscore_support(y[test_idxs], baseline_prediction, average="binary")
             full_precision, full_recall, _, _ = \
-                precision_recall_fscore_support(y[full_test_idxs], full_prediction, average="binary")
-
-            # # extract PCA num components
-            # if pca_num_components is not None:
-            #     pca_m = full_estimator.named_steps["columntransformer"].named_transformers_["pca"].named_steps["pca"]
-            #     if isinstance(pca_num_components, float):
-            #         n_pca_components = pca_m.n_components_
-            #     else:
-            #         n_pca_components = pca_num_components
-            # else:
-            #     n_pca_components = None
+                precision_recall_fscore_support(y[test_idxs], full_prediction, average="binary")
 
             result_i = {
                 "subject": subject,
@@ -347,8 +338,8 @@ def run_decoding_model_comparison_population(
                 "smax": smax,
                 "fold": fold,
 
-                "baseline_roc_auc": roc_auc_score(y[baseline_test_idxs], baseline_proba),
-                "full_roc_auc": roc_auc_score(y[full_test_idxs], full_proba),
+                "baseline_roc_auc": roc_auc_score(y[test_idxs], baseline_proba),
+                "full_roc_auc": roc_auc_score(y[test_idxs], full_proba),
 
                 "baseline_precision": baseline_precision,
                 "full_precision": full_precision,
@@ -374,7 +365,17 @@ def run_decoding_model_comparison_population(
                 )
                 all_estimators[key] = {
                     "electrode_idxs": electrode_idxs,
-                    "estimator": full_estimator
+                    "estimator": full_estimator,
+
+                    "test_predictions": pd.DataFrame({
+                        "decoder_target": y[test_idxs],
+                        "baseline_decoder_prediction": baseline_prediction,
+                        "baseline_decoder_proba": baseline_proba,
+                        "full_decoder_prediction": full_prediction,
+                        "full_decoder_proba": full_proba,
+                        "fold": fold,
+                        "epoch_idx": md.iloc[test_idxs].index.values,
+                    }),
                 }
 
     if return_estimators:
