@@ -35,7 +35,7 @@ def prepare_ABC_results(A_path, B_path, C_path,
     C_results = pd.read_csv(C_path)
 
     C_results = C_results.drop_duplicates(subset=["subject", "electrode_idx", "phoneme_pair"])
-    C_results = C_results[~C_results["Temporal pattern"].isna()]
+    C_results = C_results.loc[~C_results["Temporal pattern"].isna()]
 
     if trf_results_path is not None:
         trf_results = pd.read_csv(trf_results_path)
@@ -146,7 +146,7 @@ def prepare_ABC_results(A_path, B_path, C_path,
 
 def compute_stimulus_correlation(As: pd.DataFrame,
                                  A_decoders: dict[str, dict],
-                                 epochs: dict[str, mne.Epochs | mne.epochs.EpochsFIF],
+                                 epochs: dict[str, mne.epochs.EpochsFIF],
                                  metric: str = "spearmanr",
                                  return_outcomes=False
                                  ) -> pd.Series | tuple[pd.Series, pd.DataFrame]:
