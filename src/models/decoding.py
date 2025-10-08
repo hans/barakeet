@@ -234,6 +234,7 @@ def run_decoding_model_comparison_population(
         pca_num_components: Optional[float | Literal["auto"]] = None,
         include_only_full_windows=True,
         return_estimators=False,
+        n_jobs=None,
         smoke_test=False,
         randomize=False):
     """
@@ -273,6 +274,7 @@ def run_decoding_model_comparison_population(
                                   pca_num_components=pca_num_components,
                                   pca_dimensions=pca_dimensions,
                                   scoring=["roc_auc"],
+                                  n_jobs=n_jobs,
                                   num_repeats=5, random_state=random_state)
         else:
             raise ValueError("Unknown strategy: {}".format(strategy))
@@ -566,7 +568,7 @@ def fit_train_test(X, y, num_classes: int, scoring: list[str],
                    test_fraction=0.2, num_folds=3,
                    pca_num_components: Optional[float | Literal["auto"]] = None,
                    pca_dimensions: Optional[np.ndarray] = None,
-                   num_repeats=1, random_state=42):
+                   num_repeats=1, n_jobs=None, random_state=42):
     seeds = np.random.RandomState(random_state).randint(0, 10000, num_repeats)
 
     results = []
@@ -619,7 +621,7 @@ def fit_train_test(X, y, num_classes: int, scoring: list[str],
 
         gs = GridSearchCV(model, param_grid, cv=splits,
                           scoring="roc_auc" if num_classes == 2 else "accuracy",
-                          refit=True)
+                          refit=True, n_jobs=n_jobs)
         gs.fit(X_train, y_train)
 
         if callable(scoring):
