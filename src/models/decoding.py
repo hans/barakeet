@@ -600,7 +600,7 @@ def fit_train_test(X, y, num_classes: int, scoring: list[str],
                     ("pca", make_pipeline(StandardScaler(), pca_m), pca_dimensions)
                 ])))
             else:
-                pipeline.append(("pca", pca_m))
+                pipeline.append(("prep", make_pipeline(StandardScaler(), pca_m)))
 
         solver = "liblinear" if num_classes == 2 else "saga"
         logreg_kwargs = dict(max_iter=100000, class_weight="balanced",
