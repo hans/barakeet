@@ -261,16 +261,18 @@ def run_decoding_model_comparison_population(
     seed = 42
     results = []
 
-    def _fit(X, y, num_classes, stratify, random_state, pca_dimensions=None):
+    def _fit(X, y, num_classes, stratify, random_state, reg_range, pca_dimensions=None):
         if strategy == "nested-cv":
             return fit_nested_cv(X, y, num_classes=num_classes,
                                  stratify=stratify,
+                                 reg_range=reg_range,
                                  pca_num_components=pca_num_components,
                                  pca_dimensions=pca_dimensions,
                                  scoring=["roc_auc"], random_state=random_state)
         elif strategy == "train-test":
             return fit_train_test(X, y, num_classes=num_classes,
                                   stratify=stratify,
+                                  reg_range=reg_range,
                                   pca_num_components=pca_num_components,
                                   pca_dimensions=pca_dimensions,
                                   scoring=["roc_auc"],
@@ -300,10 +302,13 @@ def run_decoding_model_comparison_population(
 
         # Fit N baseline models
         baseline_results = _fit(X_baseline, y, num_classes,
-                                stratify=stratify_codes, random_state=seed)
+                                stratify=stratify_codes,
+                                reg_range=(-4, 4),
+                                random_state=seed)
         # Fit N full models
         full_results = _fit(X_full, y, num_classes,
                             stratify=stratify_codes,
+                            reg_range=(-8, 3),
                             pca_dimensions=np.arange(X_baseline.shape[1], X_full.shape[1]),
                             random_state=seed)
 
@@ -567,9 +572,15 @@ def fit_nested_cv(X, y, num_classes: int, scoring: list[str],
 def fit_train_test(X, y, num_classes: int, scoring: list[str],
                    stratify: Optional[np.ndarray] = None,
                    test_fraction=0.2, num_folds=3,
+                   reg_range: tuple[float, float] = (-8, 3),
                    pca_num_components: Optional[float | Literal["auto"]] = None,
                    pca_dimensions: Optional[np.ndarray] = None,
                    num_repeats=1, n_jobs=None, random_state=42):
+    """
+    Args:
+        reg_range: tuple of (min_exp, max_exp) for log10 regularization strength
+            grid search
+    """
     seeds = np.random.RandomState(random_state).randint(0, 10000, num_repeats)
 
     results = []
@@ -589,7 +600,7 @@ def fit_train_test(X, y, num_classes: int, scoring: list[str],
             cv_inner = StratifiedKFold(num_folds, shuffle=True, random_state=seed)
             splits = list(cv_inner.split(X_train, stratify[idxs_train]))
 
-        Cs = np.logspace(-8, 3, 10).tolist()
+        Cs = np.logspace(*reg_range, 10).tolist()
         pca_num_components = [0.25, 0.5, 0.9] if pca_num_components == "auto" \
             else pca_num_components
 
