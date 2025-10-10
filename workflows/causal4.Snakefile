@@ -355,6 +355,39 @@ rule behavior_decoding_single_electrode:
         )
 
 
+rule behavior_decoding_super:
+    input:
+        epochs = "outputs/epochs_preprocessed/{subject}_epo.fif",
+        electrodes = "outputs/causal4/find_speech_responsive/{subject}_results.csv",
+        annotated_B_results = "outputs/causal4/annotated_B_results.csv",
+        annotated_C_results = "outputs/causal4/annotated_C_results.csv",
+        unified_A_results = "outputs/causal4/unify_As/results.csv",
+        unified_A_decoders = "outputs/causal4/unify_As/unified_decoders.pt",
+        all_A_results = "outputs/causal4/find_As/{subject}_results.csv",
+        all_A_decoders = "outputs/causal4/find_As/{subject}_decoders.pt",
+        notebook = "notebooks/causal4/behavior_decoding_super.ipynb"
+
+    output:
+        notebook = "outputs/causal4/behavior_decoding_super/{subject}/behavior_decoding_super.ipynb",
+        results = "outputs/causal4/behavior_decoding_super/{subject}/results.pt",
+
+    run:
+        outdir = Path(output.notebook).parent
+        execute_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(epochs_path=input.epochs,
+                            electrodes_paths=input.electrodes,
+                            B_annotated_path=input.annotated_B_results,
+                            C_annotated_path=input.annotated_C_results,
+                            A_result_path=input.unified_A_results,
+                            A_decoders_path=input.unified_A_decoders,
+                            all_A_result_path=input.all_A_results,
+                            all_A_decoders_path=input.all_A_decoders,
+                            outdir=str(outdir)),
+        )
+
+
 rule behavior_decoding_all:
     input:
         expand("outputs/causal4/behavior_decoding/{subject}/behavior_decoding.ipynb",
@@ -364,4 +397,10 @@ rule behavior_decoding_all:
 rule behavior_decoding_single_electrode_all:
     input:
         expand("outputs/causal4/behavior_decoding_single_electrode/{subject}/behavior_decoding.ipynb",
+               subject=config["data"]["subjects"])
+
+
+rule behavior_decoding_super_all:
+    input:
+        expand("outputs/causal4/behavior_decoding_super/{subject}/behavior_decoding_super.ipynb",
                subject=config["data"]["subjects"])
