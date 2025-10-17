@@ -261,11 +261,14 @@ def run_decoding_model_comparison_population(
     seed = 42
     results = []
 
-    def _fit(X, y, num_classes, stratify, random_state, reg_range, pca_dimensions=None):
+    def _fit(X, y, num_classes, stratify, random_state,
+             reg_range, reg_grid_size,
+             pca_dimensions=None):
         if strategy == "nested-cv":
             return fit_nested_cv(X, y, num_classes=num_classes,
                                  stratify=stratify,
                                  reg_range=reg_range,
+                                 reg_grid_size=reg_grid_size,
                                  pca_num_components=pca_num_components,
                                  pca_dimensions=pca_dimensions,
                                  scoring=["roc_auc"], random_state=random_state)
@@ -273,6 +276,7 @@ def run_decoding_model_comparison_population(
             return fit_train_test(X, y, num_classes=num_classes,
                                   stratify=stratify,
                                   reg_range=reg_range,
+                                  reg_grid_size=reg_grid_size,
                                   pca_num_components=pca_num_components,
                                   pca_dimensions=pca_dimensions,
                                   scoring=["roc_auc"],
@@ -303,14 +307,20 @@ def run_decoding_model_comparison_population(
         # Fit N baseline models
         baseline_results = _fit(X_baseline, y, num_classes,
                                 stratify=stratify_codes,
-                                reg_range=(-4, 4),
+                                reg_range=(-1, 1),
+                                reg_grid_size=2,
                                 random_state=seed)
         # Fit N full models
         full_results = _fit(X_full, y, num_classes,
                             stratify=stratify_codes,
                             reg_range=(-8, 3),
+                            reg_grid_size=10,
                             pca_dimensions=np.arange(X_baseline.shape[1], X_full.shape[1]),
                             random_state=seed)
+
+        if baseline_results is None or full_results is None:
+            L.warning(f"Skipping model comparison for {subject}, {population_name}, {phoneme_pair}, {name}, {smin}-{smax} because fitting failed.")
+            continue
 
         # Because we matched seeds above, the fold of the ith baseline model
         # has the same samples as the fold of the ith full model.
@@ -495,7 +505,7 @@ def run_decoding_searchlight_single_electrode(
                 if strategy == "nested-cv":
                     fitted = fit_nested_cv(X, y, num_classes=num_classes, scoring=scoring)
                 elif strategy == "train-test":
-                    fitted = fit_train_test(X, y, num_classes=num_classes, scoring=scoring,
+                    fitted = fit_train_test_old(X, y, num_classes=num_classes, scoring=scoring,
                                             num_repeats=5)
 
                 result_key = (row.subject, row.electrode_idx, phoneme_pair, smin, smax)
@@ -573,6 +583,7 @@ def fit_train_test(X, y, num_classes: int, scoring: list[str],
                    stratify: Optional[np.ndarray] = None,
                    test_fraction=0.2, num_folds=3,
                    reg_range: tuple[float, float] = (-8, 3),
+                   reg_grid_size: int = 10,
                    pca_num_components: Optional[float | Literal["auto"]] = None,
                    pca_dimensions: Optional[np.ndarray] = None,
                    num_repeats=1, n_jobs=None, random_state=42):
@@ -583,6 +594,14 @@ def fit_train_test(X, y, num_classes: int, scoring: list[str],
     """
     seeds = np.random.RandomState(random_state).randint(0, 10000, num_repeats)
 
+    # Find if we are going to be able to have both positive and negative classes in each
+    # inner fold. If not, scale down the number of folds.
+    if stratify is not None:
+        min_class_count = test_fraction * np.min(np.bincount(stratify, minlength=num_classes))
+        if min_class_count < num_folds:
+            num_folds = max(1, int(np.floor(min_class_count)))
+            L.warning(f"Reducing num_folds to {num_folds} due to limited class samples per fold.")
+
     results = []
     for seed in seeds:
         X_train, X_test, y_train, y_test, idxs_train, idxs_test = \
@@ -592,17 +611,33 @@ def fit_train_test(X, y, num_classes: int, scoring: list[str],
                              shuffle=True,
                              random_state=seed)
 
+        num_folds_i = num_folds
+        class_counts_train = np.bincount(y_train, minlength=num_classes)
+        class_counts_test = np.bincount(y_test, minlength=num_classes)
+        if np.any(class_counts_train < num_folds) or np.any(class_counts_test < num_folds):
+            if min(np.min(class_counts_train), np.min(class_counts_test)) >= 2:
+                num_folds_i = np.min(class_counts_test)
+                L.warning(f"Reducing num_folds to {num_folds_i} due to limited class samples "
+                          f"in train/test split: train counts {class_counts_train}, "
+                          f"test counts {class_counts_test}.")
+            else:
+                L.warning(f"Skipping repeat with seed {seed} due to insufficient class samples "
+                        f"in train/test split: train counts {class_counts_train}, "
+                        f"test counts {class_counts_test}.")
+                continue
+
         # Prepare stratified CV inner splits
         if stratify is None:
-            cv_inner = KFold(num_folds, shuffle=True, random_state=seed)
+            cv_inner = KFold(num_folds_i, shuffle=True, random_state=seed)
             splits = list(cv_inner.split(X_train))
         else:
-            cv_inner = StratifiedKFold(num_folds, shuffle=True, random_state=seed)
+            cv_inner = StratifiedKFold(num_folds_i, shuffle=True, random_state=seed)
             splits = list(cv_inner.split(X_train, stratify[idxs_train]))
 
-        Cs = np.logspace(*reg_range, 10).tolist()
+        Cs = np.logspace(*reg_range, reg_grid_size).tolist()
         pca_num_components = [0.25, 0.5, 0.9] if pca_num_components == "auto" \
             else pca_num_components
+        
 
         pipeline = []
         if pca_num_components is not None and X.shape[1] > 1:
@@ -653,6 +688,73 @@ def fit_train_test(X, y, num_classes: int, scoring: list[str],
             "train_idxs": [idxs_train],
             "test_idxs": [idxs_test],
             "estimator": [gs],
+        })
+
+    # Concatenate results from all repeats
+    if len(results) == 0:
+        return None
+
+    fitted = {k: np.concatenate([r[k] for r in results]) if isinstance(results[0][k], np.ndarray)
+              else list(itertools.chain.from_iterable(r[k] for r in results))
+              for k in results[0].keys()}
+    return fitted
+
+
+def fit_train_test_old(X, y, num_classes: int, scoring: list[str],
+                       test_fraction=0.2, num_folds=3,
+                       pca_num_components: Optional[float] = None,
+                       num_repeats=1, random_state=42):
+    seeds = np.random.RandomState(random_state).randint(0, 10000, num_repeats)
+
+    results = []
+    for seed in seeds:
+        X_train, X_test, y_train, y_test, idxs_train, idxs_test = \
+            train_test_split(X, y, np.arange(len(X)),
+                            test_size=test_fraction, stratify=y, random_state=seed)
+
+        Cs = np.logspace(-3, 2, 6)
+
+        pipeline: list[BaseEstimator] = [StandardScaler()]
+        if pca_num_components is not None:
+            pipeline.append(PCA(n_components=pca_num_components))
+
+        solver = "liblinear" if num_classes == 2 else "saga"
+        pipeline.append(LogisticRegressionCV(
+            Cs=Cs, cv=StratifiedKFold(num_folds, shuffle=True, random_state=seed),
+            max_iter=100000, class_weight="balanced", fit_intercept=False,
+            solver=solver))
+        model = make_pipeline(*pipeline)
+        model.fit(X_train, y_train)
+
+        # Get optimal C
+        if num_classes == 2:
+            best_C = model[-1].C_[0]
+        else:
+            best_C = model[-1].C_
+
+        # re-fit on whole training set
+        refit_model = make_pipeline(*pipeline[:-1], LogisticRegression(
+            C=best_C, class_weight="balanced", fit_intercept=False,
+            solver=solver))
+        refit_model.fit(X_train, y_train)
+
+        if callable(scoring):
+            scorers = scoring
+        elif scoring is None or isinstance(scoring, str):
+            scorers = check_scoring(refit_model, scoring)
+        else:
+            scorers = _check_multimetric_scoring(refit_model, scoring)
+            # _check_refit_for_multimetric(scorers)
+            scorers = _MultimetricScorer(scorers=scorers)
+
+        train_scores = scorers(refit_model, X_train, y_train)
+        test_scores = scorers(refit_model, X_test, y_test)
+        results.append({
+            **{f"train_{k}": np.array([v]) for k, v in train_scores.items()},
+            **{f"test_{k}": np.array([v]) for k, v in test_scores.items()},
+            "train_idxs": [idxs_train],
+            "test_idxs": [idxs_test],
+            "estimator": [refit_model]
         })
 
     # Concatenate results from all repeats
