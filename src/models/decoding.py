@@ -9,7 +9,7 @@ import pandas as pd
 from sklearn.base import BaseEstimator
 from sklearn.compose import ColumnTransformer, make_column_transformer
 from sklearn.model_selection import GridSearchCV, KFold, StratifiedKFold, cross_validate, train_test_split
-from sklearn.linear_model import LogisticRegression, LogisticRegressionCV
+from sklearn.linear_model import LogisticRegression, LogisticRegressionCV, Ridge
 from sklearn.pipeline import Pipeline, make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import check_scoring, make_scorer, precision_recall_fscore_support, roc_auc_score
@@ -26,6 +26,15 @@ PopulationDecoderFitKey: TypeAlias = tuple[str, str, str, int, int]  # (subject,
 
 Epochs: TypeAlias = mne.Epochs | mne.epochs.EpochsFIF
 
+DECODER_TARGETS = ["acoustic", "lexical_evidence", "mismatch",
+                   "mismatch_left_right", "behavior_categorical",
+                   "belief_update"]
+DECODER_REGRESSION_TARGETS = ["belief_update"]
+DECODER_CLASSIFICATION_TARGETS = list(set(DECODER_TARGETS) - set(DECODER_REGRESSION_TARGETS))
+DecoderTarget: TypeAlias = Literal["acoustic", "lexical_evidence", "mismatch",
+                                   "mismatch_left_right", "behavior_categorical",
+                                   "belief_update"]
+
 
 class ClassifierLike(Protocol):
     def fit(self, X: np.ndarray, y: np.ndarray) -> None: ...
@@ -40,7 +49,7 @@ def _prepare_decoding_population(
         stride: int, window_size: int,
         global_min_sample: int = 0,
         global_max_sample: Optional[int] = None,
-        target: Literal["acoustic", "lexical_evidence", "mismatch", "mismatch_left_right", "behavior_categorical"] = "lexical_evidence",
+        target: DecoderTarget = "lexical_evidence",
         groupby: Optional[list[str]] = None,
         include_only_full_windows=True,
         randomize=False):
@@ -60,7 +69,7 @@ def _prepare_decoding_population(
         - y: target labels
     """
 
-    if target not in ["acoustic", "lexical_evidence", "mismatch", "mismatch_left_right", "behavior_categorical"]:
+    if target not in DECODER_TARGETS:
         raise ValueError(f"Invalid target {target}")
     assert epochs_i.metadata is not None
     
@@ -118,7 +127,14 @@ def _prepare_decoding_population(
                 y = y[y != 0]
             elif target == "behavior_categorical":
                 y = epochs_i.metadata.behavior_dummy_forced[selection].values
+            elif target == "belief_update":
+                y = epochs_i.metadata.belief_update_int[selection].values
+                # normalize from [-5, 5] to [-1, 1]
+                y = (y / 5).astype(float)
+                assert np.all((y >= -5) & (y <= 5)), "belief_update values must be in [-5, 5]"
 
+                from scipy.stats import pearsonr
+                print(pearsonr(y, epochs_i.metadata.resampled[selection].values))
             
             # stratify_class = epochs_ij.metadata.stratify_class[selection].values
 
@@ -128,6 +144,15 @@ def _prepare_decoding_population(
 
             yield name, smin, smax, selection, X_window, y
 
+
+def get_scoring(y, target: DecoderTarget):
+    if target in DECODER_REGRESSION_TARGETS:
+        scoring = ["r2"]
+    else:
+        num_classes = len(set(y))
+        scoring = ["roc_auc", "f1_macro", "accuracy"] if num_classes == 2 else ["f1_macro", "accuracy"]
+
+    return scoring
 
 
 def run_decoding_population(
@@ -139,7 +164,7 @@ def run_decoding_population(
         stride: int, window_size: int,
         global_min_sample: int = 0,
         global_max_sample: Optional[int] = None,
-        target: Literal["acoustic", "lexical_evidence", "mismatch", "mismatch_left_right", "behavior_categorical"] = "lexical_evidence",
+        target: DecoderTarget = "lexical_evidence",
         strategy: Literal["nested-cv", "train-test"] = "nested-cv",
         groupby: Optional[list[str]] = None,
         pca_num_components: Optional[float] = None,
@@ -147,6 +172,9 @@ def run_decoding_population(
         include_only_full_windows=True,
         smoke_test=False,
         randomize=False):
+
+    if strategy not in ["train-test"]:
+        raise NotImplementedError(f"Strategy {strategy} no longer supported.")
 
     assert epochs_i.metadata is not None
     _gen = _prepare_decoding_population(
@@ -172,20 +200,19 @@ def run_decoding_population(
 
     for name, smin, smax, selection, X_window, y in _gen:
 
-        ####
+        scoring = get_scoring(y, target)
 
-        num_classes = len(set(y))
-        scoring = ["roc_auc", "f1_macro", "accuracy"] if num_classes == 2 else ["f1_macro", "accuracy"]
+        fit_kwargs = dict(
+            pca_num_components=pca_num_components,
+            scoring=scoring,
+            num_repeats=5
+        )
 
-        if strategy == "nested-cv":
-            fitted = fit_nested_cv(X_window, y, num_classes=num_classes,
-                                   pca_num_components=pca_num_components,
-                                   scoring=scoring)
-        elif strategy == "train-test":
-            fitted = fit_train_test(X_window, y, num_classes=num_classes,
-                                    pca_num_components=pca_num_components,
-                                    scoring=scoring,
-                                    num_repeats=5)
+        if strategy == "train-test":
+            if target in DECODER_REGRESSION_TARGETS:
+                fitted = fit_train_test_regression(X_window, y, **fit_kwargs)
+            else:
+                fitted = fit_train_test(X_window, y, **fit_kwargs)
 
         result_key = (subject, population_name, phoneme_pair, name, smin, smax)
 
@@ -227,7 +254,9 @@ def run_decoding_model_comparison_population(
         baseline_features: list[str],
         global_min_sample: int = 0,
         global_max_sample: Optional[int] = None,
-        target: Literal["acoustic", "lexical_evidence", "mismatch", "mismatch_left_right", "behavior_categorical"] = "lexical_evidence",
+        target: Literal["acoustic", "lexical_evidence", "mismatch",
+                        "mismatch_left_right", "behavior_categorical",
+                        "belief_update"] = "lexical_evidence",
         strategy: Literal["nested-cv", "train-test"] = "nested-cv",
         groupby: Optional[list[str]] = None,
         stratify: tuple[str, ...] = ("resampled", "lexical_evidence"),
@@ -261,38 +290,34 @@ def run_decoding_model_comparison_population(
     seed = 42
     results = []
 
-    def _fit(X, y, num_classes, stratify, random_state,
+    def _fit(X, y, stratify, random_state,
              reg_range, reg_grid_size,
              pca_dimensions=None):
-        if strategy == "nested-cv":
-            return fit_nested_cv(X, y, num_classes=num_classes,
-                                 stratify=stratify,
-                                 reg_range=reg_range,
-                                 reg_grid_size=reg_grid_size,
-                                 pca_num_components=pca_num_components,
-                                 pca_dimensions=pca_dimensions,
-                                 scoring=["roc_auc"], random_state=random_state)
-        elif strategy == "train-test":
-            return fit_train_test(X, y, num_classes=num_classes,
-                                  stratify=stratify,
-                                  reg_range=reg_range,
-                                  reg_grid_size=reg_grid_size,
-                                  pca_num_components=pca_num_components,
-                                  pca_dimensions=pca_dimensions,
-                                  scoring=["roc_auc"],
-                                  n_jobs=n_jobs,
-                                  num_repeats=5, random_state=random_state)
+        scoring = get_scoring(y, target)
+
+        fit_kwargs = dict(
+            scoring=scoring,
+            stratify=stratify,
+            reg_range=reg_range,
+            reg_grid_size=reg_grid_size,
+            pca_num_components=pca_num_components,
+            pca_dimensions=pca_dimensions,
+            num_repeats=5,
+            random_state=random_state,
+            n_jobs=n_jobs
+        )
+    
+        if strategy == "train-test":
+            if target in DECODER_REGRESSION_TARGETS:
+                return fit_train_test_regression(X, y, **fit_kwargs)
+            else:
+                return fit_train_test(X, y, **fit_kwargs)
         else:
             raise ValueError("Unknown strategy: {}".format(strategy))
 
     all_estimators = {}
 
     for name, smin, smax, selection, X_window, y in _gen:
-        num_classes = len(set(y))
-        if num_classes != 2:
-            L.warning(f"Skipping model comparison for {subject}, {population_name}, {phoneme_pair}, {name}, {smin}-{smax} because num_classes={num_classes} != 2")
-            continue
-
         md = epochs_i.metadata[selection]
 
         # Prepare baseline features
@@ -305,13 +330,13 @@ def run_decoding_model_comparison_population(
             stratify_codes = pd.factorize(md[list(stratify)].apply(tuple, axis=1))[0]
 
         # Fit N baseline models
-        baseline_results = _fit(X_baseline, y, num_classes,
+        baseline_results = _fit(X_baseline, y,
                                 stratify=stratify_codes,
                                 reg_range=(-1, 1),
                                 reg_grid_size=2,
                                 random_state=seed)
         # Fit N full models
-        full_results = _fit(X_full, y, num_classes,
+        full_results = _fit(X_full, y,
                             stratify=stratify_codes,
                             reg_range=(-8, 3),
                             reg_grid_size=10,
@@ -333,17 +358,41 @@ def run_decoding_model_comparison_population(
             assert full_test_idxs.tolist() == baseline_test_idxs.tolist()
             test_idxs = full_test_idxs
 
-            baseline_proba = baseline_estimator.predict_proba(X_baseline[test_idxs])[:, 1]
-            full_proba = full_estimator.predict_proba(X_full[test_idxs])[:, 1]
-
             baseline_prediction = baseline_estimator.predict(X_baseline[test_idxs])
             full_prediction = full_estimator.predict(X_full[test_idxs])
 
-            # compute precision/recall
-            baseline_precision, baseline_recall, _, _ = \
-                precision_recall_fscore_support(y[test_idxs], baseline_prediction, average="binary")
-            full_precision, full_recall, _, _ = \
-                precision_recall_fscore_support(y[test_idxs], full_prediction, average="binary")
+            extra_results = {}
+            if target in DECODER_REGRESSION_TARGETS:
+                baseline_score = baseline_estimator.score(X_baseline[test_idxs], y[test_idxs])
+                full_score = full_estimator.score(X_full[test_idxs], y[test_idxs])
+
+                extra_results.update({
+                    "baseline_mse": np.mean((y[test_idxs] - baseline_prediction) ** 2),
+                    "full_mse": np.mean((y[test_idxs] - full_prediction) ** 2),
+
+                    "baseline_r2": baseline_score,
+                    "full_r2": full_score,
+                })
+            else:
+                baseline_proba = baseline_estimator.predict_proba(X_baseline[test_idxs])[:, 1]
+                full_proba = full_estimator.predict_proba(X_full[test_idxs])[:, 1]
+
+                # compute precision/recall
+                baseline_precision, baseline_recall, _, _ = \
+                    precision_recall_fscore_support(y[test_idxs], baseline_prediction, average="binary")
+                full_precision, full_recall, _, _ = \
+                    precision_recall_fscore_support(y[test_idxs], full_prediction, average="binary")
+
+                extra_results.update({
+                    "baseline_proba": baseline_proba,
+                    "full_proba": full_proba,
+
+                    "baseline_precision": baseline_precision,
+                    "full_precision": full_precision,
+
+                    "baseline_roc_auc": roc_auc_score(y[test_idxs], baseline_proba),
+                    "full_roc_auc": roc_auc_score(y[test_idxs], full_proba),
+                })
 
             result_i = {
                 "subject": subject,
@@ -353,14 +402,7 @@ def run_decoding_model_comparison_population(
                 "smax": smax,
                 "fold": fold,
 
-                "baseline_roc_auc": roc_auc_score(y[test_idxs], baseline_proba),
-                "full_roc_auc": roc_auc_score(y[test_idxs], full_proba),
-
-                "baseline_precision": baseline_precision,
-                "full_precision": full_precision,
-
-                "baseline_recall": baseline_recall,
-                "full_recall": full_recall,
+                **extra_results,
             }
             for groupby_variable, value in zip(groupby or [], name):
                 result_i[groupby_variable] = value
@@ -383,13 +425,14 @@ def run_decoding_model_comparison_population(
                     "estimator": full_estimator,
 
                     "test_predictions": pd.DataFrame({
-                        "decoder_target": y[test_idxs],
-                        "baseline_decoder_prediction": baseline_prediction,
-                        "baseline_decoder_proba": baseline_proba,
-                        "full_decoder_prediction": full_prediction,
-                        "full_decoder_proba": full_proba,
                         "fold": fold,
                         "epoch_idx": md.iloc[test_idxs].index.values,
+
+                        "decoder_target": y[test_idxs],
+                        "baseline_prediction": baseline_prediction,
+                        "full_prediction": full_prediction,
+
+                        **extra_results,
                     }),
                 }
 
@@ -579,7 +622,7 @@ def fit_nested_cv(X, y, num_classes: int, scoring: list[str],
     return fitted
 
 
-def fit_train_test(X, y, num_classes: int, scoring: list[str],
+def fit_train_test(X, y, scoring: list[str],
                    stratify: Optional[np.ndarray] = None,
                    test_fraction=0.2, num_folds=3,
                    reg_range: tuple[float, float] = (-8, 3),
@@ -593,6 +636,12 @@ def fit_train_test(X, y, num_classes: int, scoring: list[str],
             grid search
     """
     seeds = np.random.RandomState(random_state).randint(0, 10000, num_repeats)
+
+    num_classes = len(set(y))
+    if num_classes != 2:
+        L.warning(f"fit_train_test currently only supports binary classification "
+                  f"but got num_classes={num_classes}.")
+        return None
 
     # Find if we are going to be able to have both positive and negative classes in each
     # inner fold. If not, scale down the number of folds.
@@ -637,7 +686,6 @@ def fit_train_test(X, y, num_classes: int, scoring: list[str],
         Cs = np.logspace(*reg_range, reg_grid_size).tolist()
         pca_num_components = [0.25, 0.5, 0.9] if pca_num_components == "auto" \
             else pca_num_components
-        
 
         pipeline = []
         if pca_num_components is not None and X.shape[1] > 1:
@@ -669,6 +717,103 @@ def fit_train_test(X, y, num_classes: int, scoring: list[str],
         gs = GridSearchCV(model, param_grid, cv=splits,
                           scoring="roc_auc" if num_classes == 2 else "accuracy",
                           refit=True, n_jobs=n_jobs)
+        gs.fit(X_train, y_train)
+
+        if callable(scoring):
+            scorers = scoring
+        elif scoring is None or isinstance(scoring, str):
+            scorers = check_scoring(gs, scoring)
+        else:
+            scorers = _check_multimetric_scoring(gs, scoring)
+            # _check_refit_for_multimetric(scorers)
+            scorers = _MultimetricScorer(scorers=scorers)
+
+        train_scores = scorers(gs, X_train, y_train)
+        test_scores = scorers(gs, X_test, y_test)
+        results.append({
+            **{f"train_{k}": np.array([v]) for k, v in train_scores.items()},
+            **{f"test_{k}": np.array([v]) for k, v in test_scores.items()},
+            "train_idxs": [idxs_train],
+            "test_idxs": [idxs_test],
+            "estimator": [gs],
+        })
+
+    # Concatenate results from all repeats
+    if len(results) == 0:
+        return None
+
+    fitted = {k: np.concatenate([r[k] for r in results]) if isinstance(results[0][k], np.ndarray)
+              else list(itertools.chain.from_iterable(r[k] for r in results))
+              for k in results[0].keys()}
+    return fitted
+
+
+def fit_train_test_regression(X, y, scoring: list[str],
+                              stratify: Optional[np.ndarray] = None,
+                              test_fraction=0.2, num_folds=3,
+                              reg_range: tuple[float, float] = (-8, 3),
+                              reg_grid_size: int = 10,
+                              pca_num_components: Optional[float | Literal["auto"]] = None,
+                              pca_dimensions: Optional[np.ndarray] = None,
+                              num_repeats=1, n_jobs=None, random_state=42):
+    """
+    Args:
+        reg_range: tuple of (min_exp, max_exp) for log10 regularization strength
+            grid search
+    """
+    seeds = np.random.RandomState(random_state).randint(0, 10000, num_repeats)
+
+    results = []
+    for seed in seeds:
+        X_train, X_test, y_train, y_test, idxs_train, idxs_test = \
+            train_test_split(X, y, np.arange(len(X)),
+                             test_size=test_fraction,
+                             stratify=stratify,
+                             shuffle=True,
+                             random_state=seed)
+
+        # Prepare stratified CV inner splits
+        if stratify is None:
+            cv_inner = KFold(num_folds, shuffle=True, random_state=seed)
+            splits = list(cv_inner.split(X_train))
+        else:
+            cv_inner = StratifiedKFold(num_folds, shuffle=True, random_state=seed)
+            splits = list(cv_inner.split(X_train, stratify[idxs_train]))
+
+        alphas = np.logspace(*reg_range, reg_grid_size).tolist()
+        pca_num_components = [0.25, 0.5, 0.9] if pca_num_components == "auto" \
+            else pca_num_components
+        
+
+        pipeline = []
+        if pca_num_components is not None and X.shape[1] > 1:
+            pca_m = PCA(n_components=pca_num_components)
+            if pca_dimensions is not None:
+                non_pca_dimensions = np.setdiff1d(np.arange(X.shape[1]), pca_dimensions)
+                pipeline.append(("prep", ColumnTransformer([
+                    ("baseline", StandardScaler(), non_pca_dimensions),
+                    ("pca", make_pipeline(StandardScaler(), pca_m), pca_dimensions)
+                ])))
+            else:
+                pipeline.append(("prep", make_pipeline(StandardScaler(), pca_m)))
+
+        linreg_kwargs = dict(max_iter=100000)
+        pipeline.append(("reg", Ridge(**linreg_kwargs)))
+        model = Pipeline(pipeline)
+
+        param_grid = {
+            "reg__alpha": alphas
+        }
+        if pca_num_components is not None:
+            if "pca" in model.named_steps:
+                param_grid["pca__n_components"] = pca_num_components
+            elif "prep" in model.named_steps:
+                param_grid["prep__pca__pca__n_components"] = pca_num_components
+
+        gs = GridSearchCV(model, param_grid, cv=splits,
+                          scoring=scoring,
+                          refit=scoring[0],
+                          n_jobs=n_jobs)
         gs.fit(X_train, y_train)
 
         if callable(scoring):
