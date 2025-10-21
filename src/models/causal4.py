@@ -772,7 +772,7 @@ def plot_causal4_evoked(epochs: mne.Epochs,
                         height=3, aspect=3,
                         highlight_A_span=False,
                         highlight_B_span=True,
-                        hue: Literal["resampled", "p_gt_phoneme_bin_center"] = "p_gt_phoneme_bin_center",
+                        hue: Literal["resampled", "p_gt_phoneme_bin_center", "label_behavior_forced"] = "p_gt_phoneme_bin_center",
                         smoke_test=False):
     """
     Plot evoked responses for each electrode in population B,
@@ -804,7 +804,7 @@ def plot_causal4_evoked(epochs: mne.Epochs,
         assert plot_epoch_data.ndim == 2  # n_trials * n_times
 
         if highlight_A_span:
-            ax.axvspan(*plot_epochs.times[list(population_A_window)], color="red", alpha=0.05)
+            ax.axvspan(*plot_epochs.times[list(population_A_window)], color="orange", alpha=0.05)
         if highlight_B_span:
             ax.axvspan(*plot_epochs.times[list(population_B_window)], color="gray", alpha=0.05)
 
@@ -859,7 +859,13 @@ def plot_causal4_evoked(epochs: mne.Epochs,
                 )
     add_evoked_behavioral_spans(g)
 
-    hue_label = "P(gt phoneme)" if hue == "p_gt_phoneme_bin_center" else "Stimulus step"
+    hue_label = hue
+    if hue == "p_gt_phoneme_bin_center":
+        hue_label = "P(gt phoneme)"
+    elif hue == "label_behavior_forced":
+        hue_label = "Behavioral choice"
+    elif hue == "resampled":
+        hue_label = "Stimulus step"
     g.add_legend(title=hue_label)
     g.fig.suptitle(f"Evoked responses by {hue_label}", y=1.1)
 

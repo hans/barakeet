@@ -89,6 +89,8 @@ def plot_epochs(epochs: dict[Any, np.ndarray],
                 close=False,
                 share_groupers=True,
                 onset_vline=False,
+                sharex=True,
+                sharey=True,
                 fix_ylim: Literal[None, "percentile"] = None,
                 drop_minority_traces: Optional[int] = None,
                 smoke_test=False):
@@ -146,6 +148,7 @@ def plot_epochs(epochs: dict[Any, np.ndarray],
                       row=row,
                       col=col, col_order=col_order,
                       height=height, aspect=aspect,
+                      sharex=sharex, sharey=sharey,
                       gridspec_kws={"hspace": 0.55})
 
     def f(data, **f_kwargs):
@@ -263,6 +266,24 @@ def add_uv_annotation(g, feature_block, eoi_df):
         row[-1].text(1.2, 0.5, f"UV={channel_uv:.4f}", transform=row[-1].transAxes, ha="left", va="center")
 
     return g
+
+
+def add_textgrid_single(ax, textgrid_dir, ep_df, rotation=90):
+    textgrid_file = ep_df.textgrid_path.iloc[0]
+    tg = textgrid.TextGrid.fromFile(Path(textgrid_dir) / textgrid_file)
+    assert tg.getNames() == ["phonemes"]
+
+    plot_intervals = [interval for interval in tg.tiers[0].intervals
+                      if interval.mark is not None and interval.mark.strip()]
+    for i, interval in enumerate(plot_intervals):
+        ax.axvline(interval.minTime, linestyle="--", alpha=0.5, color="salmon")
+        ax.text(interval.minTime, 0.025, interval.mark.strip(), rotation=rotation,
+                ha="right", va="bottom",
+                transform=transforms.blended_transform_factory(ax.transData, ax.transAxes))
+
+        if i == len(plot_intervals) - 1:
+            # also add end time
+            ax.axvline(interval.maxTime, linestyle="--", alpha=0.5, color="blue")
 
 
 def add_textgrid(g, textgrid_path, ep_df):

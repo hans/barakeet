@@ -182,6 +182,9 @@ def add_metadata_features(md: pd.DataFrame) -> pd.DataFrame:
     md.loc[md.behavior_categorical == -1, "label_behavior"] = md[md.behavior_categorical == -1].phoneme_pair.str[0]
     md.loc[md.behavior_categorical == 1, "label_behavior"] = md[md.behavior_categorical == 1].phoneme_pair.str[1]
 
+    md.loc[md.behavior_categorical_forced == -1, "label_behavior_forced"] = md[md.behavior_categorical_forced == -1].phoneme_pair.str[0]
+    md.loc[md.behavior_categorical_forced == 1, "label_behavior_forced"] = md[md.behavior_categorical_forced == 1].phoneme_pair.str[1]
+
     # Higher-level behavior descriptions
     md["follows_acoustics"] = md.behavior_categorical_forced == md.categorical_acoustic_cue
     md["ignores_both_cues"] = (md.label_lexical == md.label_acoustic) & (md.label_lexical != md.label_behavior)
