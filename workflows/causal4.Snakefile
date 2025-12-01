@@ -377,6 +377,11 @@ rule behavior_decoding_single_electrode_summarize:
     output:
         notebook = "outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/behavior_decoding_single_electrode_summarize.ipynb",
 
+        A_results = "outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/A_results.csv",
+        A_early_results = "outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/A_early_results.csv",
+        B_results = "outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/B_results.csv",
+        C_results = "outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/C_results.csv",
+
         A_final_summary = "outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/A_final_summary.csv",
         A_early_final_summary = "outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/A_early_final_summary.csv",
         B_final_summary = "outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/B_final_summary.csv",
