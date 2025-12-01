@@ -354,6 +354,59 @@ rule behavior_decoding_single_electrode:
                             outdir=str(outdir)),
         )
 
+rule behavior_decoding_single_electrode_summarize:
+    input:
+        epochs = "outputs/epochs_preprocessed/{subject}_epo.fif",
+        speech_reponsive = "outputs/causal4/find_speech_responsive/{subject}_results.csv",
+        result = "outputs/causal4/behavior_decoding_single_electrode/{subject}/results.pt",
+
+        individual_stimulus_decoder_results = "outputs/causal4/find_As/{subject}_results.csv",
+        individual_stimulus_decoders = "outputs/causal4/find_As/{subject}_decoders.pt",
+
+        unified_stimulus_decoder_results = "outputs/causal4/unify_As/results.csv",
+        unified_stimulus_decoders = "outputs/causal4/unify_As/unified_decoders.pt",
+
+        annotated_B_results = "outputs/causal4/annotated_B_results.csv",
+        annotated_C_results = "outputs/causal4/annotated_C_results.csv",
+
+        trf_results = "/userdata/jgauthier/projects/big-trf/outputs/encoder_summary/timit-no_repeats/vanilla_aud.csv",
+        acoustic_decoding_scores = "outputs/single_electrode_decoding/30/acoustic/scores.csv",
+
+        notebook = "notebooks/causal4/behavior_decoding_single_electrode_summarize.ipynb"
+
+    output:
+        notebook = "outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/behavior_decoding_single_electrode_summarize.ipynb",
+
+        A_final_summary = "outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/A_final_summary.csv",
+        A_early_final_summary = "outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/A_early_final_summary.csv",
+        B_final_summary = "outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/B_final_summary.csv",
+        C_final_summary = "outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/C_final_summary.csv",
+        all_summary = "outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/all_summary.csv",
+
+        A_trial_analysis = "outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/A_trial_analysis.csv",
+        A_early_trial_analysis = "outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/A_early_trial_analysis.csv",
+        B_trial_analysis = "outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/B_trial_analysis.csv",
+        C_trial_analysis = "outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/C_trial_analysis.csv",
+
+    run:
+        outdir = Path(output.notebook).parent
+        execute_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(epochs_path=input.epochs,
+                            electrodes_path=input.speech_reponsive,
+                            result_path=input.result,
+                            A_individual_results_path=input.individual_stimulus_decoder_results,
+                            A_individual_decoder_path=input.individual_stimulus_decoders,
+                            A_results_path=input.unified_stimulus_decoder_results,
+                            A_stimulus_decoders_path=input.unified_stimulus_decoders,
+                            B_results_path=input.annotated_B_results,
+                            C_results_path=input.annotated_C_results,
+                            trf_results_path=input.trf_results,
+                            acoustic_decoding_scores_path=input.acoustic_decoding_scores,
+                            outdir=str(outdir)),
+        )
+
 
 rule behavior_decoding_super:
     input:
@@ -397,6 +450,8 @@ rule behavior_decoding_all:
 rule behavior_decoding_single_electrode_all:
     input:
         expand("outputs/causal4/behavior_decoding_single_electrode/{subject}/behavior_decoding.ipynb",
+               subject=config["data"]["subjects"]),
+        expand("outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/behavior_decoding_single_electrode_summarize.ipynb",
                subject=config["data"]["subjects"])
 
 
