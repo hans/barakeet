@@ -407,6 +407,39 @@ rule behavior_decoding_single_electrode_summarize:
                             outdir=str(outdir)),
         )
 
+# Attempt transferring behavior decoders estimated on different temporal windows to one another.
+rule behavior_decoding_single_electrode_transfer:
+    input:
+        epochs = "outputs/epochs_preprocessed/{subject}_epo.fif",
+        result = "outputs/causal4/behavior_decoding_single_electrode/{subject}/results.pt",
+
+        individual_stimulus_decoder_results = "outputs/causal4/find_As/{subject}_results.csv",
+
+        A_early_final_summary = "outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/A_early_final_summary.csv",
+        A_final_summary = "outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/A_final_summary.csv",
+        
+        trf_results = "/userdata/jgauthier/projects/big-trf/outputs/encoder_summary/timit-no_repeats/vanilla_aud.csv",
+        
+        notebook = "notebooks/causal4/behavior_decoding_single_electrode_transfer.ipynb"
+
+    output:
+        notebook = "outputs/causal4/behavior_decoding_single_electrode_transfer/{subject}/behavior_decoding_single_electrode_transfer.ipynb",
+        transfer_results = "outputs/causal4/behavior_decoding_single_electrode_transfer/{subject}/transfer_results.csv",
+
+    run:
+        outdir = Path(output.notebook).parent
+        execute_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(epochs_path=input.epochs,
+                            result_path=input.result,
+                            A_individual_results_path=input.individual_stimulus_decoder_results,
+                            trf_results_path=input.trf_results,
+                            A_early_final_summary_path=input.A_early_final_summary,
+                            A_final_summary_path=input.A_final_summary,
+                            outdir=str(outdir)),
+        )
+
 
 rule behavior_decoding_super:
     input:
@@ -452,6 +485,8 @@ rule behavior_decoding_single_electrode_all:
         expand("outputs/causal4/behavior_decoding_single_electrode/{subject}/behavior_decoding.ipynb",
                subject=config["data"]["subjects"]),
         expand("outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/behavior_decoding_single_electrode_summarize.ipynb",
+               subject=config["data"]["subjects"]),
+        expand("outputs/causal4/behavior_decoding_single_electrode_transfer/{subject}/behavior_decoding_single_electrode_transfer.ipynb",
                subject=config["data"]["subjects"])
 
 
