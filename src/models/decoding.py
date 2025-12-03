@@ -42,6 +42,7 @@ def _prepare_decoding_population(
         global_max_sample: Optional[int] = None,
         target: Literal["acoustic", "lexical_evidence", "mismatch", "mismatch_left_right", "behavior_categorical"] = "lexical_evidence",
         groupby: Optional[list[str]] = None,
+        filter: Optional[str] = None,
         include_only_full_windows=True,
         randomize=False):
     """
@@ -49,6 +50,7 @@ def _prepare_decoding_population(
 
     Args:
         groupby: Yield separate samples for each combination of these grouping variables.
+        filter: Optional filter string on epoch metadata, passed to pd.DataFrame.query.
 
     Yields tuples for each window of form:
         - name: tuple of grouping values, same length as `groupby`.
@@ -90,43 +92,46 @@ def _prepare_decoding_population(
     
     X = epochs_i.get_data(picks=electrode_idxs)
 
-    grouper = epochs_i.metadata.groupby(groupby) if groupby is not None else [((), epochs_i.metadata)]
+    md = epochs_i.metadata
+    if filter is not None:
+        selection = selection & md.eval(filter)
+
+    grouper = md.groupby(groupby) if groupby is not None else [((), md)]
 
     for name, metadata_subset in grouper:
-        selection = (epochs_i.metadata.phoneme_pair == phoneme_pair) & \
-            epochs_i.metadata.index.isin(metadata_subset.index)
-        if selection.sum() == 0:
+        selection_i = selection & md.index.isin(metadata_subset.index)
+        if selection_i.sum() == 0:
             continue
 
         for smin, smax in windows:
             # num_trials * num_electrodes * num_times
-            X_window = X[selection][:, :, smin:smax]
+            X_window = X[selection_i][:, :, smin:smax]
             # flatten space * time
             X_window = X_window.reshape(X_window.shape[0], -1)
 
             if target == "acoustic":
-                y = epochs_i.metadata.categorical_acoustic_cue[selection].values
+                y = md.categorical_acoustic_cue[selection_i].values
             elif target == "lexical_evidence":
-                y = (epochs_i.metadata.word_end.str[0] == phoneme_pair[0])[selection].values
+                y = (md.word_end.str[0] == phoneme_pair[0])[selection_i].values
             elif target == "mismatch":
-                y = epochs_i.metadata.mismatch[selection].values
+                y = md.mismatch[selection_i].values
             elif target == "mismatch_left_right":
-                y = epochs_i.metadata.mismatch_left_right[selection].values
+                y = md.mismatch_left_right[selection_i].values
 
                 # Subset data to only include mismatch trials
                 X_window = X_window[y != 0]
                 y = y[y != 0]
             elif target == "behavior_categorical":
-                y = epochs_i.metadata.behavior_dummy_forced[selection].values
+                y = md.behavior_dummy_forced[selection_i].values
 
             
-            # stratify_class = epochs_ij.metadata.stratify_class[selection].values
+            # stratify_class = epochs_ij.metadata.stratify_class[selection_i].values
 
             if randomize:
                 # Randomize the labels
                 y = np.random.permutation(y)
 
-            yield name, smin, smax, selection, X_window, y
+            yield name, smin, smax, selection_i, X_window, y
 
 
 
@@ -230,6 +235,7 @@ def run_decoding_model_comparison_population(
         target: Literal["acoustic", "lexical_evidence", "mismatch", "mismatch_left_right", "behavior_categorical"] = "lexical_evidence",
         strategy: Literal["nested-cv", "train-test"] = "nested-cv",
         groupby: Optional[list[str]] = None,
+        filter: Optional[str] = None,
         stratify: tuple[str, ...] = ("resampled", "lexical_evidence"),
         pca_num_components: Optional[float | Literal["auto"]] = None,
         include_only_full_windows=True,
@@ -254,6 +260,7 @@ def run_decoding_model_comparison_population(
         global_max_sample=global_max_sample,
         target=target,
         groupby=groupby,
+        filter=filter,
         include_only_full_windows=include_only_full_windows,
         randomize=randomize
     )
