@@ -417,7 +417,8 @@ def run_decoding_searchlight_single_electrode(
         return_outcomes=True,
         include_only_full_windows=True,
         smoke_test=False,
-        randomize=False
+        randomize=False,
+        n_jobs=None,
         ) -> tuple[dict[DecoderFitKey, dict[str, float]],
                    dict[DecoderFitKey, dict[str, float]],
                    dict[DecoderFitKey, pd.DataFrame],
@@ -513,7 +514,7 @@ def run_decoding_searchlight_single_electrode(
                     fitted = fit_nested_cv(X, y, num_classes=num_classes, scoring=scoring)
                 elif strategy == "train-test":
                     fitted = fit_train_test_old(X, y, num_classes=num_classes, scoring=scoring,
-                                            num_repeats=5)
+                                                num_repeats=5, n_jobs=n_jobs)
 
                 result_key = (row.subject, row.electrode_idx, phoneme_pair, smin, smax)
 
@@ -710,7 +711,7 @@ def fit_train_test(X, y, num_classes: int, scoring: list[str],
 def fit_train_test_old(X, y, num_classes: int, scoring: list[str],
                        test_fraction=0.2, num_folds=3,
                        pca_num_components: Optional[float] = None,
-                       num_repeats=1, random_state=42):
+                       num_repeats=1, random_state=42, n_jobs=None):
     seeds = np.random.RandomState(random_state).randint(0, 10000, num_repeats)
 
     results = []
@@ -729,7 +730,7 @@ def fit_train_test_old(X, y, num_classes: int, scoring: list[str],
         pipeline.append(LogisticRegressionCV(
             Cs=Cs, cv=StratifiedKFold(num_folds, shuffle=True, random_state=seed),
             max_iter=100000, class_weight="balanced", fit_intercept=False,
-            solver=solver))
+            solver=solver, n_jobs=n_jobs))
         model = make_pipeline(*pipeline)
         model.fit(X_train, y_train)
 

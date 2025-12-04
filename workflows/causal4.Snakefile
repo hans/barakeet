@@ -412,6 +412,58 @@ rule behavior_decoding_single_electrode_summarize:
                             outdir=str(outdir)),
         )
 
+# acoustic decoding analysis on those electrodes that show behavioral response
+rule behavior_decoding_single_electrode_acoustic:
+    input:
+        epochs = "outputs/epochs_preprocessed/{subject}_epo.fif",
+        speech_reponsive = "outputs/causal4/find_speech_responsive/{subject}_results.csv",
+        behavior_A_early = "outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/A_early_final_summary.csv",
+        behavior_A = "outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/A_final_summary.csv",
+
+        notebook = "notebooks/causal4/behavior_decoding_single_electrode_acoustic.ipynb"
+
+    output:
+        notebook = "outputs/causal4/behavior_decoding_single_electrode_acoustic/{subject}/behavior_decoding_single_electrode_acoustic.ipynb",
+        results = "outputs/causal4/behavior_decoding_single_electrode_acoustic/{subject}/results.pt",
+
+    run:
+        outdir = Path(output.notebook).parent
+        execute_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(epochs_path=input.epochs,
+                            electrodes_path=input.speech_reponsive,
+                            summary_paths={"A_early": input.behavior_A_early,
+                                           "A": input.behavior_A},
+                            outdir=str(outdir)),
+        )
+
+rule behavior_decoding_single_electrode_super:
+    input:
+        all_epochs = expand("outputs/epochs_preprocessed/{subject}_epo.fif", subject=config["data"]["subjects"]),
+        all_speech_responsive = expand("outputs/causal4/find_speech_responsive/{subject}_results.csv", subject=config["data"]["subjects"]),
+        
+        all_A_results = expand("outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/A_results.csv", subject=config["data"]["subjects"]),
+        all_A_early_results = expand("outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/A_early_results.csv", subject=config["data"]["subjects"]),
+
+        notebook = "notebooks/causal4/behavior_decoding_single_electrode_super.ipynb"
+
+    output:
+        notebook = "outputs/causal4/behavior_decoding_single_electrode_super/behavior_decoding_single_electrode_super.ipynb",
+        results = "outputs/causal4/behavior_decoding_single_electrode_super/results.pt",
+
+    run:
+        outdir = Path(output.notebook).parent
+        execute_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(epochs_paths=input.all_epochs,
+                            electrodes_paths=input.all_speech_responsive,
+                            result_paths={"A": input.all_A_results,
+                                          "A_early": input.all_A_early_results},
+                            outdir=str(outdir)),
+        )
+
 # Attempt transferring behavior decoders estimated on different temporal windows to one another.
 rule behavior_decoding_single_electrode_transfer:
     input:
@@ -492,6 +544,8 @@ rule behavior_decoding_single_electrode_all:
         expand("outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/behavior_decoding_single_electrode_summarize.ipynb",
                subject=config["data"]["subjects"]),
         expand("outputs/causal4/behavior_decoding_single_electrode_transfer/{subject}/behavior_decoding_single_electrode_transfer.ipynb",
+               subject=config["data"]["subjects"]),
+        expand("outputs/causal4/behavior_decoding_single_electrode_acoustic/{subject}/behavior_decoding_single_electrode_acoustic.ipynb",
                subject=config["data"]["subjects"])
 
 
