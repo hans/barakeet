@@ -436,6 +436,7 @@ rule behavior_decoding_single_electrode_acoustic:
                             summary_paths={"A_early": input.behavior_A_early,
                                            "A": input.behavior_A},
                             outdir=str(outdir)),
+            log_output=True,
         )
 
 rule behavior_decoding_single_electrode_super:
