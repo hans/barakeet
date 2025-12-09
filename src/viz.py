@@ -112,6 +112,13 @@ def plot_epochs(epochs: dict[Any, np.ndarray],
                                      palette=palette)
     style_order, style_mapper = _check_grouper(epochs_df, style, col, style_order,
                                                share_groupers=share_groupers, grouper_type="style")
+
+    if epochs_df.index.names != ["subject", "channel", "epoch_idx"]:
+        epochs_df = epochs_df.reset_index()
+        if set(["subject", "channel", "epoch_idx"]).issubset(epochs_df.columns):
+            epochs_df = epochs_df.set_index(["subject", "channel", "epoch_idx"])
+        else:
+            raise ValueError("epochs_df must have MultiIndex with levels ['subject', 'channel', 'epoch_idx']")
     
     if errorbar not in ["se", None]:
         raise ValueError("Only 'se' and None are supported for errorbar")
@@ -680,4 +687,84 @@ def plot_timit_epochs_faceted_by_feature(
     g.set_titles(col_template="{col_name}")
     g.fig.suptitle(f"Subject {plot_subject}, electrode {plot_electrode_idx + 1}\nTIMIT tuning", y=1.03)
     g.tight_layout()
+    return g
+
+
+def spaghetti_plot(long_df, y, by1, by2,
+                   by="window", x=None, col="phoneme_pair",
+                   **catplot_kwargs):
+    catplot_kwargs = {
+        "jitter": 0.05,
+        "s": 20,
+        "height": 5,
+        "aspect": 0.7,
+        **catplot_kwargs
+    }
+    assert by in long_df.columns, f"by column '{by}' not in dataframe"
+    assert set(long_df[by].unique()) <= {by1, by2}, f"by column '{by}' has unexpected values: {long_df[by].unique()}"
+    g = sns.catplot(
+        data=long_df,
+        hue=by, y=y, x=x, col=col,
+        kind="strip", dodge=True,
+        **catplot_kwargs
+    )
+    g.set_axis_labels("Population kind", "Behavior decoding\nROC-AUC")
+    g.set_titles(col_template="Phoneme pair:\n{col_name}")
+
+    ## Overlay spaghetti lines
+
+    # Small manual horizontal offset to match the two hue positions
+    offset = 0.20   # tweak if your hue dodge looks slightly different
+
+    # For each facet, draw lines between baseline/full at each source tick, per subject
+    for (col_key, ax) in g.axes_dict.items():
+        # When only row faceting, axes_dict keys are the row values themselves
+        # (If your seaborn version returns tuples, handle accordingly)
+        col_val = col_key if not isinstance(col_key, tuple) else col_key[0]
+
+        data_f = long_df[long_df[col] == col_val].copy()
+
+        # Get x positions for each 'source' category on this axis
+        xlabels = [t.get_text() for t in ax.get_xticklabels()]
+        xticks = ax.get_xticks()
+        xmap = dict(zip(xlabels, xticks))
+
+        # group by source and subject (add other keys if needed to disambiguate)
+        groupers = ["subject", "electrode_idx", "word_end"]
+        if x is not None:
+            groupers = groupers + [x]
+        for (subj, pop, word_end, *group_values), d in data_f.groupby(groupers, sort=False):
+            assert len(d) == 2
+            assert d[by].nunique() == 2
+
+            # Pull the two y-values
+            try:
+                y1 = d.loc[d[by] == by1, y].iloc[0]
+                y2 = d.loc[d[by] == by2, y].iloc[0]
+            except IndexError:
+                continue
+
+            if x is not None:
+                src = group_values[0]
+                x0 = xmap.get(src, None)
+                if x0 is None:
+                    continue
+            else:
+                x0 = xticks[0]  # Default to first tick if no x mapping
+
+            # Draw the connecting line (thin, slightly transparent)
+            style = "solid" #["solid", "dashed"][words[d.phoneme_pair.iloc[0]].index(d.word_end.iloc[0])]
+            ax.plot(
+                [x0 - offset, x0 + offset],
+                [y1, y2],
+                lw=0.7, alpha=0.35, color="gray", zorder=0, clip_on=False,
+                linestyle=style
+            )
+            
+
+    # Optional: bring points above lines & tidy
+    for ax in g.axes.flat:
+        for c in ax.collections:
+            c.set_zorder(2)
+
     return g
