@@ -3,6 +3,31 @@ from pathlib import Path
 from ploomber_engine import execute_notebook
 
 
+def run_notebook(input_path: str, output_path: str, parameters, **kwargs):
+    # First hack into the Ploomber API. Build a fake DAG so that we can validate parameters.
+    from ploomber import DAG
+    from ploomber.products import File
+    from ploomber.tasks import NotebookRunner
+
+    dag = DAG(name="temp_dag")
+    runner = NotebookRunner(
+        Path(input_path),
+        File(output_path),
+        dag=dag,
+        params=parameters,
+        static_analysis="strict",
+    )
+    # This will throw an exception if there are parameter issues (e.g. missing parameters)
+    dag.render(force=True)
+
+    # Now ditch that and run directly with `ploomber_engine`
+    return execute_notebook(
+        Path(input_path),
+        Path(output_path),
+        parameters=parameters,
+    )
+
+
 # params: power threshold
 rule find_speech_responsive:
     input:
@@ -428,15 +453,14 @@ rule behavior_decoding_single_electrode_acoustic:
 
     run:
         outdir = Path(output.notebook).parent
-        execute_notebook(
-            str(input.notebook),
-            str(output.notebook),
-            parameters=dict(epochs_path=input.epochs,
-                            electrodes_path=input.speech_reponsive,
-                            summary_paths={"A_early": input.behavior_A_early,
-                                           "A": input.behavior_A},
-                            outdir=str(outdir)),
-            log_output=True,
+        run_notebook(
+            input.notebook,
+            output.notebook,
+            dict(epochs_path=input.epochs,
+                 electrodes_path=input.speech_reponsive,
+                 summary_path={"A_early": input.behavior_A_early,
+                               "A": input.behavior_A},
+                 outdir=str(outdir)),
         )
 
 rule behavior_decoding_single_electrode_super:
