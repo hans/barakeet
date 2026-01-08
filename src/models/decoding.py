@@ -325,7 +325,6 @@ def run_decoding_model_comparison_population(
                             reg_range=(-8, 3),
                             reg_grid_size=10,
                             pca_dimensions=np.arange(X_baseline.shape[1], X_full.shape[1]),
-                            baseline_results=baseline_results,
                             random_state=seed)
 
         if baseline_results is None or full_results is None:
