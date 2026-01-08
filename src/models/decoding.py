@@ -12,7 +12,7 @@ from sklearn.model_selection import GridSearchCV, KFold, StratifiedKFold, cross_
 from sklearn.linear_model import LogisticRegression, LogisticRegressionCV
 from sklearn.pipeline import Pipeline, make_pipeline
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import check_scoring, make_scorer, precision_recall_fscore_support, roc_auc_score
+from sklearn.metrics import check_scoring, log_loss, make_scorer, precision_recall_fscore_support, roc_auc_score
 from sklearn.metrics._scorer import _MultimetricScorer, _check_multimetric_scoring
 from tqdm.auto import tqdm
 from sklearn.decomposition import PCA
@@ -270,6 +270,7 @@ def run_decoding_model_comparison_population(
 
     def _fit(X, y, num_classes, stratify, random_state,
              reg_range, reg_grid_size,
+             baseline_results=None,
              pca_dimensions=None):
         if strategy == "nested-cv":
             return fit_nested_cv(X, y, num_classes=num_classes,
@@ -286,6 +287,7 @@ def run_decoding_model_comparison_population(
                                   reg_grid_size=reg_grid_size,
                                   pca_num_components=pca_num_components,
                                   pca_dimensions=pca_dimensions,
+                                  baseline_results=baseline_results,
                                   scoring=["roc_auc"],
                                   n_jobs=n_jobs,
                                   num_repeats=5, random_state=random_state)
@@ -323,6 +325,7 @@ def run_decoding_model_comparison_population(
                             reg_range=(-8, 3),
                             reg_grid_size=10,
                             pca_dimensions=np.arange(X_baseline.shape[1], X_full.shape[1]),
+                            baseline_results=baseline_results,
                             random_state=seed)
 
         if baseline_results is None or full_results is None:
@@ -351,6 +354,12 @@ def run_decoding_model_comparison_population(
                 precision_recall_fscore_support(y[test_idxs], baseline_prediction, average="binary")
             full_precision, full_recall, _, _ = \
                 precision_recall_fscore_support(y[test_idxs], full_prediction, average="binary")
+            
+            # compute log-loss
+            baseline_log_loss = log_loss(y[test_idxs], baseline_proba)
+            full_log_loss = log_loss(y[test_idxs], full_proba)
+            # baseline_brier_score = brier_score_loss(y[test_idxs], baseline_proba)
+            # full_brier_score = brier_score_loss(y[test_idxs], full_proba)
 
             result_i = {
                 "subject": subject,
@@ -368,6 +377,9 @@ def run_decoding_model_comparison_population(
 
                 "baseline_recall": baseline_recall,
                 "full_recall": full_recall,
+
+                "baseline_log_loss": baseline_log_loss,
+                "full_log_loss": full_log_loss,
             }
             for groupby_variable, value in zip(groupby or [], name):
                 result_i[groupby_variable] = value
@@ -508,7 +520,8 @@ def run_decoding_searchlight_single_electrode(
 
                 ####
 
-                scoring = ["roc_auc", "f1_macro", "accuracy"] if num_classes == 2 else ["f1_macro", "accuracy"]
+                scoring = ["roc_auc", "neg_log_loss", "f1_macro", "accuracy"] if num_classes == 2 \
+                    else ["f1_macro", "accuracy"]
 
                 if strategy == "nested-cv":
                     fitted = fit_nested_cv(X, y, num_classes=num_classes, scoring=scoring)
@@ -594,12 +607,17 @@ def fit_train_test(X, y, num_classes: int, scoring: list[str],
                    reg_grid_size: int = 10,
                    pca_num_components: Optional[float | Literal["auto"]] = None,
                    pca_dimensions: Optional[np.ndarray] = None,
+                   baseline_results: Optional[dict] = None,
                    num_repeats=1, n_jobs=None, random_state=42):
     """
     Args:
         reg_range: tuple of (min_exp, max_exp) for log10 regularization strength
             grid search
     """
+    assert isinstance(scoring, list)
+    if "neg_log_loss" not in scoring:
+        scoring = scoring + ["neg_log_loss"]
+
     seeds = np.random.RandomState(random_state).randint(0, 10000, num_repeats)
 
     # Find if we are going to be able to have both positive and negative classes in each
@@ -611,13 +629,17 @@ def fit_train_test(X, y, num_classes: int, scoring: list[str],
             L.warning(f"Reducing num_folds to {num_folds} due to limited class samples per fold.")
 
     results = []
-    for seed in seeds:
+    for i, seed in enumerate(seeds):
         X_train, X_test, y_train, y_test, idxs_train, idxs_test = \
             train_test_split(X, y, np.arange(len(X)),
                              test_size=test_fraction,
                              stratify=stratify,
                              shuffle=True,
                              random_state=seed)
+        
+        if baseline_results is not None:
+            np.testing.assert_array_equal(idxs_train, baseline_results["train_idxs"][i])
+            np.testing.assert_array_equal(idxs_test, baseline_results["test_idxs"][i])
 
         num_folds_i = num_folds
         class_counts_train = np.bincount(y_train, minlength=num_classes)
@@ -642,10 +664,21 @@ def fit_train_test(X, y, num_classes: int, scoring: list[str],
             cv_inner = StratifiedKFold(num_folds_i, shuffle=True, random_state=seed)
             splits = list(cv_inner.split(X_train, stratify[idxs_train]))
 
+        # If we have baseline outcomes, validate that these inner splits match as well
+        if baseline_results is not None:
+            for j, (train_idxs, test_idxs) in enumerate(splits):
+                np.testing.assert_array_equal(
+                    idxs_train[train_idxs],
+                    baseline_results[f"fold_{j}_train_idxs"][i]
+                )
+                np.testing.assert_array_equal(
+                    idxs_train[test_idxs],
+                    baseline_results[f"fold_{j}_test_idxs"][i]
+                )
+
         Cs = np.logspace(*reg_range, reg_grid_size).tolist()
         pca_num_components = [0.25, 0.5, 0.9] if pca_num_components == "auto" \
             else pca_num_components
-        
 
         pipeline = []
         if pca_num_components is not None and X.shape[1] > 1:
@@ -679,24 +712,34 @@ def fit_train_test(X, y, num_classes: int, scoring: list[str],
                           refit=True, n_jobs=n_jobs)
         gs.fit(X_train, y_train)
 
-        if callable(scoring):
-            scorers = scoring
-        elif scoring is None or isinstance(scoring, str):
-            scorers = check_scoring(gs, scoring)
-        else:
-            scorers = _check_multimetric_scoring(gs, scoring)
-            # _check_refit_for_multimetric(scorers)
-            scorers = _MultimetricScorer(scorers=scorers)
+        scorers = _check_multimetric_scoring(gs, scoring)
+        # _check_refit_for_multimetric(scorers)
+        scorers = _MultimetricScorer(scorers=scorers)
+
+        scores_dict = {}
 
         train_scores = scorers(gs, X_train, y_train)
         test_scores = scorers(gs, X_test, y_test)
-        results.append({
+
+        # Also evaluate on individual folds, for later Kfold runs of extended models
+        for j, (fold_train_idxs, fold_test_idxs) in enumerate(splits):
+            fold_train_scores = scorers(gs, X_train[fold_train_idxs], y_train[fold_train_idxs])
+            fold_test_scores = scorers(gs, X_train[fold_test_idxs], y_train[fold_test_idxs])
+            scores_dict.update({
+                **{f"fold_{j}_train_{k}": np.array([v]) for k, v in fold_train_scores.items()},
+                **{f"fold_{j}_test_{k}": np.array([v]) for k, v in fold_test_scores.items()},
+                f"fold_{j}_train_idxs": [idxs_train[fold_train_idxs]],
+                f"fold_{j}_test_idxs": [idxs_train[fold_test_idxs]],
+            })
+
+        scores_dict.update({
             **{f"train_{k}": np.array([v]) for k, v in train_scores.items()},
             **{f"test_{k}": np.array([v]) for k, v in test_scores.items()},
             "train_idxs": [idxs_train],
             "test_idxs": [idxs_test],
             "estimator": [gs],
         })
+        results.append(scores_dict)
 
     # Concatenate results from all repeats
     if len(results) == 0:
