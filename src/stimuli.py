@@ -32,6 +32,12 @@ WORD_END_TO_PHONEME_PAIR = {
     "beneficial": "pb",
 }
 
+PHONEME_PAIR_TO_WORD_ENDS = {
+    "bm": ["bountiful", "mountains"],
+    "dn": ["desolate", "necessary"],
+    "pb": ["penecillin", "beneficial"],
+}
+
 WORD_PHASES = {
     "desolate": {
         "acoustic": (0.0, 0.297),
