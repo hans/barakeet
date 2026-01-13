@@ -8,6 +8,8 @@
 *.pt
 *.zip
 *.wav
+*.png
+*.json
 
 .ipynb_checkpoints
 .snakemake
