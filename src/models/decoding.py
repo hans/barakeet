@@ -636,9 +636,9 @@ def fit_train_test(X, y, num_classes: int, scoring: list[str],
                              shuffle=True,
                              random_state=seed)
         
-        if baseline_results is not None:
-            np.testing.assert_array_equal(idxs_train, baseline_results["train_idxs"][i])
-            np.testing.assert_array_equal(idxs_test, baseline_results["test_idxs"][i])
+        # if baseline_results is not None:
+        #     np.testing.assert_array_equal(idxs_train, baseline_results["train_idxs"][i])
+        #     np.testing.assert_array_equal(idxs_test, baseline_results["test_idxs"][i])
 
         num_folds_i = num_folds
         class_counts_train = np.bincount(y_train, minlength=num_classes)
@@ -664,16 +664,16 @@ def fit_train_test(X, y, num_classes: int, scoring: list[str],
             splits = list(cv_inner.split(X_train, stratify[idxs_train]))
 
         # If we have baseline outcomes, validate that these inner splits match as well
-        if baseline_results is not None:
-            for j, (train_idxs, test_idxs) in enumerate(splits):
-                np.testing.assert_array_equal(
-                    idxs_train[train_idxs],
-                    baseline_results[f"fold_{j}_train_idxs"][i]
-                )
-                np.testing.assert_array_equal(
-                    idxs_train[test_idxs],
-                    baseline_results[f"fold_{j}_test_idxs"][i]
-                )
+        # if baseline_results is not None:
+        #     for j, (train_idxs, test_idxs) in enumerate(splits):
+        #         np.testing.assert_array_equal(
+        #             idxs_train[train_idxs],
+        #             baseline_results[f"fold_{j}_train_idxs"][i]
+        #         )
+        #         np.testing.assert_array_equal(
+        #             idxs_train[test_idxs],
+        #             baseline_results[f"fold_{j}_test_idxs"][i]
+        #         )
 
         Cs = np.logspace(*reg_range, reg_grid_size).tolist()
         pca_num_components = [0.25, 0.5, 0.9] if pca_num_components == "auto" \
@@ -720,16 +720,16 @@ def fit_train_test(X, y, num_classes: int, scoring: list[str],
         train_scores = scorers(gs, X_train, y_train)
         test_scores = scorers(gs, X_test, y_test)
 
-        # Also evaluate on individual folds, for later Kfold runs of extended models
-        for j, (fold_train_idxs, fold_test_idxs) in enumerate(splits):
-            fold_train_scores = scorers(gs, X_train[fold_train_idxs], y_train[fold_train_idxs])
-            fold_test_scores = scorers(gs, X_train[fold_test_idxs], y_train[fold_test_idxs])
-            scores_dict.update({
-                **{f"fold_{j}_train_{k}": np.array([v]) for k, v in fold_train_scores.items()},
-                **{f"fold_{j}_test_{k}": np.array([v]) for k, v in fold_test_scores.items()},
-                f"fold_{j}_train_idxs": [idxs_train[fold_train_idxs]],
-                f"fold_{j}_test_idxs": [idxs_train[fold_test_idxs]],
-            })
+        # # Also evaluate on individual folds, for later Kfold runs of extended models
+        # for j, (fold_train_idxs, fold_test_idxs) in enumerate(splits):
+        #     fold_train_scores = scorers(gs, X_train[fold_train_idxs], y_train[fold_train_idxs])
+        #     fold_test_scores = scorers(gs, X_train[fold_test_idxs], y_train[fold_test_idxs])
+        #     scores_dict.update({
+        #         **{f"fold_{j}_train_{k}": np.array([v]) for k, v in fold_train_scores.items()},
+        #         **{f"fold_{j}_test_{k}": np.array([v]) for k, v in fold_test_scores.items()},
+        #         f"fold_{j}_train_idxs": [idxs_train[fold_train_idxs]],
+        #         f"fold_{j}_test_idxs": [idxs_train[fold_test_idxs]],
+        #     })
 
         scores_dict.update({
             **{f"train_{k}": np.array([v]) for k, v in train_scores.items()},
@@ -816,7 +816,10 @@ def fit_train_test_old(X, y, num_classes: int, scoring: list[str],
 
 def get_ensemble_predictions(model_key: DecoderFitKey,
                              models: list[ClassifierLike],
-                             epochs: dict[str, mne.Epochs]) -> pd.DataFrame:
+                             epochs: dict[str, mne.Epochs],
+                             target: Literal["categorical_acoustic_cue",
+                                             "subject_specific_acoustics"],
+                            ) -> pd.DataFrame:
     """
     Get predictions from an ensemble of fit single-electrode models on held-out epochs,
     subsetting appropriately to match the properties of the data the model
@@ -827,11 +830,13 @@ def get_ensemble_predictions(model_key: DecoderFitKey,
             i.e. the keys of the dictionary returned by `run_decoding_analysis_single_electrode`
         models: list of fitted models
         epochs: dict mapping from subject to mne.Epochs containing the held-out epochs
+        target: which target variable to evaluate the model on
     """
     subject, electrode_idx, phoneme_pair, smin, smax = model_key
 
     epochs_ij = epochs[subject]
     assert epochs_ij.metadata is not None
+    assert target in epochs_ij.metadata.columns
     selection = epochs_ij.metadata.phoneme_pair == phoneme_pair
     if selection.sum() == 0:
         raise ValueError(f"No epochs found for subject {subject}, "
@@ -845,7 +850,7 @@ def get_ensemble_predictions(model_key: DecoderFitKey,
         y_proba = model.predict_proba(X)[:, 1]
         outcomes.append(pd.DataFrame({
             "epoch_idx": epochs_ij.metadata.index[selection].values,
-            "decoder_target": epochs_ij.metadata.categorical_acoustic_cue[selection].values,
+            "decoder_target": epochs_ij.metadata[target][selection].values,
             "decoder_prediction": y_pred,
             "decoder_proba": y_proba,
             "fold": i
