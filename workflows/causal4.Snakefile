@@ -177,10 +177,6 @@ rule unify_As:
         )
 
 
-# TODO unified A intrinsics
-# - neurometric response functions
-
-
 rule find_Bs:
     input:
         epochs = "outputs/epochs_preprocessed/{subject}_epo.fif",
@@ -578,3 +574,40 @@ rule behavior_decoding_super_all:
     input:
         expand("outputs/causal4/behavior_decoding_super/{subject}/behavior_decoding_super.ipynb",
                subject=config["data"]["subjects"])
+
+
+# Compute A predictions on both phonetic and behavior targets
+rule A_predictions:
+    input:
+        notebook = "notebooks/causal4/A_predictions.ipynb",
+        all_epochs = expand("outputs/epochs_preprocessed/{subject}_epo.fif", subject=config["data"]["subjects"]),
+        all_speech_responsive = expand("outputs/causal4/find_speech_responsive/{subject}_results.csv", subject=config["data"]["subjects"]),
+        all_results = expand("outputs/causal4/find_As/{subject}_results.csv", subject=config["data"]["subjects"]),
+        all_decoders = expand("outputs/causal4/find_As/{subject}_decoders.pt", subject=config["data"]["subjects"]),
+
+        behav_summary_paths = expand("outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/{kind}_final_summary.csv",
+                                    subject=config["data"]["subjects"], kind=["A", "A_early"]),
+        behav_trial_paths = expand("outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/{kind}_trial_analysis.csv",
+                                subject=config["data"]["subjects"], kind=["A", "A_early"]),
+
+        behav_acoustic_paths = expand("outputs/causal4/behavior_decoding_single_electrode_acoustic/{subject}/results.pt",
+                                      subject=config["data"]["subjects"]),
+
+    output:
+        notebook = "outputs/causal4/A_predictions/A_predictions.ipynb",
+        results = "outputs/causal4/A_predictions/predictions.h5",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            input.notebook,
+            output.notebook,
+            dict(all_epochs=input.all_epochs,
+                 all_electrode_dfs=input.all_speech_responsive,
+                 all_results=input.all_results,
+                 all_decoders=input.all_decoders,
+                 behav_summary_paths=input.behav_summary_paths,
+                 behav_decoder_trial_paths=input.behav_trial_paths,
+                 behav_p_searchlight_paths=input.behav_acoustic_paths,
+                 outdir=str(outdir)),
+        )
