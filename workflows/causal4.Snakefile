@@ -409,10 +409,15 @@ rule behavior_decoding_single_electrode_summarize:
         C_final_summary = "outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/C_final_summary.csv",
         all_summary = "outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/all_summary.csv",
 
-        A_trial_analysis = "outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/A_trial_analysis.csv",
-        A_early_trial_analysis = "outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/A_early_trial_analysis.csv",
-        B_trial_analysis = "outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/B_trial_analysis.csv",
-        C_trial_analysis = "outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/C_trial_analysis.csv",
+        A_predictions = "outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/A-predictions.parquet",
+        A_early_predictions = "outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/A_early-predictions.parquet",
+        B_predictions = "outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/B-predictions.parquet",
+        C_predictions = "outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/C-predictions.parquet",
+
+        A_trial_analysis_ensembled = "outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/A-trial_analysis-ensembled.csv",
+        A_early_trial_analysis_ensembled = "outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/A_early-trial_analysis-ensembled.csv",
+        B_trial_analysis_ensembled = "outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/B-trial_analysis-ensembled.csv",
+        C_trial_analysis_ensembled = "outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/C-trial_analysis-ensembled.csv",
 
     run:
         outdir = Path(output.notebook).parent
@@ -595,7 +600,11 @@ rule A_predictions:
 
     output:
         notebook = "outputs/causal4/A_predictions/A_predictions.ipynb",
-        results = "outputs/causal4/A_predictions/predictions.h5",
+        phonetic_decoding = "outputs/causal4/A_predictions/phonetic_decoding.parquet",
+        behavior_decoding = "outputs/causal4/A_predictions/behavior_decoding.parquet",
+        phonetic_summary = "outputs/causal4/A_predictions/phonetic_summary.parquet",
+        behavior_summary = "outputs/causal4/A_predictions/behavior_summary.parquet",
+        behavior_to_phonetic_decoding = "outputs/causal4/A_predictions/behavior_to_phonetic_decoding.parquet",
 
     run:
         outdir = Path(output.notebook).parent
