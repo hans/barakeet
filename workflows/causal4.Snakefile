@@ -585,8 +585,6 @@ rule behavior_decoding_super_all:
 rule A_predictions:
     input:
         notebook = "notebooks/causal4/A_predictions.ipynb",
-        all_epochs = expand("outputs/epochs_preprocessed/{subject}_epo.fif", subject=config["data"]["subjects"]),
-        all_speech_responsive = expand("outputs/causal4/find_speech_responsive/{subject}_results.csv", subject=config["data"]["subjects"]),
         all_results = expand("outputs/causal4/find_As/{subject}_results.csv", subject=config["data"]["subjects"]),
         all_decoders = expand("outputs/causal4/find_As/{subject}_decoders.pt", subject=config["data"]["subjects"]),
 
@@ -604,9 +602,7 @@ rule A_predictions:
         run_notebook(
             input.notebook,
             output.notebook,
-            dict(all_epochs=input.all_epochs,
-                 all_electrode_dfs=input.all_speech_responsive,
-                 all_results=input.all_results,
+            dict(all_results=input.all_results,
                  all_decoders=input.all_decoders,
                  behav_p_searchlight_paths=input.behav_acoustic_paths,
                  outdir=str(outdir)),
