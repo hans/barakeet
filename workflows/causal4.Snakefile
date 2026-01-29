@@ -590,20 +590,13 @@ rule A_predictions:
         all_results = expand("outputs/causal4/find_As/{subject}_results.csv", subject=config["data"]["subjects"]),
         all_decoders = expand("outputs/causal4/find_As/{subject}_decoders.pt", subject=config["data"]["subjects"]),
 
-        behav_summary_paths = expand("outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/{kind}_final_summary.csv",
-                                    subject=config["data"]["subjects"], kind=["A", "A_early"]),
-        behav_trial_paths = expand("outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/{kind}_trial_analysis.csv",
-                                subject=config["data"]["subjects"], kind=["A", "A_early"]),
-
         behav_acoustic_paths = expand("outputs/causal4/behavior_decoding_single_electrode_acoustic/{subject}/results.pt",
                                       subject=config["data"]["subjects"]),
 
     output:
         notebook = "outputs/causal4/A_predictions/A_predictions.ipynb",
         phonetic_decoding = "outputs/causal4/A_predictions/phonetic_decoding.parquet",
-        behavior_decoding = "outputs/causal4/A_predictions/behavior_decoding.parquet",
         phonetic_summary = "outputs/causal4/A_predictions/phonetic_summary.parquet",
-        behavior_summary = "outputs/causal4/A_predictions/behavior_summary.parquet",
         behavior_to_phonetic_decoding = "outputs/causal4/A_predictions/behavior_to_phonetic_decoding.parquet",
 
     run:
@@ -615,8 +608,6 @@ rule A_predictions:
                  all_electrode_dfs=input.all_speech_responsive,
                  all_results=input.all_results,
                  all_decoders=input.all_decoders,
-                 behav_summary_paths=input.behav_summary_paths,
-                 behav_decoder_trial_paths=input.behav_trial_paths,
                  behav_p_searchlight_paths=input.behav_acoustic_paths,
                  outdir=str(outdir)),
         )
