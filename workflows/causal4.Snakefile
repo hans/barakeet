@@ -439,18 +439,23 @@ rule behavior_decoding_single_electrode_summarize:
         )
 
 # acoustic decoding analysis on those electrodes that show behavioral response
+# ACTUALLY this has been expanded to be a general searchlight; TODO rename
 rule behavior_decoding_single_electrode_acoustic:
     input:
         epochs = "outputs/epochs_preprocessed/{subject}_epo.fif",
         speech_reponsive = "outputs/causal4/find_speech_responsive/{subject}_results.csv",
-        behavior_A_early = "outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/A_early_final_summary.csv",
-        behavior_A = "outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/A_final_summary.csv",
 
         notebook = "notebooks/causal4/behavior_decoding_single_electrode_acoustic.ipynb"
 
     output:
         notebook = "outputs/causal4/behavior_decoding_single_electrode_acoustic/{subject}/behavior_decoding_single_electrode_acoustic.ipynb",
-        results = "outputs/causal4/behavior_decoding_single_electrode_acoustic/{subject}/results.pt",
+
+        outcomes = "outputs/causal4/behavior_decoding_single_electrode_acoustic/{subject}/outcomes.parquet",
+        all_outcomes = "outputs/causal4/behavior_decoding_single_electrode_acoustic/{subject}/all_outcomes.parquet",
+        train_scores = "outputs/causal4/behavior_decoding_single_electrode_acoustic/{subject}/train_scores.parquet",
+        test_scores = "outputs/causal4/behavior_decoding_single_electrode_acoustic/{subject}/test_scores.parquet",
+        avg_scores = "outputs/causal4/behavior_decoding_single_electrode_acoustic/{subject}/avg_test_scores.csv",
+        models = "outputs/causal4/behavior_decoding_single_electrode_acoustic/{subject}/decoding_models.joblib",
 
     run:
         outdir = Path(output.notebook).parent
@@ -588,7 +593,7 @@ rule A_predictions:
         all_results = expand("outputs/causal4/find_As/{subject}_results.csv", subject=config["data"]["subjects"]),
         all_decoders = expand("outputs/causal4/find_As/{subject}_decoders.pt", subject=config["data"]["subjects"]),
 
-        behav_acoustic_paths = expand("outputs/causal4/behavior_decoding_single_electrode_acoustic/{subject}/results.pt",
+        behav_acoustic_paths = expand("outputs/causal4/behavior_decoding_single_electrode_acoustic/{subject}/all_outcomes.parquet",
                                       subject=config["data"]["subjects"]),
 
     output:
