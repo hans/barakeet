@@ -464,8 +464,6 @@ rule behavior_decoding_single_electrode_acoustic:
             output.notebook,
             dict(epochs_path=input.epochs,
                  electrodes_path=input.speech_reponsive,
-                 summary_path={"A_early": input.behavior_A_early,
-                               "A": input.behavior_A},
                  outdir=str(outdir)),
         )
 
@@ -586,6 +584,69 @@ rule behavior_decoding_super_all:
                subject=config["data"]["subjects"])
 
 
+# Permutation-based null distribution for behavior_decoding_single_electrode.
+# Re-runs decoding K times per subject with shuffled labels, using hyperparameters
+# fixed from the true model fit to avoid re-running the inner grid search.
+rule behavior_decoding_single_electrode_permutation:
+    input:
+        epochs = "outputs/epochs_preprocessed/{subject}_epo.fif",
+        all_A_results = "outputs/causal4/find_As/{subject}_results.csv",
+        true_results = "outputs/causal4/behavior_decoding_single_electrode/{subject}/results.pt",
+        notebook = "notebooks/causal4/behavior_decoding_single_electrode_permutation.ipynb"
+
+    output:
+        notebook = "outputs/causal4/behavior_decoding_single_electrode_permutation/{subject}/notebook.ipynb",
+        permutation_results = "outputs/causal4/behavior_decoding_single_electrode_permutation/{subject}/permutation_results.parquet"
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(epochs_path=input.epochs,
+                            all_A_result_path=input.all_A_results,
+                            true_results_path=input.true_results,
+
+                            min_sample=1,
+                            window_size=15,
+                            stride=2,
+                            n_permutations=10,
+
+                            outdir=str(outdir)),
+        )
+
+
+rule behavior_decoding_single_electrode_permutation_all:
+    input:
+        expand("outputs/causal4/behavior_decoding_single_electrode_permutation/{subject}/permutation_results.parquet",
+               subject=config["data"]["subjects"])
+
+
+# NHST across all subjects: compare true vs permuted Δ ROC-AUC per decoder,
+# apply Benjamini-Hochberg FDR correction.
+rule behavior_decoding_single_electrode_permutation_test:
+    input:
+        all_true_results = expand("outputs/causal4/behavior_decoding_single_electrode/{subject}/results.pt",
+                                  subject=config["data"]["subjects"]),
+        all_permutation_results = expand("outputs/causal4/behavior_decoding_single_electrode_permutation/{subject}/permutation_results.parquet",
+                                         subject=config["data"]["subjects"]),
+        notebook = "notebooks/causal4/behavior_decoding_single_electrode_permutation_test.py"
+
+    output:
+        notebook = "outputs/causal4/behavior_decoding_single_electrode_permutation_test/notebook.ipynb",
+        results = "outputs/causal4/behavior_decoding_single_electrode_permutation_test/results.csv"
+
+    run:
+        outdir = Path(output.notebook).parent
+        execute_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(all_true_results=list(input.all_true_results),
+                            all_permutation_results=list(input.all_permutation_results),
+                            outdir=str(outdir)),
+        )
+
+
 # Compute A predictions on both phonetic and behavior targets
 rule A_predictions:
     input:
@@ -638,7 +699,7 @@ rule prepare_neurometrics:
             "outputs/causal4/find_speech_responsive/{subject}_results.csv",
             subject=config["data"]["subjects"]
         ),
-        notebook = "notebooks/causal4/prepare_neurometrics.ipynb",
+        notebook = "notebooks/causal4/prepare_neurometrics.py",
 
     output:
         notebook = "outputs/causal4/prepare_neurometrics/prepare_neurometrics.ipynb",
