@@ -1239,7 +1239,9 @@ def extract_hga_windows_df(
         ), steps in data.ambiguous_resampled_steps.items()
     }
 
-    for site_row in tqdm(sites.iter_rows(named=True), total=sites.height):
+    for site_row in tqdm(
+        sites.iter_rows(named=True), total=sites.height, desc="Extracting HGA windows"
+    ):
         subject = site_row["subject"]
         electrode_idx = site_row["electrode_idx"]
         phoneme_pair = site_row["phoneme_pair"]

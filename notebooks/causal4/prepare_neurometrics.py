@@ -97,6 +97,7 @@ epochs = {}
 for path in all_epochs:
     subject = re.findall(r"(EC[\d]+)_epo", str(path))[0]
     ep_i = mne.read_epochs(path, verbose=False)
+    assert ep_i.metadata is not None
     ep_i.metadata = add_metadata_features(ep_i.metadata)
     epochs[subject] = ep_i
 
@@ -387,7 +388,7 @@ early_polarity = (
     .reset_index()
     .set_index("decoder_target")
     .groupby(["subject", "electrode_idx", "phoneme_pair", "word_end"])
-    .apply(lambda xs: np.sign(xs.loc[1] - xs.loc[0]))
+    .apply(lambda xs: np.sign(xs.loc[1] - xs.loc[0]))  # type: ignore[union-attr]
     .rename(columns={"hga_early": "early_polarity"})
 )
 
@@ -406,7 +407,7 @@ late_polarity = (
     .reset_index()
     .set_index("behavior_dummy_forced")
     .groupby(["subject", "electrode_idx", "phoneme_pair", "word_end"])
-    .apply(lambda xs: np.sign(xs.loc[1] - xs.loc[0]))
+    .apply(lambda xs: np.sign(xs.loc[1] - xs.loc[0]))  # type: ignore[union-attr]
     .rename(columns={"hga_late": "late_polarity"})
 )
 
