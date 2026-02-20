@@ -32,7 +32,6 @@ import pandas as pd
 import polars as pl
 import seaborn as sns
 import torch
-from loguru import logger as L
 from tqdm.auto import tqdm
 
 tqdm.pandas()
@@ -63,7 +62,6 @@ from src.data import add_metadata_features
 from src.stimuli import (
     OFFSET_DICT,
     PHONEME_PAIR_TO_WORD_ENDS,
-    WORD_END_TO_PHONEME_PAIR,
     POD_dict,
 )
 from src.viz import add_textgrid_single
@@ -89,24 +87,6 @@ sns.set_context("paper", font_scale=1.25)
 # %% tags=["parameters"]
 all_epochs = list(Path("outputs/epochs_preprocessed").glob("*_epo.fif"))
 
-# Behavioral decoding searchlight
-A_behav_predictions = list(
-    Path("outputs/causal4/behavior_decoding_single_electrode_summarize").glob(
-        "*/A-predictions.parquet"
-    )
-)
-A_early_behav_predictions = list(
-    Path("outputs/causal4/behavior_decoding_single_electrode_summarize").glob(
-        "*/A_early-predictions.parquet"
-    )
-)
-
-# phonetic decoding searchlight. NB this is currently only done for behaviorally selective sites
-# TODO broaden
-phon_predictions_path = Path(
-    "outputs/causal4/A_predictions/behavior_to_phonetic_decoding.parquet"
-)
-
 phonetic_searchlight_paths = list(
     Path("outputs/causal4/behavior_decoding_single_electrode_acoustic/").glob("*")
 )
@@ -117,23 +97,10 @@ transfer_results_paths = list(
     )
 )
 
-electrode_paths = list(Path("outputs/causal4/find_speech_responsive/").glob("*.csv"))
+neurometrics_dir = "outputs/causal4/prepare_neurometrics"
 
 epoch_tmin = -0.4
 epoch_sfreq = 100
-
-# parameters for searching for behavioral peaks
-behav_response_tmin_min = 0.3
-behav_response_smin_min = (behav_response_tmin_min - epoch_tmin) * epoch_sfreq
-
-# parameters for searching for phonetic peaks
-phon_response_tmin_min = 0.0
-phon_response_smin_min = (phon_response_tmin_min - epoch_tmin) * epoch_sfreq
-# threshold value for significant phonetic decoding peak
-phon_response_peak_threshold = 0.64
-
-all_response_tmax_max = 1.3
-all_response_smax_max = int((all_response_tmax_max - epoch_tmin) * epoch_sfreq)
 
 relative_performance_twidth = 0.2
 relative_performance_swidth = int(relative_performance_twidth * epoch_sfreq)
@@ -161,32 +128,12 @@ resampled_palette_simplified = (
 # ## Prepare helpers
 
 # %%
-electrode_df = pl.concat([pl.read_csv(p) for p in electrode_paths]).with_columns(
-    pl.col("subject").cast(subject_enum)
-)
-
-# %%
 epochs = {}
 for path in all_epochs:
     subject = re.findall(r"(EC[\d]+)_epo", str(path))[0]
     ep_i = mne.read_epochs(path, verbose=False)
     ep_i.metadata = add_metadata_features(ep_i.metadata)
     epochs[subject] = ep_i
-
-# %%
-all_md = pl.from_pandas(
-    pd.concat(
-        [
-            ep.metadata.rename_axis("epoch_idx").assign(subject=subject).reset_index()
-            for subject, ep in epochs.items()
-        ],
-        ignore_index=True,
-    ).drop(columns=["TDT Block"])
-).with_columns(
-    pl.col("subject").cast(subject_enum),
-    pl.col("phoneme_pair").cast(phoneme_pair_enum),
-    pl.col("word_end").cast(word_end_enum),
-)
 
 # %%
 # Load saved phonetic decoders
@@ -197,122 +144,131 @@ phonetic_decoder_checkpoints = {
     for subject in tqdm(epochs.keys())
 }
 
-
 # %%
-# New format, todo
+# Load precomputed neurometrics data
+neurometrics_path = Path(neurometrics_dir)
 
-# phonetic_decoder_models = {}
-# for dec_dir in tqdm(phonetic_searchlight_paths):
-#     subject = dec_dir.name
-#     checkpoint_path = dec_dir / "decoding_models.joblib"
-#     phonetic_decoder_models[subject] = joblib.load(checkpoint_path)
-
-# # model predictions on test folds
-# phonetic_decoder_outcomes = {path.name: pd.read_parquet(path / "outcomes.parquet")
-#                              for path in phonetic_searchlight_paths}
-
-# # model predictions on all relevant epochs for a given decoder
-# # (e.g. all p/b epochs for a p/b decoder)
-# # also incorporates multiple measures
-# phonetic_decoder_all_outcomes = {path.name: pd.read_parquet(path / "all_outcomes.parquet")
-#                                  for path in phonetic_searchlight_paths}
-
-# %%
-word_end_df = pl.from_pandas(
-    pd.DataFrame.from_dict(OFFSET_DICT, orient="index", columns=["word_end_offset"])
-    .rename_axis("word_end")
-    .join(
-        pd.DataFrame.from_dict(
-            WORD_END_TO_PHONEME_PAIR, orient="index", columns=["phoneme_pair"]
-        ).rename_axis("word_end"),
-        on="word_end",
-    )
-    .reset_index()
-    .join(
-        pd.DataFrame.from_dict(POD_dict, orient="index", columns=["pod"]).rename_axis(
-            "phoneme_pair"
-        ),
-        on="phoneme_pair",
-    )
-    .reset_index()
-).with_columns(
-    pl.col("word_end").cast(word_end_enum),
-    pl.col("phoneme_pair").cast(phoneme_pair_enum),
-    ((pl.col("word_end_offset") - epoch_tmin) * epoch_sfreq).alias(
-        "word_end_offset_sample"
-    ),
-    ((pl.col("pod") - epoch_tmin) * epoch_sfreq).alias("pod_sample"),
+electrode_df = pl.read_parquet(neurometrics_path / "electrode_df.parquet").with_columns(
+    pl.col("subject").cast(subject_enum)
 )
-
-# %% [markdown]
-# ## Behav prep
-
-# %%
-behav_pred_df = pl.concat(
-    [pl.read_parquet(f) for f in A_behav_predictions + A_early_behav_predictions]
+plot_phon_phon_df = pl.read_parquet(
+    neurometrics_path / "plot_phon_phon_df.parquet"
 ).with_columns(
     pl.col("subject").cast(subject_enum),
     pl.col("phoneme_pair").cast(phoneme_pair_enum),
     pl.col("word_end").cast(word_end_enum),
-    (pl.col("decoder_target") == 1).cast(pl.Int8).alias("decoder_target"),
 )
-
-# %% [markdown]
-# ### Find behav peaks
-
-# %%
-# Compute behavioral baselines
-behav_baseline_df = pl_roc_auc(
-    df=behav_pred_df.unique(
-        subset=[
-            "subject",
-            "electrode_idx",
-            "phoneme_pair",
-            "word_end",
-            "epoch_idx",
-            "fold",
-        ],
-        keep="first",
-    ),
-    target_col="decoder_target",
-    proba_col="baseline_decoder_proba",
-    group_cols=["subject", "electrode_idx", "phoneme_pair", "word_end", "fold"],
-    roc_auc_name="behav_roc_auc_baseline",
-)
-
-# %%
-# Compute per-window, per-fold behavioral prediction performance
-# Exclude the late time windows we don't care about
-# Include the early time windows for now; these will be reused in later comparison analyses
-group_cols = [
-    "subject",
-    "electrode_idx",
-    "phoneme_pair",
-    "word_end",
-    "smin",
-    "smax",
-    "fold",
-]
-behav_roc_auc_searchlight = pl_roc_auc(
-    df=behav_pred_df.filter(pl.col("smax") <= all_response_smax_max),
-    target_col="decoder_target",
-    proba_col="full_decoder_proba",
-    group_cols=group_cols,
-    roc_auc_name="behav_roc_auc",
-)
-
-# %%
-behav_roc_auc_searchlight_df = behav_roc_auc_searchlight.join(
-    behav_baseline_df,
-    on=["subject", "electrode_idx", "phoneme_pair", "word_end", "fold"],
-    how="inner",
+plot_behav_phon_df = pl.read_parquet(
+    neurometrics_path / "plot_behav_phon_df.parquet"
 ).with_columns(
-    (pl.col("behav_roc_auc") - pl.col("behav_roc_auc_baseline")).alias(
-        "behav_roc_auc_improvement"
-    )
+    pl.col("subject").cast(subject_enum),
+    pl.col("phoneme_pair").cast(phoneme_pair_enum),
+    pl.col("word_end").cast(word_end_enum),
+)
+plot_behav_behav_df = pl.read_parquet(
+    neurometrics_path / "plot_behav_behav_df.parquet"
+).with_columns(
+    pl.col("subject").cast(subject_enum),
+    pl.col("phoneme_pair").cast(phoneme_pair_enum),
+    pl.col("word_end").cast(word_end_enum),
+)
+plot_phon_behav_df = pl.read_parquet(
+    neurometrics_path / "plot_phon_behav_df.parquet"
+).with_columns(
+    pl.col("subject").cast(subject_enum),
+    pl.col("phoneme_pair").cast(phoneme_pair_enum),
+    pl.col("word_end").cast(word_end_enum),
+)
+behav_roc_auc_searchlight_df = pl.read_parquet(
+    neurometrics_path / "behav_roc_auc_searchlight_df.parquet"
+).with_columns(
+    pl.col("subject").cast(subject_enum),
+    pl.col("phoneme_pair").cast(phoneme_pair_enum),
+    pl.col("word_end").cast(word_end_enum),
+)
+phon_roc_auc_searchlight_df = pl.read_parquet(
+    neurometrics_path / "phon_roc_auc_searchlight_df.parquet"
+).with_columns(
+    pl.col("subject").cast(subject_enum),
+    pl.col("phoneme_pair").cast(phoneme_pair_enum),
+)
+all_md = pl.read_parquet(neurometrics_path / "all_md.parquet").with_columns(
+    pl.col("subject").cast(subject_enum),
+    pl.col("phoneme_pair").cast(phoneme_pair_enum),
+    pl.col("word_end").cast(word_end_enum),
+)
+word_end_df = pl.read_parquet(neurometrics_path / "word_end_df.parquet").with_columns(
+    pl.col("word_end").cast(word_end_enum),
+    pl.col("phoneme_pair").cast(phoneme_pair_enum),
+)
+phon_peaks_df = pl.read_parquet(neurometrics_path / "phon_peaks_df.parquet").with_columns(
+    pl.col("subject").cast(subject_enum),
+    pl.col("phoneme_pair").cast(phoneme_pair_enum),
+)
+behav_peaks_df = pl.read_parquet(
+    neurometrics_path / "behav_peaks_df.parquet"
+).with_columns(
+    pl.col("subject").cast(subject_enum),
+    pl.col("phoneme_pair").cast(phoneme_pair_enum),
+    pl.col("word_end").cast(word_end_enum),
+)
+behav_peaks_df_unfiltered = pl.read_parquet(
+    neurometrics_path / "behav_peaks_df_unfiltered.parquet"
+).with_columns(
+    pl.col("subject").cast(subject_enum),
+    pl.col("phoneme_pair").cast(phoneme_pair_enum),
+    pl.col("word_end").cast(word_end_enum),
+)
+behav_baseline_df = pl.read_parquet(
+    neurometrics_path / "behav_baseline_df.parquet"
+).with_columns(
+    pl.col("subject").cast(subject_enum),
+    pl.col("phoneme_pair").cast(phoneme_pair_enum),
+    pl.col("word_end").cast(word_end_enum),
+)
+zoomin_keys = pl.read_parquet(neurometrics_path / "zoomin_keys.parquet").with_columns(
+    pl.col("subject").cast(subject_enum),
+    pl.col("phoneme_pair").cast(phoneme_pair_enum),
+    pl.col("word_end").cast(word_end_enum),
+)
+early_polarity = pd.read_parquet(neurometrics_path / "early_polarity.parquet").set_index(
+    ["subject", "electrode_idx", "phoneme_pair", "word_end"]
+)
+late_polarity = pd.read_parquet(neurometrics_path / "late_polarity.parquet").set_index(
+    ["subject", "electrode_idx", "phoneme_pair", "word_end"]
+)
+hga_df = pd.read_parquet(neurometrics_path / "hga_df.parquet")
+reg_df = pd.read_parquet(neurometrics_path / "reg_df.parquet")
+
+# %%
+paper_data = PaperData(
+    electrode_df=electrode_df,
+    plot_phon_phon_df=plot_phon_phon_df,
+    plot_behav_phon_df=plot_behav_phon_df,
+    plot_behav_behav_df=plot_behav_behav_df,
+    plot_phon_behav_df=plot_phon_behav_df,
+    behav_roc_auc_searchlight_df=behav_roc_auc_searchlight_df,
+    phon_roc_auc_searchlight_df=phon_roc_auc_searchlight_df,
+    all_md=all_md,
+    word_end_df=word_end_df,
+    epochs=epochs,
+    phon_peaks_df=phon_peaks_df,
+    behav_peaks_df=behav_peaks_df,
+    behav_peaks_df_unfiltered=behav_peaks_df_unfiltered,
+    behav_baseline_df=behav_baseline_df,
+    zoomin_keys=zoomin_keys,
+    early_polarity=early_polarity,
+    late_polarity=late_polarity,
+    hga_df=hga_df,
+    reg_df=reg_df,
 )
 
 # %%
+# Derived; cheap to recompute from precomputed searchlight data
+phon_roc_auc_mean_df = phon_roc_auc_searchlight_df.group_by(
+    ["subject", "electrode_idx", "phoneme_pair", "smin", "smax"]
+).agg(pl.col("phon_roc_auc").mean())
+
 behav_roc_auc_mean_df = behav_roc_auc_searchlight_df.group_by(
     ["subject", "electrode_idx", "phoneme_pair", "word_end", "smin", "smax"]
 ).agg(
@@ -321,71 +277,6 @@ behav_roc_auc_mean_df = behav_roc_auc_searchlight_df.group_by(
         pl.col("behav_roc_auc_baseline").mean(),
         pl.col("behav_roc_auc_improvement").mean(),
     ]
-)
-
-# %%
-behav_peaks_df_unfiltered = (
-    behav_roc_auc_mean_df.join(word_end_df, on=["phoneme_pair", "word_end"], how="left")
-    .filter(
-        pl.col("smax") <= pl.col("word_end_offset_sample") + 20,
-        pl.col("smin") >= pl.col("pod_sample"),
-    )
-    .sort("behav_roc_auc_improvement", descending=True)
-    .group_by(["subject", "electrode_idx", "phoneme_pair", "word_end"])
-    .first()
-)
-
-# %%
-behav_peaks_df = behav_peaks_df_unfiltered.filter(
-    pl.col("behav_roc_auc_improvement") > 0
-)
-
-# %% [markdown]
-# ## Prep phonetic
-
-# %%
-phon_pred_df = pl.read_parquet(phon_predictions_path).with_columns(
-    pl.col("subject").cast(subject_enum),
-    pl.col("phoneme_pair").cast(phoneme_pair_enum),
-    (pl.col("decoder_target") == 1).cast(pl.Int8).alias("decoder_target"),
-)
-
-# %%
-# Compute per-window, per-fold phonetic prediction performance
-# Exclude the late time windows we don't care about
-# Include the rest of time windows for now; these will be reused in later comparison analyses
-group_cols = ["subject", "electrode_idx", "phoneme_pair", "smin", "smax", "fold"]
-phon_roc_auc_searchlight_df = pl_roc_auc(
-    df=phon_pred_df.filter(
-        (pl.col("smin") >= phon_response_smin_min)
-        & (pl.col("smax") <= all_response_smax_max)
-    ),
-    target_col="decoder_target",
-    proba_col="decoder_proba",
-    group_cols=group_cols,
-    roc_auc_name="phon_roc_auc",
-)
-
-# %%
-phon_roc_auc_mean_df = phon_roc_auc_searchlight_df.group_by(
-    ["subject", "electrode_idx", "phoneme_pair", "smin", "smax"]
-).agg(pl.col("phon_roc_auc").mean())
-
-# %%
-phon_peaks_df = (
-    phon_roc_auc_mean_df.join(
-        word_end_df.group_by(["phoneme_pair"]).agg(pl.max("word_end_offset_sample")),
-        on=["phoneme_pair"],
-        how="left",
-    )
-    .filter(
-        pl.col("smin") >= phon_response_smin_min,
-        pl.col("smax") <= pl.col("word_end_offset_sample"),
-        pl.col("phon_roc_auc") >= phon_response_peak_threshold,
-    )
-    .sort("phon_roc_auc", descending=True)
-    .group_by(["subject", "electrode_idx", "phoneme_pair"])
-    .first()
 )
 
 # %% [markdown]
@@ -646,39 +537,16 @@ for ax in axs:
 # ## Plot neurometric for phonetic targets
 
 # %%
-# --- phon peaks: keys -> join to predictions -> join metadata
 plot_phon_phon_keys = phon_peaks_df.select(
     ["subject", "electrode_idx", "phoneme_pair", "smin", "smax"]
 )
-plot_phon_phon_df = plot_phon_phon_keys.join(
-    phon_pred_df,
-    on=["subject", "electrode_idx", "phoneme_pair", "smin", "smax"],
-    how="left",
-).join(all_md, on=["subject", "epoch_idx", "phoneme_pair"], how="left")
-
+plot_phon_phon_df = paper_data.plot_phon_phon_df
 
 # %%
-# --- behav peaks: keys (+ word_end) -> rename -> join to predictions -> join metadata
 plot_behav_phon_keys = behav_peaks_df.select(
     ["subject", "electrode_idx", "phoneme_pair", "smin", "smax", "word_end"]
 )
-
-plot_behav_phon_df = (
-    plot_behav_phon_keys.rename({"word_end": "behav_word_end"})
-    .join(
-        phon_pred_df,
-        on=["subject", "electrode_idx", "phoneme_pair", "smin", "smax"],
-        how="left",
-    )
-    .join(
-        all_md,
-        on=["subject", "epoch_idx", "phoneme_pair"],
-        how="left",
-    )
-    # retain epochs where metadata word_end matches behav peak word_end
-    .filter(pl.col("word_end") == pl.col("behav_word_end"))
-    .drop("behav_word_end")
-)
+plot_behav_phon_df = paper_data.plot_behav_phon_df
 
 # %%
 # --- concat with source labels
@@ -760,67 +628,6 @@ phon_acc_change = (
     .with_columns((pl.col("phon") - pl.col("behav")).alias("acc_diff"))
 )
 
-# %%
-# # compute phonetic accuracy per source and resampled, within fold
-# phon_acc = plot_phon_df.groupby(["source", "site", "subject", "electrode_idx", "phoneme_pair", "resampled", "lexical_evidence", "smin", "smax", "fold"]) \
-#     .progress_apply(lambda xs: accuracy_score(xs.decoder_target == 1, xs.decoder_proba > 0.5)) \
-#     .rename("accuracy").reset_index()
-
-# %%
-# # Pivot wider and get difference in accuracy depending on phon source vs behav source
-# assert phon_acc.groupby(["site", "subject", "electrode_idx", "phoneme_pair", "resampled", "lexical_evidence", "fold"]).size().max() <= 2
-
-# # NB we are doing dropna here -- so those phon sites which are predictive of phon but
-# # not predictive of behav aren't included in the comparison
-# phon_acc_change = phon_acc.pivot_table(
-#     index=["site", "subject", "electrode_idx", "phoneme_pair", "resampled", "lexical_evidence", "fold"],
-#     columns="source",
-#     values="accuracy").dropna().assign(acc_diff=lambda df: df.phon - df.behav)
-
-# %%
-# g = sns.catplot(data=phon_acc_change.to_pandas(),
-#                 x="resampled", y="phon", hue="lexical_evidence",
-#                 row="phoneme_pair", row_order=phoneme_pair_order,
-#                 kind="point", units="site", height=3.5)
-# g.set_axis_labels("Stimulus step", "Phonetic\ndecoding accuracy")
-# g.set_titles(template="{row_name}")
-# for ax in g.axes.flat:
-#     ax.axhline(0.5, color="red", linestyle="--")
-
-# %%
-# g = sns.catplot(
-#     data=phon_acc_change.melt(
-#         id_vars=["site", "subject", "electrode_idx", "phoneme_pair", "resampled", "lexical_evidence", "fold"],
-#         value_vars=["phon", "behav"],
-#         variable_name="source",
-#         value_name="accuracy"),
-#     x="resampled", y="accuracy", hue="source", hue_order=source_order,
-#     row="phoneme_pair", row_order=phoneme_pair_order,
-#     kind="point", units="site", height=3.5)
-# g.set_axis_labels("Stimulus step", "Phonetic\ndecoding accuracy")
-# g.set_titles(template="{row_name}")
-
-# for ax in g.axes.flat:
-#     ax.axhline(0.5, color="red", linestyle="--")
-
-# %%
-# from scipy.stats import ttest_1samp
-# phon_acc_change.groupby(["phoneme_pair", "resampled", "lexical_evidence"]) \
-#     .apply(lambda xs: pd.Series(ttest_1samp(xs["phon"], popmean=0.5), index=["t_stat", "p_value"])).sort_values("p_value")
-
-# %%
-# g = sns.catplot(data=phon_acc_change.to_pandas(),
-#                 x="resampled", y="acc_diff", hue="lexical_evidence",
-#                 col="phoneme_pair", col_order=phoneme_pair_order,
-#                 kind="point", units="site")
-# for ax in g.axes.flat:
-#     ax.axhline(0, color="red", linestyle="--")
-
-# %%
-# from scipy.stats import ttest_1samp
-# phon_acc_change.groupby(["phoneme_pair", "resampled", "lexical_evidence"]) \
-#     .apply(lambda xs: pd.Series(ttest_1samp(xs["acc_diff"], popmean=0), index=["t_stat", "p_value"])).sort_values("p_value")
-
 # %% [markdown]
 # ## Behav prediction
 
@@ -828,21 +635,7 @@ phon_acc_change = (
 plot_phon_behav_keys = phon_peaks_df.select(
     ["subject", "electrode_idx", "phoneme_pair", "smin", "smax"]
 )
-plot_phon_behav_df = plot_phon_behav_keys.join(
-    behav_pred_df,
-    on=["subject", "electrode_idx", "phoneme_pair", "smin", "smax"],
-    how="left",
-)
-missing_phon_behav = plot_phon_behav_df.filter(pl.col("full_decoder_proba").is_null())
-if missing_phon_behav.height > 0:
-    L.warning(
-        f"Found {missing_phon_behav.height} phonetic peak sites with no matching behavioral predictions"
-    )
-    L.warning(
-        missing_phon_behav.select(
-            ["subject", "electrode_idx", "phoneme_pair", "smin", "smax"]
-        )
-    )
+plot_phon_behav_df = paper_data.plot_phon_behav_df
 
 plot_behav_behav_keys = behav_peaks_df.select(
     ["subject", "electrode_idx", "phoneme_pair", "word_end", "smin", "smax"]
@@ -850,21 +643,7 @@ plot_behav_behav_keys = behav_peaks_df.select(
 plot_behav_behav_keys_unfiltered = behav_peaks_df_unfiltered.select(
     ["subject", "electrode_idx", "phoneme_pair", "word_end", "smin", "smax"]
 )
-plot_behav_behav_df = plot_behav_behav_keys.join(
-    behav_pred_df,
-    on=["subject", "electrode_idx", "phoneme_pair", "word_end", "smin", "smax"],
-    how="left",
-)
-missing_behav_behav = plot_behav_behav_df.filter(pl.col("full_decoder_proba").is_null())
-if missing_behav_behav.height > 0:
-    L.warning(
-        f"Found {missing_behav_behav.height} behavioral peak sites with no matching behavioral predictions"
-    )
-    L.warning(
-        missing_behav_behav.select(
-            ["subject", "electrode_idx", "phoneme_pair", "word_end", "smin", "smax"]
-        )
-    )
+plot_behav_behav_df = paper_data.plot_behav_behav_df
 
 # %%
 plot_behav_df = (
@@ -989,22 +768,6 @@ behav_roc_auc = (
 
 # for ax in g.axes.flat:
 #     ax.axhline(0, color="red", linestyle="--")
-
-# %% [markdown]
-# ## Prepare data struct for future plotting
-
-# %%
-paper_data = PaperData(
-    electrode_df=electrode_df,
-    plot_phon_phon_df=plot_phon_phon_df,
-    plot_behav_phon_df=plot_behav_phon_df,
-    plot_behav_behav_df=plot_behav_behav_df,
-    plot_phon_behav_df=plot_phon_behav_df,
-    behav_roc_auc_searchlight_df=behav_roc_auc_searchlight_df,
-    all_md=all_md,
-    word_end_df=word_end_df,
-    epochs=epochs,
-)
 
 # %% [markdown]
 # ## Dynamics
@@ -2160,248 +1923,6 @@ for ax in g.axes.flat:
     ax.axhline(0.5, color="red", linestyle="--")
     ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: "{:.0%}".format(y)))
 
-# %%
-# sns.catplot(data=phonetic_transfer_results.unpivot(
-#     on=["early_to_late_normalized_roc_auc", "late_to_early_normalized_roc_auc"],
-#     index=["subject", "electrode_idx", "phoneme_pair", "fold"],
-#     variable_name="transfer_direction",
-#     value_name="normalized_roc_auc"
-# ).to_pandas(),
-#             x="phoneme_pair", order=phoneme_pair_order,
-#             y="normalized_roc_auc",
-#             hue="transfer_direction",
-#             kind="box")
-
-# %%
-# g = sns.catplot(data=early_late_outcomes_df.to_pandas().assign(site=lambda xs: xs.subject.astype(str) + "_" + xs.electrode_idx.astype(str) + "_" + xs.phoneme_pair.astype(str)).astype({"resampled": int}),
-#             x="resampled", y="decoder_proba", hue="lexical_evidence",
-#             col="phoneme_pair", col_order=phoneme_pair_order,
-#             kind="point", units="site",
-#             height=3.5)
-# g.set_axis_labels("Stimulus step", "Predicted\nP(second phoneme)")
-# g.set_titles(col_template="Phoneme pair: {col_name}")
-# for ax in g.axes.flat:
-#     ax.axhline(0.5, color="red", linestyle="--")
-
-# %%
-# g = sns.catplot(data=late_early_outcomes_df.to_pandas().assign(site=lambda xs: xs.subject.astype(str) + "_" + xs.electrode_idx.astype(str) + "_" + xs.phoneme_pair.astype(str)),
-#             x="resampled", y="decoder_proba", hue="lexical_evidence",
-#             col="phoneme_pair", col_order=phoneme_pair_order,
-#             kind="point", units="site",
-#             height=3.5)
-# for ax in g.axes.flat:
-#     ax.axhline(0.5, color="red", linestyle="--")
-
-# %%
-# sns.catplot(data=phonetic_transfer_results_by_resampled.unpivot(
-#     on=["early_early_accuracy", "early_late_accuracy", "late_early_accuracy", "late_late_accuracy"],
-#     index=["subject", "electrode_idx", "phoneme_pair", "fold", "resampled"],
-#     variable_name="transfer_condition",
-#     value_name="accuracy"
-# ).to_pandas(),
-#             x="resampled", y="accuracy",
-#             hue="transfer_condition", col="phoneme_pair", col_order=phoneme_pair_order,
-#             kind="point")
-
-# %%
-# sns.catplot(data=phonetic_transfer_results_by_resampled.unpivot(
-#     on=["early_early_accuracy", "early_late_accuracy", "late_early_accuracy", "late_late_accuracy"],
-#     index=["subject", "electrode_idx", "phoneme_pair", "fold", "resampled"],
-#     variable_name="transfer_condition",
-#     value_name="accuracy"
-# ).to_pandas(),
-#             x="resampled", y="accuracy",
-#             hue="transfer_condition",
-#             col="electrode_idx", col_wrap=3, height=2.5, aspect=1.5,
-#             kind="point")
-
-# %%
-# g = sns.catplot(data=
-#     phonetic_transfer_results_by_resampled
-#     .with_columns(
-#         (pl.col("early_late_accuracy") / pl.col("late_late_accuracy")).alias("early_to_late_normalized_accuracy"),
-#         (pl.col("late_early_accuracy") / pl.col("early_early_accuracy")).alias("late_to_early_normalized_accuracy"),
-#     ).unpivot(
-#         on=["early_to_late_normalized_accuracy", "late_to_early_normalized_accuracy"],
-#         index=["subject", "electrode_idx", "phoneme_pair", "fold", "resampled"],
-#         variable_name="transfer_direction",
-#         value_name="normalized_accuracy"
-#     ).to_pandas(),
-#             x="resampled", y="normalized_accuracy",
-#             hue="transfer_direction",
-#             col="phoneme_pair", col_order=phoneme_pair_order,
-#             kind="point")
-
-# for ax in g.axes.flat:
-#     ax.axhline(1, color="red", linestyle="--")
-
-# %%
-# Old method: ROC AUC across stimulus steps
-
-# group_cols = ["subject", "electrode_idx", "phoneme_pair", "fold"]#, "resampled"]
-
-# # compute accuracy within resampled step
-# phonetic_transfer_results_controlled = (
-#     pl_roc_auc(
-#         early_early_outcomes_df
-#         .filter(pl.col("follows_acoustics") == False),
-#         **roc_auc_kwargs,
-#         roc_auc_name="early_early_roc_auc")
-#     .join(
-#         pl_roc_auc(
-#             early_late_outcomes_df
-#                 .filter(pl.col("follows_acoustics") == False),
-#             **roc_auc_kwargs,
-#             roc_auc_name="early_late_roc_auc"),
-#         on=group_cols,
-#         how="inner")
-#     .join(
-#         pl_roc_auc(
-#             late_early_outcomes_df
-#                 .filter(pl.col("follows_acoustics") == False),
-#             **roc_auc_kwargs,
-#             roc_auc_name="late_early_roc_auc"),
-#         on=group_cols,
-#         how="inner")
-#     .join(
-#         pl_roc_auc(
-#             late_late_outcomes_df
-#                 .filter(pl.col("follows_acoustics") == False),
-#             **roc_auc_kwargs,
-#             roc_auc_name="late_late_roc_auc"),
-#         on=group_cols,
-#         how="inner")
-
-#     # Join information about train early -> test early (should be a sanity check)
-#     .join(
-#         phon_roc_auc_searchlight_df.join(early_to_late_transfer_keys.select(["subject", "electrode_idx", "phoneme_pair", "smin_early", "smax_early"]),
-#                                          left_on=["subject", "electrode_idx", "phoneme_pair", "smin", "smax"],
-#                                          right_on=["subject", "electrode_idx", "phoneme_pair", "smin_early", "smax_early"],
-#                                          how="inner").rename({"phon_roc_auc": "early_roc_auc"}),
-#         on=["subject", "electrode_idx", "phoneme_pair", "fold"],
-#         how="inner")
-
-#     # Join information about train late -> test late (should be upper bound?? for the transfer case)
-#     .join(
-#         phon_roc_auc_searchlight_df.join(early_to_late_transfer_keys.select(["subject", "electrode_idx", "phoneme_pair", "word_end", "smin", "smax"]),
-#                                          on=["subject", "electrode_idx", "phoneme_pair", "smin", "smax"],
-#                                          how="inner").rename({"phon_roc_auc": "late_roc_auc",
-#                                                               "smin": "smin_late", "smax": "smax_late"}),
-#         on=["subject", "electrode_idx", "phoneme_pair", "fold"],
-#         how="inner"
-#     )
-# )
-
-# %%
-# group_cols = ["subject", "electrode_idx", "phoneme_pair", "word_end", "fold"]#, "resampled"]
-# controlled_resampled_step = 3
-
-# # compute accuracy within resampled step
-# phonetic_transfer_results_controlled = (
-#     early_early_outcomes_df
-#         .filter(pl.col("follows_acoustics") == False,
-#                 pl.col("resampled") == controlled_resampled_step)
-#         .with_columns(
-#             ((pl.col("decoder_target") == 1) == (pl.col("decoder_proba") >= 0.5)).alias("correct"))
-#         .group_by(group_cols)
-#         .agg(pl.mean("correct").alias("early_early_accuracy"),
-#              pl.count("correct").alias("n_trials"))
-
-#         .join(
-#             early_late_outcomes_df
-#                 .filter(pl.col("follows_acoustics") == False,
-#                         pl.col("resampled") == controlled_resampled_step)
-#                 .with_columns(
-#                     ((pl.col("decoder_target") == 1) == (pl.col("decoder_proba") >= 0.5)).alias("correct"))
-#                 .group_by(group_cols)
-#                 .agg(pl.mean("correct").alias("early_late_accuracy")),
-#             on=group_cols,
-#             how="inner")
-#         .join(
-#             late_early_outcomes_df
-#                 .filter(pl.col("follows_acoustics") == False,
-#                         pl.col("resampled") == controlled_resampled_step)
-#                 .with_columns(
-#                     ((pl.col("decoder_target") == 1) == (pl.col("decoder_proba") >= 0.5)).alias("correct"))
-#                 .group_by(group_cols)
-#                 .agg(pl.mean("correct").alias("late_early_accuracy")),
-#             on=group_cols,
-#             how="inner")
-#         .join(
-#             late_late_outcomes_df
-#                 .filter(pl.col("follows_acoustics") == False,
-#                         pl.col("resampled") == controlled_resampled_step)
-#                 .with_columns(
-#                     ((pl.col("decoder_target") == 1) == (pl.col("decoder_proba") >= 0.5)).alias("correct"))
-#                 .group_by(group_cols)
-#                 .agg(pl.mean("correct").alias("late_late_accuracy")),
-#             on=group_cols,
-#             how="inner")
-
-#         # Join information about train early -> test early (should be a sanity check)
-#         .join(
-#             phon_roc_auc_searchlight_df.join(early_to_late_transfer_keys.select(["subject", "electrode_idx", "phoneme_pair", "word_end", "smin_early", "smax_early"]),
-#                                             left_on=["subject", "electrode_idx", "phoneme_pair", "smin", "smax"],
-#                                             right_on=["subject", "electrode_idx", "phoneme_pair", "smin_early", "smax_early"],
-#                                             how="inner").rename({"phon_roc_auc": "early_roc_auc"}),
-#             on=["subject", "electrode_idx", "phoneme_pair", "word_end", "fold"],
-#             how="inner")
-
-#         # Join information about train late -> test late (should be upper bound?? for the transfer case)
-#         .join(
-#             phon_roc_auc_searchlight_df.join(early_to_late_transfer_keys.select(["subject", "electrode_idx", "phoneme_pair", "word_end", "smin", "smax"]),
-#                                             on=["subject", "electrode_idx", "phoneme_pair", "smin", "smax"],
-#                                             how="inner").rename({"phon_roc_auc": "late_roc_auc",
-#                                                                 "smin": "smin_late", "smax": "smax_late"}),
-#             on=["subject", "electrode_idx", "phoneme_pair", "word_end", "fold"],
-#             how="inner"
-#         )
-# )
-
-# %%
-# transfer_n_trials = phonetic_transfer_results_controlled \
-#     .group_by(["subject", "electrode_idx", "phoneme_pair", "word_end"]) \
-#     .agg(pl.min("n_trials").alias("n_trials")) \
-#     .to_pandas().set_index(["subject", "electrode_idx", "phoneme_pair", "word_end"])["n_trials"]
-# transfer_n_trials
-
-# %%
-# transfer_plot_df = phonetic_transfer_results_controlled.unpivot(
-#     on=["early_early_accuracy", "early_late_accuracy", "late_early_accuracy", "late_late_accuracy"],
-#     index=["subject", "electrode_idx", "phoneme_pair", "word_end", "fold"],#, "resampled"],
-#     variable_name="transfer_condition",
-#     value_name="accuracy"
-# ).to_pandas().assign(site=lambda xs: xs.subject.astype(str) + "_" + xs.electrode_idx.astype(str) + "_" + xs.phoneme_pair.astype(str) + "_" + xs.word_end.astype(str))
-# transfer_plot_df = transfer_plot_df.merge(transfer_n_trials.reset_index(), on=["subject", "electrode_idx", "phoneme_pair", "word_end"], how="left")
-
-# %%
-# # Show all transfer mean results as a heatmap, one column per site
-# transfer_pixel_df = phonetic_transfer_results_controlled.to_pandas() \
-#     .assign(site=lambda xs: xs.subject.astype(str) + "_" + xs.electrode_idx.astype(str) + "_" + xs.phoneme_pair.astype(str) + "_" + xs.word_end.astype(str))
-# transfer_pixel_df = transfer_pixel_df[["site", "early_early_accuracy", "early_late_accuracy", "late_early_accuracy", "late_late_accuracy"]] \
-#     .groupby("site").mean()
-
-# from sklearn.cluster import KMeans
-# kmeans = KMeans(n_clusters=4, random_state=0).fit(transfer_pixel_df.fillna(0).values)
-# transfer_pixel_df = transfer_pixel_df.assign(cluster=kmeans.labels_)
-# transfer_pixel_df = transfer_pixel_df.sort_values("cluster")
-# transfer_pixel_df["cluster"] = transfer_pixel_df.cluster / transfer_pixel_df.cluster.max()
-
-# sns.heatmap(transfer_pixel_df)
-
-# %%
-# g = sns.catplot(data=transfer_plot_df,
-#             y="accuracy",
-#             hue="transfer_condition", col="site", col_wrap=3,
-#             col_order=transfer_plot_df.set_index("site").sort_values("n_trials", ascending=False).index.drop_duplicates(),
-#             kind="box", sharey=False)
-
-# for site, ax in g.axes_dict.items():
-#     ax.axhline(0.5, color="red", linestyle="--")
-#     data = transfer_plot_df.query("site == @site")
-#     n_trials = data["n_trials"].iloc[0]
-#     ax.set_title(f"{site}\n(n={n_trials} trials)")
-
 # %% [markdown]
 # #### Behavior
 
@@ -2819,63 +2340,10 @@ find_site_windows(
 )
 
 # %%
-import src.viz_paper
-
-# %%
-hga_df = src.viz_paper.extract_hga_windows_df(paper_data, zoomin_keys=zoomin_keys)
-
-# %%
-# compute per-site sign relationship between phonetic options in early window
-early_polarity = (
-    hga_df.groupby(
-        ["subject", "electrode_idx", "phoneme_pair", "word_end", "decoder_target"]
-    )
-    .hga_early.mean()
-    .reset_index()
-    .set_index("decoder_target")
-    .groupby(["subject", "electrode_idx", "phoneme_pair", "word_end"])
-    .apply(lambda xs: np.sign(xs.loc[1] - xs.loc[0]))
-    .rename(columns={"hga_early": "early_polarity"})
-)
-
-# compute per-site sign relationship between behavioral options in late window
-late_polarity = (
-    hga_df.groupby(
-        [
-            "subject",
-            "electrode_idx",
-            "phoneme_pair",
-            "word_end",
-            "behavior_dummy_forced",
-        ]
-    )
-    .hga_late.mean()
-    .reset_index()
-    .set_index("behavior_dummy_forced")
-    .groupby(["subject", "electrode_idx", "phoneme_pair", "word_end"])
-    .apply(lambda xs: np.sign(xs.loc[1] - xs.loc[0]))
-    .rename(columns={"hga_late": "late_polarity"})
-)
-
-reg_df = pd.merge(
-    hga_df,
-    pd.merge(
-        early_polarity.reset_index(),
-        late_polarity.reset_index(),
-        on=["subject", "electrode_idx", "phoneme_pair", "word_end"],
-    ),
-    on=["subject", "electrode_idx", "phoneme_pair", "word_end"],
-)
-reg_df["hga_early_signed"] = reg_df["hga_early"] * reg_df["early_polarity"]
-reg_df["hga_late_signed"] = reg_df["hga_late"] * reg_df["late_polarity"]
-reg_df["is_ambiguous"] = reg_df.apply(
-    lambda xs: (
-        str(int(xs.resampled)) in xs.behav_steps_chosen
-        if xs.behav_steps_chosen is not None
-        else np.nan
-    ),
-    axis=1,
-)
+hga_df = paper_data.hga_df
+early_polarity = paper_data.early_polarity
+late_polarity = paper_data.late_polarity
+reg_df = paper_data.reg_df
 
 # %%
 polarity_contingency = (

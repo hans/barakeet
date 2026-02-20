@@ -612,3 +612,66 @@ rule A_predictions:
                  behav_p_searchlight_paths=input.behav_acoustic_paths,
                  outdir=str(outdir)),
         )
+
+
+rule prepare_neurometrics:
+    """
+    Pre-compute PaperData for A_neurometrics visualizations.
+    The slow step (extract_hga_windows_df) and polarity derivations are done here
+    so that A_neurometrics.py can load precomputed parquets instead of rerunning them.
+    """
+    input:
+        all_epochs = expand(
+            "outputs/epochs_preprocessed/{subject}_epo.fif",
+            subject=config["data"]["subjects"]
+        ),
+        A_behav_predictions = expand(
+            "outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/A-predictions.parquet",
+            subject=config["data"]["subjects"]
+        ),
+        A_early_behav_predictions = expand(
+            "outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/A_early-predictions.parquet",
+            subject=config["data"]["subjects"]
+        ),
+        phon_predictions = "outputs/causal4/A_predictions/behavior_to_phonetic_decoding.parquet",
+        electrode_paths = expand(
+            "outputs/causal4/find_speech_responsive/{subject}_results.csv",
+            subject=config["data"]["subjects"]
+        ),
+        notebook = "notebooks/causal4/prepare_neurometrics.ipynb",
+
+    output:
+        notebook = "outputs/causal4/prepare_neurometrics/prepare_neurometrics.ipynb",
+        electrode_df = "outputs/causal4/prepare_neurometrics/electrode_df.parquet",
+        plot_phon_phon_df = "outputs/causal4/prepare_neurometrics/plot_phon_phon_df.parquet",
+        plot_behav_phon_df = "outputs/causal4/prepare_neurometrics/plot_behav_phon_df.parquet",
+        plot_behav_behav_df = "outputs/causal4/prepare_neurometrics/plot_behav_behav_df.parquet",
+        plot_phon_behav_df = "outputs/causal4/prepare_neurometrics/plot_phon_behav_df.parquet",
+        behav_roc_auc_searchlight_df = "outputs/causal4/prepare_neurometrics/behav_roc_auc_searchlight_df.parquet",
+        phon_roc_auc_searchlight_df = "outputs/causal4/prepare_neurometrics/phon_roc_auc_searchlight_df.parquet",
+        all_md = "outputs/causal4/prepare_neurometrics/all_md.parquet",
+        word_end_df = "outputs/causal4/prepare_neurometrics/word_end_df.parquet",
+        phon_peaks_df = "outputs/causal4/prepare_neurometrics/phon_peaks_df.parquet",
+        behav_peaks_df = "outputs/causal4/prepare_neurometrics/behav_peaks_df.parquet",
+        behav_peaks_df_unfiltered = "outputs/causal4/prepare_neurometrics/behav_peaks_df_unfiltered.parquet",
+        behav_baseline_df = "outputs/causal4/prepare_neurometrics/behav_baseline_df.parquet",
+        zoomin_keys = "outputs/causal4/prepare_neurometrics/zoomin_keys.parquet",
+        early_polarity = "outputs/causal4/prepare_neurometrics/early_polarity.parquet",
+        late_polarity = "outputs/causal4/prepare_neurometrics/late_polarity.parquet",
+        hga_df = "outputs/causal4/prepare_neurometrics/hga_df.parquet",
+        reg_df = "outputs/causal4/prepare_neurometrics/reg_df.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        execute_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                all_epochs=list(input.all_epochs),
+                A_behav_predictions=list(input.A_behav_predictions),
+                A_early_behav_predictions=list(input.A_early_behav_predictions),
+                phon_predictions_path=str(input.phon_predictions),
+                electrode_paths=list(input.electrode_paths),
+                outdir=str(outdir),
+            ),
+        )

@@ -10,6 +10,9 @@
 *.wav
 *.png
 *.json
+*.parquet
+*.joblib
+*.h5
 
 .ipynb_checkpoints
 .snakemake
