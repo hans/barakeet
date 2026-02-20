@@ -8,8 +8,9 @@ configfile: "config.yaml"
 
 include: "workflows/causal4.Snakefile"
 
-DEFAULT_NOTEBOOKS = {run_name: run_dict if run_dict else {"notebook": run_name}
-                     for run_name, run_dict in config["run_notebooks"].items()}
+# DEFAULT_NOTEBOOKS = {run_name: run_dict if run_dict else {"notebook": run_name}
+#                      for run_name, run_dict in config["run_notebooks"].items()}
+DEFAULT_NOTEBOOKS = {}
 
 
 wildcard_constraints:
@@ -353,14 +354,14 @@ rule single_electrode_decoding_specific_window_random:
         )
 
 
-rule single_electrode_decoding_all_results:
-    input:
-        expand("outputs/single_electrode_decoding/full_window/{target}/scores.csv",
-               target=config["decoding"]["targets"]),
-        expand("outputs/single_electrode_decoding/{window}/{target}/scores.csv",
-               window=config["decoding"]["window_sizes"],
-               target=config["decoding"]["targets"]),
-        # expand("outputs/single_electrode_decoding-random_{run}/{window}/{target}/scores.csv",
-        #         window=config["decoding"]["window_sizes"] + ["full_window"],
-        #         target=config["decoding"]["targets"],
-        #         run=list(range(config["decoding"]["num_random_runs"]))),
+# rule single_electrode_decoding_all_results:
+#     input:
+#         expand("outputs/single_electrode_decoding/full_window/{target}/scores.csv",
+#                target=config["decoding"]["targets"]),
+#         expand("outputs/single_electrode_decoding/{window}/{target}/scores.csv",
+#                window=config["decoding"]["window_sizes"],
+#                target=config["decoding"]["targets"]),
+#         # expand("outputs/single_electrode_decoding-random_{run}/{window}/{target}/scores.csv",
+#         #         window=config["decoding"]["window_sizes"] + ["full_window"],
+#         #         target=config["decoding"]["targets"],
+#         #         run=list(range(config["decoding"]["num_random_runs"]))),

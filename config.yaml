@@ -12,30 +12,9 @@ data:
     - EC282
     - EC287
 
-run_notebooks:
-  mismatch_erp:
-  population_decoding:
-  population_decoding_nopca:
-    notebook: population_decoding
-    params:
-      pca_num_components: null
-  population_decoding_speech_responsive:
 
+analysis:
+  epoch_sfreq: 100
+  epoch_tmin: -0.4
 
-decoding:
-  targets:
-    - acoustic
-    - mismatch
-    - lexical_evidence
-    # - mismatch_left_right
-    - behavior_categorical
-
-  num_random_runs: 3
-
-  window_sizes:
-    # - 10
-    # - 20
-    - 30
-    # - 60
-    # - 90
-    # - 120
+  phon_response_peak_threshold: 0.64

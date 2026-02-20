@@ -25,7 +25,6 @@ import mne
 import numpy as np
 import pandas as pd
 import polars as pl
-import torch
 from loguru import logger as L
 from tqdm.auto import tqdm
 
@@ -35,11 +34,9 @@ tqdm.pandas()
 from src.data import add_metadata_features
 from src.stimuli import (
     OFFSET_DICT,
-    PHONEME_PAIR_TO_WORD_ENDS,
-    POD_dict,
     WORD_END_TO_PHONEME_PAIR,
+    POD_dict,
 )
-import src.viz_paper
 from src.viz_paper import (
     PaperData,
     extract_hga_windows_df,
@@ -72,17 +69,16 @@ electrode_paths = list(Path("outputs/causal4/find_speech_responsive/").glob("*.c
 epoch_tmin = -0.4
 epoch_sfreq = 100
 
-behav_response_tmin_min = 0.3
-behav_response_smin_min = (behav_response_tmin_min - epoch_tmin) * epoch_sfreq
-
 phon_response_tmin_min = 0.0
-phon_response_smin_min = (phon_response_tmin_min - epoch_tmin) * epoch_sfreq
+all_response_tmax_max = 1.3
+
 phon_response_peak_threshold = 0.64
 
-all_response_tmax_max = 1.3
-all_response_smax_max = int((all_response_tmax_max - epoch_tmin) * epoch_sfreq)
-
 outdir = "outputs/causal4/prepare_neurometrics"
+
+# %%
+phon_response_smin_min = (phon_response_tmin_min - epoch_tmin) * epoch_sfreq
+all_response_smax_max = int((all_response_tmax_max - epoch_tmin) * epoch_sfreq)
 
 # %%
 outdir = Path(outdir)
@@ -373,7 +369,7 @@ _bootstrap = PaperData(
     behav_baseline_df=behav_baseline_df,
     zoomin_keys=zoomin_keys,
     early_polarity=None,  # type: ignore  — filled in below
-    late_polarity=None,   # type: ignore  — filled in below
+    late_polarity=None,  # type: ignore  — filled in below
 )
 
 # %%
@@ -468,13 +464,19 @@ paper_data.plot_phon_phon_df.write_parquet(outdir / "plot_phon_phon_df.parquet")
 paper_data.plot_behav_phon_df.write_parquet(outdir / "plot_behav_phon_df.parquet")
 paper_data.plot_behav_behav_df.write_parquet(outdir / "plot_behav_behav_df.parquet")
 paper_data.plot_phon_behav_df.write_parquet(outdir / "plot_phon_behav_df.parquet")
-paper_data.behav_roc_auc_searchlight_df.write_parquet(outdir / "behav_roc_auc_searchlight_df.parquet")
-paper_data.phon_roc_auc_searchlight_df.write_parquet(outdir / "phon_roc_auc_searchlight_df.parquet")
+paper_data.behav_roc_auc_searchlight_df.write_parquet(
+    outdir / "behav_roc_auc_searchlight_df.parquet"
+)
+paper_data.phon_roc_auc_searchlight_df.write_parquet(
+    outdir / "phon_roc_auc_searchlight_df.parquet"
+)
 paper_data.all_md.write_parquet(outdir / "all_md.parquet")
 paper_data.word_end_df.write_parquet(outdir / "word_end_df.parquet")
 paper_data.phon_peaks_df.write_parquet(outdir / "phon_peaks_df.parquet")
 paper_data.behav_peaks_df.write_parquet(outdir / "behav_peaks_df.parquet")
-paper_data.behav_peaks_df_unfiltered.write_parquet(outdir / "behav_peaks_df_unfiltered.parquet")
+paper_data.behav_peaks_df_unfiltered.write_parquet(
+    outdir / "behav_peaks_df_unfiltered.parquet"
+)
 paper_data.behav_baseline_df.write_parquet(outdir / "behav_baseline_df.parquet")
 paper_data.zoomin_keys.write_parquet(outdir / "zoomin_keys.parquet")
 

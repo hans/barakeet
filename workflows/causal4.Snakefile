@@ -4,28 +4,49 @@ from ploomber_engine import execute_notebook
 
 
 def run_notebook(input_path: str, output_path: str, parameters, **kwargs):
-    # First hack into the Ploomber API. Build a fake DAG so that we can validate parameters.
-    from ploomber import DAG
-    from ploomber.products import File
-    from ploomber.tasks import NotebookRunner
+    import tempfile
+    import jupytext
 
-    dag = DAG(name="temp_dag")
-    runner = NotebookRunner(
-        Path(input_path),
-        File(output_path),
-        dag=dag,
-        params=parameters,
-        static_analysis="strict",
-    )
-    # This will throw an exception if there are parameter issues (e.g. missing parameters)
-    dag.render(force=True)
+    input_path = Path(input_path)
 
-    # Now ditch that and run directly with `ploomber_engine`
-    return execute_notebook(
-        Path(input_path),
-        Path(output_path),
-        parameters=parameters,
-    )
+    # jupytext .py percent-format files must be converted to .ipynb before
+    # ploomber_engine can execute them.
+    if input_path.suffix == ".py":
+        nb = jupytext.read(input_path)
+        with tempfile.NamedTemporaryFile(suffix=".ipynb", delete=False) as f:
+            tmp_path = Path(f.name)
+        jupytext.write(nb, tmp_path)
+    else:
+        tmp_path = None
+
+    try:
+        actual_input = tmp_path if tmp_path is not None else input_path
+
+        # First hack into the Ploomber API. Build a fake DAG so that we can validate parameters.
+        from ploomber import DAG
+        from ploomber.products import File
+        from ploomber.tasks import NotebookRunner
+
+        dag = DAG(name="temp_dag")
+        runner = NotebookRunner(
+            actual_input,
+            File(output_path),
+            dag=dag,
+            params=parameters,
+            static_analysis="strict",
+        )
+        # This will throw an exception if there are parameter issues (e.g. missing parameters)
+        dag.render(force=True)
+
+        # Now ditch that and run directly with `ploomber_engine`
+        return execute_notebook(
+            actual_input,
+            Path(output_path),
+            parameters=parameters,
+        )
+    finally:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
 
 
 # params: power threshold
@@ -592,7 +613,7 @@ rule behavior_decoding_single_electrode_permutation:
         epochs = "outputs/epochs_preprocessed/{subject}_epo.fif",
         all_A_results = "outputs/causal4/find_As/{subject}_results.csv",
         true_results = "outputs/causal4/behavior_decoding_single_electrode/{subject}/results.pt",
-        notebook = "notebooks/causal4/behavior_decoding_single_electrode_permutation.ipynb"
+        notebook = "notebooks/causal4/behavior_decoding_single_electrode_permutation.py"
 
     output:
         notebook = "outputs/causal4/behavior_decoding_single_electrode_permutation/{subject}/notebook.ipynb",
@@ -638,7 +659,7 @@ rule behavior_decoding_single_electrode_permutation_test:
 
     run:
         outdir = Path(output.notebook).parent
-        execute_notebook(
+        run_notebook(
             str(input.notebook),
             str(output.notebook),
             parameters=dict(all_true_results=list(input.all_true_results),
@@ -724,7 +745,7 @@ rule prepare_neurometrics:
 
     run:
         outdir = Path(output.notebook).parent
-        execute_notebook(
+        run_notebook(
             str(input.notebook),
             str(output.notebook),
             parameters=dict(
@@ -733,6 +754,15 @@ rule prepare_neurometrics:
                 A_early_behav_predictions=list(input.A_early_behav_predictions),
                 phon_predictions_path=str(input.phon_predictions),
                 electrode_paths=list(input.electrode_paths),
+
+                phon_response_tmin_min=0.0,
+                all_response_tmax_max=1.3,
+
+                epoch_sfreq=config["analysis"]["epoch_sfreq"],
+                epoch_tmin=config["analysis"]["epoch_tmin"],
+
+                phon_response_peak_threshold=config["analysis"]["phon_response_peak_threshold"],
+
                 outdir=str(outdir),
             ),
         )
