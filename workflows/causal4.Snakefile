@@ -631,8 +631,8 @@ rule behavior_decoding_super_all:
 rule behavior_decoding_single_electrode_permutation:
     input:
         epochs = "outputs/epochs_preprocessed/{subject}_epo.fif",
-        all_A_results = "outputs/causal4/find_As/{subject}_results.csv",
         true_results = "outputs/causal4/behavior_decoding_single_electrode/{subject}/results.pt",
+        behav_peaks = "outputs/causal4/prepare_neurometrics/behav_peaks_df.parquet",
         notebook = "notebooks/causal4/behavior_decoding_single_electrode_permutation.py"
 
     output:
@@ -645,14 +645,9 @@ rule behavior_decoding_single_electrode_permutation:
             str(input.notebook),
             str(output.notebook),
             parameters=dict(epochs_path=input.epochs,
-                            all_A_result_path=input.all_A_results,
                             true_results_path=input.true_results,
-
-                            min_sample=1,
-                            window_size=15,
-                            stride=2,
-                            n_permutations=10,
-
+                            behav_peaks_path=input.behav_peaks,
+                            n_permutations=1000,
                             outdir=str(outdir)),
         )
 
@@ -684,6 +679,7 @@ rule behavior_decoding_single_electrode_permutation_test:
             str(output.notebook),
             parameters=dict(all_true_results=list(input.all_true_results),
                             all_permutation_results=list(input.all_permutation_results),
+                            fdr_alpha=config["analysis"]["fdr_alpha"],
                             outdir=str(outdir)),
         )
 
