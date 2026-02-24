@@ -160,6 +160,16 @@ epoch_sfreq = 100
 resampled_palette = sns.color_palette("cool", n_colors=6)
 
 
+def p_to_stars(p):
+    if p < 0.001:
+        return "***"
+    if p < 0.01:
+        return "**"
+    if p < 0.05:
+        return "*"
+    return "n.s."
+
+
 def add_textgrid(
     ax,
     textgrid_dir,
@@ -1601,7 +1611,7 @@ def plot_condition_contrasts_single_figure(
         color=plot_palette[0],
         annotate=True,
         textgrid_kwargs=dict(fontsize=8),
-        label="Phonetic\ncontrast",
+        label="Acoustic\ncontrast",
     )
 
     ambiguous_keys = pl.DataFrame(
@@ -2160,3 +2170,188 @@ def plot_behav_barplot(
         ax.get_legend().remove()
 
     sns.despine(ax=ax, top=True, bottom=False, left=False, right=True)
+
+
+def evaluate_phonetic_transfer(
+    data: PaperData,
+    phonetic_decoder_checkpoints: dict,
+    t_subject,
+    t_electrode_idx,
+    t_phoneme_pair,
+    t_word_end,
+    t_smin_early,
+    t_smax_early,
+    t_smin_late,
+    t_smax_late,
+    t_num_folds=5,
+    t_measure="categorical_acoustic_cue",
+    t_restrict_to_word_end=True,
+):
+    t_early_key = (
+        t_subject,
+        t_electrode_idx,
+        t_phoneme_pair,
+        t_smin_early,
+        t_smax_early,
+    )
+    t_late_key = (t_subject, t_electrode_idx, t_phoneme_pair, t_smin_late, t_smax_late)
+
+    t_early_models = phonetic_decoder_checkpoints[t_subject]["models"][t_early_key]
+    t_early_predictions = phonetic_decoder_checkpoints[t_subject]["outcomes"][
+        t_early_key
+    ]
+    t_early_all_predictions = phonetic_decoder_checkpoints[t_subject]["all_outcomes"][
+        t_early_key + (t_measure,)
+    ]
+    assert len(t_early_models) == t_num_folds
+
+    t_late_models = phonetic_decoder_checkpoints[t_subject]["models"][t_late_key]
+    t_late_predictions = phonetic_decoder_checkpoints[t_subject]["outcomes"][t_late_key]
+    t_late_all_predictions = phonetic_decoder_checkpoints[t_subject]["all_outcomes"][
+        t_late_key + (t_measure,)
+    ]
+    assert len(t_late_models) == t_num_folds
+
+    t_epochs = data.epochs[t_subject]
+    t_epoch_data = t_epochs.get_data(picks=t_electrode_idx).squeeze(1)
+
+    early_early_outcomes, early_late_outcomes = [], []
+    late_late_outcomes, late_early_outcomes = [], []
+
+    def prepare_decoding_data(ep_i, data_i, epoch_idxs, smin, smax, baseline_vars=None):
+        X = data_i[epoch_idxs][:, smin:smax]
+        if baseline_vars is not None:
+            X_baseline = ep_i.metadata.loc[epoch_idxs][baseline_vars].values
+            X = np.concatenate([X_baseline, X], axis=1)
+        return X
+
+    def restrict_word_end(outcome_rows, word_end):
+        outcome_rows = pd.merge(
+            outcome_rows,
+            t_epochs.metadata,
+            left_on=["epoch_idx"],
+            right_index=True,
+            how="left",
+        )
+        return outcome_rows.loc[outcome_rows.word_end == word_end][
+            ["epoch_idx", "fold", "decoder_target", "decoder_proba"]
+        ]
+
+    for fold, fold_rows in t_early_predictions.groupby("fold"):
+        early_idxs = fold_rows.epoch_idx
+
+        early_pipe = t_early_models[fold]
+        late_pipe = t_late_models[fold]
+
+        X_early = prepare_decoding_data(
+            t_epochs, t_epoch_data, early_idxs, t_smin_early, t_smax_early
+        )
+        early_preds = early_pipe.predict_proba(X_early)[:, 1]
+        np.testing.assert_allclose(early_preds, fold_rows.decoder_proba.values)
+
+        fold_all_rows = t_early_all_predictions[t_early_all_predictions.fold == fold]
+        if t_restrict_to_word_end:
+            fold_all_rows = restrict_word_end(fold_all_rows, t_word_end)
+        early_all_idxs = fold_all_rows.epoch_idx
+
+        X_early_all = prepare_decoding_data(
+            t_epochs, t_epoch_data, early_all_idxs, t_smin_early, t_smax_early
+        )
+        early_all_preds = early_pipe.predict_proba(X_early_all)[:, 1]
+
+        X_late_all = prepare_decoding_data(
+            t_epochs, t_epoch_data, early_all_idxs, t_smin_late, t_smax_late
+        )
+        late_scaler = late_pipe.named_steps["standardscaler"]
+        X_late_all = late_scaler.transform(X_late_all)
+        late_all_preds = early_pipe.named_steps["logisticregression"].predict_proba(
+            X_late_all
+        )[:, 1]
+
+        early_early_outcomes.append(
+            fold_all_rows.assign(
+                subject=t_subject,
+                electrode_idx=t_electrode_idx,
+                phoneme_pair=t_phoneme_pair,
+                word_end=t_word_end,
+                smin=t_smin_early,
+                smax=t_smax_early,
+                decoder_target=(fold_all_rows.decoder_target > 0).astype(int),
+                decoder_proba=early_all_preds,
+            )
+        )
+        early_late_outcomes.append(
+            fold_all_rows.assign(
+                subject=t_subject,
+                electrode_idx=t_electrode_idx,
+                phoneme_pair=t_phoneme_pair,
+                word_end=t_word_end,
+                smin=t_smin_late,
+                smax=t_smax_late,
+                decoder_target=(fold_all_rows.decoder_target > 0).astype(int),
+                decoder_proba=late_all_preds,
+            )
+        )
+
+    for fold, fold_rows in t_late_predictions.groupby("fold"):
+        late_idxs = fold_rows.epoch_idx
+
+        early_pipe = t_early_models[fold]
+        late_pipe = t_late_models[fold]
+
+        X_late = prepare_decoding_data(
+            t_epochs, t_epoch_data, late_idxs, t_smin_late, t_smax_late
+        )
+        late_preds = late_pipe.predict_proba(X_late)[:, 1]
+        np.testing.assert_allclose(late_preds, fold_rows.decoder_proba.values)
+
+        fold_all_rows = t_late_all_predictions[t_late_all_predictions.fold == fold]
+        if t_restrict_to_word_end:
+            fold_all_rows = restrict_word_end(fold_all_rows, t_word_end)
+        late_all_idxs = fold_all_rows.epoch_idx
+
+        X_late_all = prepare_decoding_data(
+            t_epochs, t_epoch_data, late_all_idxs, t_smin_late, t_smax_late
+        )
+        late_all_preds = late_pipe.predict_proba(X_late_all)[:, 1]
+
+        X_early_all = prepare_decoding_data(
+            t_epochs, t_epoch_data, late_all_idxs, t_smin_early, t_smax_early
+        )
+        early_scaler = early_pipe.named_steps["standardscaler"]
+        X_early_all = early_scaler.transform(X_early_all)
+        early_all_preds = late_pipe.named_steps["logisticregression"].predict_proba(
+            X_early_all
+        )[:, 1]
+
+        late_late_outcomes.append(
+            fold_all_rows.assign(
+                subject=t_subject,
+                electrode_idx=t_electrode_idx,
+                phoneme_pair=t_phoneme_pair,
+                word_end=t_word_end,
+                smin=t_smin_late,
+                smax=t_smax_late,
+                decoder_target=(fold_all_rows.decoder_target > 0).astype(int),
+                decoder_proba=late_all_preds,
+            )
+        )
+        late_early_outcomes.append(
+            fold_all_rows.assign(
+                subject=t_subject,
+                electrode_idx=t_electrode_idx,
+                phoneme_pair=t_phoneme_pair,
+                word_end=t_word_end,
+                smin=t_smin_early,
+                smax=t_smax_early,
+                decoder_target=(fold_all_rows.decoder_target > 0).astype(int),
+                decoder_proba=early_all_preds,
+            )
+        )
+
+    return (
+        pd.concat(early_early_outcomes),
+        pd.concat(early_late_outcomes),
+        pd.concat(late_late_outcomes),
+        pd.concat(late_early_outcomes),
+    )
