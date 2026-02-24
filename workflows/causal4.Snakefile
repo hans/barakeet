@@ -68,6 +68,26 @@ rule find_speech_responsive:
                             outdir=str(outdir)),
         )
 
+# store graded output, eventually do a ttest
+# TODO merge this into the pipeline and re-run everything..
+rule find_speech_responsive_graded:
+    input:
+        epochs = "outputs/epochs_preprocessed/{subject}_epo.fif",
+        notebook = "notebooks/causal4/find_speech_responsive_graded.ipynb"
+
+    output:
+        notebook = "outputs/causal4/find_speech_responsive_graded/{subject}.ipynb",
+        results = "outputs/causal4/find_speech_responsive_graded/{subject}_results.csv"
+
+    run:
+        outdir = Path(output.notebook).parent
+        execute_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(epochs_path=input.epochs,
+                            outdir=str(outdir)),
+        )
+
 
 # params: decoding window, stride
 # decode spectrum extremes vs. all
