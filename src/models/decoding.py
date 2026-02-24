@@ -78,8 +78,8 @@ def _prepare_decoding_population(
     epochs_i: Epochs,
     electrode_idxs: list[int],
     phoneme_pair: str,
-    stride: int,
-    window_size: int,
+    stride: Optional[int] = None,
+    window_size: Optional[int] = None,
     global_min_sample: int = 0,
     global_max_sample: Optional[int] = None,
     target: Literal[
@@ -93,6 +93,7 @@ def _prepare_decoding_population(
     filter: Optional[str] = None,
     include_only_full_windows=True,
     randomize=False,
+    windows: Optional[np.ndarray] = None,
 ):
     """
     Prepare windowed decoding inputs/targets for the given parameters.
@@ -100,6 +101,8 @@ def _prepare_decoding_population(
     Args:
         groupby: Yield separate samples for each combination of these grouping variables.
         filter: Optional filter string on epoch metadata, passed to pd.DataFrame.query.
+        windows: Optional explicit (N, 2) array of (smin, smax) pairs. When provided,
+            stride/window_size/global_min_sample/global_max_sample are ignored.
 
     Yields tuples for each window of form:
         - name: tuple of grouping values, same length as `groupby`.
@@ -121,30 +124,34 @@ def _prepare_decoding_population(
         raise ValueError(f"Invalid target {target}")
     assert epochs_i.metadata is not None
 
-    if global_max_sample is not None:
-        assert global_max_sample > global_min_sample, (
-            f"global_max_sample ({global_max_sample}) must be greater than global_min_sample ({global_min_sample})"
-        )
-
     X = epochs_i.get_data(picks=electrode_idxs)
 
-    data_max_sample = X.shape[2]
-    if global_max_sample is None:
-        global_max_sample = cast(int, data_max_sample)
-    else:
-        global_max_sample = min(global_max_sample, data_max_sample)
-
-    if global_max_sample - global_min_sample < window_size:
-        raise ValueError(
-            f"Window size ({window_size}) is larger than the available data range "
-            f"({global_max_sample - global_min_sample}). Please adjust the parameters."
+    if windows is None:
+        assert stride is not None and window_size is not None, (
+            "stride and window_size must be provided when windows is not given explicitly"
         )
+        if global_max_sample is not None:
+            assert global_max_sample > global_min_sample, (
+                f"global_max_sample ({global_max_sample}) must be greater than global_min_sample ({global_min_sample})"
+            )
 
-    windows_left = np.arange(global_min_sample, global_max_sample, stride)
-    windows_right = windows_left + window_size
-    windows = np.array(list(zip(windows_left, windows_right)))
-    if include_only_full_windows:
-        windows = windows[windows[:, 1] <= global_max_sample]
+        data_max_sample = X.shape[2]
+        if global_max_sample is None:
+            global_max_sample = cast(int, data_max_sample)
+        else:
+            global_max_sample = min(global_max_sample, data_max_sample)
+
+        if global_max_sample - global_min_sample < window_size:
+            raise ValueError(
+                f"Window size ({window_size}) is larger than the available data range "
+                f"({global_max_sample - global_min_sample}). Please adjust the parameters."
+            )
+
+        windows_left = np.arange(global_min_sample, global_max_sample, stride)
+        windows_right = windows_left + window_size
+        windows = np.array(list(zip(windows_left, windows_right)))
+        if include_only_full_windows:
+            windows = windows[windows[:, 1] <= global_max_sample]
 
     selection = epochs_i.metadata.phoneme_pair == phoneme_pair
     if selection.sum() == 0:
@@ -326,9 +333,9 @@ def run_decoding_model_comparison_population(
     phoneme_pair: str,
     subject: str,
     population_name: str,
-    stride: int,
-    window_size: int,
     baseline_features: list[str],
+    stride: Optional[int] = None,
+    window_size: Optional[int] = None,
     global_min_sample: int = 0,
     global_max_sample: Optional[int] = None,
     target: Literal[
@@ -374,23 +381,41 @@ def run_decoding_model_comparison_population(
     activity beyond the acoustic cue.
 
     Args:
+        stride: Stride between windows in samples. Required when fixed_hparams_df
+            is None; ignored when fixed_hparams_df is provided (windows are derived
+            from it instead).
+        window_size: Window size in samples. Same optionality as stride.
         fixed_hparams_df: When provided, skips the inner grid search entirely
             and reuses hyperparameters from a previous fit stored in this
             DataFrame (typically the true-model results from a prior call).
-            The DataFrame must have the same (smin, smax, fold) structure as
-            what this call would produce, plus columns of the form
-            ``"baseline_<param>"`` and ``"full_<param>"`` (e.g.
-            ``"baseline_clf__C"``, ``"full_clf__C"``,
-            ``"full_prep__pca__pca__n_components"``), which are the columns
-            written by a normal grid-search run.  Any column whose name
+            The set of (smin, smax) windows to run is derived from the unique
+            values in this DataFrame — stride/window_size/global_min_sample/
+            global_max_sample are then unused. Any (group, window) combination
+            absent from fixed_hparams_df is silently skipped.
+            The DataFrame must contain columns of the form ``"baseline_<param>"``
+            and ``"full_<param>"`` (e.g. ``"baseline_clf__C"``, ``"full_clf__C"``,
+            ``"full_prep__pca__pca__n_components"``). Any column whose name
             contains ``"__"`` is treated as a hyperparameter column.
 
-            This is intended for permutation testing: combine with
-            ``randomize=True`` to draw K null-distribution samples without
+            Combine with ``randomize=True`` for permutation testing without
             paying the cost of K grid searches.
     """
 
     assert epochs_i.metadata is not None
+
+    # When fixed_hparams_df is provided, derive the windows to iterate from it
+    # rather than from stride/window_size. Any (group, window) not present in
+    # fixed_hparams_df is skipped inside the loop below.
+    _explicit_windows: Optional[np.ndarray] = None
+    if fixed_hparams_df is not None:
+        _explicit_windows = (
+            fixed_hparams_df[["smin", "smax"]].drop_duplicates().to_numpy()
+        )
+    else:
+        assert stride is not None and window_size is not None, (
+            "stride and window_size are required when fixed_hparams_df is not provided"
+        )
+
     n_windows, _gen = _prepare_decoding_population(
         epochs_i=epochs_i,
         electrode_idxs=electrode_idxs,
@@ -404,6 +429,7 @@ def run_decoding_model_comparison_population(
         filter=filter,
         include_only_full_windows=include_only_full_windows,
         randomize=randomize,
+        windows=_explicit_windows,
     )
 
     seed = 42
@@ -448,7 +474,7 @@ def run_decoding_model_comparison_population(
                 fixed_params_list=fixed_params_list,
                 scoring=["roc_auc"],
                 n_jobs=n_jobs,
-                num_repeats=5,
+                num_repeats=len(fixed_params_list) if fixed_params_list is not None else 5,
                 random_state=random_state,
             )
         else:
@@ -503,6 +529,9 @@ def run_decoding_model_comparison_population(
             window_rows = (
                 fixed_hparams_df[window_mask].sort_values("fold").to_dict("records")
             )
+            if not window_rows:
+                # This (group, window) was not present in fixed_hparams_df — skip.
+                continue
             baseline_fixed_params = [
                 {c.removeprefix("baseline_"): row[c] for c in _baseline_hparam_cols}
                 for row in window_rows

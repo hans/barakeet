@@ -1,6 +1,7 @@
 # ---
 # jupyter:
 #   jupytext:
+#     formats: ipynb,py:percent
 #     text_representation:
 #       extension: .py
 #       format_name: percent
@@ -27,14 +28,17 @@
 # %%
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 import torch
 from statsmodels.stats.multitest import multipletests
 
 # %% tags=["parameters"]
-all_true_results: list = []   # paths to results.pt from behavior_decoding_single_electrode
-all_permutation_results: list = []   # paths to permutation_results.parquet
+all_true_results = [
+    "outputs/causal4/behavior_decoding_single_electrode/EC260/results.pt"
+]  # paths to results.pt from behavior_decoding_single_electrode
+all_permutation_results = [
+    "outputs/causal4/behavior_decoding_single_electrode_permutation/EC260/permutation_results.parquet"
+]  # paths to permutation_results.parquet
 fdr_alpha = 0.05
 outdir = "."
 
@@ -66,7 +70,9 @@ for path in all_permutation_results:
 perm_results = pd.concat(perm_dfs, ignore_index=True)
 
 n_permutations = perm_results["permutation_idx"].nunique()
-print(f"Loaded {n_permutations} permutations across {len(all_permutation_results)} subjects.")
+print(
+    f"Loaded {n_permutations} permutations across {len(all_permutation_results)} subjects."
+)
 
 # %% [markdown]
 # ## Compute Δ ROC-AUC and aggregate over folds
@@ -76,19 +82,23 @@ print(f"Loaded {n_permutations} permutations across {len(all_permutation_results
 # %%
 groupby_cols = ["subject", "population", "phoneme_pair", "word_end", "smin", "smax"]
 
-true_results["delta_roc_auc"] = true_results["full_roc_auc"] - true_results["baseline_roc_auc"]
+true_results["delta_roc_auc"] = (
+    true_results["full_roc_auc"] - true_results["baseline_roc_auc"]
+)
 true_summary = (
-    true_results
-    .groupby(groupby_cols, observed=True)["delta_roc_auc"]
+    true_results.groupby(groupby_cols, observed=True)["delta_roc_auc"]
     .mean()
     .reset_index()
     .rename(columns={"delta_roc_auc": "true_delta_roc_auc"})
 )
 
-perm_results["delta_roc_auc"] = perm_results["full_roc_auc"] - perm_results["baseline_roc_auc"]
+perm_results["delta_roc_auc"] = (
+    perm_results["full_roc_auc"] - perm_results["baseline_roc_auc"]
+)
 perm_summary = (
-    perm_results
-    .groupby(groupby_cols + ["permutation_idx"], observed=True)["delta_roc_auc"]
+    perm_results.groupby(groupby_cols + ["permutation_idx"], observed=True)[
+        "delta_roc_auc"
+    ]
     .mean()
     .reset_index()
     .rename(columns={"delta_roc_auc": "perm_delta_roc_auc"})
@@ -105,11 +115,18 @@ perm_summary = (
 merged = true_summary.merge(perm_summary, on=groupby_cols)
 
 pvalue_rows = (
-    merged
-    .groupby(groupby_cols, observed=True)
-    .apply(lambda g: (
-        (g["perm_delta_roc_auc"].values >= g["true_delta_roc_auc"].iloc[0]).sum() + 1
-    ) / (n_permutations + 1))
+    merged.groupby(groupby_cols, observed=True)
+    .apply(
+        lambda g: (
+            (
+                (
+                    g["perm_delta_roc_auc"].values >= g["true_delta_roc_auc"].iloc[0]
+                ).sum()
+                + 1
+            )
+            / (n_permutations + 1)
+        )
+    )
     .reset_index(name="p_value")
 )
 
@@ -130,7 +147,9 @@ pvalue_rows["significant"] = pvalue_rows["q_value"] < fdr_alpha
 results = true_summary.merge(pvalue_rows, on=groupby_cols)
 
 print(f"Total decoders tested: {len(results)}")
-print(f"Significant (q < {fdr_alpha}): {results['significant'].sum()} "
-      f"({100 * results['significant'].mean():.1f}%)")
+print(
+    f"Significant (q < {fdr_alpha}): {results['significant'].sum()} "
+    f"({100 * results['significant'].mean():.1f}%)"
+)
 
 results.to_csv(outdir / "results.csv", index=False)

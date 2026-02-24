@@ -2,11 +2,12 @@
 # jupyter:
 #   jupytext:
 #     custom_cell_magics: kql
+#     formats: ipynb,py:percent
 #     text_representation:
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.11.2
+#       jupytext_version: 1.18.1
 #   kernelspec:
 #     display_name: Python 3
 #     language: python
@@ -16,10 +17,11 @@
 # %% [markdown]
 # Permutation-based null distribution for behavior_decoding_single_electrode.
 #
-# For each A-electrode decoder, re-run decoding K times with shuffled behavioral
-# labels (`randomize=True`) while keeping the hyperparameters (C, n_components)
-# fixed to those found in the true model fit. This avoids re-running the expensive
-# inner grid search for every permutation.
+# For each peak (electrode, phoneme_pair, word_end, smin, smax) from behav_peaks_df,
+# re-run decoding K times with shuffled behavioral labels (`randomize=True`) while
+# keeping the hyperparameters (C, n_components) fixed to those found in the true model
+# fit. This avoids re-running the expensive inner grid search for every permutation,
+# and avoids the full searchlight by targeting only the peak windows.
 #
 # Outputs a parquet of all permuted fold-level results (with `permutation_idx`
 # column) for downstream use in behavior_decoding_single_electrode_permutation_test.
@@ -49,15 +51,12 @@ from src.data import add_metadata_features
 from src.models.decoding import run_decoding_model_comparison_population
 
 # %% tags=["parameters"]
-subject = "EC260"
+subject = "EC279"
 epochs_path = f"outputs/epochs_preprocessed/{subject}_epo.fif"
-all_A_result_path = f"outputs/causal4/find_As/{subject}_results.csv"
+behav_peaks_path = "outputs/causal4/prepare_neurometrics/behav_peaks_df.parquet"
 true_results_path = f"outputs/causal4/behavior_decoding_single_electrode/{subject}/results.pt"
 n_permutations = 10
 outdir = "."
-min_sample = 1
-window_size = 15
-stride = 2
 
 # %%
 subject = re.findall(r"(EC[\d]+)_epo", str(epochs_path))[0]
@@ -72,9 +71,9 @@ epochs = mne.read_epochs(epochs_path, verbose=False)
 assert epochs.metadata is not None
 epochs.metadata = add_metadata_features(epochs.metadata)
 
-max_sample = epochs.times.shape[0]
-
-A_results = pd.read_csv(all_A_result_path).query("A and subject == @subject")
+# Load peak windows for this subject (one row per electrode/phoneme_pair/word_end)
+behav_peaks_df = pd.read_parquet(behav_peaks_path).query("subject == @subject")
+behav_peaks_df["word_end"] = behav_peaks_df["word_end"].astype(str)
 
 # Load true decoding results to extract stored best hyperparameters
 true_results = torch.load(true_results_path)
@@ -82,12 +81,10 @@ true_results = torch.load(true_results_path)
 # %% [markdown]
 # ## Run permutations
 #
-# For each A-electrode / phoneme-pair combination:
-#   - Look up the per-(window, fold) best hyperparameters from the true fit
-#   - Run `n_permutations` decoding passes with `randomize=True`, using those
-#     fixed hparams instead of re-searching the grid
-#
-# Each permutation uses a distinct numpy seed so results are reproducible.
+# For each peak (electrode, phoneme_pair, word_end, smin, smax):
+#   - Look up the per-fold best hyperparameters from the true fit
+#   - Run `n_permutations` decoding passes with `randomize=True` at that single window,
+#     using those fixed hparams instead of re-searching the grid
 
 # %%
 all_perm_dfs = []
@@ -96,40 +93,47 @@ for k in tqdm(range(n_permutations), desc="Permutation"):
     np.random.seed(k)
 
     perm_rows = []
-    for row in A_results.itertuples():
-        outer_key = (row.subject, row.electrode_idx, row.phoneme_pair)
-
-        # Retrieve the true-fit results DataFrame for this electrode/phoneme_pair.
-        # Keys in A_decoding_results are (subject, electrode_idx, phoneme_pair).
+    for (electrode_idx, phoneme_pair), peak_rows in behav_peaks_df.groupby(
+        ["electrode_idx", "phoneme_pair"], observed=True
+    ):
+        outer_key = (subject, electrode_idx, phoneme_pair)
         true_df = true_results["A_decoding_results"].get(outer_key)
         if true_df is None or len(true_df) == 0:
             continue
 
-        df = run_decoding_model_comparison_population(
-            epochs,
-            [row.electrode_idx],
-            phoneme_pair=row.phoneme_pair,
-            subject=row.subject,
-            population_name=str(row.electrode_idx),
-            global_min_sample=min_sample,
-            global_max_sample=max_sample,
-            stride=stride,
-            window_size=window_size,
+        for peak_row in peak_rows.itertuples():
+            # Restrict fixed_hparams_df to this specific (word_end, smin, smax) so that
+            # run_decoding_model_comparison_population derives exactly one window from it
+            # and skips all other groups.
+            peak_true_df = true_df[
+                (true_df["smin"] == peak_row.smin)
+                & (true_df["smax"] == peak_row.smax)
+                & (true_df["word_end"] == peak_row.word_end)
+            ]
+            if peak_true_df.empty:
+                continue
 
-            # Non-None value is required so fit_train_test builds a PCA pipeline step;
-            # the actual n_components per fold comes from fixed_hparams_df, not this value.
-            pca_num_components=0.5,
-            
-            target="behavior_categorical",
-            baseline_features=["resampled"],
-            strategy="train-test",
-            groupby=["word_end"],
-            return_estimators=False,
-            n_jobs=5,
-            randomize=True,
-            fixed_hparams_df=true_df,
-        )
-        perm_rows.append(df)
+            df = run_decoding_model_comparison_population(
+                epochs,
+                [electrode_idx],
+                phoneme_pair=phoneme_pair,
+                subject=subject,
+                population_name=str(electrode_idx),
+                baseline_features=["resampled"],
+
+                # Non-None value is required so fit_train_test builds a PCA pipeline step;
+                # the actual n_components per fold comes from fixed_hparams_df, not this value.
+                pca_num_components=0.5,
+
+                target="behavior_categorical",
+                strategy="train-test",
+                groupby=["word_end"],
+                return_estimators=False,
+                n_jobs=5,
+                randomize=True,
+                fixed_hparams_df=peak_true_df,
+            )
+            perm_rows.append(df)
 
     if not perm_rows:
         continue
