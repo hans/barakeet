@@ -141,8 +141,14 @@ class PaperData:
         """
         ret = (
             self.all_md.group_by(["subject", "phoneme_pair", "word_end", "resampled"])
-            .agg(pl.col("label_behavior_forced").value_counts().len().alias("count"))
-            .filter(pl.col("count") > 1)
+            .agg(
+                pl.col("label_behavior_forced")
+                .value_counts()
+                .struct.field("count")
+                .min()
+                .alias("count")
+            )
+            .filter(pl.col("count") > 3)
             .with_columns(pl.col("resampled").cast(int))
             .sort(["subject", "phoneme_pair", "word_end", "resampled"])
             .group_by(["subject", "phoneme_pair", "word_end"])
@@ -1401,24 +1407,12 @@ class HandlerRectangle(HandlerPatch):
         return [p]
 
 
-def plot_condition_contrast(
+def get_condition_contrast(
     plot_df,
     condition_variable,
     data: PaperData,
-    textgrid_dir,
-    polarity_correct: Literal[None, "early", "late"] = None,
     epoch_data_cache=None,
-    ax=None,
-    annotate=True,
-    label=None,
-    textgrid_kwargs=None,
-    vline_extent=1.25,
-    ttest_window_size=8,
-    ttest_window_stride=8,
-    ttest_bar_height_ratio=0.04,
-    ttest_bar_y_ratio=0.95,
-    color=None,
-):
+) -> pl.DataFrame:
     hga_condition_results = []
     if epoch_data_cache is None:
         epoch_data_cache = {}
@@ -1455,7 +1449,7 @@ def plot_condition_contrast(
             }
         )
 
-    hga_condition_results_df = (
+    return (
         pl.DataFrame(hga_condition_results)
         .join(
             pl.from_pandas(data.early_polarity.reset_index()),
@@ -1467,6 +1461,29 @@ def plot_condition_contrast(
             on=["subject", "electrode_idx", "phoneme_pair", "word_end"],
             how="left",
         )
+    )
+
+
+def plot_condition_contrast(
+    plot_df,
+    condition_variable,
+    data: PaperData,
+    textgrid_dir,
+    polarity_correct: Literal[None, "early", "late"] = None,
+    epoch_data_cache=None,
+    ax=None,
+    annotate=True,
+    label=None,
+    textgrid_kwargs=None,
+    vline_extent=1.25,
+    ttest_window_size=8,
+    ttest_window_stride=8,
+    ttest_bar_height_ratio=0.04,
+    ttest_bar_y_ratio=0.95,
+    color=None,
+):
+    hga_condition_results_df = get_condition_contrast(
+        plot_df, condition_variable, data, epoch_data_cache=epoch_data_cache
     )
 
     if ax is None:
@@ -1507,7 +1524,8 @@ def plot_condition_contrast(
         ttest_results.append((plot_times[start], plot_times[end], t_stat, p_value))
 
     p_threshold_height_mults = [1.0, 0.5, 0.25]
-    p_thresholds = list(zip([0.0001, 0.001, 0.01], p_threshold_height_mults))
+    # p_thresholds = list(zip([0.0001, 0.001, 0.01], p_threshold_height_mults))
+    p_thresholds = list(zip([0.001, 0.01, 0.05], p_threshold_height_mults))
 
     ymin, ymax = ax.get_ylim()
     base_bar_height = (ymax - ymin) * ttest_bar_height_ratio
@@ -1561,6 +1579,7 @@ def plot_condition_contrast(
             fontsize=8,
         )
 
+        word_end = plot_rows["word_end"][0]
         pod_time = (
             data.word_end_df.filter(pl.col("word_end") == word_end)
             .select(pl.max("pod"))
@@ -1648,7 +1667,7 @@ def plot_condition_contrasts_single_figure(
         ax=ax,
         color=plot_palette[1],
         annotate=False,
-        label="Behavioral\ncontrast",
+        label="Perceptual\ncontrast",
         vline_extent=1.2,
         textgrid_kwargs=dict(include_phonemes=False),
         ttest_bar_y_ratio=0.87,
