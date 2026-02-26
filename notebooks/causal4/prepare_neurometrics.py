@@ -72,7 +72,8 @@ epoch_sfreq = 100
 phon_response_tmin_min = 0.0
 all_response_tmax_max = 1.3
 
-phon_response_peak_threshold = 0.64
+# phon_response_peak_threshold = 0.64
+phon_response_peak_threshold = 0.6
 
 outdir = "outputs/causal4/prepare_neurometrics"
 
@@ -219,8 +220,8 @@ behav_roc_auc_mean_df = behav_roc_auc_searchlight_df.group_by(
 behav_peaks_df_unfiltered = (
     behav_roc_auc_mean_df.join(word_end_df, on=["phoneme_pair", "word_end"], how="left")
     .filter(
+        pl.col("smax") >= 0 - epoch_tmin * epoch_sfreq,
         pl.col("smax") <= pl.col("word_end_offset_sample") + 20,
-        pl.col("smin") >= pl.col("pod_sample"),
     )
     .sort("behav_roc_auc_improvement", descending=True)
     .group_by(["subject", "electrode_idx", "phoneme_pair", "word_end"])
