@@ -123,11 +123,50 @@ class PaperData:
     """
     Per-site × per-trial mean HGA in the early and late windows.
     Output of extract_hga_windows_df. None if not yet computed.
+    Shape: ~40k rows × 21 columns.
+
+    Site identifiers:
+      subject: str                – participant ID
+      electrode_idx: int64
+      phoneme_pair: str           – 'bm' | 'dn' | 'pb'
+      word_end: str               – word context
+
+    Trial identifiers:
+      epoch_idx: int64            – index into epochs[subject]
+      resampled: float64          – acoustic continuum step 1.0–6.0
+      decoder_target: int64       – acoustic category 0/1
+      behavior_dummy_forced: int64 – forced-choice behavioral response 0/1
+      follows_acoustics: bool
+      mismatch: int64             – lexical context (-1/0/1)
+
+    HGA values (NaN when no valid late window found):
+      hga_early: float64          – mean HGA in phoneme-separability window
+      hga_late: float64           – mean HGA in behavior window (best variant by |t-stat|)
+
+    Window metadata (per site, same for all trials of that site):
+      phon_tmin/tmax: float64     – phoneme window in seconds
+      phon_smin/smax: int64       – phoneme window in samples
+      behav_tmin/tmax: float64    – behavior window in seconds (NaN if no window)
+      behav_smin/smax: float64    – behavior window in samples (NaN if no window)
+      behav_steps_chosen: str     – repr of resampled steps used to find late window,
+                                    e.g. '(3,)' | '(3, 4)' | 'None'
     """
     reg_df: pd.DataFrame | None = None
     """
-    hga_df merged with early_polarity and late_polarity; adds hga_early_signed,
-    hga_late_signed, and is_ambiguous columns. None if not yet computed.
+    hga_df merged with early_polarity and late_polarity; adds signed HGA columns
+    and is_ambiguous flag. None if not yet computed.
+    Same shape as hga_df (~40k rows), adds these columns:
+
+      early_polarity: float64     – sign(mean HGA at decoder_target=1 − 0) in early window;
+                                    per-site constant (+1 or -1)
+      late_polarity: float64      – sign(mean HGA at behavior=1 − 0) in late window;
+                                    per-site constant (+1 or -1)
+      hga_early_signed: float64   – hga_early * early_polarity (positive = acoustic cat 1)
+      hga_late_signed: float64    – hga_late * late_polarity   (positive = behavior choice 1)
+      is_ambiguous: bool          – True if this trial's resampled step is one of the
+                                    behav_steps_chosen (i.e. the step used to define the
+                                    late window); False for resampled=1, 6 and any step
+                                    not in the chosen set
     """
 
     @property

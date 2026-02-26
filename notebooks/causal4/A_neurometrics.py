@@ -27,13 +27,13 @@ from pathlib import Path
 import matplotlib
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mtick
-import matplotlib.transforms as mtransforms
 import mne
 import numpy as np
 import pandas as pd
 import polars as pl
 import seaborn as sns
 import torch
+from scipy.stats import ttest_ind
 from tqdm.auto import tqdm
 
 tqdm.pandas()
@@ -66,23 +66,18 @@ from src.stimuli import (
     PHONEME_PAIR_TO_WORD_ENDS,
     POD_dict,
 )
-from src.viz import add_textgrid_single
 from src.viz_paper import (
     PaperData,
     add_textgrid,
     evaluate_phonetic_transfer,
-    find_site_windows,
     p_to_stars,
     phoneme_pair_enum,
     pl_roc_auc,
     plot_behav_barplot,
-    plot_condition_contrast,
-    plot_condition_contrast_peak_aligned,
     plot_condition_contrasts_single_figure,
     subject_enum,
     word_end_enum,
     zoomin_hga,
-    zoomin_search_hga,
 )
 
 # %%
@@ -258,12 +253,18 @@ print("-> filtered behav peaks:", behav_peaks_df.height)
 
 # %%
 # Check: are behav peaks a subset of phon peaks?
-(pd.merge(
-    behav_peaks_df.to_pandas().drop_duplicates(["subject", "electrode_idx", "phoneme_pair"]),
-    phon_peaks_df.to_pandas().drop_duplicates(["subject", "electrode_idx", "phoneme_pair"]),
-    on=["subject", "electrode_idx", "phoneme_pair"],
-    how="outer", indicator=True
-).drop_duplicates(["subject", "electrode_idx"])
+(
+    pd.merge(
+        behav_peaks_df.to_pandas().drop_duplicates(
+            ["subject", "electrode_idx", "phoneme_pair"]
+        ),
+        phon_peaks_df.to_pandas().drop_duplicates(
+            ["subject", "electrode_idx", "phoneme_pair"]
+        ),
+        on=["subject", "electrode_idx", "phoneme_pair"],
+        how="outer",
+        indicator=True,
+    ).drop_duplicates(["subject", "electrode_idx"])
 )._merge.value_counts()
 
 # %% [markdown]
@@ -275,10 +276,10 @@ plot_phon_phon_keys = phon_peaks_df.select(
 )
 
 # merge in case necessary
-plot_phon_phon_df = (
-    plot_phon_phon_df
-    .join(plot_phon_phon_keys,
-          on=["subject", "electrode_idx", "phoneme_pair", "smin", "smax"], how="inner")
+plot_phon_phon_df = plot_phon_phon_df.join(
+    plot_phon_phon_keys,
+    on=["subject", "electrode_idx", "phoneme_pair", "smin", "smax"],
+    how="inner",
 )
 
 plot_behav_phon_keys = behav_peaks_df.select(
@@ -286,11 +287,10 @@ plot_behav_phon_keys = behav_peaks_df.select(
 )
 
 # merge in case necessary
-plot_behav_phon_df = (
-    plot_behav_phon_df
-    .join(plot_behav_phon_keys,
-          on=["subject", "electrode_idx", "phoneme_pair", "smin", "smax", "word_end"],
-          how="inner")
+plot_behav_phon_df = plot_behav_phon_df.join(
+    plot_behav_phon_keys,
+    on=["subject", "electrode_idx", "phoneme_pair", "smin", "smax", "word_end"],
+    how="inner",
 )
 
 # %%
@@ -298,11 +298,10 @@ plot_phon_behav_keys = phon_peaks_df.select(
     ["subject", "electrode_idx", "phoneme_pair", "smin", "smax"]
 )
 # merge in case necessary
-plot_phon_behav_df = (
-    plot_phon_behav_df
-    .join(plot_phon_behav_keys,
-          on=["subject", "electrode_idx", "phoneme_pair", "smin", "smax"],
-          how="inner")
+plot_phon_behav_df = plot_phon_behav_df.join(
+    plot_phon_behav_keys,
+    on=["subject", "electrode_idx", "phoneme_pair", "smin", "smax"],
+    how="inner",
 )
 
 plot_behav_behav_keys = behav_peaks_df.select(
@@ -311,22 +310,23 @@ plot_behav_behav_keys = behav_peaks_df.select(
 plot_behav_behav_keys_unfiltered = behav_peaks_df_unfiltered.select(
     ["subject", "electrode_idx", "phoneme_pair", "word_end", "smin", "smax"]
 )
-plot_behav_behav_df = (
-    plot_behav_behav_df
-    .join(plot_behav_behav_keys,
-          on=["subject", "electrode_idx", "phoneme_pair", "word_end", "smin", "smax"],
-          how="inner")
+plot_behav_behav_df = plot_behav_behav_df.join(
+    plot_behav_behav_keys,
+    on=["subject", "electrode_idx", "phoneme_pair", "word_end", "smin", "smax"],
+    how="inner",
 )
 
 # %%
 # filter based on possibly filtered peaks
 join_keys = ["subject", "electrode_idx", "phoneme_pair"]
-early_polarity = early_polarity.reset_index().merge(phon_peaks_df.to_pandas()[join_keys],
-                                      on=join_keys, how="inner")
+early_polarity = early_polarity.reset_index().merge(
+    phon_peaks_df.to_pandas()[join_keys], on=join_keys, how="inner"
+)
 
 join_keys = ["subject", "electrode_idx", "phoneme_pair", "word_end"]
-late_polarity = late_polarity.merge(behav_peaks_df.to_pandas()[join_keys],
-                                    on=join_keys, how="inner")
+late_polarity = late_polarity.merge(
+    behav_peaks_df.to_pandas()[join_keys], on=join_keys, how="inner"
+)
 
 # %%
 paper_data = PaperData(
@@ -616,21 +616,36 @@ phon_acc_change = (
 # %%
 # summarize: per electrode, selective for one completion or both?
 (
-    behav_peaks_df
+    behav_peaks_df.with_columns(
+        (
+            pl.col("word_end").cast(pl.String).str.slice(0, 1)
+            == pl.col("phoneme_pair").cast(pl.String).str.slice(0, 1)
+        )
+        .cast(pl.UInt8)
+        .alias("lexical_evidence")
+    )
+    .pivot(
+        index=["subject", "electrode_idx", "phoneme_pair"],
+        on="lexical_evidence",
+        values="behav_roc_auc_improvement",
+        aggregate_function="len",
+    )
     .with_columns(
-        (pl.col("word_end").cast(pl.String).str.slice(0, 1) == pl.col("phoneme_pair").cast(pl.String).str.slice(0, 1)).cast(pl.UInt8).alias("lexical_evidence"))
-    .pivot(index=["subject", "electrode_idx", "phoneme_pair"], on="lexical_evidence",
-           values="behav_roc_auc_improvement", aggregate_function="len")
-    .with_columns(
-        (pl.col("0").is_not_null() & pl.col("1").is_not_null()).alias("both_completions"),
-        (pl.col("0").is_not_null() & pl.col("1").is_null()).alias("first_completion_only"),
-        (pl.col("0").is_null() & pl.col("1").is_not_null()).alias("second_completion_only")
+        (pl.col("0").is_not_null() & pl.col("1").is_not_null()).alias(
+            "both_completions"
+        ),
+        (pl.col("0").is_not_null() & pl.col("1").is_null()).alias(
+            "first_completion_only"
+        ),
+        (pl.col("0").is_null() & pl.col("1").is_not_null()).alias(
+            "second_completion_only"
+        ),
     )
     .group_by("phoneme_pair")
     .agg(
         pl.sum("both_completions").alias("both_completions"),
         pl.sum("first_completion_only").alias("first_completion_only"),
-        pl.sum("second_completion_only").alias("second_completion_only")
+        pl.sum("second_completion_only").alias("second_completion_only"),
     )
 )
 
@@ -1152,30 +1167,37 @@ phon_roc_auc_comparison_df = pl.concat(
 
 # %%
 phon_roc_auc_pivot_df = (
-    phon_roc_auc_comparison_df
-    .pivot(
+    phon_roc_auc_comparison_df.pivot(
         on="source",
         index=["subject", "electrode_idx", "phoneme_pair", "fold"],
         values="phon_roc_auc",
-        aggregate_function="mean"
+        aggregate_function="mean",
     )
     .drop_nulls()
     .group_by(["subject", "electrode_idx", "phoneme_pair"])
-    .agg(pl.col("phon").mean().alias("roc_auc_from_phon"),
-         pl.col("behav").mean().alias("roc_auc_from_behav"))
+    .agg(
+        pl.col("phon").mean().alias("roc_auc_from_phon"),
+        pl.col("behav").mean().alias("roc_auc_from_behav"),
+    )
 )
 
 subject_means = (
-    phon_roc_auc_pivot_df
-    .group_by("subject")
-    .agg(pl.col("roc_auc_from_phon").mean().alias("phon_mean"),
-         pl.col("roc_auc_from_behav").mean().alias("behav_mean"))
+    phon_roc_auc_pivot_df.group_by("subject")
+    .agg(
+        pl.col("roc_auc_from_phon").mean().alias("phon_mean"),
+        pl.col("roc_auc_from_behav").mean().alias("behav_mean"),
+    )
     .to_pandas()
 )
 from scipy import stats
-ttest_t, ttest_p = stats.ttest_rel(subject_means["phon_mean"], subject_means["behav_mean"])
-print(f"Paired t-test comparing phonetic decoding from phonetic vs. perceptual peaks: "
-      f"t={ttest_t:.3f}, p={ttest_p:g}")
+
+ttest_t, ttest_p = stats.ttest_rel(
+    subject_means["phon_mean"], subject_means["behav_mean"]
+)
+print(
+    f"Paired t-test comparing phonetic decoding from phonetic vs. perceptual peaks: "
+    f"t={ttest_t:.3f}, p={ttest_p:g}"
+)
 
 fig, ax = plt.subplots(figsize=(2.75, 2.75))
 
@@ -1197,14 +1219,19 @@ ax.plot(
     zorder=3,
     alpha=0.7,
 )
-ax.scatter(
-    [0, 1], [grand_early, grand_late], color="black", s=60, zorder=4, alpha=0.7
-)
+ax.scatter([0, 1], [grand_early, grand_late], color="black", s=60, zorder=4, alpha=0.7)
 
 # Annotate with significance stars
 ymax = max(subject_means["phon_mean"].max(), subject_means["behav_mean"].max())
-ax.text(0.5, 0.85, p_to_stars(ttest_p),
-        ha="center", va="bottom", fontsize=11, transform=ax.transAxes)
+ax.text(
+    0.5,
+    0.85,
+    p_to_stars(ttest_p),
+    ha="center",
+    va="bottom",
+    fontsize=11,
+    transform=ax.transAxes,
+)
 
 ax.set_xticks([0, 1])
 ax.set_xticklabels(["Acoustic\nwindow", "Perceptual\nwindow"])
@@ -1340,7 +1367,6 @@ brac_ttest_df = (
 )
 
 # %%
-from scipy.stats import ttest_ind
 
 ttest_ind(
     brac_ttest_df.loc["phon"].behav_roc_auc, brac_ttest_df.loc["baseline"].behav_roc_auc
@@ -1371,7 +1397,11 @@ g = sns.catplot(
     .to_pandas()
     .assign(
         source=lambda xs: xs.source.replace(
-            {"phon": "Acoustic\nwindow", "behav": "Perceptual\nwindow", "baseline": "Baseline"}
+            {
+                "phon": "Acoustic\nwindow",
+                "behav": "Perceptual\nwindow",
+                "baseline": "Baseline",
+            }
         )
     )
     .rename(columns={"source": "Evaluation"})
@@ -1553,9 +1583,15 @@ ymax = max(
     subject_means["phon_baseline_diff"].max(),
     subject_means["behav_baseline_diff"].max(),
 )
-ax.text(0.5, 0.85, p_to_stars(p_early_vs_late),
-        ha="center", va="bottom", fontsize=11,
-        transform=ax.transAxes)
+ax.text(
+    0.5,
+    0.85,
+    p_to_stars(p_early_vs_late),
+    ha="center",
+    va="bottom",
+    fontsize=11,
+    transform=ax.transAxes,
+)
 
 ax.set_xticks([0, 1])
 ax.set_xticklabels(["Acoustic\nwindow", "Perceptual\nwindow"])
@@ -1861,16 +1897,18 @@ phonetic_transfer_results_by_resampled = (
         suffix="_late",
         how="inner",
     )
-
     .with_columns(
-        (pl.col("early_early_accuracy") - pl.col("late_early_accuracy"))
-        .alias("early_transfer_effect"),
+        (pl.col("early_early_accuracy") - pl.col("late_early_accuracy")).alias(
+            "early_transfer_effect"
+        ),
     )
 )
 
 # %%
 # mean over folds
-phonetic_transfer_results_mean = phonetic_transfer_results.group_by(["subject", "electrode_idx", "phoneme_pair"]).agg(
+phonetic_transfer_results_mean = phonetic_transfer_results.group_by(
+    ["subject", "electrode_idx", "phoneme_pair"]
+).agg(
     pl.mean("early_early_roc_auc"),
     pl.mean("early_late_roc_auc"),
     pl.mean("late_early_roc_auc"),
@@ -1880,14 +1918,17 @@ phonetic_transfer_results_mean = phonetic_transfer_results.group_by(["subject", 
     pl.mean("early_transfer_effect"),
 )
 
-phonetic_transfer_results_by_resampled_mean = \
-    phonetic_transfer_results_by_resampled.group_by(["subject", "electrode_idx", "phoneme_pair", "resampled"]).agg(
+phonetic_transfer_results_by_resampled_mean = (
+    phonetic_transfer_results_by_resampled.group_by(
+        ["subject", "electrode_idx", "phoneme_pair", "resampled"]
+    ).agg(
         pl.mean("early_early_accuracy"),
         pl.mean("early_late_accuracy"),
         pl.mean("late_early_accuracy"),
         pl.mean("late_late_accuracy"),
         pl.mean("early_transfer_effect"),
     )
+)
 
 # %% [markdown]
 # #### Transfer all resampled steps
@@ -1928,9 +1969,12 @@ for ax in g.axes.flat:
     ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: "{:.0%}".format(y)))
 
 # %%
-sns.displot(data=phonetic_transfer_results_mean.to_pandas(),
-            x="early_transfer_effect",
-            height=2.5, aspect=2.5)
+sns.displot(
+    data=phonetic_transfer_results_mean.to_pandas(),
+    x="early_transfer_effect",
+    height=2.5,
+    aspect=2.5,
+)
 
 # %%
 # spaghetti plot
@@ -1946,8 +1990,9 @@ df_wide = (
         }
     )
     .to_pandas()
-    .query('phoneme_pair == "dn"')
-    [[*["subject", "electrode_idx", "phoneme_pair", "fold"], early_col, transfer_col]]
+    .query('phoneme_pair == "dn"')[
+        [*["subject", "electrode_idx", "phoneme_pair", "fold"], early_col, transfer_col]
+    ]
     .dropna(subset=[early_col, transfer_col])
 )
 
@@ -1969,12 +2014,22 @@ for _, row in df_wide.iterrows():
 
 # points at each end
 ax.scatter(
-    [x0] * len(df_wide), df_wide[early_col],
-    color=colors[0], s=12, alpha=0.1, zorder=2, label=early_col
+    [x0] * len(df_wide),
+    df_wide[early_col],
+    color=colors[0],
+    s=12,
+    alpha=0.1,
+    zorder=2,
+    label=early_col,
 )
 ax.scatter(
-    [x1] * len(df_wide), df_wide[transfer_col],
-    color=colors[1], s=12, alpha=0.1, zorder=2, label=transfer_col
+    [x1] * len(df_wide),
+    df_wide[transfer_col],
+    color=colors[1],
+    s=12,
+    alpha=0.1,
+    zorder=2,
+    label=transfer_col,
 )
 
 ax.axhline(0.5, color="red", linestyle="--", linewidth=1)
@@ -1994,8 +2049,9 @@ plt.show()
 # %%
 g = sns.catplot(
     data=(
-        phonetic_transfer_results_by_resampled_mean
-        .filter(pl.col("resampled").is_in([1, 6]))
+        phonetic_transfer_results_by_resampled_mean.filter(
+            pl.col("resampled").is_in([1, 6])
+        )
         .rename(
             {
                 "early_early_accuracy": "Early window",
@@ -2003,7 +2059,8 @@ g = sns.catplot(
                 "early_late_accuracy": "Late window\n(transfer from early)",
                 "late_early_accuracy": "Early window\n(transfer from late)",
             }
-        ).unpivot(
+        )
+        .unpivot(
             on=[
                 "Early window",
                 "Late window",
@@ -2029,15 +2086,20 @@ for ax in g.axes.flat:
     ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: "{:.0%}".format(y)))
 
 # %%
-sns.displot(data=phonetic_transfer_results_by_resampled_mean
-            .filter(pl.col("resampled").is_in([1, 6]))
-            .to_pandas(),
-            x="early_transfer_effect",
-            height=2.5, aspect=2.5)
+sns.displot(
+    data=phonetic_transfer_results_by_resampled_mean.filter(
+        pl.col("resampled").is_in([1, 6])
+    ).to_pandas(),
+    x="early_transfer_effect",
+    height=2.5,
+    aspect=2.5,
+)
 
 # %%
-(phonetic_transfer_results_by_resampled_mean
-    .filter(pl.col("resampled").is_in([1, 6]))
+(
+    phonetic_transfer_results_by_resampled_mean.filter(
+        pl.col("resampled").is_in([1, 6])
+    )
     .group_by(["subject", "electrode_idx", "phoneme_pair"])
     .agg(
         pl.mean("early_early_accuracy").alias("early_early_accuracy"),
@@ -2048,7 +2110,8 @@ sns.displot(data=phonetic_transfer_results_by_resampled_mean
             "early_early_accuracy": "Early window",
             "late_early_accuracy": "Early window\n(transfer from late)",
         }
-    )).sort("Early window\n(transfer from late)")
+    )
+).sort("Early window\n(transfer from late)")
 
 # %%
 # spaghetti plot
@@ -2057,8 +2120,9 @@ transfer_col = "Early window\n(transfer from late)"
 hue_order = [early_col, transfer_col]
 
 df_wide = (
-    phonetic_transfer_results_by_resampled_mean
-    .filter(pl.col("resampled").is_in([1, 6]))
+    phonetic_transfer_results_by_resampled_mean.filter(
+        pl.col("resampled").is_in([1, 6])
+    )
     .group_by(["subject", "electrode_idx", "phoneme_pair"])
     .agg(
         pl.mean("early_early_accuracy").alias("early_early_accuracy"),
@@ -2071,8 +2135,9 @@ df_wide = (
         }
     )
     .to_pandas()
-    .query('phoneme_pair == "dn"')
-    [[*["subject", "electrode_idx", "phoneme_pair"], early_col, transfer_col]]
+    .query('phoneme_pair == "dn"')[
+        [*["subject", "electrode_idx", "phoneme_pair"], early_col, transfer_col]
+    ]
     .dropna(subset=[early_col, transfer_col])
 )
 
@@ -2094,12 +2159,22 @@ for _, row in df_wide.iterrows():
 
 # points at each end
 ax.scatter(
-    [x0] * len(df_wide), df_wide[early_col],
-    color=colors[0], s=12, alpha=0.1, zorder=2, label=early_col
+    [x0] * len(df_wide),
+    df_wide[early_col],
+    color=colors[0],
+    s=12,
+    alpha=0.1,
+    zorder=2,
+    label=early_col,
 )
 ax.scatter(
-    [x1] * len(df_wide), df_wide[transfer_col],
-    color=colors[1], s=12, alpha=0.1, zorder=2, label=transfer_col
+    [x1] * len(df_wide),
+    df_wide[transfer_col],
+    color=colors[1],
+    s=12,
+    alpha=0.1,
+    zorder=2,
+    label=transfer_col,
 )
 
 ax.axhline(0.5, color="red", linestyle="--", linewidth=1)
@@ -2115,8 +2190,9 @@ plt.show()
 
 # %%
 (
-    phonetic_transfer_results_by_resampled_mean
-    .filter(pl.col("resampled").is_in([1, 6]))
+    phonetic_transfer_results_by_resampled_mean.filter(
+        pl.col("resampled").is_in([1, 6])
+    )
     .group_by(["subject", "electrode_idx", "phoneme_pair"])
     .agg(pl.mean("early_transfer_effect"))
     .sort("early_transfer_effect", descending=True)
@@ -2423,22 +2499,17 @@ plt.gcf().savefig("figures/behav_barplot_EC278_dn_necessary.pdf")
 # ## Exploratory: polarity relationships
 
 # %%
-early_polarity_strict = (
-    early_polarity.copy()
-)
+early_polarity_strict = early_polarity.copy()
 
 # %%
-late_polarity_strict = (
-    late_polarity
-    .dropna()
-)
-late_polarity_strict["lexical_evidence"] = (late_polarity_strict.word_end.str[0] == late_polarity_strict.phoneme_pair.str[1]).astype(int)
+late_polarity_strict = late_polarity.dropna()
+late_polarity_strict["lexical_evidence"] = (
+    late_polarity_strict.word_end.str[0] == late_polarity_strict.phoneme_pair.str[1]
+).astype(int)
 
 
 # %%
-def plot_summary_acoustic_vs_presence_of_response(
-        phoneme_pair: str
-):
+def plot_summary_acoustic_vs_presence_of_response(phoneme_pair: str):
     # First: summarize relationship between early polarity
     # and on which words the subsequent effect appears
     f, ax = plt.subplots(figsize=(1.1, 1.5))
@@ -2448,44 +2519,60 @@ def plot_summary_acoustic_vs_presence_of_response(
     completion_2 = "-" + word_end_2[1:]
 
     sns.heatmap(
-        late_polarity_strict
-        .query("phoneme_pair == @phoneme_pair")
-        .pivot_table(index=["subject", "electrode_idx", "phoneme_pair"],
-                    columns="lexical_evidence",
-                    values="late_polarity",
-                    aggfunc="count")
-        .fillna(0).astype({0: bool, 1: bool})
-        .merge((
-            early_polarity_strict
-            .query("phoneme_pair == @phoneme_pair")
-            .groupby(["subject", "electrode_idx", "phoneme_pair"])
-            .filter(lambda xs: xs.early_polarity.nunique() == 1)
-            .drop(columns=["word_end"])
-            .drop_duplicates()
-            .set_index(["subject", "electrode_idx", "phoneme_pair"])),
-            left_index=True, right_index=True, how="inner")
-        .groupby("early_polarity").value_counts(sort=False).reset_index()
-
-        .pipe(lambda df: df.assign(early_polarity=df.early_polarity.map({
-            -1: phoneme_pair[0], 1: phoneme_pair[1]})))
+        late_polarity_strict.query("phoneme_pair == @phoneme_pair")
+        .pivot_table(
+            index=["subject", "electrode_idx", "phoneme_pair"],
+            columns="lexical_evidence",
+            values="late_polarity",
+            aggfunc="count",
+        )
+        .fillna(0)
+        .astype({0: bool, 1: bool})
+        .merge(
+            (
+                early_polarity_strict.query("phoneme_pair == @phoneme_pair")
+                .groupby(["subject", "electrode_idx", "phoneme_pair"])
+                .filter(lambda xs: xs.early_polarity.nunique() == 1)
+                .drop(columns=["word_end"])
+                .drop_duplicates()
+                .set_index(["subject", "electrode_idx", "phoneme_pair"])
+            ),
+            left_index=True,
+            right_index=True,
+            how="inner",
+        )
+        .groupby("early_polarity")
+        .value_counts(sort=False)
+        .reset_index()
+        .pipe(
+            lambda df: df.assign(
+                early_polarity=df.early_polarity.map(
+                    {-1: phoneme_pair[0], 1: phoneme_pair[1]}
+                )
+            )
+        )
         .rename(columns={0: completion_1, 1: completion_2})
-        .set_index([completion_1, completion_2, "early_polarity"])
-        ["count"].unstack().fillna(0).sort_index(ascending=False),
-        annot=True, ax=ax,
-        cbar=False
+        .set_index([completion_1, completion_2, "early_polarity"])["count"]
+        .unstack()
+        .fillna(0)
+        .sort_index(ascending=False),
+        annot=True,
+        ax=ax,
+        cbar=False,
     )
 
     ax.set_xlabel("Acoustic\nselectivity")
     ax.set_ylabel(None)
     yticklabel_map = {
-        f"False-True": f"{completion_2}\nresponse",
-        f"True-False": f"{completion_1}\nresponse",
+        "False-True": f"{completion_2}\nresponse",
+        "True-False": f"{completion_1}\nresponse",
         "True-True": "Both",
         "False-False": "Neither",
     }
-    ax.set_yticklabels([yticklabel_map.get(t.get_text(), t.get_text())
-                        for t in ax.get_yticklabels()],
-                    rotation=0)
+    ax.set_yticklabels(
+        [yticklabel_map.get(t.get_text(), t.get_text()) for t in ax.get_yticklabels()],
+        rotation=0,
+    )
 
     return f
 
@@ -2505,7 +2592,8 @@ f.savefig("figures/early_polarity-late_response-pb.pdf")
 
 # %%
 def plot_summary_acoustic_vs_presence_of_response_stackplot(
-        phoneme_pair=None, ax=None, palette="Set2"):
+    phoneme_pair=None, ax=None, palette="Set2"
+):
     if phoneme_pair is None:
         # use these labels w.l.o.g.
         phoneme_pair_label = "dn"
@@ -2514,39 +2602,62 @@ def plot_summary_acoustic_vs_presence_of_response_stackplot(
         late_polarity_strict__ = late_polarity_strict
     else:
         phoneme_pair_label = phoneme_pair
-        completion_1, completion_2 = [f"-{w[1:]}" for w in PHONEME_PAIR_TO_WORD_ENDS[phoneme_pair]]
-        early_polarity_strict__ = early_polarity_strict.query("phoneme_pair == @phoneme_pair")
-        late_polarity_strict__ = late_polarity_strict.query("phoneme_pair == @phoneme_pair")
+        completion_1, completion_2 = [
+            f"-{w[1:]}" for w in PHONEME_PAIR_TO_WORD_ENDS[phoneme_pair]
+        ]
+        early_polarity_strict__ = early_polarity_strict.query(
+            "phoneme_pair == @phoneme_pair"
+        )
+        late_polarity_strict__ = late_polarity_strict.query(
+            "phoneme_pair == @phoneme_pair"
+        )
 
-    df = (late_polarity_strict__
-            .pivot_table(index=["subject", "electrode_idx", "phoneme_pair"],
-                        columns="lexical_evidence",
-                        values="late_polarity",
-                        aggfunc="count")
-            .fillna(0).astype({0: bool, 1: bool})
-            .merge((
-                early_polarity_strict__
-                .groupby(["subject", "electrode_idx", "phoneme_pair"])
+    df = (
+        late_polarity_strict__.pivot_table(
+            index=["subject", "electrode_idx", "phoneme_pair"],
+            columns="lexical_evidence",
+            values="late_polarity",
+            aggfunc="count",
+        )
+        .fillna(0)
+        .astype({0: bool, 1: bool})
+        .merge(
+            (
+                early_polarity_strict__.groupby(
+                    ["subject", "electrode_idx", "phoneme_pair"]
+                )
                 .filter(lambda xs: xs.early_polarity.nunique() == 1)
                 .drop(columns=["word_end"])
                 .drop_duplicates()
-                .set_index(["subject", "electrode_idx", "phoneme_pair"])),
-                left_index=True, right_index=True, how="inner")
-            .groupby("early_polarity").value_counts(sort=False).reset_index()
-
-            .pipe(lambda df: df.assign(early_polarity=df.early_polarity.map({
-                -1: phoneme_pair_label[0], 1: phoneme_pair_label[1]})))
-            .rename(columns={0: completion_1, 1: completion_2})
-            .set_index([completion_1, completion_2, "early_polarity"])
-            ["count"].unstack().fillna(0).sort_index(ascending=False).T
+                .set_index(["subject", "electrode_idx", "phoneme_pair"])
+            ),
+            left_index=True,
+            right_index=True,
+            how="inner",
+        )
+        .groupby("early_polarity")
+        .value_counts(sort=False)
+        .reset_index()
+        .pipe(
+            lambda df: df.assign(
+                early_polarity=df.early_polarity.map(
+                    {-1: phoneme_pair_label[0], 1: phoneme_pair_label[1]}
+                )
+            )
+        )
+        .rename(columns={0: completion_1, 1: completion_2})
+        .set_index([completion_1, completion_2, "early_polarity"])["count"]
+        .unstack()
+        .fillna(0)
+        .sort_index(ascending=False)
+        .T
     )
 
     # map to readable columns
     column_order = [completion_1, completion_2, "Both"]
-    df.columns = df.columns.map(dict(zip(
-        [(True, False), (False, True), (True, True)],
-        column_order
-    )))
+    df.columns = df.columns.map(
+        dict(zip([(True, False), (False, True), (True, True)], column_order))
+    )
     df = df[column_order]
 
     # # Chi-square test on one-sided responses only
@@ -2564,12 +2675,17 @@ def plot_summary_acoustic_vs_presence_of_response_stackplot(
     else:
         f = ax.get_figure()
 
-    df_pct.plot(kind='bar', stacked=True,
-                color=sns.color_palette(palette, n_colors=3),
-                ax=ax, width=0.7)
+    df_pct.plot(
+        kind="bar",
+        stacked=True,
+        color=sns.color_palette(palette, n_colors=3),
+        ax=ax,
+        width=0.7,
+    )
     sns.despine(ax=ax)
-    legend = ax.legend(loc="upper right", bbox_to_anchor=(1.75, 1),
-              title="Perceptual\nresponse")
+    legend = ax.legend(
+        loc="upper right", bbox_to_anchor=(1.75, 1), title="Perceptual\nresponse"
+    )
     plt.setp(legend.get_title(), multialignment="center")
     ax.set_xlabel("Acoustic preference")
     ax.set_ylabel(None)
@@ -2577,11 +2693,11 @@ def plot_summary_acoustic_vs_presence_of_response_stackplot(
     ax.set_xticklabels(df_pct.index, rotation=0)
     ax.set_ylim(0, 100)
     ax.yaxis.set_major_formatter(mtick.PercentFormatter())
-    
+
     # # Add significance annotation
-    # ax.text(0.5, 0.9, sig_stars, ha='center', va='bottom', 
+    # ax.text(0.5, 0.9, sig_stars, ha='center', va='bottom',
     #         fontsize=14, transform=ax.transAxes)
-    
+
     return f
 
 
@@ -2595,7 +2711,9 @@ None
 
 # %%
 # Matches in late polarity for electrodes showing responses at both completion
-late_polarity_strict.set_index(["subject", "electrode_idx", "phoneme_pair", "lexical_evidence"]).late_polarity.unstack().dropna().groupby("phoneme_pair").value_counts()
+late_polarity_strict.set_index(
+    ["subject", "electrode_idx", "phoneme_pair", "lexical_evidence"]
+).late_polarity.unstack().dropna().groupby("phoneme_pair").value_counts()
 
 # %%
 
@@ -2608,22 +2726,28 @@ late_polarity_strict.set_index(["subject", "electrode_idx", "phoneme_pair", "lex
 f, ax = plt.subplots(figsize=(1, 1))
 sns.heatmap(
     (
-        late_polarity_strict
-        .drop_duplicates(["subject", "electrode_idx", "phoneme_pair", "word_end"])
+        late_polarity_strict.drop_duplicates(
+            ["subject", "electrode_idx", "phoneme_pair", "word_end"]
+        )
         .drop(columns=["lexical_evidence"])
         .merge(
             early_polarity_strict.drop_duplicates(),
-            on=["subject", "electrode_idx", "phoneme_pair", "word_end"]
-        )
-        [["early_polarity", "late_polarity"]].value_counts(sort=False)
+            on=["subject", "electrode_idx", "phoneme_pair", "word_end"],
+        )[["early_polarity", "late_polarity"]]
+        .value_counts(sort=False)
         .reset_index()
-        .pipe(lambda df: df.assign(early_selectivity=df.early_polarity.map({-1: "d", 1: "n"}),
-                                late_selectivity=df.late_polarity.map({-1: "d", 1: "n"})))
-        .set_index(["early_selectivity", "late_selectivity"])
-        ["count"].unstack()
+        .pipe(
+            lambda df: df.assign(
+                early_selectivity=df.early_polarity.map({-1: "d", 1: "n"}),
+                late_selectivity=df.late_polarity.map({-1: "d", 1: "n"}),
+            )
+        )
+        .set_index(["early_selectivity", "late_selectivity"])["count"]
+        .unstack()
     ),
     annot=True,
-    vmin=0, cbar=False,
+    vmin=0,
+    cbar=False,
 )
 
 ax.set_yticklabels(ax.get_yticklabels(), rotation=0)
@@ -2636,34 +2760,43 @@ f.savefig("figures/early_polarity-late_polarity.pdf")
 # Stacked bar chart form
 f, ax = plt.subplots(figsize=(2.25, 2))
 (
-    late_polarity_strict
-    .drop_duplicates(["subject", "electrode_idx", "phoneme_pair", "word_end"])
+    late_polarity_strict.drop_duplicates(
+        ["subject", "electrode_idx", "phoneme_pair", "word_end"]
+    )
     .drop(columns=["lexical_evidence"])
     .merge(
         early_polarity_strict.drop_duplicates(),
-        on=["subject", "electrode_idx", "phoneme_pair", "word_end"]
-    )
-    [["early_polarity", "late_polarity"]].value_counts(sort=False)
+        on=["subject", "electrode_idx", "phoneme_pair", "word_end"],
+    )[["early_polarity", "late_polarity"]]
+    .value_counts(sort=False)
     .reset_index()
-    .pipe(lambda df: df.assign(early_selectivity=df.early_polarity.map({-1: "d", 1: "n"}),
-                            late_selectivity=df.late_polarity.map({-1: "d", 1: "n"})))
-    .set_index(["early_selectivity", "late_selectivity"])
-    ["count"].unstack()
+    .pipe(
+        lambda df: df.assign(
+            early_selectivity=df.early_polarity.map({-1: "d", 1: "n"}),
+            late_selectivity=df.late_polarity.map({-1: "d", 1: "n"}),
+        )
+    )
+    .set_index(["early_selectivity", "late_selectivity"])["count"]
+    .unstack()
     .transform(lambda x: x / x.sum() * 100, axis=1)
-    .plot(kind="bar", stacked=True, width=0.7,
-          color=sns.color_palette("Set2", n_colors=2),
-          ax=ax)
+    .plot(
+        kind="bar",
+        stacked=True,
+        width=0.7,
+        color=sns.color_palette("Set2", n_colors=2),
+        ax=ax,
+    )
 )
 
 # Add 50% chance line
-plt.axhline(y=50, color='black', linestyle='--', linewidth=1, alpha=0.5)
+plt.axhline(y=50, color="black", linestyle="--", linewidth=1, alpha=0.5)
 
-plt.xlabel('Acoustic preference', fontsize=12)
+plt.xlabel("Acoustic preference", fontsize=12)
 plt.ylabel(None)
 ax.set_xticklabels(ax.get_xticklabels(), rotation=0)
 plt.ylim(0, 100)
 ax.yaxis.set_major_formatter(mtick.PercentFormatter())
-ax.legend(title='Perceptual\npreference', loc='upper right', bbox_to_anchor=(1.6, 1))
+ax.legend(title="Perceptual\npreference", loc="upper right", bbox_to_anchor=(1.6, 1))
 sns.despine(ax=ax)
 
 f.savefig("figures/early_polarity-late_polarity_stackbar.pdf")
@@ -2673,18 +2806,27 @@ f.savefig("figures/early_polarity-late_polarity_stackbar.pdf")
 f, ax = plt.subplots(figsize=(2.5, 1.5))
 sns.heatmap(
     (
-        late_polarity_strict
-        .set_index(["subject", "electrode_idx", "phoneme_pair", "lexical_evidence"])
+        late_polarity_strict.set_index(
+            ["subject", "electrode_idx", "phoneme_pair", "lexical_evidence"]
+        )
         .late_polarity.unstack("lexical_evidence")
         .fillna(0)
         .astype(int)
         .value_counts(sort=False)
         .unstack(1)
         # update labels
-        .rename(index={-1: "/d/-selective\nin -esolate", 1: "/n/-selective\nin -esolate"})
-        .rename(columns={-1: "/d/-selective\nin -ecessary", 1: "/n/-selective\nin -ecessary"})
+        .rename(
+            index={-1: "/d/-selective\nin -esolate", 1: "/n/-selective\nin -esolate"}
+        )
+        .rename(
+            columns={
+                -1: "/d/-selective\nin -ecessary",
+                1: "/n/-selective\nin -ecessary",
+            }
+        )
     ),
-    annot=True, cbar=False,
+    annot=True,
+    cbar=False,
 )
 
 ax.set_xlabel(None)
@@ -2692,5 +2834,67 @@ ax.set_xticklabels(ax.get_xticklabels(), rotation=0)
 ax.set_ylabel(None)
 
 f.savefig("figures/late_polarity_relationship.pdf")
+
+# %% [markdown]
+# ## Late response on unambiguous vs. ambiguous trials
+#
+# For each site with a valid late window (hga_late not NaN), test whether the
+# late-window signed HGA (hga_late_signed) also differentiates behavioral choice
+# on *unambiguous* trials (resampled 1 and 6), vs. only on the ambiguous trials
+# that were used to find the window.
+#
+# At resampled=1, behavioral choice is almost always 0; at resampled=6 almost
+# always 1. So we compare hga_late_signed between behavior_dummy_forced=0 and =1
+# within unambiguous trials per site.  We use acoustic-consistent trials only
+# (follows_acoustics=True) to keep the same inclusion criteria used in zoomin_hga.
+
+# %%
+
+site_cols = ["subject", "electrode_idx", "phoneme_pair", "word_end"]
+
+# Only sites with a valid late window
+reg_df_valid = reg_df.dropna(subset=["hga_late_signed"])
+
+unambig_late_results = []
+for site_key, site_data in reg_df_valid.groupby(site_cols):
+    # unambiguous acoustic-consistent trials only
+    unambig = site_data[
+        site_data.resampled.isin([1.0, 6.0]) & site_data.follows_acoustics
+    ]
+    grp0 = unambig[unambig.behavior_dummy_forced == 0]["hga_late_signed"].dropna()
+    grp1 = unambig[unambig.behavior_dummy_forced == 1]["hga_late_signed"].dropna()
+
+    if len(grp0) >= 3 and len(grp1) >= 3:
+        t, p = ttest_ind(grp1, grp0, equal_var=False)
+        has_unambig_response = p < 0.05 and t > 0  # expect higher for behavior=1
+    else:
+        p, has_unambig_response = np.nan, False
+
+    unambig_late_results.append(
+        {
+            **dict(zip(site_cols, site_key)),
+            "n_unambig": len(unambig),
+            "n_grp0": len(grp0),
+            "n_grp1": len(grp1),
+            "t": t if not np.isnan(p) else np.nan,
+            "p_unambig": p,
+            "late_on_unambig": has_unambig_response,
+        }
+    )
+
+unambig_late_df = pd.DataFrame(unambig_late_results)
+
+n_total = len(unambig_late_df)
+n_both = unambig_late_df["late_on_unambig"].sum()
+n_ambig_only = n_total - n_both
+
+print(
+    f"Sites with valid late window: {n_total}\n"
+    f"  Late response on BOTH unambiguous and ambiguous trials: {n_both} "
+    f"({100 * n_both / n_total:.0f}%)\n"
+    f"  Late response on ambiguous trials ONLY:                 {n_ambig_only} "
+    f"({100 * n_ambig_only / n_total:.0f}%)"
+)
+unambig_late_df
 
 # %%
