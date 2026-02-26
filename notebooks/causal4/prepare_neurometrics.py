@@ -72,7 +72,6 @@ epoch_sfreq = 100
 phon_response_tmin_min = 0.0
 all_response_tmax_max = 1.3
 
-# phon_response_peak_threshold = 0.64
 phon_response_peak_threshold = 0.6
 
 outdir = "outputs/causal4/prepare_neurometrics"
@@ -385,9 +384,7 @@ hga_df = extract_hga_windows_df(_bootstrap, zoomin_keys=zoomin_keys)
 # Use only unambiguous acoustic-consistent trials (resampled=1 and 6, follows_acoustics=True),
 # consistent with how the early window was found (zoomin_hga / find_site_windows uses
 # resampled=1 vs 6 acoustic-consistent trials to select the phoneme window).
-hga_df_unambig = hga_df[
-    hga_df.resampled.isin([1.0, 6.0]) & hga_df.follows_acoustics
-]
+hga_df_unambig = hga_df[hga_df.resampled.isin([1.0, 6.0]) & hga_df.follows_acoustics]
 early_polarity = (
     hga_df_unambig.groupby(
         ["subject", "electrode_idx", "phoneme_pair", "word_end", "decoder_target"]
@@ -407,8 +404,10 @@ early_polarity = (
 # is constant within those steps) and consistent with how the window was found.
 hga_df_ambig = hga_df[
     hga_df.apply(
-        lambda xs: xs.behav_steps_chosen != "None"
-        and str(int(xs.resampled)) in xs.behav_steps_chosen,
+        lambda xs: (
+            xs.behav_steps_chosen != "None"
+            and str(int(xs.resampled)) in xs.behav_steps_chosen
+        ),
         axis=1,
     )
 ]

@@ -991,6 +991,69 @@ for (row, col, hue), data in g.facet_data():
 
 g.savefig("figures/decoding_timing-desolate.pdf")
 
+# %%
+plot_word_ends = ["desolate", "necessary"]
+plot_phoneme_pair = "dn"
+plot_textgrid = "11_necessary_dn_002.TextGrid"
+plot_xlim = (0, 1.2)
+vline_extent = 1.1
+g = sns.displot(
+    data=peak_timing_plot.filter(
+        (pl.col("word_end").is_in(plot_word_ends))
+        | ((pl.col("source") == "phon") & (pl.col("phoneme_pair") == plot_phoneme_pair))
+    )
+    .to_pandas()
+    .assign(
+        source=lambda df: df.source.map({"phon": "Acoustic", "behav": "Perceptual"})
+    ),
+    x="t_center",
+    hue="source",
+    hue_order={"Acoustic": 0, "Perceptual": 1},
+    palette=categorical_palette,
+    linewidth=2,
+    # kind="hist", stat="density", common_norm=False,
+    kind="kde",
+    common_norm=False,
+    clip=(0, None),
+    # legend=False,
+    height=2,
+    aspect=2.75 / 2,
+)
+g.set_axis_labels("Peak decoding time (s)", "Density")
+sns.move_legend(
+    g, "upper right", bbox_to_anchor=(0.65, 0.93), fontsize=10, frameon=True, title=None
+)
+
+for (row, col, hue), data in g.facet_data():
+    ax = g.axes[row][col]
+    ax.set_xlim(plot_xlim)
+
+    phoneme_pair = data.phoneme_pair.iloc[0]
+    word_stim_info = word_end_df.filter(pl.col("word_end").is_in(plot_word_ends))
+    # for word_end in word_stim_info.select("word_end_offset").to_series():
+    #     ax.axvline(word_end, color="red", linestyle="--")
+    pod = word_stim_info.select("pod").unique().item()
+    ax.axvline(
+        pod,
+        ymax=vline_extent,
+        color="red",
+        alpha=0.5,
+        linewidth=2,
+        linestyle="--",
+        clip_on=False,
+    )
+
+    add_textgrid(
+        ax,
+        textgrid_dir,
+        textgrid_file=plot_textgrid,
+        include_phonemes=False,
+        fontsize=9,
+        vline_extent=vline_extent,
+    )
+
+g.savefig("figures/decoding_timing-both.pdf")
+
 # %% [markdown]
 # ### Peak timing of behavior relative to word offset
 
@@ -2448,7 +2511,7 @@ f = plot_condition_contrasts_single_figure(
     paper_data,
     textgrid_dir,
     epoch_data_cache=pcc_epoch_data_cache,
-    plot_word_end="necessary",
+    plot_word_ends=["necessary"],
 )
 f.savefig("figures/condition_contrasts.pdf")
 
@@ -2457,11 +2520,24 @@ plot_condition_contrasts_single_figure(
     paper_data,
     textgrid_dir,
     epoch_data_cache=pcc_epoch_data_cache,
-    plot_word_end="desolate",
+    plot_word_ends=["desolate"],
 )
 plt.gca().set_xlim(0, 0.7)
 plt.gcf().savefig("figures/condition_contrasts-desolate.pdf")
 
+
+# %%
+plot_condition_contrasts_single_figure(
+    paper_data,
+    textgrid_dir,
+    epoch_data_cache=pcc_epoch_data_cache,
+    plot_word_ends=["necessary", "desolate"],
+    textgrid_kwargs=dict(
+        include_offset=False, include_phonemes=False, vline_extent=1.0
+    ),
+)
+plt.gcf().savefig("figures/condition_contrasts-both.pdf")
+None
 
 # %%
 # f, ax = plt.subplots(figsize=(5, 3))

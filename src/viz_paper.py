@@ -187,7 +187,7 @@ class PaperData:
                 .min()
                 .alias("count")
             )
-            .filter(pl.col("count") > 3)
+            .filter(pl.col("count") > 2)
             .with_columns(pl.col("resampled").cast(int))
             .sort(["subject", "phoneme_pair", "word_end", "resampled"])
             .group_by(["subject", "phoneme_pair", "word_end"])
@@ -1515,8 +1515,8 @@ def plot_condition_contrast(
     label=None,
     textgrid_kwargs=None,
     vline_extent=1.25,
-    ttest_window_size=8,
-    ttest_window_stride=8,
+    ttest_window_size=15,
+    ttest_window_stride=15,
     ttest_bar_height_ratio=0.04,
     ttest_bar_y_ratio=0.95,
     color=None,
@@ -1564,7 +1564,8 @@ def plot_condition_contrast(
 
     p_threshold_height_mults = [1.0, 0.5, 0.25]
     # p_thresholds = list(zip([0.0001, 0.001, 0.01], p_threshold_height_mults))
-    p_thresholds = list(zip([0.001, 0.01, 0.05], p_threshold_height_mults))
+    p_thresholds = list(zip([0.00001, 0.0001, 0.001], p_threshold_height_mults))
+    # p_thresholds = list(zip([0.001, 0.01, 0.05], p_threshold_height_mults))
 
     ymin, ymax = ax.get_ylim()
     base_bar_height = (ymax - ymin) * ttest_bar_height_ratio
@@ -1647,17 +1648,21 @@ def plot_condition_contrasts_single_figure(
     data: PaperData,
     textgrid_dir,
     epoch_data_cache=None,
-    plot_word_end: str = "necessary",
+    textgrid_kwargs=None,
+    plot_word_ends: list[str] = ("necessary",),
     plot_xlim=(0, 1.2),
 ):
     f, ax = plt.subplots(figsize=(2.5, 2))
+
+    is_single_word_end = len(plot_word_ends) == 1
 
     plot_palette = sns.color_palette("Set2", 2)
 
     _, p_handles, p_labels = plot_condition_contrast(
         (
             data.plot_phon_phon_df.filter(
-                pl.col("resampled").is_in([1, 6]), pl.col("word_end") == plot_word_end
+                pl.col("resampled").is_in([1, 6]),
+                pl.col("word_end").is_in(plot_word_ends),
             )
         ),
         "categorical_acoustic_cue",
@@ -1668,7 +1673,7 @@ def plot_condition_contrasts_single_figure(
         ax=ax,
         color=plot_palette[0],
         annotate=True,
-        textgrid_kwargs=dict(fontsize=8),
+        textgrid_kwargs={"fontsize": 8, **(textgrid_kwargs or {})},
         label="Acoustic\ncontrast",
     )
 
@@ -1695,7 +1700,7 @@ def plot_condition_contrasts_single_figure(
         data.plot_phon_phon_df,
         on=["subject", "phoneme_pair", "word_end", "resampled"],
         how="inner",
-    ).filter(pl.col("word_end") == plot_word_end)
+    ).filter(pl.col("word_end").is_in(plot_word_ends))
     plot_condition_contrast(
         plot_behav_rows,
         "behavior_dummy_forced",
@@ -1708,7 +1713,11 @@ def plot_condition_contrasts_single_figure(
         annotate=False,
         label="Perceptual\ncontrast",
         vline_extent=1.2,
-        textgrid_kwargs=dict(include_phonemes=False),
+        textgrid_kwargs={
+            "fontsize": 8,
+            "include_phonemes": False,
+            **(textgrid_kwargs or {}),
+        },
         ttest_bar_y_ratio=0.87,
     )
 
@@ -1716,17 +1725,18 @@ def plot_condition_contrasts_single_figure(
     ax.set_ylabel("HGA effect size ($z$)")
     ax.set_xlabel("Time from word onset (s)")
 
-    handles, labels = ax.get_legend_handles_labels()
-    handles += p_handles
-    labels += p_labels
-    ax.legend(
-        handles=handles,
-        labels=labels,
-        handler_map={Rectangle: HandlerRectangle()},
-        fontsize=10,
-        loc="upper right",
-        bbox_to_anchor=(1.6, 1.15),
-    )
+    if p_handles is not None:
+        handles, labels = ax.get_legend_handles_labels()
+        handles += p_handles
+        labels += p_labels
+        ax.legend(
+            handles=handles,
+            labels=labels,
+            handler_map={Rectangle: HandlerRectangle()},
+            fontsize=10,
+            loc="upper right",
+            bbox_to_anchor=(1.6, 1.15),
+        )
 
     return f
 
