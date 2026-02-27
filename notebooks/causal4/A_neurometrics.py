@@ -2564,11 +2564,27 @@ None
 
 
 # %%
-plot_behav_barplot(all_md, "EC250", "dn", "desolate", [1, 3, 4, 6], legend=False)
+plot_behav_barplot(
+    all_md,
+    "EC250",
+    "dn",
+    "desolate",
+    [1, 3, 4, 6],
+    legend=False,
+    resampled_palette=resampled_palette_simplified,
+)
 plt.gcf().savefig("figures/behav_barplot_EC250_dn_desolate.pdf")
 
 # %%
-plot_behav_barplot(all_md, "EC278", "dn", "necessary", [1, 3, 4, 6], legend=False)
+plot_behav_barplot(
+    all_md,
+    "EC278",
+    "dn",
+    "necessary",
+    [1, 3, 4, 6],
+    legend=False,
+    resampled_palette=resampled_palette_simplified,
+)
 plt.gcf().savefig("figures/behav_barplot_EC278_dn_necessary.pdf")
 
 # %% [markdown]
