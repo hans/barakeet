@@ -2989,4 +2989,231 @@ print(
 )
 unambig_late_df
 
+# %% [markdown]
+# ## Perceptual contrast on unambiguous trials, split by late-response generalization
+#
+# Compare sites that show a late behavioral response on *unambiguous* trials
+# (`late_on_unambig=True`) vs. those that only show it on ambiguous trials.
+# Both groups are evaluated here on unambiguous trials (resampled 1 and 6),
+# using `behavior_dummy_forced` as the condition variable and `late_polarity`
+# sign correction — i.e. the same signed HGA contrast used to classify sites.
+
+# %%
+from matplotlib.patches import Rectangle
+
+from src.viz_paper import HandlerRectangle, plot_condition_contrast
+
+unambig_late_pl = pl.from_pandas(
+    unambig_late_df[site_cols + ["late_on_unambig"]]
+).with_columns(
+    pl.col("subject").cast(subject_enum),
+    pl.col("phoneme_pair").cast(phoneme_pair_enum),
+    pl.col("word_end").cast(word_end_enum),
+)
+
+# %%
+for plot_word_end, plot_xlim in zip(["necessary", "desolate"], [(0, 1.2), (0, 0.7)]):
+    plot_unambig = paper_data.plot_phon_phon_df.filter(
+        pl.col("resampled").is_in([1.0, 6.0]),
+        pl.col("word_end").is_in([plot_word_end]),
+    )
+    plot_generalize = plot_unambig.join(
+        unambig_late_pl.filter(pl.col("late_on_unambig")), on=site_cols, how="inner"
+    )
+    plot_specific = plot_unambig.join(
+        unambig_late_pl.filter(~pl.col("late_on_unambig")), on=site_cols, how="inner"
+    )
+
+    n_generalize = plot_generalize.select(site_cols).unique().height
+    n_specific = plot_specific.select(site_cols).unique().height
+
+    f, ax = plt.subplots(figsize=(3, 2))
+    plot_palette = sns.color_palette("Set1", 2)
+
+    _, p_handles, p_labels = plot_condition_contrast(
+        plot_generalize,
+        "behavior_dummy_forced",
+        data=paper_data,
+        textgrid_dir=textgrid_dir,
+        polarity_correct="late",
+        epoch_data_cache=pcc_epoch_data_cache,
+        ax=ax,
+        color=plot_palette[0],
+        annotate=True,
+        textgrid_kwargs={"fontsize": 8},
+        label=f"Generalizes (n={n_generalize})",
+        pval_thresholds=(0.01, 0.05),
+    )
+    plot_condition_contrast(
+        plot_specific,
+        "behavior_dummy_forced",
+        data=paper_data,
+        textgrid_dir=textgrid_dir,
+        polarity_correct="late",
+        epoch_data_cache=pcc_epoch_data_cache,
+        ax=ax,
+        color=plot_palette[1],
+        annotate=False,
+        label=f"Ambig-only (n={n_specific})",
+        ttest_bar_y_ratio=0.87,
+        pval_thresholds=(0.01, 0.05),
+    )
+
+    ax.set_xlim(*plot_xlim)
+    ax.set_ylabel("HGA effect size ($z$)")
+    ax.set_xlabel("Time from word onset (s)")
+
+    if p_handles is not None:
+        handles, labels = ax.get_legend_handles_labels()
+        handles += p_handles
+        labels += p_labels
+        ax.legend(
+            handles=handles,
+            labels=labels,
+            handler_map={Rectangle: HandlerRectangle()},
+            fontsize=8,
+            loc="best",
+        )
+
+    f.savefig(f"figures/perceptual_contrast_unambig_split-{plot_word_end}.pdf")
+    plt.show()
+
+# %%
+plot_word_ends = ["necessary", "desolate"]
+plot_xlim = (0, 1.2)
+
+plot_unambig = paper_data.plot_phon_phon_df.filter(
+    pl.col("resampled").is_in([1.0, 6.0]),
+    pl.col("word_end").is_in(plot_word_ends),
+)
+plot_generalize = plot_unambig.join(
+    unambig_late_pl.filter(pl.col("late_on_unambig")), on=site_cols, how="inner"
+)
+plot_specific = plot_unambig.join(
+    unambig_late_pl.filter(~pl.col("late_on_unambig")), on=site_cols, how="inner"
+)
+
+n_generalize = plot_generalize.select(site_cols).unique().height
+n_specific = plot_specific.select(site_cols).unique().height
+
+f, ax = plt.subplots(figsize=(3, 2))
+plot_palette = sns.color_palette("Set1", 2)
+
+_, p_handles, p_labels = plot_condition_contrast(
+    plot_generalize,
+    "behavior_dummy_forced",
+    data=paper_data,
+    textgrid_dir=textgrid_dir,
+    polarity_correct="late",
+    epoch_data_cache=pcc_epoch_data_cache,
+    ax=ax,
+    color=plot_palette[0],
+    annotate=True,
+    textgrid_kwargs={"fontsize": 8},
+    label=f"Generalizes (n={n_generalize})",
+    pval_thresholds=(0.01, 0.05),
+)
+plot_condition_contrast(
+    plot_specific,
+    "behavior_dummy_forced",
+    data=paper_data,
+    textgrid_dir=textgrid_dir,
+    polarity_correct="late",
+    epoch_data_cache=pcc_epoch_data_cache,
+    ax=ax,
+    color=plot_palette[1],
+    annotate=False,
+    label=f"Ambig-only (n={n_specific})",
+    ttest_bar_y_ratio=0.87,
+    pval_thresholds=(0.01, 0.05),
+)
+
+ax.set_xlim(*plot_xlim)
+ax.set_ylabel("HGA effect size ($z$)")
+ax.set_xlabel("Time from word onset (s)")
+
+if p_handles is not None:
+    handles, labels = ax.get_legend_handles_labels()
+    handles += p_handles
+    labels += p_labels
+    ax.legend(
+        handles=handles,
+        labels=labels,
+        handler_map={Rectangle: HandlerRectangle()},
+        fontsize=8,
+        loc="best",
+    )
+
+f.savefig("figures/perceptual_contrast_unambig_split-both.pdf")
+plt.show()
+
+# %%
+plot_word_ends = ["necessary", "desolate"]
+plot_xlim = (0, 1.2)
+
+plot_unambig = paper_data.plot_phon_phon_df.filter(
+    ~pl.col("resampled").is_in([1.0, 6.0]),
+    pl.col("word_end").is_in(plot_word_ends),
+)
+plot_generalize = plot_unambig.join(
+    unambig_late_pl.filter(pl.col("late_on_unambig")), on=site_cols, how="inner"
+)
+plot_specific = plot_unambig.join(
+    unambig_late_pl.filter(~pl.col("late_on_unambig")), on=site_cols, how="inner"
+)
+
+n_generalize = plot_generalize.select(site_cols).unique().height
+n_specific = plot_specific.select(site_cols).unique().height
+
+f, ax = plt.subplots(figsize=(3, 2))
+plot_palette = sns.color_palette("Set1", 2)
+
+_, p_handles, p_labels = plot_condition_contrast(
+    plot_generalize,
+    "behavior_dummy_forced",
+    data=paper_data,
+    textgrid_dir=textgrid_dir,
+    polarity_correct="late",
+    epoch_data_cache=pcc_epoch_data_cache,
+    ax=ax,
+    color=plot_palette[0],
+    annotate=True,
+    textgrid_kwargs={"fontsize": 8},
+    label=f"Generalizes (n={n_generalize})",
+    pval_thresholds=(0.01, 0.05),
+)
+plot_condition_contrast(
+    plot_specific,
+    "behavior_dummy_forced",
+    data=paper_data,
+    textgrid_dir=textgrid_dir,
+    polarity_correct="late",
+    epoch_data_cache=pcc_epoch_data_cache,
+    ax=ax,
+    color=plot_palette[1],
+    annotate=False,
+    label=f"Ambig-only (n={n_specific})",
+    ttest_bar_y_ratio=0.87,
+    pval_thresholds=(0.01, 0.05),
+)
+
+ax.set_xlim(*plot_xlim)
+ax.set_ylabel("HGA effect size ($z$)")
+ax.set_xlabel("Time from word onset (s)")
+
+if p_handles is not None:
+    handles, labels = ax.get_legend_handles_labels()
+    handles += p_handles
+    labels += p_labels
+    ax.legend(
+        handles=handles,
+        labels=labels,
+        handler_map={Rectangle: HandlerRectangle()},
+        fontsize=8,
+        loc="best",
+    )
+
+# f.savefig(f"figures/perceptual_contrast_unambig_split-both.pdf")
+plt.show()
+
 # %%
