@@ -1,3 +1,4 @@
+from itertools import product as _product
 from pathlib import Path
 
 from ploomber_engine import execute_notebook
@@ -48,6 +49,31 @@ def run_notebook(input_path: str, output_path: str, parameters, **kwargs):
         if tmp_path is not None:
             tmp_path.unlink(missing_ok=True)
 
+
+# ---------------------------------------------------------------------------
+# Neurometrics hyperparameter sweep helpers
+# ---------------------------------------------------------------------------
+
+def _params_tag(phon, behav, ambig):
+    """Encode threshold triple as a filesystem-safe directory name."""
+    return f"p{int(phon * 100)}_b{int(behav * 1000)}_a{ambig}"
+
+
+NEUROMETRICS_PARAMS_GRID = {
+    _params_tag(p, b, a): dict(
+        phon_response_peak_threshold=p,
+        behav_response_peak_threshold=b,
+        ambiguous_response_threshold=a,
+    )
+    for p, b, a in _product(
+        config["analysis"]["sweep"]["phon_response_peak_thresholds"],
+        config["analysis"]["sweep"]["behav_response_peak_thresholds"],
+        config["analysis"]["sweep"]["ambiguous_response_thresholds"],
+    )
+}
+ALL_NEUROMETRICS_PARAMS = list(NEUROMETRICS_PARAMS_GRID.keys())
+
+# ---------------------------------------------------------------------------
 
 # params: power threshold
 rule find_speech_responsive:
@@ -783,4 +809,136 @@ rule prepare_neurometrics:
 
                 outdir=str(outdir),
             ),
+        )
+
+
+rule prepare_neurometrics_sweep:
+    """
+    Parameterized variant of prepare_neurometrics.
+    Runs for every combination in NEUROMETRICS_PARAMS_GRID, writing outputs to
+    outputs/causal4/prepare_neurometrics/{params_id}/.
+    """
+    input:
+        all_epochs = expand(
+            "outputs/epochs_preprocessed/{subject}_epo.fif",
+            subject=config["data"]["subjects"]
+        ),
+        A_behav_predictions = expand(
+            "outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/A-predictions.parquet",
+            subject=config["data"]["subjects"]
+        ),
+        A_early_behav_predictions = expand(
+            "outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/A_early-predictions.parquet",
+            subject=config["data"]["subjects"]
+        ),
+        phon_predictions = "outputs/causal4/A_predictions/behavior_to_phonetic_decoding.parquet",
+        electrode_paths = expand(
+            "outputs/causal4/find_speech_responsive/{subject}_results.csv",
+            subject=config["data"]["subjects"]
+        ),
+        notebook = "notebooks/causal4/prepare_neurometrics.py",
+
+    output:
+        notebook = "outputs/causal4/prepare_neurometrics/{params_id}/notebook.ipynb",
+        electrode_df = "outputs/causal4/prepare_neurometrics/{params_id}/electrode_df.parquet",
+        plot_phon_phon_df = "outputs/causal4/prepare_neurometrics/{params_id}/plot_phon_phon_df.parquet",
+        plot_behav_phon_df = "outputs/causal4/prepare_neurometrics/{params_id}/plot_behav_phon_df.parquet",
+        plot_behav_behav_df = "outputs/causal4/prepare_neurometrics/{params_id}/plot_behav_behav_df.parquet",
+        plot_phon_behav_df = "outputs/causal4/prepare_neurometrics/{params_id}/plot_phon_behav_df.parquet",
+        behav_roc_auc_searchlight_df = "outputs/causal4/prepare_neurometrics/{params_id}/behav_roc_auc_searchlight_df.parquet",
+        phon_roc_auc_searchlight_df = "outputs/causal4/prepare_neurometrics/{params_id}/phon_roc_auc_searchlight_df.parquet",
+        all_md = "outputs/causal4/prepare_neurometrics/{params_id}/all_md.parquet",
+        word_end_df = "outputs/causal4/prepare_neurometrics/{params_id}/word_end_df.parquet",
+        phon_peaks_df = "outputs/causal4/prepare_neurometrics/{params_id}/phon_peaks_df.parquet",
+        behav_peaks_df = "outputs/causal4/prepare_neurometrics/{params_id}/behav_peaks_df.parquet",
+        behav_peaks_df_unfiltered = "outputs/causal4/prepare_neurometrics/{params_id}/behav_peaks_df_unfiltered.parquet",
+        behav_baseline_df = "outputs/causal4/prepare_neurometrics/{params_id}/behav_baseline_df.parquet",
+        zoomin_keys = "outputs/causal4/prepare_neurometrics/{params_id}/zoomin_keys.parquet",
+        early_polarity = "outputs/causal4/prepare_neurometrics/{params_id}/early_polarity.parquet",
+        late_polarity = "outputs/causal4/prepare_neurometrics/{params_id}/late_polarity.parquet",
+        hga_df = "outputs/causal4/prepare_neurometrics/{params_id}/hga_df.parquet",
+        reg_df = "outputs/causal4/prepare_neurometrics/{params_id}/reg_df.parquet",
+
+    wildcard_constraints:
+        params_id = "|".join(ALL_NEUROMETRICS_PARAMS)
+
+    run:
+        params = NEUROMETRICS_PARAMS_GRID[wildcards.params_id]
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                all_epochs=list(input.all_epochs),
+                A_behav_predictions=list(input.A_behav_predictions),
+                A_early_behav_predictions=list(input.A_early_behav_predictions),
+                phon_predictions_path=str(input.phon_predictions),
+                electrode_paths=list(input.electrode_paths),
+
+                phon_response_tmin_min=0.0,
+                all_response_tmax_max=1.3,
+
+                epoch_sfreq=config["analysis"]["epoch_sfreq"],
+                epoch_tmin=config["analysis"]["epoch_tmin"],
+
+                phon_response_peak_threshold=params["phon_response_peak_threshold"],
+                behav_response_peak_threshold=params["behav_response_peak_threshold"],
+                ambiguous_response_threshold=params["ambiguous_response_threshold"],
+
+                outdir=str(outdir),
+            ),
+        )
+
+
+rule A_neurometrics:
+    """
+    Run A_neurometrics visualizations for a single params_id.
+    Depends on the corresponding prepare_neurometrics_sweep outputs.
+    """
+    input:
+        all_epochs = expand(
+            "outputs/epochs_preprocessed/{subject}_epo.fif",
+            subject=config["data"]["subjects"]
+        ),
+        phonetic_searchlight_paths = expand(
+            "outputs/causal4/behavior_decoding_single_electrode_acoustic/{subject}/results.pt",
+            subject=config["data"]["subjects"]
+        ),
+        # Use zoomin_keys as the sentinel that prepare_neurometrics_sweep is done
+        neurometrics_sentinel = "outputs/causal4/prepare_neurometrics/{params_id}/zoomin_keys.parquet",
+        notebook = "notebooks/causal4/A_neurometrics.py",
+
+    output:
+        notebook = "outputs/causal4/A_neurometrics/{params_id}/notebook.ipynb",
+        hga_zoomin_search_keys = "outputs/causal4/A_neurometrics/{params_id}/hga_zoomin_search_keys.csv",
+        phonetic_transfer_results = "outputs/causal4/A_neurometrics/{params_id}/phonetic_transfer_extreme_results_mean.csv",
+
+    wildcard_constraints:
+        params_id = "|".join(ALL_NEUROMETRICS_PARAMS)
+
+    run:
+        params = NEUROMETRICS_PARAMS_GRID[wildcards.params_id]
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                all_epochs=list(input.all_epochs),
+                phonetic_searchlight_paths=list(input.phonetic_searchlight_paths),
+                neurometrics_dir=str(Path(input.neurometrics_sentinel).parent),
+                ambiguous_response_threshold=params["ambiguous_response_threshold"],
+                epoch_tmin=config["analysis"]["epoch_tmin"],
+                epoch_sfreq=config["analysis"]["epoch_sfreq"],
+                textgrid_dir="textgrids",
+                outdir=str(outdir),
+            ),
+        )
+
+
+rule neurometrics_sweep_all:
+    """Run the full prepare_neurometrics + A_neurometrics sweep over all param combinations."""
+    input:
+        expand(
+            "outputs/causal4/A_neurometrics/{params_id}/hga_zoomin_search_keys.csv",
+            params_id=ALL_NEUROMETRICS_PARAMS,
         )

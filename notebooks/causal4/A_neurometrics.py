@@ -93,12 +93,6 @@ phonetic_searchlight_paths = list(
     Path("outputs/causal4/behavior_decoding_single_electrode_acoustic/").glob("*")
 )
 
-transfer_results_paths = list(
-    Path("outputs/causal4/behavior_decoding_single_electrode_transfer").glob(
-        "*/transfer_results.csv"
-    )
-)
-
 neurometrics_dir = "outputs/causal4/prepare_neurometrics"
 
 epoch_tmin = -0.4
@@ -106,13 +100,11 @@ epoch_sfreq = 100
 
 ambiguous_response_threshold = 2
 
-relative_performance_twidth = 0.2
-relative_performance_swidth = int(relative_performance_twidth * epoch_sfreq)
-
 textgrid_dir = "textgrids"
 
 outdir = "outputs/causal4/A_neurometrics"
 
+# %%
 max_plot_rows = 15
 phoneme_pair_order = ["bm", "dn", "pb"]
 source_order = ["phon", "behav"]
@@ -120,7 +112,6 @@ source_order = ["phon", "behav"]
 # shared palette for categorical variables
 categorical_palette = "Set2"
 
-# %%
 resampled_palette = sns.color_palette("cool", n_colors=6)
 
 # simplified resampled palette contrasting ambiguous vs unambiguous
