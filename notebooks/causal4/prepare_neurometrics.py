@@ -270,7 +270,7 @@ behav_peaks_df_unfiltered = (
     )
     .join(word_end_df, on=["phoneme_pair", "word_end"], how="left")
     .filter(
-        pl.col("smax") > pl.col("smax_phon"),
+        pl.col("smin") > pl.col("smax_phon"),
         pl.col("smax") <= pl.col("word_end_offset_sample") + 20,
     )
     .drop(["smax_phon"])
