@@ -275,17 +275,24 @@ def add_uv_annotation(g, feature_block, eoi_df):
     return g
 
 
-def add_textgrid_single(ax, textgrid_dir, ep_df, rotation=90):
-    textgrid_file = ep_df.textgrid_path.iloc[0]
+def add_textgrid_single(ax, textgrid_dir, ep_df=None, textgrid_file=None, rotation=90):
+    if ep_df is None and textgrid_file is None:
+        raise ValueError("Either ep_df or textgrid_file must be provided")
+    if textgrid_file is not None and ep_df is not None:
+        raise ValueError("Only one of ep_df or textgrid_file should be provided")
+
+    if ep_df is not None:
+        textgrid_file = ep_df.textgrid_path.iloc[0]
     tg = textgrid.TextGrid.fromFile(Path(textgrid_dir) / textgrid_file)
     assert tg.getNames() == ["phonemes"]
 
     plot_intervals = [interval for interval in tg.tiers[0].intervals
                       if interval.mark is not None and interval.mark.strip()]
     for i, interval in enumerate(plot_intervals):
-        ax.axvline(interval.minTime, linestyle="--", alpha=0.5, color="salmon")
+        ax.axvline(interval.minTime, linestyle="--", alpha=0.5, color="salmon",
+                   clip_on=True)
         ax.text(interval.minTime, 0.025, interval.mark.strip(), rotation=rotation,
-                ha="right", va="bottom",
+                ha="right", va="bottom", clip_on=True,
                 transform=transforms.blended_transform_factory(ax.transData, ax.transAxes))
 
         if i == len(plot_intervals) - 1:
@@ -704,7 +711,8 @@ def spaghetti_plot(long_df, y, by1, by2,
     assert set(long_df[by].unique()) <= {by1, by2}, f"by column '{by}' has unexpected values: {long_df[by].unique()}"
     g = sns.catplot(
         data=long_df,
-        hue=by, y=y, x=x, col=col,
+        hue=by, hue_order=[by1, by2],
+        y=y, x=x, col=col,
         kind="strip", dodge=True,
         **catplot_kwargs
     )
