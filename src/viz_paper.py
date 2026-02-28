@@ -1514,6 +1514,7 @@ def plot_condition_contrast(
     annotate=True,
     label=None,
     textgrid_kwargs=None,
+    pval_thresholds=(0.00001, 0.0001, 0.001),
     vline_extent=1.25,
     ttest_window_size=15,
     ttest_window_stride=15,
@@ -1564,7 +1565,7 @@ def plot_condition_contrast(
 
     p_threshold_height_mults = [1.0, 0.5, 0.25]
     # p_thresholds = list(zip([0.0001, 0.001, 0.01], p_threshold_height_mults))
-    p_thresholds = list(zip([0.00001, 0.0001, 0.001], p_threshold_height_mults))
+    p_thresholds = list(zip(pval_thresholds, p_threshold_height_mults))
     # p_thresholds = list(zip([0.001, 0.01, 0.05], p_threshold_height_mults))
 
     ymin, ymax = ax.get_ylim()
@@ -1649,12 +1650,11 @@ def plot_condition_contrasts_single_figure(
     textgrid_dir,
     epoch_data_cache=None,
     textgrid_kwargs=None,
+    vline_extent=1.2,
     plot_word_ends: list[str] = ("necessary",),
     plot_xlim=(0, 1.2),
 ):
     f, ax = plt.subplots(figsize=(2.5, 2))
-
-    is_single_word_end = len(plot_word_ends) == 1
 
     plot_palette = sns.color_palette("Set2", 2)
 
@@ -1673,7 +1673,12 @@ def plot_condition_contrasts_single_figure(
         ax=ax,
         color=plot_palette[0],
         annotate=True,
-        textgrid_kwargs={"fontsize": 8, **(textgrid_kwargs or {})},
+        vline_extent=vline_extent,
+        textgrid_kwargs={
+            "fontsize": 8,
+            "vline_extent": vline_extent,
+            **(textgrid_kwargs or {}),
+        },
         label="Acoustic\ncontrast",
     )
 
@@ -1712,9 +1717,10 @@ def plot_condition_contrasts_single_figure(
         color=plot_palette[1],
         annotate=False,
         label="Perceptual\ncontrast",
-        vline_extent=1.2,
+        vline_extent=vline_extent,
         textgrid_kwargs={
             "fontsize": 8,
+            "vline_extent": vline_extent,
             "include_phonemes": False,
             **(textgrid_kwargs or {}),
         },
@@ -1735,7 +1741,7 @@ def plot_condition_contrasts_single_figure(
             handler_map={Rectangle: HandlerRectangle()},
             fontsize=10,
             loc="upper right",
-            bbox_to_anchor=(1.6, 1.15),
+            bbox_to_anchor=(1.65, 1),
         )
 
     return f
