@@ -178,18 +178,18 @@ class PaperData:
         variable responses across different repeats of the same stimulus (i.e. different
         behavior_dummy_forced values for the same resampled value).
         """
+        # design choice: minimum number of responses to consider a step ambiguous
+        min_responses = 2
         ret = (
             self.all_md.group_by(["subject", "phoneme_pair", "word_end", "resampled"])
-            .agg(
-                pl.col("label_behavior_forced")
-                .value_counts()
-                .struct.field("count")
-                .min()
-                .alias("count")
+            .agg(pl.col("behavior_dummy_forced").value_counts().struct.field("count"))
+            .filter(
+                ~pl.col("resampled").is_in([1, 6]),
+                pl.col("behavior_dummy_forced").list.len() == 2,
+                pl.col("behavior_dummy_forced").list.min() > min_responses,
             )
-            .filter(pl.col("count") > 2)
             .with_columns(pl.col("resampled").cast(int))
-            .sort(["subject", "phoneme_pair", "word_end", "resampled"])
+            .sort(["resampled"])
             .group_by(["subject", "phoneme_pair", "word_end"])
             .agg(pl.col("resampled"))
             .rows_by_key(["subject", "phoneme_pair", "word_end"], unique=True)
