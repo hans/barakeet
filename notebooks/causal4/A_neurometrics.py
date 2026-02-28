@@ -246,77 +246,6 @@ late_polarity = pd.read_parquet(neurometrics_path / "late_polarity.parquet").set
 hga_df = pd.read_parquet(neurometrics_path / "hga_df.parquet")
 reg_df = pd.read_parquet(neurometrics_path / "reg_df.parquet")
 
-# DEV filter phon peaks
-# print(phon_peaks_df.height)
-# phon_peaks_df = phon_peaks_df.filter(pl.col("phon_roc_auc") > 0.64)
-# print("-> filtered phon peaks:", phon_peaks_df.height)
-
-# DEV filter behav peaks
-print(behav_peaks_df.height)
-behav_peaks_df = behav_peaks_df.filter(pl.col("behav_roc_auc_improvement") > 0.01)
-print("-> filtered behav peaks:", behav_peaks_df.height)
-
-# %% [markdown]
-# ### Follow through on peak filtering consequences
-
-# %%
-plot_phon_phon_keys = phon_peaks_df.select(
-    ["subject", "electrode_idx", "phoneme_pair", "smin", "smax"]
-)
-
-# merge in case necessary
-plot_phon_phon_df = plot_phon_phon_df.join(
-    plot_phon_phon_keys,
-    on=["subject", "electrode_idx", "phoneme_pair", "smin", "smax"],
-    how="inner",
-)
-
-plot_behav_phon_keys = behav_peaks_df.select(
-    ["subject", "electrode_idx", "phoneme_pair", "smin", "smax", "word_end"]
-)
-
-# merge in case necessary
-plot_behav_phon_df = plot_behav_phon_df.join(
-    plot_behav_phon_keys,
-    on=["subject", "electrode_idx", "phoneme_pair", "smin", "smax", "word_end"],
-    how="inner",
-)
-
-# %%
-plot_phon_behav_keys = phon_peaks_df.select(
-    ["subject", "electrode_idx", "phoneme_pair", "smin", "smax"]
-)
-# merge in case necessary
-plot_phon_behav_df = plot_phon_behav_df.join(
-    plot_phon_behav_keys,
-    on=["subject", "electrode_idx", "phoneme_pair", "smin", "smax"],
-    how="inner",
-)
-
-plot_behav_behav_keys = behav_peaks_df.select(
-    ["subject", "electrode_idx", "phoneme_pair", "word_end", "smin", "smax"]
-)
-plot_behav_behav_keys_unfiltered = behav_peaks_df_unfiltered.select(
-    ["subject", "electrode_idx", "phoneme_pair", "word_end", "smin", "smax"]
-)
-plot_behav_behav_df = plot_behav_behav_df.join(
-    plot_behav_behav_keys,
-    on=["subject", "electrode_idx", "phoneme_pair", "word_end", "smin", "smax"],
-    how="inner",
-)
-
-# %%
-# filter based on possibly filtered peaks
-join_keys = ["subject", "electrode_idx", "phoneme_pair"]
-early_polarity = early_polarity.reset_index().merge(
-    phon_peaks_df.to_pandas()[join_keys], on=join_keys, how="inner"
-)
-
-join_keys = ["subject", "electrode_idx", "phoneme_pair", "word_end"]
-late_polarity = late_polarity.merge(
-    behav_peaks_df.to_pandas()[join_keys], on=join_keys, how="inner"
-)
-
 # %%
 paper_data = PaperData(
     electrode_df=electrode_df,
@@ -354,6 +283,22 @@ behav_roc_auc_mean_df = behav_roc_auc_searchlight_df.group_by(
         pl.col("behav_roc_auc_baseline").mean(),
         pl.col("behav_roc_auc_improvement").mean(),
     ]
+)
+
+plot_phon_phon_keys = phon_peaks_df.select(
+    ["subject", "electrode_idx", "phoneme_pair", "smin", "smax"]
+)
+plot_behav_phon_keys = behav_peaks_df.select(
+    ["subject", "electrode_idx", "phoneme_pair", "smin", "smax", "word_end"]
+)
+plot_phon_behav_keys = phon_peaks_df.select(
+    ["subject", "electrode_idx", "phoneme_pair", "smin", "smax"]
+)
+plot_behav_behav_keys = behav_peaks_df.select(
+    ["subject", "electrode_idx", "phoneme_pair", "word_end", "smin", "smax"]
+)
+plot_behav_behav_keys_unfiltered = behav_peaks_df_unfiltered.select(
+    ["subject", "electrode_idx", "phoneme_pair", "word_end", "smin", "smax"]
 )
 
 # %% [markdown]
@@ -620,6 +565,7 @@ peak_timing_plot = pl.concat(
 def plot_peak_timing(
     plot_phoneme_pair, plot_word_ends, plot_xlim=None, vline_extent=1.1
 ):
+    plot_textgrid = "11_necessary_dn_002.TextGrid"
     g = sns.displot(
         data=peak_timing_plot.filter(
             (pl.col("word_end").is_in(plot_word_ends))
@@ -2309,7 +2255,7 @@ for plot_word_end, plot_xlim in zip(["necessary", "desolate"], [(0, 1.2), (0, 0.
             loc="best",
         )
 
-    f.savefig(fPath(outdir) / "perceptual_contrast_unambig_split-{plot_word_end}.pdf")
+    f.savefig(Path(outdir) / "perceptual_contrast_unambig_split-{plot_word_end}.pdf")
     plt.close()
 
 None
