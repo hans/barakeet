@@ -926,7 +926,7 @@ for (row, col, hue), data in g.facet_data():
         vline_extent=vline_extent,
     )
 
-g.savefig("figures/decoding_timing.pdf")
+g.savefig("figures/decoding_timing-necessary.pdf")
 
 # %%
 plot_word_end = "desolate"
@@ -1021,7 +1021,7 @@ g = sns.displot(
 )
 g.set_axis_labels("Peak decoding time (s)", "Density")
 sns.move_legend(
-    g, "upper right", bbox_to_anchor=(0.65, 0.93), fontsize=10, frameon=True, title=None
+    g, "upper right", bbox_to_anchor=(0.69, 0.93), fontsize=10, frameon=True, title=None
 )
 
 for (row, col, hue), data in g.facet_data():
@@ -1284,16 +1284,29 @@ ax.plot(
 )
 ax.scatter([0, 1], [grand_early, grand_late], color="black", s=60, zorder=4, alpha=0.7)
 
-# Annotate with significance stars
-ymax = max(subject_means["phon_mean"].max(), subject_means["behav_mean"].max())
+# Annotate with significance star
+from matplotlib.transforms import blended_transform_factory
+
+bracket_y = 1.10  # in axes coords
+tick_h = 0.03
+trans = blended_transform_factory(ax.transData, ax.transAxes)
+ax.plot(
+    [0, 0, 1, 1],
+    [bracket_y - tick_h, bracket_y, bracket_y, bracket_y - tick_h],
+    color="black",
+    linewidth=1.0,
+    transform=trans,
+    clip_on=False,
+)
+
 ax.text(
     0.5,
-    0.85,
+    bracket_y + 0.01,
     p_to_stars(ttest_p),
     ha="center",
     va="bottom",
     fontsize=11,
-    transform=ax.transAxes,
+    transform=trans,
 )
 
 ax.set_xticks([0, 1])
@@ -1593,7 +1606,7 @@ fig.savefig("figures/decoding_behavioral_improvement.pdf")
 
 # %%
 # Spaghetti plot: per-subject mean improvement from baseline
-# Left = early/phon, Center = baseline (0), Right = late/behav
+from matplotlib.transforms import blended_transform_factory
 from scipy import stats
 
 subject_means = (
@@ -1616,10 +1629,9 @@ t_early_vs_late, p_early_vs_late = stats.ttest_rel(
 print(f"Late vs early: t={t_early_vs_late:.3f}, p={p_early_vs_late:g}")
 
 
-# fig, ax = plt.subplots(figsize=(3.5, 3))
 fig, ax = plt.subplots(figsize=(2.75, 2.75))
 
-# Draw individual subject lines (3 points: early, baseline, late)
+# Draw individual subject lines
 for _, row in subject_means.iterrows():
     xs = [0, 1]
     ys = [row["phon_baseline_diff"], row["behav_baseline_diff"]]
@@ -1637,35 +1649,59 @@ ax.plot(
     zorder=3,
     alpha=0.7,
 )
-# annotate the left and right but not the center
 for x, y in zip([0, 1], [grand_early, grand_late]):
     ax.scatter(x, y, color="black", s=60, zorder=4, alpha=0.7)
 
-# annotate with significance stars
-ymax = max(
-    subject_means["phon_baseline_diff"].max(),
-    subject_means["behav_baseline_diff"].max(),
+# --- Significance annotations ---
+# ...after drawing the plot elements...
+
+# Blended transform: x in data coords, y in axes coords
+trans = blended_transform_factory(ax.transData, ax.transAxes)
+
+# Stars above each column (early vs 0, late vs 0)
+for x, p in zip([0, 1], [p_early, p_late]):
+    ax.text(
+        x,
+        0.94,
+        p_to_stars(p),
+        ha="center",
+        va="bottom",
+        fontsize=11,
+        transform=trans,
+    )
+
+# Bracket + stars for early vs late
+bracket_y = 1.10  # in axes coords
+tick_h = 0.03
+ax.plot(
+    [0, 0, 1, 1],
+    [bracket_y - tick_h, bracket_y, bracket_y, bracket_y - tick_h],
+    color="black",
+    linewidth=1.0,
+    transform=trans,
+    clip_on=False,
 )
 ax.text(
     0.5,
-    0.85,
+    bracket_y + 0.01,
     p_to_stars(p_early_vs_late),
     ha="center",
     va="bottom",
     fontsize=11,
-    transform=ax.transAxes,
+    transform=trans,
 )
 
 ax.set_xticks([0, 1])
 ax.set_xticklabels(["Acoustic\nwindow", "Perceptual\nwindow"])
 ax.set_xlabel("Evaluation")
-ax.set_ylabel("Perceptual prediction\n($\Delta$ROC-AUC)")
+ax.set_ylabel("Perceptual prediction\n($\Delta$ROC-AUC)", labelpad=5)
+# put ylabel on right side
+ax.yaxis.set_label_position("right")
 ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: "{:.0%}".format(y)))
 ax.axhline(0, color="k", linestyle="--", alpha=0.3)
 ax.set_xlim(-0.3, 1.3)
-sns.despine()
+sns.despine(left=True, top=True, right=False)
 fig.tight_layout()
-plt.show()
 
 fig.savefig("figures/decoding_behavioral_improvement-no_baseline.pdf")
 
@@ -2564,7 +2600,7 @@ f = plot_condition_contrasts_single_figure(
     epoch_data_cache=pcc_epoch_data_cache,
     plot_word_ends=["necessary"],
 )
-f.savefig("figures/condition_contrasts.pdf")
+f.savefig("figures/condition_contrasts-necessary.pdf")
 
 # %%
 plot_condition_contrasts_single_figure(
@@ -2587,6 +2623,7 @@ plot_condition_contrasts_single_figure(
     textgrid_kwargs=dict(
         include_offset=False, include_phonemes=False, vline_extent=1.0
     ),
+    pval_thresholds=(0.00001, 0.0001, 0.001),
 )
 plt.gcf().savefig("figures/condition_contrasts-both.pdf")
 None
@@ -2806,7 +2843,7 @@ def plot_summary_acoustic_vs_presence_of_response_stackplot(
 
     # # Chi-square test on one-sided responses only
     # # Create 2x2 contingency table: acoustic (rows) x perceptual completion (columns)
-    # chi2_table = df[[completion_1, completion_2]].values
+    # chi2_table = df.values#[[completion_1, completion_2]].values
     # from scipy.stats import chi2_contingency
     # chi2, p_value, dof, expected = chi2_contingency(chi2_table)
     # print(chi2, p_value)
@@ -2901,6 +2938,61 @@ ax.set_xlabel("Perceptual\npreference")
 f.savefig("figures/early_polarity-late_polarity.pdf")
 
 # %%
+hga_df_ambig = hga_df[
+    hga_df.apply(
+        lambda xs: (
+            xs.behav_steps_chosen != "None"
+            and str(int(xs.resampled)) in xs.behav_steps_chosen
+        ),
+        axis=1,
+    )
+]
+late_polarity = (
+    hga_df_ambig.groupby(
+        [
+            "subject",
+            "electrode_idx",
+            "phoneme_pair",
+            "word_end",
+            "behavior_dummy_forced",
+        ]
+    )
+    .hga_late.mean()
+    .reset_index()
+    .set_index("behavior_dummy_forced")
+    .groupby(["subject", "electrode_idx", "phoneme_pair", "word_end"])
+    .apply(lambda xs: np.sign(xs.loc[1] - xs.loc[0]))  # type: ignore[union-attr]
+    .rename(columns={"hga_late": "late_polarity"})
+)
+late_polarity.query(
+    "subject == 'EC278' and electrode_idx == 38 and phoneme_pair == 'dn' and word_end == 'necessary'"
+)
+
+# %%
+(
+    hga_df_ambig.query(
+        "subject == 'EC278' and electrode_idx == 38 and phoneme_pair == 'dn' and word_end == 'necessary'"
+    )
+    # .groupby("resampled").behavior_dummy_forced.value_counts()
+    # .groupby("behavior_dummy_forced")
+    # .hga_late.mean()
+)
+
+# %%
+(
+    late_polarity_strict.drop_duplicates(
+        ["subject", "electrode_idx", "phoneme_pair", "word_end"]
+    )
+    .drop(columns=["lexical_evidence"])
+    .merge(
+        early_polarity_strict.drop_duplicates(),
+        on=["subject", "electrode_idx", "phoneme_pair", "word_end"],
+        # ).query("subject == 'EC250' and electrode_idx == 185 and phoneme_pair == 'dn'"))
+    )
+    .query("subject == 'EC278' and electrode_idx == 38 and phoneme_pair == 'dn'")
+)
+
+# %%
 preference_relationship_df = (
     late_polarity_strict.drop_duplicates(
         ["subject", "electrode_idx", "phoneme_pair", "word_end"]
@@ -2922,6 +3014,27 @@ preference_relationship_df = (
     .unstack()
 )
 preference_relationship_df
+
+# %% [markdown]
+# #### Congruency analysis
+
+# %%
+# get diagonal and off-diagonal sums
+congruent_responses = np.diag(preference_relationship_df).sum()
+incongruent_responses = (
+    preference_relationship_df.values.sum() - np.diag(preference_relationship_df).sum()
+)
+from scipy.stats import binomtest
+
+binomtest(
+    congruent_responses,
+    congruent_responses + incongruent_responses,
+    p=0.5,
+    alternative="greater",
+)
+
+# %% [markdown]
+# #### More in-depth selectivity relationship
 
 # %%
 (
@@ -2966,6 +3079,115 @@ ax.legend(title="Perceptual\npreference", loc="upper right", bbox_to_anchor=(1.6
 sns.despine(ax=ax)
 
 f.savefig("figures/early_polarity-late_polarity_stackbar.pdf")
+
+# %%
+# Cross-electrode correlation of effect sizes.
+# early_effect: mean(hga_early | decoder_target=1) - mean(hga_early | decoder_target=0)
+#   evaluated on UNAMBIGUOUS trials (resampled 1 or 6), where the acoustic signal is strong.
+# late_effect:  mean(hga_late  | behavior=1)        - mean(hga_late  | behavior=0)
+#   evaluated on AMBIGUOUS trials (is_ambiguous), where behavior varies independently.
+# These are exactly what early_polarity / late_polarity are signs of, but kept continuous.
+_site_cols = ["subject", "electrode_idx", "phoneme_pair", "word_end"]
+
+_early_effect = (
+    reg_df[reg_df.resampled.isin([1.0, 6.0])]
+    .dropna(subset=["hga_early"])
+    .groupby(_site_cols + ["decoder_target"])["hga_early"]
+    .mean()
+    .unstack("decoder_target")
+    .pipe(lambda df: df[1] - df[0])
+    .rename("early_effect")
+    .reset_index()
+)
+
+_late_effect = (
+    reg_df[reg_df.is_ambiguous]
+    .dropna(subset=["hga_late"])
+    .groupby(_site_cols + ["behavior_dummy_forced"])["hga_late"]
+    .mean()
+    .unstack("behavior_dummy_forced")
+    .pipe(lambda df: df[1] - df[0])
+    .rename("late_effect")
+    .reset_index()
+)
+
+effect_df = _early_effect.merge(_late_effect, on=_site_cols)
+effect_df
+
+# %%
+# A. Violin split by sign(early_effect)
+from scipy.stats import ttest_ind as _ttest_ind
+
+_plot_df = effect_df.assign(
+    acoustic_pref=effect_df["early_effect"].apply(
+        lambda x: "prefers 1" if x > 0 else "prefers 0"
+    )
+)
+
+f, ax = plt.subplots(figsize=(2.2, 2.5))
+sns.violinplot(
+    data=_plot_df,
+    x="acoustic_pref",
+    y="late_effect",
+    order=["prefers 0", "prefers 1"],
+    inner="quart",
+    cut=0,
+    linewidth=1,
+    palette="Set2",
+    ax=ax,
+)
+sns.stripplot(
+    data=_plot_df,
+    x="acoustic_pref",
+    y="late_effect",
+    order=["prefers 0", "prefers 1"],
+    size=3,
+    alpha=0.5,
+    color="black",
+    jitter=True,
+    ax=ax,
+)
+ax.axhline(0, color="black", linestyle="--", linewidth=1, alpha=0.5)
+_grp0 = _plot_df.loc[_plot_df.acoustic_pref == "prefers 0", "late_effect"]
+_grp1 = _plot_df.loc[_plot_df.acoustic_pref == "prefers 1", "late_effect"]
+_, _p_t = _ttest_ind(_grp0, _grp1)
+ax.set_title(f"t-test p={_p_t:.3g}", fontsize=9)
+ax.set_xlabel("Acoustic preference")
+ax.set_ylabel("Perceptual selectivity\n(hga_late effect size)")
+sns.despine(ax=ax)
+
+f.savefig("figures/hga_early_late_effect_violin.pdf")
+
+# %%
+# C. Sorted-sites trend: bin by early_effect quantile, plot mean ± SEM of late_effect
+_n_bins = 5
+_plot_df2 = effect_df.assign(
+    early_bin=pd.qcut(effect_df["early_effect"], _n_bins, labels=False)
+)
+_binned = (
+    _plot_df2.groupby("early_bin")["late_effect"]
+    .agg(mean="mean", sem=lambda x: x.sem(), n="count")
+    .reset_index()
+)
+_bin_centers = _plot_df2.groupby("early_bin")["early_effect"].mean().values
+
+f, ax = plt.subplots(figsize=(2.5, 2.2))
+ax.errorbar(
+    _bin_centers,
+    _binned["mean"],
+    yerr=_binned["sem"],
+    fmt="o-",
+    color="steelblue",
+    capsize=3,
+    linewidth=1.5,
+    markersize=5,
+)
+ax.axhline(0, color="black", linestyle="--", linewidth=1, alpha=0.5)
+ax.set_xlabel("Acoustic selectivity\n(early_effect, binned by quintile)", fontsize=9)
+ax.set_ylabel("Mean perceptual selectivity\n(late_effect ± SEM)", fontsize=9)
+sns.despine(ax=ax)
+
+f.savefig("figures/hga_early_late_effect_trend.pdf")
 
 # %%
 # Relationship between polarity of -ecessary and -esolate responses at the same electrode
@@ -3226,6 +3448,7 @@ n_specific = plot_specific.select(site_cols).unique().height
 
 f, ax = plt.subplots(figsize=(3, 2))
 plot_palette = sns.color_palette("Set1", 2)
+pval_thresholds = (0.0001, 0.001, 0.01)
 
 _, p_handles, p_labels = plot_condition_contrast(
     plot_generalize,
@@ -3239,7 +3462,7 @@ _, p_handles, p_labels = plot_condition_contrast(
     annotate=True,
     textgrid_kwargs=dict(include_phonemes=False, include_offset=False),
     label=f"Generalizes (n={n_generalize})",
-    pval_thresholds=(0.001, 0.01, 0.05),
+    pval_thresholds=pval_thresholds,
 )
 plot_condition_contrast(
     plot_specific,
@@ -3253,7 +3476,7 @@ plot_condition_contrast(
     annotate=False,
     label=f"Ambig-only (n={n_specific})",
     ttest_bar_y_ratio=0.87,
-    pval_thresholds=(0.001, 0.01, 0.05),
+    pval_thresholds=pval_thresholds,
 )
 
 ax.set_xlim(*plot_xlim)
@@ -3298,6 +3521,7 @@ n_specific = plot_specific.select(site_cols).unique().height
 
 f, ax = plt.subplots(figsize=(3, 2))
 plot_palette = sns.color_palette("Set1", 2)
+pval_thresholds = (0.001, 0.01, 0.05)
 
 _, p_handles, p_labels = plot_condition_contrast(
     plot_generalize,
@@ -3311,7 +3535,7 @@ _, p_handles, p_labels = plot_condition_contrast(
     annotate=True,
     textgrid_kwargs=dict(include_phonemes=False, include_offset=False),
     label=f"Generalizes (n={n_generalize})",
-    pval_thresholds=(0.001, 0.01, 0.05),
+    pval_thresholds=pval_thresholds,
 )
 plot_condition_contrast(
     plot_specific,
@@ -3325,7 +3549,7 @@ plot_condition_contrast(
     annotate=False,
     label=f"Ambig-only (n={n_specific})",
     ttest_bar_y_ratio=0.87,
-    pval_thresholds=(0.001, 0.01, 0.05),
+    pval_thresholds=pval_thresholds,
 )
 
 ax.set_xlim(*plot_xlim)
