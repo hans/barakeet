@@ -1234,13 +1234,7 @@ def extract_hga_windows_df(
     data: PaperData,
     zoomin_keys: pl.DataFrame,
     window_size: int = 15,
-    window_stride: int = 1,
-    behavior_resampled_steps: tuple[tuple[int, ...], ...] = (
-        (3,),
-        (4,),
-        (3, 4),
-        (2, 3, 4, 5),
-    ),
+    window_stride: int = 15,
 ) -> pd.DataFrame:
     """
     For each site in zoomin_keys, find optimal early (phoneme) and late (behavior)
@@ -1309,16 +1303,10 @@ def extract_hga_windows_df(
             )
         epoch_data = epoch_cache[cache_key][:, electrode_idx, :]
 
-        # subset on just those combinations of resampled steps that show behavioral ambiguity for this site
-        behavior_resampled_steps_i = tuple(
-            s
-            for s in behavior_resampled_steps
-            if all(
-                step
-                in ambiguous_resampled_steps.get((subject, phoneme_pair, word_end), ())
-                for step in s
-            )
-        )
+        # just use the resampled steps that have ambiguity for this subject / phoneme pair / word end
+        behavior_resampled_steps_i = [
+            ambiguous_resampled_steps.get((subject, phoneme_pair, word_end), ())
+        ]
 
         windows = find_site_windows(
             data,
@@ -1653,6 +1641,7 @@ def plot_condition_contrasts_single_figure(
     vline_extent=1.2,
     plot_word_ends: list[str] = ("necessary",),
     plot_xlim=(0, 1.2),
+    pval_thresholds=(0.00001, 0.0001, 0.001),
 ):
     f, ax = plt.subplots(figsize=(2.5, 2))
 
@@ -1674,6 +1663,7 @@ def plot_condition_contrasts_single_figure(
         color=plot_palette[0],
         annotate=True,
         vline_extent=vline_extent,
+        pval_thresholds=pval_thresholds,
         textgrid_kwargs={
             "fontsize": 8,
             "vline_extent": vline_extent,
@@ -1712,6 +1702,7 @@ def plot_condition_contrasts_single_figure(
         data=data,
         textgrid_dir=textgrid_dir,
         polarity_correct="late",
+        pval_thresholds=pval_thresholds,
         epoch_data_cache=epoch_data_cache,
         ax=ax,
         color=plot_palette[1],
