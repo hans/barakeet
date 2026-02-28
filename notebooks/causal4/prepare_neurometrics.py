@@ -73,6 +73,7 @@ phon_response_tmin_min = 0.0
 all_response_tmax_max = 1.3
 
 phon_response_peak_threshold = 0.6
+ambiguous_response_threshold = 2
 
 outdir = "outputs/causal4/prepare_neurometrics"
 
@@ -381,7 +382,11 @@ _bootstrap = PaperData(
 )
 
 # %%
-hga_df = extract_hga_windows_df(_bootstrap, zoomin_keys=zoomin_keys)
+hga_df = extract_hga_windows_df(
+    _bootstrap,
+    zoomin_keys=zoomin_keys,
+    ambiguous_response_threshold=ambiguous_response_threshold,
+)
 
 # %% [markdown]
 # ## Compute polarities and reg_df

@@ -778,6 +778,7 @@ rule prepare_neurometrics:
                 epoch_tmin=config["analysis"]["epoch_tmin"],
 
                 phon_response_peak_threshold=config["analysis"]["phon_response_peak_threshold"],
+                ambiguous_response_threshold=config["analysis"]["ambiguous_response_threshold"],
 
                 outdir=str(outdir),
             ),

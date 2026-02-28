@@ -18,5 +18,6 @@ analysis:
   epoch_tmin: -0.4
 
   phon_response_peak_threshold: 0.6
+  ambiguous_response_threshold: 2
 
   fdr_alpha: 0.05

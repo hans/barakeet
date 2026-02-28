@@ -104,6 +104,8 @@ neurometrics_dir = "outputs/causal4/prepare_neurometrics"
 epoch_tmin = -0.4
 epoch_sfreq = 100
 
+ambiguous_response_threshold = 2
+
 relative_performance_twidth = 0.2
 relative_performance_swidth = int(relative_performance_twidth * epoch_sfreq)
 
@@ -1730,6 +1732,7 @@ f = plot_condition_contrasts_single_figure(
     paper_data,
     textgrid_dir,
     epoch_data_cache=pcc_epoch_data_cache,
+    ambiguous_response_threshold=ambiguous_response_threshold,
     plot_word_ends=["necessary"],
 )
 f.savefig(Path(outdir) / "condition_contrasts-necessary.pdf")
@@ -1739,6 +1742,7 @@ plot_condition_contrasts_single_figure(
     paper_data,
     textgrid_dir,
     epoch_data_cache=pcc_epoch_data_cache,
+    ambiguous_response_threshold=ambiguous_response_threshold,
     plot_word_ends=["desolate"],
 )
 plt.gca().set_xlim(0, 0.7)
@@ -1750,6 +1754,7 @@ plot_condition_contrasts_single_figure(
     paper_data,
     textgrid_dir,
     epoch_data_cache=pcc_epoch_data_cache,
+    ambiguous_response_threshold=ambiguous_response_threshold,
     plot_word_ends=["necessary", "desolate"],
     vline_extent=1.0,
     textgrid_kwargs=dict(

@@ -169,24 +169,27 @@ class PaperData:
                                     not in the chosen set
     """
 
-    @property
-    def ambiguous_resampled_steps(
+    def get_ambiguous_resampled_steps(
         self,
+        ambiguous_response_threshold: int = 2,
     ) -> dict[tuple[Subject, PhonemePair, WordEnd], set[int]]:
         """
         For each (subject, phoneme_pair, word_end), the set of resampled steps that elicited
         variable responses across different repeats of the same stimulus (i.e. different
         behavior_dummy_forced values for the same resampled value).
+
+        Params:
+            ambiguous_response_threshold: minimum number of responses for the minority
+                response to consider the step ambiguous
         """
-        # design choice: minimum number of responses to consider a step ambiguous
-        min_responses = 2
         ret = (
             self.all_md.group_by(["subject", "phoneme_pair", "word_end", "resampled"])
             .agg(pl.col("behavior_dummy_forced").value_counts().struct.field("count"))
             .filter(
                 ~pl.col("resampled").is_in([1, 6]),
                 pl.col("behavior_dummy_forced").list.len() == 2,
-                pl.col("behavior_dummy_forced").list.min() > min_responses,
+                pl.col("behavior_dummy_forced").list.min()
+                > ambiguous_response_threshold,
             )
             .with_columns(pl.col("resampled").cast(int))
             .sort(["resampled"])
@@ -1235,6 +1238,7 @@ def extract_hga_windows_df(
     zoomin_keys: pl.DataFrame,
     window_size: int = 15,
     window_stride: int = 15,
+    ambiguous_response_threshold: int = 2,
 ) -> pd.DataFrame:
     """
     For each site in zoomin_keys, find optimal early (phoneme) and late (behavior)
@@ -1279,14 +1283,9 @@ def extract_hga_windows_df(
     # For each subject / phoneme pair / word end, compute which `resampled` steps
     # elicit ambiguous behavior across trials
     # don't let in step 1 or 6
-    ambiguous_resampled_steps = {
-        (subject, phoneme_pair, word_end): tuple(s for s in steps if s not in (1, 6))
-        for (
-            subject,
-            phoneme_pair,
-            word_end,
-        ), steps in data.ambiguous_resampled_steps.items()
-    }
+    ambiguous_resampled_steps = data.get_ambiguous_resampled_steps(
+        ambiguous_response_threshold=ambiguous_response_threshold
+    )
 
     for site_row in tqdm(
         sites.iter_rows(named=True), total=sites.height, desc="Extracting HGA windows"
@@ -1642,6 +1641,7 @@ def plot_condition_contrasts_single_figure(
     plot_word_ends: list[str] = ("necessary",),
     plot_xlim=(0, 1.2),
     pval_thresholds=(0.00001, 0.0001, 0.001),
+    ambiguous_response_threshold: int = 2,
 ):
     f, ax = plt.subplots(figsize=(2.5, 2))
 
@@ -1679,7 +1679,9 @@ def plot_condition_contrasts_single_figure(
                 subject,
                 phoneme_pair,
                 word_end,
-            ), resampled_list in data.ambiguous_resampled_steps.items()
+            ), resampled_list in data.get_ambiguous_resampled_steps(
+                ambiguous_response_threshold=ambiguous_response_threshold
+            ).items()
             for resampled in resampled_list
         ],
         schema=pl.Schema(
