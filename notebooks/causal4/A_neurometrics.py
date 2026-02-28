@@ -93,7 +93,7 @@ phonetic_searchlight_paths = list(
     Path("outputs/causal4/behavior_decoding_single_electrode_acoustic/").glob("*")
 )
 
-neurometrics_dir = "outputs/causal4/prepare_neurometrics"
+neurometrics_dir = "outputs/causal4/prepare_neurometrics/p60_b20_a3"
 
 epoch_tmin = -0.4
 epoch_sfreq = 100
@@ -1616,38 +1616,49 @@ star_plot_kwargs = dict(
 )
 
 # %%
-fig = zoomin_hga(
-    paper_data,
-    "EC250",
-    185,
-    "dn",
-    "desolate",
-    hide_bottom=False,
-    legend=False,
-    **star_plot_kwargs,
-)
-fig.savefig(Path(outdir) / "zoomin_EC250_185_dn_desolate.pdf")
-plt.close(fig)
-None
+# this may fail depending on whether the specific electrode is a peak in this
+# analysis run
+try:
+    fig = zoomin_hga(
+        paper_data,
+        "EC250",
+        185,
+        "dn",
+        "desolate",
+        hide_bottom=False,
+        legend=False,
+        **star_plot_kwargs,
+    )
+    fig.savefig(Path(outdir) / "zoomin_EC250_185_dn_desolate.pdf")
+    plt.close(fig)
+    None
 
-legend_fig = plt.figure(figsize=(2, 2))
+    legend_fig = plt.figure(figsize=(2, 2))
 
-legend_handles_labels = fig.axes[0].get_legend_handles_labels()
-# reverse sort
-legend_handles_labels = (legend_handles_labels[0][::-1], legend_handles_labels[1][::-1])
-for handle in legend_handles_labels[0]:
-    handle.set_linewidth(3)
-    handle.set_color("black")
-legend_fig.legend(*legend_handles_labels, loc="center", frameon=True)
+    legend_handles_labels = fig.axes[0].get_legend_handles_labels()
+    # reverse sort
+    legend_handles_labels = (
+        legend_handles_labels[0][::-1],
+        legend_handles_labels[1][::-1],
+    )
+    for handle in legend_handles_labels[0]:
+        handle.set_linewidth(3)
+        handle.set_color("black")
+    legend_fig.legend(*legend_handles_labels, loc="center", frameon=True)
 
-legend_fig.savefig(Path(outdir) / "zoomin_legend.pdf")
+    legend_fig.savefig(Path(outdir) / "zoomin_legend.pdf")
+except:
+    pass
 
 # %%
-zoomin_hga(
-    paper_data, "EC278", 38, "dn", "necessary", hide_bottom=True, **star_plot_kwargs
-)
-plt.gcf().savefig(Path(outdir) / "zoomin_EC278_38_dn_necessary.pdf")
-None
+# this may fail depending on whether the specific electrode is a peak in this analysis run
+try:
+    zoomin_hga(
+        paper_data, "EC278", 38, "dn", "necessary", hide_bottom=True, **star_plot_kwargs
+    )
+    plt.gcf().savefig(Path(outdir) / "zoomin_EC278_38_dn_necessary.pdf")
+except:
+    pass
 
 # %% [markdown]
 # ## Quant HGA search
@@ -1734,10 +1745,10 @@ plt.gcf().savefig(Path(outdir) / "behav_barplot_EC278_dn_necessary.pdf")
 # ## Exploratory: polarity relationships
 
 # %%
-early_polarity_strict = early_polarity.copy()
+early_polarity_strict = early_polarity.reset_index()
 
 # %%
-late_polarity_strict = late_polarity.dropna()
+late_polarity_strict = late_polarity.dropna().reset_index()
 late_polarity_strict["lexical_evidence"] = (
     late_polarity_strict.word_end.str[0] == late_polarity_strict.phoneme_pair.str[1]
 ).astype(int)
@@ -1754,43 +1765,52 @@ def plot_summary_acoustic_vs_presence_of_response(phoneme_pair: str):
     completion_2 = "-" + word_end_2[1:]
 
     sns.heatmap(
-        late_polarity_strict.query("phoneme_pair == @phoneme_pair")
-        .pivot_table(
-            index=["subject", "electrode_idx", "phoneme_pair"],
-            columns="lexical_evidence",
-            values="late_polarity",
-            aggfunc="count",
-        )
-        .fillna(0)
-        .astype({0: bool, 1: bool})
-        .merge(
-            (
-                early_polarity_strict.query("phoneme_pair == @phoneme_pair")
-                .groupby(["subject", "electrode_idx", "phoneme_pair"])
-                .filter(lambda xs: xs.early_polarity.nunique() == 1)
-                .drop(columns=["word_end"])
-                .drop_duplicates()
-                .set_index(["subject", "electrode_idx", "phoneme_pair"])
-            ),
-            left_index=True,
-            right_index=True,
-            how="inner",
-        )
-        .groupby("early_polarity")
-        .value_counts(sort=False)
-        .reset_index()
-        .pipe(
-            lambda df: df.assign(
-                early_polarity=df.early_polarity.map(
-                    {-1: phoneme_pair[0], 1: phoneme_pair[1]}
+        (
+            late_polarity_strict.query("phoneme_pair == @phoneme_pair")
+            .pivot_table(
+                index=["subject", "electrode_idx", "phoneme_pair"],
+                columns="lexical_evidence",
+                values="late_polarity",
+                aggfunc="count",
+            )
+            .fillna(0)
+            .astype(bool)
+            .rename(columns={0: completion_1, 1: completion_2})
+            # make sure we have both possible lexical evidences for this word pair
+            .assign(
+                **{
+                    completion_1: lambda df: df.get(completion_1, False),
+                    completion_2: lambda df: df.get(completion_2, False),
+                }
+            )
+            .merge(
+                (
+                    early_polarity_strict.query("phoneme_pair == @phoneme_pair")
+                    .groupby(["subject", "electrode_idx", "phoneme_pair"])
+                    .filter(lambda xs: xs.early_polarity.nunique() == 1)
+                    .drop(columns=["word_end"])
+                    .drop_duplicates()
+                    .set_index(["subject", "electrode_idx", "phoneme_pair"])
+                ),
+                left_index=True,
+                right_index=True,
+                how="inner",
+            )
+            .groupby("early_polarity")
+            .value_counts(sort=False)
+            .reset_index()
+            .pipe(
+                lambda df: df.assign(
+                    early_polarity=df.early_polarity.map(
+                        {-1: phoneme_pair[0], 1: phoneme_pair[1]}
+                    )
                 )
             )
-        )
-        .rename(columns={0: completion_1, 1: completion_2})
-        .set_index([completion_1, completion_2, "early_polarity"])["count"]
-        .unstack()
-        .fillna(0)
-        .sort_index(ascending=False),
+            .set_index([completion_1, completion_2, "early_polarity"])["count"]
+            .unstack()
+            .fillna(0)
+            .sort_index(ascending=False)
+        ),
         annot=True,
         ax=ax,
         cbar=False,
@@ -2012,6 +2032,11 @@ with open(Path(outdir) / "early_late_preference_relationship.txt", "w") as f:
         f"Binomial test p-value: {test.pvalue:.4e}\n"
         f"Significant at alpha=0.05: {'Yes' if test.pvalue < 0.05 else 'No'}\n"
     )
+
+print(f"Congruent responses: {congruent_responses}")
+print(f"Incongruent responses: {incongruent_responses}")
+print(f"Binomial test p-value: {test.pvalue:.4e}")
+print(f"Significant at alpha=0.05: {'Yes' if test.pvalue < 0.05 else 'No'}")
 
 # %% [markdown]
 # #### More in-depth selectivity relationship
