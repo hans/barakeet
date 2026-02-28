@@ -144,6 +144,51 @@ word_end_df = pl.from_pandas(
 )
 
 # %% [markdown]
+# ## Prep phonetic
+
+# %%
+phon_pred_df = pl.read_parquet(phon_predictions_path).with_columns(
+    pl.col("subject").cast(subject_enum),
+    pl.col("phoneme_pair").cast(phoneme_pair_enum),
+    (pl.col("decoder_target") == 1).cast(pl.Int8).alias("decoder_target"),
+)
+
+# %%
+group_cols = ["subject", "electrode_idx", "phoneme_pair", "smin", "smax", "fold"]
+phon_roc_auc_searchlight_df = pl_roc_auc(
+    df=phon_pred_df.filter(
+        (pl.col("smin") >= phon_response_smin_min)
+        & (pl.col("smax") <= all_response_smax_max)
+    ),
+    target_col="decoder_target",
+    proba_col="decoder_proba",
+    group_cols=group_cols,
+    roc_auc_name="phon_roc_auc",
+)
+
+# %%
+phon_roc_auc_mean_df = phon_roc_auc_searchlight_df.group_by(
+    ["subject", "electrode_idx", "phoneme_pair", "smin", "smax"]
+).agg(pl.col("phon_roc_auc").mean())
+
+# %%
+phon_peaks_df = (
+    phon_roc_auc_mean_df.join(
+        word_end_df.group_by(["phoneme_pair"]).agg(pl.max("word_end_offset_sample")),
+        on=["phoneme_pair"],
+        how="left",
+    )
+    .filter(
+        pl.col("smin") >= phon_response_smin_min,
+        pl.col("smax") <= pl.col("word_end_offset_sample"),
+        pl.col("phon_roc_auc") >= phon_response_peak_threshold,
+    )
+    .sort("phon_roc_auc", descending=True)
+    .group_by(["subject", "electrode_idx", "phoneme_pair"])
+    .first()
+)
+
+# %% [markdown]
 # ## Behav prep
 
 # %%
@@ -217,11 +262,18 @@ behav_roc_auc_mean_df = behav_roc_auc_searchlight_df.group_by(
 
 # %%
 behav_peaks_df_unfiltered = (
-    behav_roc_auc_mean_df.join(word_end_df, on=["phoneme_pair", "word_end"], how="left")
+    behav_roc_auc_mean_df.join(
+        phon_peaks_df.select(["subject", "electrode_idx", "phoneme_pair", "smax"]),
+        on=["subject", "electrode_idx", "phoneme_pair"],
+        how="inner",
+        suffix="_phon",
+    )
+    .join(word_end_df, on=["phoneme_pair", "word_end"], how="left")
     .filter(
-        pl.col("smax") >= 0 - epoch_tmin * epoch_sfreq,
+        pl.col("smax") > pl.col("smax_phon"),
         pl.col("smax") <= pl.col("word_end_offset_sample") + 20,
     )
+    .drop(["smax_phon"])
     .sort("behav_roc_auc_improvement", descending=True)
     .group_by(["subject", "electrode_idx", "phoneme_pair", "word_end"])
     .first()
@@ -230,51 +282,6 @@ behav_peaks_df_unfiltered = (
 # %%
 behav_peaks_df = behav_peaks_df_unfiltered.filter(
     pl.col("behav_roc_auc_improvement") > 0
-)
-
-# %% [markdown]
-# ## Prep phonetic
-
-# %%
-phon_pred_df = pl.read_parquet(phon_predictions_path).with_columns(
-    pl.col("subject").cast(subject_enum),
-    pl.col("phoneme_pair").cast(phoneme_pair_enum),
-    (pl.col("decoder_target") == 1).cast(pl.Int8).alias("decoder_target"),
-)
-
-# %%
-group_cols = ["subject", "electrode_idx", "phoneme_pair", "smin", "smax", "fold"]
-phon_roc_auc_searchlight_df = pl_roc_auc(
-    df=phon_pred_df.filter(
-        (pl.col("smin") >= phon_response_smin_min)
-        & (pl.col("smax") <= all_response_smax_max)
-    ),
-    target_col="decoder_target",
-    proba_col="decoder_proba",
-    group_cols=group_cols,
-    roc_auc_name="phon_roc_auc",
-)
-
-# %%
-phon_roc_auc_mean_df = phon_roc_auc_searchlight_df.group_by(
-    ["subject", "electrode_idx", "phoneme_pair", "smin", "smax"]
-).agg(pl.col("phon_roc_auc").mean())
-
-# %%
-phon_peaks_df = (
-    phon_roc_auc_mean_df.join(
-        word_end_df.group_by(["phoneme_pair"]).agg(pl.max("word_end_offset_sample")),
-        on=["phoneme_pair"],
-        how="left",
-    )
-    .filter(
-        pl.col("smin") >= phon_response_smin_min,
-        pl.col("smax") <= pl.col("word_end_offset_sample"),
-        pl.col("phon_roc_auc") >= phon_response_peak_threshold,
-    )
-    .sort("phon_roc_auc", descending=True)
-    .group_by(["subject", "electrode_idx", "phoneme_pair"])
-    .first()
 )
 
 # %% [markdown]
