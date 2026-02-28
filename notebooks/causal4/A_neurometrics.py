@@ -33,6 +33,9 @@ import pandas as pd
 import polars as pl
 import seaborn as sns
 import torch
+from matplotlib.patches import Rectangle
+from matplotlib.transforms import blended_transform_factory
+from scipy import stats
 from scipy.stats import ttest_ind
 from tqdm.auto import tqdm
 
@@ -62,11 +65,10 @@ matplotlib.rcParams.update(
 # %%
 from src.data import add_metadata_features
 from src.stimuli import (
-    OFFSET_DICT,
     PHONEME_PAIR_TO_WORD_ENDS,
-    POD_dict,
 )
 from src.viz_paper import (
+    HandlerRectangle,
     PaperData,
     add_textgrid,
     evaluate_phonetic_transfer,
@@ -74,6 +76,7 @@ from src.viz_paper import (
     phoneme_pair_enum,
     pl_roc_auc,
     plot_behav_barplot,
+    plot_condition_contrast,
     plot_condition_contrasts_single_figure,
     subject_enum,
     word_end_enum,
@@ -251,22 +254,6 @@ print(behav_peaks_df.height)
 behav_peaks_df = behav_peaks_df.filter(pl.col("behav_roc_auc_improvement") > 0.01)
 print("-> filtered behav peaks:", behav_peaks_df.height)
 
-# %%
-# Check: are behav peaks a subset of phon peaks?
-(
-    pd.merge(
-        behav_peaks_df.to_pandas().drop_duplicates(
-            ["subject", "electrode_idx", "phoneme_pair"]
-        ),
-        phon_peaks_df.to_pandas().drop_duplicates(
-            ["subject", "electrode_idx", "phoneme_pair"]
-        ),
-        on=["subject", "electrode_idx", "phoneme_pair"],
-        how="outer",
-        indicator=True,
-    ).drop_duplicates(["subject", "electrode_idx"])
-)._merge.value_counts()
-
 # %% [markdown]
 # ### Follow through on peak filtering consequences
 
@@ -408,70 +395,6 @@ electrode_distribution_df = (
 electrode_distribution_df
 
 # %%
-# fig, ax = plt.subplots(figsize=(3, 0.3 * len(electrode_distribution_df)))
-
-# total = electrode_distribution_df["total_electrodes"].values
-# speech = electrode_distribution_df["speech_responsive"].values
-# phonetic = electrode_distribution_df["phonetic_selective"].values
-# behavior = electrode_distribution_df["behavior_selective"].values
-
-# plot_palette = sns.color_palette(categorical_palette, 3)
-
-# # derive complementary counts
-# non_speech = total - speech
-# speech_not_phonetic = speech - phonetic
-
-# y = np.arange(len(electrode_distribution_df))
-# # first (leftmost): phonetic
-# ax.barh(
-#     y,
-#     phonetic,
-#     color=plot_palette[0],
-#     label="Phonetically\nselective",
-#     alpha=0.9,
-# )
-
-# # --- overlay: behaviorally selective (hatched) ---
-# ax.barh(
-#     y,
-#     behavior,
-#     left=0,
-#     facecolor="none",
-#     edgecolor="k",
-#     hatch="///",
-#     linewidth=0.0,
-#     label="Behaviorally\nselective",
-#     zorder=5,
-# )
-
-# # second: speech-responsive but not phonetic
-# ax.barh(
-#     y,
-#     speech_not_phonetic,
-#     color=plot_palette[1],
-#     left=phonetic,
-#     label="Task-responsive\n(non-phonetic)",
-#     alpha=0.7,
-# )
-
-# # third: non-speech electrodes
-# ax.barh(
-#     y,
-#     non_speech,
-#     color=plot_palette[2],
-#     left=phonetic + speech_not_phonetic,
-#     label="Other",
-#     alpha=0.5,
-# )
-
-# ax.set_yticks(y)
-# ax.set_yticklabels(electrode_distribution_df.subject, rotation=45, ha="right")
-# ax.set_xlabel("Number of electrodes")
-# ax.legend(loc="upper right", bbox_to_anchor=(1.5, 1.0), fontsize=9)
-
-# fig.savefig("figures/electrode_distribution.pdf")
-
-# %%
 fig, ax = plt.subplots(figsize=(1.8, 2.2))
 
 electrode_distribution_df_plot = electrode_distribution_df.copy()
@@ -525,10 +448,13 @@ ax.set_xlim(0, 1)
 ax.legend(loc="lower left", fontsize=10)
 sns.despine(ax=ax, top=True, right=True)
 
-fig.savefig("figures/electrode_distribution-phonetic_selective.pdf")
+fig.savefig(Path(outdir) / "electrode_distribution-phonetic_selective.pdf")
 
 # %% [markdown]
-# ## Plot neurometric for phonetic targets
+# ## Prepare prediction summaries
+
+# %% [markdown]
+# ### Phonetic
 
 # %%
 # --- concat with source labels
@@ -552,20 +478,6 @@ plot_phon_df = pl.concat(
 # --- asserts
 assert plot_phon_df.select(pl.col("resampled").is_null().any()).item() is False
 assert plot_phon_df.select(pl.col("fold").is_null().any()).item() is False
-
-# %%
-# g = sns.catplot(data=plot_phon_df.to_pandas(),
-#                 x="resampled", y="decoder_proba",
-#                 # hue="lexical_evidence",
-#                 col="phoneme_pair", col_order=phoneme_pair_order,
-#                 row="source", row_order=["phon", "behav"],
-#                 kind="point", units="site",
-#                 height=3.5)
-# g.set_axis_labels("Stimulus step", "Predicted\nP(second phoneme)")
-# g.set_titles(template="Window: {row_name}\nPhoneme pair: {col_name}")
-
-# for ax in g.axes.flat:
-#     ax.axhline(0.5, color="red", linestyle="--")
 
 # %%
 # compute phonetic accuracy per source and resampled, within fold
@@ -611,43 +523,7 @@ phon_acc_change = (
 )
 
 # %% [markdown]
-# ## Behav prediction
-
-# %%
-# summarize: per electrode, selective for one completion or both?
-(
-    behav_peaks_df.with_columns(
-        (
-            pl.col("word_end").cast(pl.String).str.slice(0, 1)
-            == pl.col("phoneme_pair").cast(pl.String).str.slice(0, 1)
-        )
-        .cast(pl.UInt8)
-        .alias("lexical_evidence")
-    )
-    .pivot(
-        index=["subject", "electrode_idx", "phoneme_pair"],
-        on="lexical_evidence",
-        values="behav_roc_auc_improvement",
-        aggregate_function="len",
-    )
-    .with_columns(
-        (pl.col("0").is_not_null() & pl.col("1").is_not_null()).alias(
-            "both_completions"
-        ),
-        (pl.col("0").is_not_null() & pl.col("1").is_null()).alias(
-            "first_completion_only"
-        ),
-        (pl.col("0").is_null() & pl.col("1").is_not_null()).alias(
-            "second_completion_only"
-        ),
-    )
-    .group_by("phoneme_pair")
-    .agg(
-        pl.sum("both_completions").alias("both_completions"),
-        pl.sum("first_completion_only").alias("first_completion_only"),
-        pl.sum("second_completion_only").alias("second_completion_only"),
-    )
-)
+# ### Behavior
 
 # %%
 plot_behav_df = (
@@ -672,36 +548,24 @@ plot_behav_df = (
 )
 
 # %%
-# g = sns.catplot(data=plot_behav_df.to_pandas(),
-#                 x="resampled", y="full_decoder_proba", hue="decoder_target",
-#                 col="phoneme_pair", col_order=phoneme_pair_order,
-#                 row="source", row_order=["phon", "behav"],
-#                 kind="point", units="site",
-#                 height=3.5)
-# g.set_axis_labels("Stimulus step", "Predicted P(picks\nsecond phoneme)")
-# g.set_titles(template="Window: {row_name}\nPhoneme pair: {col_name}")
-
-# for ax in g.axes.flat:
-#     ax.axhline(0.5, color="red", linestyle="--")
-
-# %%
+group_cols = [
+    "source",
+    "site",
+    "subject",
+    "electrode_idx",
+    "phoneme_pair",
+    "word_end",
+    "resampled",
+    "smin",
+    "smax",
+    "fold",
+]
 behav_roc_auc = (
     pl_roc_auc(
         df=plot_behav_df,
         target_col="decoder_target",
         proba_col="full_decoder_proba",
-        group_cols=[
-            "source",
-            "site",
-            "subject",
-            "electrode_idx",
-            "phoneme_pair",
-            "word_end",
-            "resampled",
-            "smin",
-            "smax",
-            "fold",
-        ],
+        group_cols=group_cols,
         roc_auc_name="behav_roc_auc",
     )
     .join(
@@ -709,32 +573,10 @@ behav_roc_auc = (
             df=plot_behav_df,
             target_col="decoder_target",
             proba_col="baseline_decoder_proba",
-            group_cols=[
-                "source",
-                "site",
-                "subject",
-                "electrode_idx",
-                "phoneme_pair",
-                "word_end",
-                "resampled",
-                "smin",
-                "smax",
-                "fold",
-            ],
+            group_cols=group_cols,
             roc_auc_name="behav_roc_auc_baseline",
         ),
-        on=[
-            "source",
-            "site",
-            "subject",
-            "electrode_idx",
-            "phoneme_pair",
-            "word_end",
-            "resampled",
-            "smin",
-            "smax",
-            "fold",
-        ],
+        on=group_cols,
         how="inner",
     )
     .with_columns(
@@ -752,78 +594,8 @@ behav_roc_auc = (
     )
 )
 
-# %%
-# g = sns.catplot(data=behav_roc_auc.to_pandas().astype({"resampled": int}),
-#                 x="resampled", y="behav_roc_auc",
-#                 hue="source", hue_order=source_order,
-#                 row="phoneme_pair", row_order=phoneme_pair_order,
-#                 kind="point", units="site", height=3.5)
-# g.set_axis_labels("Stimulus step", "Behavioral\ndecoding ROC-AUC")
-# g.set_titles(template="{row_name}")
-
-# for ax in g.axes.flat:
-#     ax.axhline(0.5, color="red", linestyle="--")
-
-# %%
-# g = sns.catplot(data=behav_roc_auc.to_pandas(), x="resampled", y="behav_roc_auc_improvement",
-#                 hue="source", hue_order=source_order, col="phoneme_pair", col_order=phoneme_pair_order,
-#                 kind="point", units="site")
-# g.set_axis_labels("Resampled", "ROC AUC Improvement over Baseline")
-
-# for ax in g.axes.flat:
-#     ax.axhline(0, color="red", linestyle="--")
-
 # %% [markdown]
 # ## Dynamics
-
-# %% [markdown]
-# ### Decoding timecourse
-
-# %%
-# sns.lineplot(
-#     data=phon_roc_auc_mean_df.to_pandas(),
-#     x="smax",
-#     y="phon_roc_auc",
-#     hue="phoneme_pair",
-#     hue_order=phoneme_pair_order,
-# )
-
-# %%
-# sns.lineplot(
-#     data=(
-#         behav_roc_auc_mean_df
-#         .join(plot_behav_behav_keys, on=["subject", "electrode_idx", "phoneme_pair", "word_end"], how="inner")
-#     ).to_pandas(),
-#     x="smax",
-#     y="behav_roc_auc_improvement",
-#     hue="phoneme_pair",
-#     hue_order=phoneme_pair_order,
-# )
-
-# %%
-# # above but with median
-# plot_textgrid = "11_necessary_dn_002.TextGrid"
-# behav_median_timecourse = (
-#     behav_roc_auc_mean_df.to_pandas()
-#     .query("word_end == 'necessary'")
-#     .groupby(["phoneme_pair", "smin", "smax"])
-#     .behav_roc_auc_improvement.median()
-#     .reset_index()
-# )
-# behav_median_timecourse["tmin"] = (
-#     behav_median_timecourse["smin"] / epoch_sfreq + epoch_tmin
-# )
-# behav_median_timecourse["tmax"] = (
-#     behav_median_timecourse["smax"] / epoch_sfreq + epoch_tmin
-# )
-# ax = sns.lineplot(
-#     data=behav_median_timecourse,
-#     x="tmax",
-#     y="behav_roc_auc_improvement",
-#     hue="phoneme_pair",
-#     hue_order=phoneme_pair_order,
-# )
-# add_textgrid(ax, textgrid_dir, textgrid_file=plot_textgrid)
 
 # %% [markdown]
 # ### Peak timing
@@ -841,356 +613,100 @@ peak_timing_plot = pl.concat(
     )
 )
 
-# %%
-g = sns.displot(
-    data=peak_timing_plot.to_pandas(),
-    x="t_center",
-    hue="phoneme_pair",
-    hue_order=phoneme_pair_order,
-    row="source",
-    row_order=source_order,
-    kind="kde",
-    clip=(0, None),
-    height=2.5,
-    aspect=2.5,
-)
-g.set_axis_labels("Peak decoding time (s)", "Density")
 
 # %%
-# g = sns.displot(data=peak_timing_plot.to_pandas(), x="t_center",
-#                 hue="source", hue_order=source_order,
-#                 row="phoneme_pair", row_order=phoneme_pair_order,
-#                 # kind="kde", clip=(0, None),
-#                 kind="hist", stat="density", common_norm=False,
-#                 height=2.5, aspect=2.5)
-# g.set_axis_labels("Peak decoding time (s)", "Density")
-
-# %%
-plot_word_end = "necessary"
-plot_phoneme_pair = "dn"
-plot_textgrid = "11_necessary_dn_002.TextGrid"
-plot_xlim = (0, 1.2)
-vline_extent = 1.1
-g = sns.displot(
-    data=peak_timing_plot.filter(
-        (pl.col("word_end") == plot_word_end)
-        | ((pl.col("source") == "phon") & (pl.col("phoneme_pair") == plot_phoneme_pair))
-    )
-    .to_pandas()
-    .assign(
-        source=lambda df: df.source.map({"phon": "Acoustic", "behav": "Perceptual"})
-    ),
-    x="t_center",
-    hue="source",
-    hue_order={"Acoustic": 0, "Perceptual": 1},
-    palette=categorical_palette,
-    linewidth=2,
-    # kind="hist", stat="density", common_norm=False,
-    kind="kde",
-    common_norm=False,
-    clip=(0, None),
-    # legend=False,
-    height=2,
-    aspect=2.75 / 2,
-)
-g.set_axis_labels("Peak decoding time (s)", "Density")
-sns.move_legend(
-    g, "upper right", bbox_to_anchor=(0.65, 0.93), fontsize=10, frameon=True, title=None
-)
-
-for (row, col, hue), data in g.facet_data():
-    ax = g.axes[row][col]
-    ax.set_xlim(plot_xlim)
-
-    phoneme_pair = data.phoneme_pair.iloc[0]
-    word_stim_info = word_end_df.filter(pl.col("word_end") == plot_word_end)
-    # for word_end in word_stim_info.select("word_end_offset").to_series():
-    #     ax.axvline(word_end, color="red", linestyle="--")
-    pod = word_stim_info.select("pod").unique().item()
-    ax.axvline(
-        pod,
-        ymax=vline_extent,
-        color="red",
-        alpha=0.5,
-        linewidth=2,
-        linestyle="--",
-        clip_on=False,
-    )
-
-    add_textgrid(
-        ax,
-        textgrid_dir,
-        textgrid_file=plot_textgrid,
-        include_phonemes=False,
-        fontsize=9,
-        vline_extent=vline_extent,
-    )
-
-g.savefig("figures/decoding_timing-necessary.pdf")
-
-# %%
-plot_word_end = "desolate"
-plot_phoneme_pair = "dn"
-plot_textgrid = "11_necessary_dn_002.TextGrid"
-plot_xlim = (0, 0.7)
-vline_extent = 1.1
-g = sns.displot(
-    data=peak_timing_plot.filter(
-        (pl.col("word_end") == plot_word_end)
-        | ((pl.col("source") == "phon") & (pl.col("phoneme_pair") == plot_phoneme_pair))
-    )
-    .to_pandas()
-    .assign(
-        source=lambda df: df.source.map({"phon": "Acoustic", "behav": "Perceptual"})
-    ),
-    x="t_center",
-    hue="source",
-    hue_order={"Acoustic": 0, "Perceptual": 1},
-    palette=categorical_palette,
-    linewidth=2,
-    # kind="hist", stat="density", common_norm=False,
-    kind="kde",
-    common_norm=False,
-    clip=(0, None),
-    # legend=False,
-    height=2,
-    aspect=2.75 / 2,
-)
-g.set_axis_labels("Peak decoding time (s)", "Density")
-sns.move_legend(
-    g, "upper right", bbox_to_anchor=(0.65, 0.93), fontsize=10, frameon=True, title=None
-)
-
-for (row, col, hue), data in g.facet_data():
-    ax = g.axes[row][col]
-    ax.set_xlim(plot_xlim)
-
-    phoneme_pair = data.phoneme_pair.iloc[0]
-    word_stim_info = word_end_df.filter(pl.col("word_end") == plot_word_end)
-    # for word_end in word_stim_info.select("word_end_offset").to_series():
-    #     ax.axvline(word_end, color="red", linestyle="--")
-    pod = word_stim_info.select("pod").unique().item()
-    ax.axvline(
-        pod,
-        ymax=vline_extent,
-        color="red",
-        alpha=0.5,
-        linewidth=2,
-        linestyle="--",
-        clip_on=False,
-    )
-
-    add_textgrid(
-        ax,
-        textgrid_dir,
-        textgrid_file=plot_textgrid,
-        include_phonemes=False,
-        fontsize=9,
-        vline_extent=vline_extent,
-    )
-
-g.savefig("figures/decoding_timing-desolate.pdf")
-
-# %%
-plot_word_ends = ["desolate", "necessary"]
-plot_phoneme_pair = "dn"
-plot_textgrid = "11_necessary_dn_002.TextGrid"
-plot_xlim = (0, 1.2)
-vline_extent = 1.1
-g = sns.displot(
-    data=peak_timing_plot.filter(
-        (pl.col("word_end").is_in(plot_word_ends))
-        | ((pl.col("source") == "phon") & (pl.col("phoneme_pair") == plot_phoneme_pair))
-    )
-    .to_pandas()
-    .assign(
-        source=lambda df: df.source.map({"phon": "Acoustic", "behav": "Perceptual"})
-    ),
-    x="t_center",
-    hue="source",
-    hue_order={"Acoustic": 0, "Perceptual": 1},
-    palette=categorical_palette,
-    linewidth=2,
-    # kind="hist", stat="density", common_norm=False,
-    kind="kde",
-    common_norm=False,
-    clip=(0, None),
-    # legend=False,
-    height=2,
-    aspect=2.75 / 2,
-)
-g.set_axis_labels("Peak decoding time (s)", "Density")
-sns.move_legend(
-    g, "upper right", bbox_to_anchor=(0.69, 0.93), fontsize=10, frameon=True, title=None
-)
-
-for (row, col, hue), data in g.facet_data():
-    ax = g.axes[row][col]
-    ax.set_xlim(plot_xlim)
-
-    phoneme_pair = data.phoneme_pair.iloc[0]
-    word_stim_info = word_end_df.filter(pl.col("word_end").is_in(plot_word_ends))
-    # for word_end in word_stim_info.select("word_end_offset").to_series():
-    #     ax.axvline(word_end, color="red", linestyle="--")
-    pod = word_stim_info.select("pod").unique().item()
-    ax.axvline(
-        pod,
-        ymax=vline_extent,
-        color="red",
-        alpha=0.5,
-        linewidth=2,
-        linestyle="--",
-        clip_on=False,
-    )
-
-    add_textgrid(
-        ax,
-        textgrid_dir,
-        textgrid_file=plot_textgrid,
-        include_phonemes=False,
-        fontsize=9,
-        vline_extent=vline_extent,
-    )
-
-g.savefig("figures/decoding_timing-both.pdf")
-
-# %% [markdown]
-# ### Peak timing of behavior relative to word offset
-
-# %%
-behav_peak_timing_plot = behav_peaks_df.with_columns(
-    (((pl.col("smin") + pl.col("smax")) / 2) / epoch_sfreq + epoch_tmin).alias(
-        "t_center"
-    ),
-    pl.col("word_end").replace_strict(OFFSET_DICT).alias("t_offset"),
-    pl.col("phoneme_pair").replace_strict(POD_dict).alias("t_pod"),
-).with_columns(
-    (pl.col("t_center") - pl.col("t_offset")).alias("t_from_offset"),
-    (pl.col("t_center") - pl.col("t_pod")).alias("t_from_pod"),
-)
-
-# %%
-# g = sns.displot(
-#     data=behav_peak_timing_plot.to_pandas(),
-#     x="t_from_offset",
-#     hue="phoneme_pair",
-#     hue_order=phoneme_pair_order,
-#     # hue="subject",
-#     kind="kde",
-#     height=2,
-#     aspect=2.5,
-# )
-# g.set_axis_labels("Time from word offset (s)", "Density")
-
-# %%
-# g = sns.displot(
-#     data=behav_peak_timing_plot.to_pandas(),
-#     x="t_from_pod",
-#     hue="phoneme_pair",
-#     hue_order=phoneme_pair_order,
-#     # hue="subject",
-#     kind="kde",
-#     height=2,
-#     aspect=2.5,
-# )
-# g.set_axis_labels("Time from\npoint of disambiguation (s)", "Density")
-
-# %%
-# (
-#     behav_peak_timing_plot
-#     .group_by(["subject", "phoneme_pair"])
-#     .agg(pl.col("t_from_offset").var(), pl.col("t_from_pod").var())
-#     .unpivot(index=["subject", "phoneme_pair"],
-#              on=["t_from_offset", "t_from_pod"],
-#              variable_name="time_reference",
-#              value_name="variance")
-# )
-
-# sns.catplot(data=
-#     pl.concat([
-#         (
-#             behav_peak_timing_plot
-#             .group_by(["subject", "phoneme_pair"])
-#             .agg(pl.col("t_from_offset").var(), pl.col("t_from_pod").var())
-#             .unpivot(index=["subject", "phoneme_pair"],
-#                     on=["t_from_offset", "t_from_pod"],
-#                     variable_name="time_reference",
-#                     value_name="variance")
-#         ),
-#         (
-#             peak_timing_plot
-#             .filter(pl.col("source") == "behav")
-#             .group_by(["subject", "phoneme_pair"])
-#             .agg(pl.col("t_center").var().alias("variance"))
-#             .with_columns(pl.lit("t_from_onset").alias("time_reference"))
-#         )], how="align"),
-#         x="phoneme_pair", order=phoneme_pair_order, y="variance",
-#         hue="time_reference", kind="box")
-
-# %% [markdown]
-# ### Performance relative to peak
-
-# %%
-phon_relative_df = (
-    phon_peaks_df.join(
-        phon_roc_auc_mean_df,
-        on=["subject", "electrode_idx", "phoneme_pair"],
-        how="left",
-    )
-    .with_columns(
-        (pl.col("smin_right") - pl.col("smin")).alias("smin_relative"),
-        (pl.col("smax_right") - pl.col("smax")).alias("smax_relative"),
-        (pl.col("phon_roc_auc_right") / pl.col("phon_roc_auc")).alias(
-            "phon_roc_auc_relative"
+def plot_peak_timing(
+    plot_phoneme_pair, plot_word_ends, plot_xlim=None, vline_extent=1.1
+):
+    g = sns.displot(
+        data=peak_timing_plot.filter(
+            (pl.col("word_end").is_in(plot_word_ends))
+            | (
+                (pl.col("source") == "phon")
+                & (pl.col("phoneme_pair") == plot_phoneme_pair)
+            )
+        )
+        .to_pandas()
+        .assign(
+            source=lambda df: df.source.map({"phon": "Acoustic", "behav": "Perceptual"})
         ),
+        x="t_center",
+        hue="source",
+        hue_order={"Acoustic": 0, "Perceptual": 1},
+        palette=categorical_palette,
+        linewidth=2,
+        kind="kde",
+        common_norm=False,
+        clip=(0, None),
+        height=2,
+        aspect=2.75 / 2,
     )
-    .with_columns((pl.col("smax_relative") / epoch_sfreq).alias("tmax_relative"))
-    .filter(
-        pl.col("smin_relative") >= -relative_performance_swidth,
-        pl.col("smax_relative") <= relative_performance_swidth,
-        pl.col("phon_roc_auc_right") > 0.5,
+    g.set_axis_labels("Peak decoding time (s)", "Density")
+    sns.move_legend(
+        g,
+        "upper right",
+        bbox_to_anchor=(0.69, 0.93),
+        fontsize=10,
+        frameon=True,
+        title=None,
     )
+
+    for (row, col, hue), data in g.facet_data():
+        ax = g.axes[row][col]
+        ax.set_xlim(plot_xlim)
+
+        word_stim_info = word_end_df.filter(pl.col("word_end").is_in(plot_word_ends))
+        # for word_end in word_stim_info.select("word_end_offset").to_series():
+        #     ax.axvline(word_end, color="red", linestyle="--")
+        pod = word_stim_info.select("pod").unique().item()
+        ax.axvline(
+            pod,
+            ymax=vline_extent,
+            color="red",
+            alpha=0.5,
+            linewidth=2,
+            linestyle="--",
+            clip_on=False,
+        )
+
+        add_textgrid(
+            ax,
+            textgrid_dir,
+            textgrid_file=plot_textgrid,
+            include_phonemes=False,
+            fontsize=9,
+            vline_extent=vline_extent,
+        )
+
+    return g.fig
+
+
+# %%
+f = plot_peak_timing(
+    plot_phoneme_pair="dn",
+    plot_word_ends=["necessary"],
+    plot_xlim=(0, 1.2),
+    vline_extent=1.1,
 )
+f.savefig(Path(outdir) / "decoding_timing-necessary.pdf")
 
 # %%
-# g = sns.relplot(data=phon_relative_df.to_pandas(), x="tmax_relative", y="phon_roc_auc_relative",
-#                 hue="phoneme_pair", hue_order=phoneme_pair_order,
-#                 kind="line", marker="o")
-# g.set_axis_labels("Time from phonetic\ndecoding peak (s)", "Relative phonetic\nROC AUC (%)")
-# for ax in g.axes.flat:
-#     ax.axvline(0, color="gray", ls="--")
-#     ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: '{:.0%}'.format(y)))
-#     ax.set_xlim(-relative_performance_twidth, relative_performance_twidth)
+f = plot_peak_timing(
+    plot_phoneme_pair="dn",
+    plot_word_ends=["desolate"],
+    plot_xlim=(0, 0.7),
+    vline_extent=1.1,
+)
+f.savefig(Path(outdir) / "decoding_timing-desolate.pdf")
 
 # %%
-# behav_relative_df = (
-#     behav_peaks_df
-#     .join(behav_roc_auc_mean_df, on=["subject", "electrode_idx", "phoneme_pair", "word_end"], how="left")
-#     .with_columns(
-#         (pl.col("smin_right") - pl.col("smin")).alias("smin_relative"),
-#         (pl.col("smax_right") - pl.col("smax")).alias("smax_relative"),
-#         (pl.col("behav_roc_auc_improvement_right") / pl.col("behav_roc_auc_improvement")).alias("behav_roc_auc_relative"),
-#     )
-#     .with_columns(
-#         (pl.col("smax_relative") / epoch_sfreq).alias("tmax_relative")
-#     )
-#     .filter(
-#         pl.col("smin_relative") >= -relative_performance_swidth,
-#         pl.col("smax_relative") <= relative_performance_swidth,
-#         pl.col("behav_roc_auc_improvement_right") > 0
-#     )
-# )
-
-# %%
-# g = sns.relplot(data=behav_relative_df.to_pandas(), x="tmax_relative", y="behav_roc_auc_relative",
-#                 hue="phoneme_pair", hue_order=phoneme_pair_order,
-#                 kind="line", marker="o")
-# g.set_axis_labels("Time from behavioral\ndecoding peak (s)", "Relative behavioral\nROC AUC improvement (%)")
-
-# for ax in g.axes.flat:
-#     ax.axvline(0, color="gray", ls="--")
-#     ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: '{:.0%}'.format(y)))
-#     ax.set_xlim(-relative_performance_twidth, relative_performance_twidth)
+f = plot_peak_timing(
+    plot_phoneme_pair="dn",
+    plot_word_ends=["desolate", "necessary"],
+    plot_xlim=(0, 1.2),
+    vline_extent=1.1,
+)
+f.savefig(Path(outdir) / "decoding_timing-both.pdf")
 
 # %% [markdown]
 # ## Cross-window analysis
@@ -1252,7 +768,6 @@ subject_means = (
     )
     .to_pandas()
 )
-from scipy import stats
 
 ttest_t, ttest_p = stats.ttest_rel(
     subject_means["phon_mean"], subject_means["behav_mean"]
@@ -1285,7 +800,6 @@ ax.plot(
 ax.scatter([0, 1], [grand_early, grand_late], color="black", s=60, zorder=4, alpha=0.7)
 
 # Annotate with significance star
-from matplotlib.transforms import blended_transform_factory
 
 bracket_y = 1.10  # in axes coords
 tick_h = 0.03
@@ -1320,41 +834,7 @@ sns.despine()
 fig.tight_layout()
 plt.show()
 
-fig.savefig("figures/decoding_phonetic.pdf")
-
-# %%
-g = sns.catplot(
-    data=(
-        phon_roc_auc_comparison_df.group_by(
-            [
-                "source",
-                "site",
-                "subject",
-                "electrode_idx",
-                "phoneme_pair",
-                "smin",
-                "smax",
-            ]
-        ).agg(pl.mean("phon_roc_auc"))
-    ).to_pandas(),
-    x="phoneme_pair",
-    order=phoneme_pair_order,
-    y="phon_roc_auc",
-    hue="source",
-    hue_order=source_order,
-    kind="box",
-    units="site",
-)
-g.set_axis_labels("Phoneme pair", "Phonetic ROC AUC (%)")
-for ax in g.axes.flat:
-    ax.axhline(0.5, color="red", linestyle="--")
-    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: "{:.0%}".format(y)))
-
-# %%
-# from src.viz import spaghetti_plot
-# spaghetti_plot(phon_roc_auc_overall.assign(word_end="NA"),
-#                y="roc_auc", by1="phon", by2="behav", by="source",
-#                col="phoneme_pair")
+fig.savefig(Path(outdir) / "decoding_phonetic.pdf")
 
 # %%
 g = sns.displot(
@@ -1423,38 +903,6 @@ behav_roc_auc_comparison_df = pl.concat(
 )
 
 # %%
-brac_ttest_df = (
-    (
-        behav_roc_auc_comparison_df.group_by(
-            [
-                "source",
-                "site",
-                "subject",
-                "electrode_idx",
-                "phoneme_pair",
-                "smin",
-                "smax",
-            ]
-        ).agg(pl.mean("behav_roc_auc"))
-    )
-    .to_pandas()
-    .set_index("source")
-    .dropna(subset=["behav_roc_auc"])
-)
-
-# %%
-
-ttest_ind(
-    brac_ttest_df.loc["phon"].behav_roc_auc, brac_ttest_df.loc["baseline"].behav_roc_auc
-)
-
-# %%
-ttest_ind(
-    brac_ttest_df.loc["behav"].behav_roc_auc,
-    brac_ttest_df.loc["baseline"].behav_roc_auc,
-)
-
-# %%
 evaluation_order = ["Acoustic\nwindow", "Baseline", "Perceptual\nwindow"]
 g = sns.catplot(
     data=(
@@ -1499,12 +947,7 @@ for ax in g.axes.flat:
     ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: "{:.0%}".format(y)))
     ax.set_ylim(ax.get_ylim()[0], 1.0)
 
-g.savefig("figures/decoding_comparison.pdf")
-
-# %%
-# spaghetti_plot(behav_roc_auc_overall.query("source in ['phon', 'behav']"),
-#                y="roc_auc", by1="phon", by2="behav", by="source",
-#                col="phoneme_pair")
+g.savefig(Path(outdir) / "decoding_comparison.pdf")
 
 # %%
 # within-fold comparison of behavior prediction between two windows and baseline
@@ -1537,7 +980,6 @@ behav_improvement_df = (
 # %%
 # Spaghetti plot: per-subject mean improvement from baseline
 # Left = early/phon, Center = baseline (0), Right = late/behav
-from scipy import stats
 
 subject_means = (
     behav_improvement_df.group_by("subject")
@@ -1602,13 +1044,10 @@ sns.despine()
 fig.tight_layout()
 plt.show()
 
-fig.savefig("figures/decoding_behavioral_improvement.pdf")
+fig.savefig(Path(outdir) / "decoding_behavioral_improvement.pdf")
 
 # %%
 # Spaghetti plot: per-subject mean improvement from baseline
-from matplotlib.transforms import blended_transform_factory
-from scipy import stats
-
 subject_means = (
     behav_improvement_df.group_by("subject")
     .agg(
@@ -1703,7 +1142,7 @@ ax.set_xlim(-0.3, 1.3)
 sns.despine(left=True, top=True, right=False)
 fig.tight_layout()
 
-fig.savefig("figures/decoding_behavioral_improvement-no_baseline.pdf")
+fig.savefig(Path(outdir) / "decoding_behavioral_improvement-no_baseline.pdf")
 
 # %%
 g = sns.displot(
@@ -1751,8 +1190,6 @@ g.set_axis_labels(
 for ax in g.axes.flat:
     ax.axvline(0, color="gray", linestyle="--")
     ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: "{:.0%}".format(x)))
-
-# %%
 
 # %% [markdown]
 # ### Cross-window transfer, no training
@@ -2015,90 +1452,6 @@ phonetic_transfer_extreme_results = (
 phonetic_transfer_extreme_results
 
 # %%
-group_cols = ["subject", "electrode_idx", "phoneme_pair", "fold", "resampled"]
-
-# compute ROC-AUC on just the extremes
-phonetic_transfer_results_by_resampled = (
-    early_early_outcomes_df.with_columns(
-        ((pl.col("decoder_target") == 1) == (pl.col("decoder_proba") >= 0.5)).alias(
-            "correct"
-        )
-    )
-    .group_by(group_cols)
-    .agg(pl.mean("correct").alias("early_early_accuracy"))
-    .join(
-        early_late_outcomes_df.with_columns(
-            ((pl.col("decoder_target") == 1) == (pl.col("decoder_proba") >= 0.5)).alias(
-                "correct"
-            )
-        )
-        .group_by(group_cols)
-        .agg(pl.mean("correct").alias("early_late_accuracy")),
-        on=group_cols,
-        how="inner",
-    )
-    .join(
-        late_early_outcomes_df.with_columns(
-            ((pl.col("decoder_target") == 1) == (pl.col("decoder_proba") >= 0.5)).alias(
-                "correct"
-            )
-        )
-        .group_by(group_cols)
-        .agg(pl.mean("correct").alias("late_early_accuracy")),
-        on=group_cols,
-        how="inner",
-    )
-    .join(
-        late_late_outcomes_df.with_columns(
-            ((pl.col("decoder_target") == 1) == (pl.col("decoder_proba") >= 0.5)).alias(
-                "correct"
-            )
-        )
-        .group_by(group_cols)
-        .agg(pl.mean("correct").alias("late_late_accuracy")),
-        on=group_cols,
-        how="inner",
-    )
-    # Join information about train early -> test early (should be a sanity check)
-    .join(
-        phon_roc_auc_searchlight_df.join(
-            early_to_late_transfer_keys.select(
-                ["subject", "electrode_idx", "phoneme_pair", "smin_early", "smax_early"]
-            ),
-            left_on=["subject", "electrode_idx", "phoneme_pair", "smin", "smax"],
-            right_on=[
-                "subject",
-                "electrode_idx",
-                "phoneme_pair",
-                "smin_early",
-                "smax_early",
-            ],
-            how="inner",
-        ).rename({"phon_roc_auc": "early_roc_auc"}),
-        on=["subject", "electrode_idx", "phoneme_pair", "fold"],
-        how="inner",
-    )
-    # Join information about train late -> test late (should be upper bound?? for the transfer case)
-    .join(
-        phon_roc_auc_searchlight_df.join(
-            early_to_late_transfer_keys.select(
-                ["subject", "electrode_idx", "phoneme_pair", "smin", "smax"]
-            ),
-            on=["subject", "electrode_idx", "phoneme_pair", "smin", "smax"],
-            how="inner",
-        ).rename({"phon_roc_auc": "late_roc_auc"}),
-        on=["subject", "electrode_idx", "phoneme_pair", "fold"],
-        suffix="_late",
-        how="inner",
-    )
-    .with_columns(
-        (pl.col("early_early_accuracy") - pl.col("late_early_accuracy")).alias(
-            "early_transfer_effect"
-        ),
-    )
-)
-
-# %%
 # mean over folds
 phonetic_transfer_results_mean = phonetic_transfer_results.group_by(
     ["subject", "electrode_idx", "phoneme_pair"]
@@ -2124,163 +1477,10 @@ phonetic_transfer_extreme_results_mean = phonetic_transfer_extreme_results.group
     pl.mean("early_transfer_effect"),
 )
 
-phonetic_transfer_results_by_resampled_mean = (
-    phonetic_transfer_results_by_resampled.group_by(
-        ["subject", "electrode_idx", "phoneme_pair", "resampled"]
-    ).agg(
-        pl.mean("early_early_accuracy"),
-        pl.mean("early_late_accuracy"),
-        pl.mean("late_early_accuracy"),
-        pl.mean("late_late_accuracy"),
-        pl.mean("early_transfer_effect"),
-    )
-)
-
 # %%
 phonetic_transfer_extreme_results_mean.to_pandas().to_csv(
     Path(outdir) / "phonetic_transfer_extreme_results_mean.csv", index=False
 )
-
-# %%
-g = sns.catplot(
-    data=(
-        phonetic_transfer_results_by_resampled_mean.filter(
-            pl.col("resampled").is_in([1, 6])
-        )
-        .rename(
-            {
-                "early_early_accuracy": "Early window",
-                "late_late_accuracy": "Late window",
-                "early_late_accuracy": "Late window\n(transfer from early)",
-                "late_early_accuracy": "Early window\n(transfer from late)",
-            }
-        )
-        .unpivot(
-            on=[
-                "Early window",
-                "Late window",
-                "Late window\n(transfer from early)",
-                "Early window\n(transfer from late)",
-            ],
-            index=["subject", "electrode_idx", "phoneme_pair"],
-            variable_name="Evaluation",
-            value_name="roc_auc",
-        )
-    )
-    .to_pandas()
-    .query('phoneme_pair == "dn"'),
-    # x="phoneme_pair", order=phoneme_pair_order,
-    y="roc_auc",
-    hue="Evaluation",
-    kind="box",
-)
-g.set_axis_labels("", "Phonetic ROC AUC (%)")
-
-for ax in g.axes.flat:
-    ax.axhline(0.5, color="red", linestyle="--")
-    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: "{:.0%}".format(y)))
-
-# %%
-sns.displot(
-    data=phonetic_transfer_results_by_resampled_mean.filter(
-        pl.col("resampled").is_in([1, 6])
-    ).to_pandas(),
-    x="early_transfer_effect",
-    height=2.5,
-    aspect=2.5,
-)
-
-# %%
-(
-    phonetic_transfer_results_by_resampled_mean.filter(
-        pl.col("resampled").is_in([1, 6])
-    )
-    .group_by(["subject", "electrode_idx", "phoneme_pair"])
-    .agg(
-        pl.mean("early_early_accuracy").alias("early_early_accuracy"),
-        pl.mean("late_early_accuracy").alias("late_early_accuracy"),
-    )
-    .rename(
-        {
-            "early_early_accuracy": "Early window",
-            "late_early_accuracy": "Early window\n(transfer from late)",
-        }
-    )
-).sort("Early window\n(transfer from late)")
-
-# %%
-# spaghetti plot
-early_col = "Acoustic window"
-transfer_col = "Acoustic window\n(transfer from\nperceptual window)"
-hue_order = [early_col, transfer_col]
-
-df_wide = (
-    phonetic_transfer_results_by_resampled_mean.filter(
-        pl.col("resampled").is_in([1, 6])
-    )
-    .group_by(["subject", "electrode_idx", "phoneme_pair"])
-    .agg(
-        pl.mean("early_early_accuracy").alias("early_early_accuracy"),
-        pl.mean("late_early_accuracy").alias("late_early_accuracy"),
-    )
-    .rename(
-        {
-            "early_early_accuracy": "Acoustic window",
-            "late_early_accuracy": "Acoustic window\n(transfer from\nperceptual window)",
-        }
-    )
-    .to_pandas()
-    .query('phoneme_pair == "dn"')[
-        [*["subject", "electrode_idx", "phoneme_pair"], early_col, transfer_col]
-    ]
-    .dropna(subset=[early_col, transfer_col])
-)
-
-fig, ax = plt.subplots(figsize=(2, 2.5))
-
-colors = sns.color_palette(categorical_palette, 2)
-x0, x1 = 0, 1
-
-# spaghetti lines
-for _, row in df_wide.iterrows():
-    ax.plot(
-        [x0, x1],
-        [row[early_col], row[transfer_col]],
-        color="gray",
-        alpha=0.2,
-        linewidth=0.8,
-        zorder=0,
-    )
-
-# points at each end
-ax.scatter(
-    [x0] * len(df_wide),
-    df_wide[early_col],
-    color=colors[0],
-    s=12,
-    alpha=0.4,
-    zorder=2,
-    label=early_col,
-)
-ax.scatter(
-    [x1] * len(df_wide),
-    df_wide[transfer_col],
-    color=colors[1],
-    s=12,
-    alpha=0.4,
-    zorder=2,
-    label=transfer_col,
-)
-
-ax.axhline(0.5, color="red", linestyle="--", linewidth=1)
-ax.set_xticks([x0, x1])
-ax.set_xticklabels(hue_order)
-ax.set_ylabel("Acoustic prediction\n(accuracy)")
-ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: "{:.0%}".format(y)))
-# ax.legend(loc="lower right", fontsize=8)
-sns.despine(ax=ax)
-
-fig.savefig("figures/decoding_acoustic_transfer.pdf")
 
 # %%
 # spaghetti plot
@@ -2353,10 +1553,7 @@ ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: "{:.0%}".format(y)))
 # ax.legend(loc="lower right", fontsize=8)
 sns.despine(ax=ax)
 
-fig.savefig("figures/decoding_acoustic_transfer-roc_auc.pdf")
-
-# %%
-phonetic_transfer_extreme_results_mean.select(pl.min("early_transfer_effect"))
+fig.savefig(Path(outdir) / "decoding_acoustic_transfer-roc_auc.pdf")
 
 # %%
 g = sns.displot(
@@ -2392,9 +1589,6 @@ g.axes[0, 0].axvline(0, color="gray", linestyle="--")
 # ## Zoomin
 
 # %%
-#  phon_peaks_df.join(behav_peaks_df,
-#     on=["subject", "electrode_idx", "phoneme_pair"])
-#  .sort("phon_roc_auc", descending=True) \
 zoomin_keys = phon_peaks_df.join(
     behav_peaks_df, on=["subject", "electrode_idx", "phoneme_pair"]
 ).select(
@@ -2407,10 +1601,6 @@ zoomin_keys = phon_peaks_df.join(
         "behav_roc_auc_improvement",
     ]
 )
-# zoomin_keys = (
-#     behav_peaks_df
-#     .select(["subject", "electrode_idx", "phoneme_pair", "word_end", "behav_roc_auc_improvement"])
-# )
 zoomin_keys
 
 # %%
@@ -2470,7 +1660,9 @@ hga_zoomin_keys = zoomin_keys.unique(
 #         plt.close(fig)
 
 # %%
-hga_zoomin_keys.to_pandas().to_csv("hga_zoomin_search_keys.csv", index=False)
+hga_zoomin_keys.to_pandas().to_csv(
+    Path(outdir) / "hga_zoomin_search_keys.csv", index=False
+)
 
 # %% [markdown]
 # ## Star plots
@@ -2495,7 +1687,7 @@ fig = zoomin_hga(
     legend=False,
     **star_plot_kwargs,
 )
-fig.savefig("figures/zoomin_EC250_185_dn_desolate.pdf")
+fig.savefig(Path(outdir) / "zoomin_EC250_185_dn_desolate.pdf")
 plt.close(fig)
 None
 
@@ -2509,13 +1701,13 @@ for handle in legend_handles_labels[0]:
     handle.set_color("black")
 legend_fig.legend(*legend_handles_labels, loc="center", frameon=True)
 
-legend_fig.savefig("figures/zoomin_legend.pdf")
+legend_fig.savefig(Path(outdir) / "zoomin_legend.pdf")
 
 # %%
 zoomin_hga(
     paper_data, "EC278", 38, "dn", "necessary", hide_bottom=True, **star_plot_kwargs
 )
-plt.gcf().savefig("figures/zoomin_EC278_38_dn_necessary.pdf")
+plt.gcf().savefig(Path(outdir) / "zoomin_EC278_38_dn_necessary.pdf")
 None
 
 # %% [markdown]
@@ -2526,66 +1718,6 @@ hga_df = paper_data.hga_df
 early_polarity = paper_data.early_polarity
 late_polarity = paper_data.late_polarity
 reg_df = paper_data.reg_df
-
-# %%
-# sns.catplot(
-#     data=reg_df,
-#     x="phoneme_pair",
-#     hue="decoder_target",
-#     y="hga_early_signed",
-#     kind="box",
-#     height=3,
-#     aspect=1.5,
-# )
-# from scipy.stats import ttest_ind
-
-# ttest_ind(
-#     reg_df.query("decoder_target == 0")["hga_early_signed"],
-#     reg_df.query("decoder_target == 1")["hga_early_signed"],
-# )
-
-# %%
-# sns.catplot(
-#     data=reg_df, x="early_polarity", hue="decoder_target", y="hga_early", kind="box"
-# )
-
-# %%
-# sns.catplot(data=reg_df, hue="behavior_dummy_forced", y="hga_late_signed", kind="box")
-# ttest_ind(
-#     reg_df.dropna().query("behavior_dummy_forced == 0")["hga_late_signed"],
-#     reg_df.dropna().query("behavior_dummy_forced == 1")["hga_late_signed"],
-# )
-
-# %%
-# sns.catplot(
-#     data=reg_df,
-#     x="late_polarity",
-#     hue="behavior_dummy_forced",
-#     y="hga_late",
-#     kind="box",
-# )
-
-# %%
-# Do some basic normalization to aid a visual t-test
-#
-# reg_df_norm = pd.merge(reg_df,
-#          reg_df.groupby(["subject", "electrode_idx", "phoneme_pair", "word_end"])[["hga_early_signed", "hga_late_signed"]].mean(),
-#             on=["subject", "electrode_idx", "phoneme_pair", "word_end"],
-#             suffixes=("", "_site_mean"))
-# reg_df_norm["hga_early_signed_norm"] = reg_df_norm["hga_early_signed"] - reg_df_norm["hga_early_signed_site_mean"]
-# reg_df_norm["hga_late_signed_norm"] = reg_df_norm["hga_late_signed"] - reg_df_norm["hga_late_signed_site_mean"]
-
-# sns.catplot(data=reg_df_norm.melt(id_vars=["subject", "electrode_idx", "phoneme_pair", "word_end", "decoder_target", "behavior_dummy_forced"],
-#                             value_vars=["hga_early_signed_norm", "hga_late_signed_norm"],
-#                             var_name="window", value_name="hga_signed"),
-#             x="window", hue="decoder_target", y="hga_signed",
-#             kind="box")
-
-# sns.catplot(data=reg_df_norm.melt(id_vars=["subject", "electrode_idx", "phoneme_pair", "word_end", "decoder_target", "behavior_dummy_forced"],
-#                             value_vars=["hga_early_signed_norm", "hga_late_signed_norm"],
-#                             var_name="window", value_name="hga_signed"),
-#             x="window", hue="behavior_dummy_forced", y="hga_signed",
-#             kind="box")
 
 # %% [markdown]
 # ### Overall HGA
@@ -2600,7 +1732,7 @@ f = plot_condition_contrasts_single_figure(
     epoch_data_cache=pcc_epoch_data_cache,
     plot_word_ends=["necessary"],
 )
-f.savefig("figures/condition_contrasts-necessary.pdf")
+f.savefig(Path(outdir) / "condition_contrasts-necessary.pdf")
 
 # %%
 plot_condition_contrasts_single_figure(
@@ -2610,7 +1742,7 @@ plot_condition_contrasts_single_figure(
     plot_word_ends=["desolate"],
 )
 plt.gca().set_xlim(0, 0.7)
-plt.gcf().savefig("figures/condition_contrasts-desolate.pdf")
+plt.gcf().savefig(Path(outdir) / "condition_contrasts-desolate.pdf")
 
 
 # %%
@@ -2625,28 +1757,8 @@ plot_condition_contrasts_single_figure(
     ),
     pval_thresholds=(0.00001, 0.0001, 0.001),
 )
-plt.gcf().savefig("figures/condition_contrasts-both.pdf")
+plt.gcf().savefig(Path(outdir) / "condition_contrasts-both.pdf")
 None
-
-# %%
-# f, ax = plt.subplots(figsize=(5, 3))
-# plot_condition_contrast_peak_aligned(
-#     plot_behav_rows,
-#     behav_peaks_df=behav_peaks_df,
-#     data=paper_data,
-#     condition_variable="behavior_dummy_forced",
-#     polarity_correct="late",
-#     epoch_data_cache=pcc_epoch_data_cache,
-#     ax=ax,
-#     label="Behavioral contrast",
-#     window_sec=0.3,
-#     ttest_window_size=4,
-#     ttest_window_stride=4,
-#     ttest_bar_height_ratio=0.04,
-#     ttest_bar_y_ratio=0.87,
-# )
-# ax.set_xlim(-0.3, 0.3)
-
 
 # %% [markdown]
 # ## Behav stackplot
@@ -2662,7 +1774,7 @@ plot_behav_barplot(
     legend=False,
     resampled_palette=resampled_palette_simplified,
 )
-plt.gcf().savefig("figures/behav_barplot_EC250_dn_desolate.pdf")
+plt.gcf().savefig(Path(outdir) / "behav_barplot_EC250_dn_desolate.pdf")
 
 # %%
 plot_behav_barplot(
@@ -2674,7 +1786,7 @@ plot_behav_barplot(
     legend=False,
     resampled_palette=resampled_palette_simplified,
 )
-plt.gcf().savefig("figures/behav_barplot_EC278_dn_necessary.pdf")
+plt.gcf().savefig(Path(outdir) / "behav_barplot_EC278_dn_necessary.pdf")
 
 # %% [markdown]
 # ## Exploratory: polarity relationships
@@ -2760,15 +1872,15 @@ def plot_summary_acoustic_vs_presence_of_response(phoneme_pair: str):
 
 # %%
 f = plot_summary_acoustic_vs_presence_of_response("dn")
-f.savefig("figures/early_polarity-late_response.pdf")
+f.savefig(Path(outdir) / "early_polarity-late_response.pdf")
 
 # %%
 f = plot_summary_acoustic_vs_presence_of_response("bm")
-f.savefig("figures/early_polarity-late_response-bm.pdf")
+f.savefig(Path(outdir) / "early_polarity-late_response-bm.pdf")
 
 # %%
 f = plot_summary_acoustic_vs_presence_of_response("pb")
-f.savefig("figures/early_polarity-late_response-pb.pdf")
+f.savefig(Path(outdir) / "early_polarity-late_response-pb.pdf")
 
 
 # %%
@@ -2884,113 +1996,11 @@ def plot_summary_acoustic_vs_presence_of_response_stackplot(
 
 # %%
 f = plot_summary_acoustic_vs_presence_of_response_stackplot()
-f.savefig("figures/early_polarity-late_response_stackplot.pdf")
+f.savefig(Path(outdir) / "early_polarity-late_response_stackplot.pdf")
 
 # %%
 plot_summary_acoustic_vs_presence_of_response_stackplot("dn")
 None
-
-# %%
-# Matches in late polarity for electrodes showing responses at both completion
-late_polarity_strict.set_index(
-    ["subject", "electrode_idx", "phoneme_pair", "lexical_evidence"]
-).late_polarity.unstack().dropna().groupby("phoneme_pair").value_counts()
-
-# %%
-
-# %%
-# Next: summarize relationship between early polarity and late polarity
-# NB in this setup, we are separately counting responses to -ecessary and -esolate
-# at each electrode, since the polarities of either the early or late response
-# might differ
-
-f, ax = plt.subplots(figsize=(1, 1))
-sns.heatmap(
-    (
-        late_polarity_strict.drop_duplicates(
-            ["subject", "electrode_idx", "phoneme_pair", "word_end"]
-        )
-        .drop(columns=["lexical_evidence"])
-        .merge(
-            early_polarity_strict.drop_duplicates(),
-            on=["subject", "electrode_idx", "phoneme_pair", "word_end"],
-        )[["early_polarity", "late_polarity"]]
-        .value_counts(sort=False)
-        .reset_index()
-        .pipe(
-            lambda df: df.assign(
-                early_selectivity=df.early_polarity.map({-1: "d", 1: "n"}),
-                late_selectivity=df.late_polarity.map({-1: "d", 1: "n"}),
-            )
-        )
-        .set_index(["early_selectivity", "late_selectivity"])["count"]
-        .unstack()
-    ),
-    annot=True,
-    vmin=0,
-    cbar=False,
-)
-
-ax.set_yticklabels(ax.get_yticklabels(), rotation=0)
-ax.set_ylabel("Acoustic\npreference", rotation=0, va="center", labelpad=34)
-ax.set_xlabel("Perceptual\npreference")
-
-f.savefig("figures/early_polarity-late_polarity.pdf")
-
-# %%
-hga_df_ambig = hga_df[
-    hga_df.apply(
-        lambda xs: (
-            xs.behav_steps_chosen != "None"
-            and str(int(xs.resampled)) in xs.behav_steps_chosen
-        ),
-        axis=1,
-    )
-]
-late_polarity = (
-    hga_df_ambig.groupby(
-        [
-            "subject",
-            "electrode_idx",
-            "phoneme_pair",
-            "word_end",
-            "behavior_dummy_forced",
-        ]
-    )
-    .hga_late.mean()
-    .reset_index()
-    .set_index("behavior_dummy_forced")
-    .groupby(["subject", "electrode_idx", "phoneme_pair", "word_end"])
-    .apply(lambda xs: np.sign(xs.loc[1] - xs.loc[0]))  # type: ignore[union-attr]
-    .rename(columns={"hga_late": "late_polarity"})
-)
-late_polarity.query(
-    "subject == 'EC278' and electrode_idx == 38 and phoneme_pair == 'dn' and word_end == 'necessary'"
-)
-
-# %%
-(
-    hga_df_ambig.query(
-        "subject == 'EC278' and electrode_idx == 38 and phoneme_pair == 'dn' and word_end == 'necessary'"
-    )
-    # .groupby("resampled").behavior_dummy_forced.value_counts()
-    # .groupby("behavior_dummy_forced")
-    # .hga_late.mean()
-)
-
-# %%
-(
-    late_polarity_strict.drop_duplicates(
-        ["subject", "electrode_idx", "phoneme_pair", "word_end"]
-    )
-    .drop(columns=["lexical_evidence"])
-    .merge(
-        early_polarity_strict.drop_duplicates(),
-        on=["subject", "electrode_idx", "phoneme_pair", "word_end"],
-        # ).query("subject == 'EC250' and electrode_idx == 185 and phoneme_pair == 'dn'"))
-    )
-    .query("subject == 'EC278' and electrode_idx == 38 and phoneme_pair == 'dn'")
-)
 
 # %%
 preference_relationship_df = (
@@ -3015,6 +2025,26 @@ preference_relationship_df = (
 )
 preference_relationship_df
 
+# %%
+# Next: summarize relationship between early polarity and late polarity
+# NB in this setup, we are separately counting responses to -ecessary and -esolate
+# at each electrode, since the polarities of either the early or late response
+# might differ
+
+f, ax = plt.subplots(figsize=(1, 1))
+sns.heatmap(
+    preference_relationship_df,
+    annot=True,
+    vmin=0,
+    cbar=False,
+)
+
+ax.set_yticklabels(ax.get_yticklabels(), rotation=0)
+ax.set_ylabel("Acoustic\npreference", rotation=0, va="center", labelpad=34)
+ax.set_xlabel("Perceptual\npreference")
+
+f.savefig(Path(outdir) / "early_polarity-late_polarity.pdf")
+
 # %% [markdown]
 # #### Congruency analysis
 
@@ -3024,14 +2054,22 @@ congruent_responses = np.diag(preference_relationship_df).sum()
 incongruent_responses = (
     preference_relationship_df.values.sum() - np.diag(preference_relationship_df).sum()
 )
-from scipy.stats import binomtest
 
-binomtest(
+test = stats.binomtest(
     congruent_responses,
     congruent_responses + incongruent_responses,
     p=0.5,
     alternative="greater",
 )
+
+# write this result to a file that can be human readable but also aggregated into a meta-analysis later
+with open(Path(outdir) / "early_late_preference_relationship.txt", "w") as f:
+    f.write(
+        f"Congruent responses: {congruent_responses}\n"
+        f"Incongruent responses: {incongruent_responses}\n"
+        f"Binomial test p-value: {test.pvalue:.4e}\n"
+        f"Significant at alpha=0.05: {'Yes' if test.pvalue < 0.05 else 'No'}\n"
+    )
 
 # %% [markdown]
 # #### More in-depth selectivity relationship
@@ -3078,150 +2116,7 @@ ax.yaxis.set_major_formatter(mtick.PercentFormatter())
 ax.legend(title="Perceptual\npreference", loc="upper right", bbox_to_anchor=(1.6, 1))
 sns.despine(ax=ax)
 
-f.savefig("figures/early_polarity-late_polarity_stackbar.pdf")
-
-# %%
-# Cross-electrode correlation of effect sizes.
-# early_effect: mean(hga_early | decoder_target=1) - mean(hga_early | decoder_target=0)
-#   evaluated on UNAMBIGUOUS trials (resampled 1 or 6), where the acoustic signal is strong.
-# late_effect:  mean(hga_late  | behavior=1)        - mean(hga_late  | behavior=0)
-#   evaluated on AMBIGUOUS trials (is_ambiguous), where behavior varies independently.
-# These are exactly what early_polarity / late_polarity are signs of, but kept continuous.
-_site_cols = ["subject", "electrode_idx", "phoneme_pair", "word_end"]
-
-_early_effect = (
-    reg_df[reg_df.resampled.isin([1.0, 6.0])]
-    .dropna(subset=["hga_early"])
-    .groupby(_site_cols + ["decoder_target"])["hga_early"]
-    .mean()
-    .unstack("decoder_target")
-    .pipe(lambda df: df[1] - df[0])
-    .rename("early_effect")
-    .reset_index()
-)
-
-_late_effect = (
-    reg_df[reg_df.is_ambiguous]
-    .dropna(subset=["hga_late"])
-    .groupby(_site_cols + ["behavior_dummy_forced"])["hga_late"]
-    .mean()
-    .unstack("behavior_dummy_forced")
-    .pipe(lambda df: df[1] - df[0])
-    .rename("late_effect")
-    .reset_index()
-)
-
-effect_df = _early_effect.merge(_late_effect, on=_site_cols)
-effect_df
-
-# %%
-# A. Violin split by sign(early_effect)
-from scipy.stats import ttest_ind as _ttest_ind
-
-_plot_df = effect_df.assign(
-    acoustic_pref=effect_df["early_effect"].apply(
-        lambda x: "prefers 1" if x > 0 else "prefers 0"
-    )
-)
-
-f, ax = plt.subplots(figsize=(2.2, 2.5))
-sns.violinplot(
-    data=_plot_df,
-    x="acoustic_pref",
-    y="late_effect",
-    order=["prefers 0", "prefers 1"],
-    inner="quart",
-    cut=0,
-    linewidth=1,
-    palette="Set2",
-    ax=ax,
-)
-sns.stripplot(
-    data=_plot_df,
-    x="acoustic_pref",
-    y="late_effect",
-    order=["prefers 0", "prefers 1"],
-    size=3,
-    alpha=0.5,
-    color="black",
-    jitter=True,
-    ax=ax,
-)
-ax.axhline(0, color="black", linestyle="--", linewidth=1, alpha=0.5)
-_grp0 = _plot_df.loc[_plot_df.acoustic_pref == "prefers 0", "late_effect"]
-_grp1 = _plot_df.loc[_plot_df.acoustic_pref == "prefers 1", "late_effect"]
-_, _p_t = _ttest_ind(_grp0, _grp1)
-ax.set_title(f"t-test p={_p_t:.3g}", fontsize=9)
-ax.set_xlabel("Acoustic preference")
-ax.set_ylabel("Perceptual selectivity\n(hga_late effect size)")
-sns.despine(ax=ax)
-
-f.savefig("figures/hga_early_late_effect_violin.pdf")
-
-# %%
-# C. Sorted-sites trend: bin by early_effect quantile, plot mean ± SEM of late_effect
-_n_bins = 5
-_plot_df2 = effect_df.assign(
-    early_bin=pd.qcut(effect_df["early_effect"], _n_bins, labels=False)
-)
-_binned = (
-    _plot_df2.groupby("early_bin")["late_effect"]
-    .agg(mean="mean", sem=lambda x: x.sem(), n="count")
-    .reset_index()
-)
-_bin_centers = _plot_df2.groupby("early_bin")["early_effect"].mean().values
-
-f, ax = plt.subplots(figsize=(2.5, 2.2))
-ax.errorbar(
-    _bin_centers,
-    _binned["mean"],
-    yerr=_binned["sem"],
-    fmt="o-",
-    color="steelblue",
-    capsize=3,
-    linewidth=1.5,
-    markersize=5,
-)
-ax.axhline(0, color="black", linestyle="--", linewidth=1, alpha=0.5)
-ax.set_xlabel("Acoustic selectivity\n(early_effect, binned by quintile)", fontsize=9)
-ax.set_ylabel("Mean perceptual selectivity\n(late_effect ± SEM)", fontsize=9)
-sns.despine(ax=ax)
-
-f.savefig("figures/hga_early_late_effect_trend.pdf")
-
-# %%
-# Relationship between polarity of -ecessary and -esolate responses at the same electrode
-f, ax = plt.subplots(figsize=(2.5, 1.5))
-sns.heatmap(
-    (
-        late_polarity_strict.set_index(
-            ["subject", "electrode_idx", "phoneme_pair", "lexical_evidence"]
-        )
-        .late_polarity.unstack("lexical_evidence")
-        .fillna(0)
-        .astype(int)
-        .value_counts(sort=False)
-        .unstack(1)
-        # update labels
-        .rename(
-            index={-1: "/d/-selective\nin -esolate", 1: "/n/-selective\nin -esolate"}
-        )
-        .rename(
-            columns={
-                -1: "/d/-selective\nin -ecessary",
-                1: "/n/-selective\nin -ecessary",
-            }
-        )
-    ),
-    annot=True,
-    cbar=False,
-)
-
-ax.set_xlabel(None)
-ax.set_xticklabels(ax.get_xticklabels(), rotation=0)
-ax.set_ylabel(None)
-
-f.savefig("figures/late_polarity_relationship.pdf")
+f.savefig(Path(outdir) / "early_polarity-late_polarity_stackbar.pdf")
 
 # %% [markdown]
 # ## Late response on unambiguous vs. ambiguous trials
@@ -3272,10 +2167,26 @@ for site_key, site_data in reg_df_valid.groupby(site_cols):
 
 unambig_late_df = pd.DataFrame(unambig_late_results)
 
+# Only look at behav peaks
+unambig_late_df = unambig_late_df.merge(
+    behav_peaks_df.to_pandas()[
+        ["subject", "electrode_idx", "phoneme_pair", "word_end"]
+    ],
+    on=["subject", "electrode_idx", "phoneme_pair", "word_end"],
+    how="inner",
+)
+
 n_total = len(unambig_late_df)
 n_both = unambig_late_df["late_on_unambig"].sum()
 n_ambig_only = n_total - n_both
 
+# write this result to a file that can be human readable but also aggregated into a meta-analysis later
+with open(Path(outdir) / "late_response_summary.txt", "w") as f:
+    f.write(
+        f"Sites with valid late window: {n_total}\n"
+        f"  Late response on BOTH unambiguous and ambiguous trials: {n_both} ({100 * n_both / n_total:.0f}%)\n"
+        f"  Late response on ambiguous trials ONLY: {n_ambig_only} ({100 * n_ambig_only / n_total:.0f}%)\n"
+    )
 print(
     f"Sites with valid late window: {n_total}\n"
     f"  Late response on BOTH unambiguous and ambiguous trials: {n_both} "
@@ -3285,30 +2196,6 @@ print(
 )
 unambig_late_df.to_csv(Path(outdir) / "unambig_late_df.csv", index=False)
 unambig_late_df
-
-# %%
-(
-    behav_peaks_df[["subject", "electrode_idx", "phoneme_pair", "word_end"]]
-    .to_pandas()
-    .merge(
-        unambig_late_df,
-        on=["subject", "electrode_idx", "phoneme_pair", "word_end"],
-        how="left",
-    )
-    .late_on_unambig.value_counts()
-)
-
-# %%
-(
-    behav_peaks_df[["subject", "electrode_idx", "phoneme_pair", "word_end"]]
-    .to_pandas()
-    .merge(
-        unambig_late_df,
-        on=["subject", "electrode_idx", "phoneme_pair", "word_end"],
-        how="left",
-    )
-    .late_on_unambig.value_counts(normalize=True)
-)
 
 # %% [markdown]
 # ## Perceptual contrast on unambiguous trials, split by late-response generalization
@@ -3320,10 +2207,6 @@ unambig_late_df
 # sign correction — i.e. the same signed HGA contrast used to classify sites.
 
 # %%
-from matplotlib.patches import Rectangle
-
-from src.viz_paper import HandlerRectangle, plot_condition_contrast
-
 unambig_late_pl = (
     pl.from_pandas(unambig_late_df[site_cols + ["late_on_unambig"]])
     .with_columns(
@@ -3421,8 +2304,10 @@ for plot_word_end, plot_xlim in zip(["necessary", "desolate"], [(0, 1.2), (0, 0.
             loc="best",
         )
 
-    f.savefig(f"figures/perceptual_contrast_unambig_split-{plot_word_end}.pdf")
-    plt.show()
+    f.savefig(fPath(outdir) / "perceptual_contrast_unambig_split-{plot_word_end}.pdf")
+    plt.close()
+
+None
 
 # %%
 # Behavioral contrast on electrodes with vs without late unambiguous response,
@@ -3495,8 +2380,7 @@ if p_handles is not None:
         loc="best",
     )
 
-f.savefig("figures/perceptual_contrast_unambig_split-both.pdf")
-plt.show()
+f.savefig(Path(outdir) / "perceptual_contrast_unambig_split-both.pdf")
 
 # %%
 # Behavioral contrast on electrodes with vs without late unambiguous response,
@@ -3568,7 +2452,6 @@ if p_handles is not None:
         loc="best",
     )
 
-# f.savefig(f"figures/perceptual_contrast_unambig_split-both.pdf")
-plt.show()
+f.savefig(Path(outdir) / "perceptual_contrast_ambig_split-both.pdf")
 
 # %%

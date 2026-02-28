@@ -2251,7 +2251,7 @@ def evaluate_phonetic_transfer(
     t_num_folds=5,
     t_measure="categorical_acoustic_cue",
     t_restrict_to_word_end=True,
-):
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     t_early_key = (
         t_subject,
         t_electrode_idx,
