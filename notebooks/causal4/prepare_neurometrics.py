@@ -76,6 +76,8 @@ phon_response_peak_threshold = 0.6
 behav_response_peak_threshold = 0.01
 ambiguous_response_threshold = 2
 
+hga_window_source = "decoder"
+
 outdir = "outputs/causal4/prepare_neurometrics"
 
 # %%
@@ -387,6 +389,7 @@ hga_df = extract_hga_windows_df(
     _bootstrap,
     zoomin_keys=zoomin_keys,
     ambiguous_response_threshold=ambiguous_response_threshold,
+    window_source=hga_window_source,
 )
 
 # %% [markdown]

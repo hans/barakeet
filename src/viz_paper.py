@@ -1239,6 +1239,7 @@ def extract_hga_windows_df(
     window_size: int = 15,
     window_stride: int = 15,
     ambiguous_response_threshold: int = 2,
+    window_source: Literal["ttest_searchlight", "decoder"] = "ttest_searchlight",
 ) -> pd.DataFrame:
     """
     For each site in zoomin_keys, find optimal early (phoneme) and late (behavior)
@@ -1258,13 +1259,22 @@ def extract_hga_windows_df(
 
       HGA outcomes:
         hga_early               – mean HGA in phoneme-separability window
-        hga_late                – mean HGA in behavior window (best variant by |t-stat|)
+        hga_late                – mean HGA in behavior window
 
       Window choice metadata (per site):
-        behav_steps_chosen      – which resampled steps were used to find the late window,
-                                  e.g. '(3, 4)'
+        behav_steps_chosen      – ambiguous resampled steps for this site, e.g. '(3, 4)'
         phon_tmin, phon_tmax, phon_smin, phon_smax
         behav_tmin, behav_tmax, behav_smin, behav_smax
+
+    Parameters
+    ----------
+    window_source : {"ttest_searchlight", "decoder"}
+        How windows are selected per site:
+        - "ttest_searchlight" (default): run find_site_windows() — a sliding Welch's
+          t-test searchlight — independently for each site. This is the original behaviour.
+        - "decoder": look up windows from data.phon_peaks_df (acoustic window) and
+          data.behav_peaks_df (behavioral window), aligning selectivity/congruency
+          with the decoder-located peaks used by the transfer analysis.
 
     To feed into lmer, pivot to long format:
         df_long = df.melt(
@@ -1274,15 +1284,14 @@ def extract_hga_windows_df(
         )
     Then: HGA ~ window * decoder_target + window * behavior_dummy_forced + (1 | subject)
     """
-    # Cache baseline-corrected epoch data per (subject, electrode_idx) across sites
+    # Cache baseline-corrected epoch data per subject across sites
     epoch_cache: dict[tuple, np.ndarray] = {}
 
     sites = zoomin_keys.unique(["subject", "electrode_idx", "phoneme_pair", "word_end"])
     rows = []
 
-    # For each subject / phoneme pair / word end, compute which `resampled` steps
-    # elicit ambiguous behavior across trials
-    # don't let in step 1 or 6
+    # Ambiguous resampled steps (steps where behavior varies) — used for behav_steps_chosen
+    # and, in ttest_searchlight mode, to drive the behavioral window search.
     ambiguous_resampled_steps = data.get_ambiguous_resampled_steps(
         ambiguous_response_threshold=ambiguous_response_threshold
     )
@@ -1302,43 +1311,65 @@ def extract_hga_windows_df(
             )
         epoch_data = epoch_cache[cache_key][:, electrode_idx, :]
 
-        # just use the resampled steps that have ambiguity for this subject / phoneme pair / word end
-        behavior_resampled_steps_i = [
-            ambiguous_resampled_steps.get((subject, phoneme_pair, word_end), ())
-        ]
+        ambig_steps = ambiguous_resampled_steps.get((subject, phoneme_pair, word_end), None)
 
-        windows = find_site_windows(
-            data,
-            subject,
-            electrode_idx,
-            phoneme_pair,
-            word_end,
-            window_size=window_size,
-            window_stride=window_stride,
-            behavior_resampled_steps=behavior_resampled_steps_i,
-        )
-        phon_win = windows["phon"]
-        behav_wins = windows["behav"]  # dict: tuple(steps) → WindowSearchResult | None
+        if window_source == "ttest_searchlight":
+            # Original behaviour: run a sliding Welch's t-test searchlight per site.
+            behavior_resampled_steps_i = [ambig_steps if ambig_steps else ()]
+            windows = find_site_windows(
+                data,
+                subject,
+                electrode_idx,
+                phoneme_pair,
+                word_end,
+                window_size=window_size,
+                window_stride=window_stride,
+                behavior_resampled_steps=behavior_resampled_steps_i,
+            )
+            phon_win = windows["phon"]
+            valid_behav = {k: v for k, v in windows["behav"].items() if v is not None}
+            if valid_behav:
+                best_steps = max(valid_behav, key=lambda k: abs(valid_behav[k].t_stat))
+                best_bwin = valid_behav[best_steps]
+            else:
+                best_steps, best_bwin = None, None
 
-        # Pick the behavior window variant with the largest |t_stat|
-        valid_behav = {k: v for k, v in behav_wins.items() if v is not None}
-        if valid_behav:
-            best_steps = max(valid_behav, key=lambda k: abs(valid_behav[k].t_stat))
-            best_bwin = valid_behav[best_steps]
-        else:
-            best_steps, best_bwin = None, None
+            phon_smin_i = phon_win.smin
+            phon_smax_i = phon_win.smax
+            behav_smin_i = best_bwin.smin if best_bwin else None
+            behav_smax_i = best_bwin.smax if best_bwin else None
 
-        # Window timing is per-site metadata (same for every trial)
+        else:  # "decoder"
+            # Use decoder-located windows from PaperData, matching the transfer analysis.
+            phon_row = data.phon_peaks_df.filter(
+                (pl.col("subject") == subject)
+                & (pl.col("electrode_idx") == electrode_idx)
+                & (pl.col("phoneme_pair") == phoneme_pair)
+            )
+            behav_row = data.behav_peaks_df.filter(
+                (pl.col("subject") == subject)
+                & (pl.col("electrode_idx") == electrode_idx)
+                & (pl.col("phoneme_pair") == phoneme_pair)
+                & (pl.col("word_end") == word_end)
+            )
+            phon_smin_i = int(phon_row["smin"][0])
+            phon_smax_i = int(phon_row["smax"][0])
+            behav_smin_i = int(behav_row["smin"][0]) if not behav_row.is_empty() else None
+            behav_smax_i = int(behav_row["smax"][0]) if not behav_row.is_empty() else None
+
+        # Window timing metadata (same for every trial at this site)
+        ep = data.epochs[subject]
+        _t0, _sf = ep.tmin, ep.info["sfreq"]
         timing = {
-            "phon_tmin": phon_win.tmin,
-            "phon_tmax": phon_win.tmax,
-            "phon_smin": phon_win.smin,
-            "phon_smax": phon_win.smax,
-            "behav_tmin": best_bwin.tmin if best_bwin else np.nan,
-            "behav_tmax": best_bwin.tmax if best_bwin else np.nan,
-            "behav_smin": best_bwin.smin if best_bwin else np.nan,
-            "behav_smax": best_bwin.smax if best_bwin else np.nan,
-            "behav_steps_chosen": str(best_steps),
+            "phon_tmin":  _t0 + phon_smin_i / _sf,
+            "phon_tmax":  _t0 + phon_smax_i / _sf,
+            "phon_smin":  phon_smin_i,
+            "phon_smax":  phon_smax_i,
+            "behav_tmin": _t0 + behav_smin_i / _sf if behav_smin_i is not None else np.nan,
+            "behav_tmax": _t0 + behav_smax_i / _sf if behav_smin_i is not None else np.nan,
+            "behav_smin": behav_smin_i if behav_smin_i is not None else np.nan,
+            "behav_smax": behav_smax_i if behav_smin_i is not None else np.nan,
+            "behav_steps_chosen": str(ambig_steps),
         }
 
         # One row per trial (deduplicated across CV folds)
@@ -1369,10 +1400,10 @@ def extract_hga_windows_df(
                     "behavior_dummy_forced": trial.behavior_dummy_forced,
                     "follows_acoustics": trial.follows_acoustics,
                     "mismatch": trial.mismatch,
-                    "hga_early": trace[phon_win.smin : phon_win.smax].mean(),
+                    "hga_early": trace[phon_smin_i : phon_smax_i].mean(),
                     "hga_late": (
-                        trace[best_bwin.smin : best_bwin.smax].mean()
-                        if best_bwin
+                        trace[behav_smin_i : behav_smax_i].mean()
+                        if behav_smin_i is not None
                         else np.nan
                     ),
                     **timing,
