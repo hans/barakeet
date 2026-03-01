@@ -94,6 +94,78 @@ Quick-access recipe:
     estimators = models[key]   # list of fitted models, one per repeat
     proba = estimators[0].predict_proba(X)[:, 1]
 ===========================================================================
+
+===========================================================================
+SKLEARN PIPELINE STRUCTURES
+===========================================================================
+
+------------------------------------------------------------------------
+Behavioral decoder pipeline  (behavior_decoding_single_electrode)
+Producer: fit_train_test (this module)
+------------------------------------------------------------------------
+
+The value stored at data["A_decoders"][outer_key][inner_key]["estimator"]
+is a fitted sklearn GridSearchCV whose best_estimator_ is:
+
+    Pipeline([
+        ("prep", ColumnTransformer([
+            ("baseline", StandardScaler(),  [0]),        # col 0: resampled (continuous morph step)
+            ("pca",      Pipeline([                      # cols 1+: neural window (15 samples)
+                ("standardscaler", StandardScaler()),
+                ("pca",            PCA(n_components=k)),
+            ]),                             [1:]),
+        ])),
+        ("clf", LogisticRegression(...)),
+    ])
+
+Input to the pipeline:  X of shape (n_epochs, 1 + n_neural_features)
+    col 0   – resampled (the continuous acoustic morph step, 1–6)
+    cols 1+ – HGA amplitude at each sample in the time window
+
+Accessor shortcuts (given est = checkpoint["estimator"].best_estimator_):
+    neural StandardScaler : est.named_steps["prep"]
+                               .named_transformers_["pca"]
+                               .named_steps["standardscaler"]
+    PCA                   : est.named_steps["prep"]
+                               .named_transformers_["pca"]
+                               .named_steps["pca"]
+    LogisticRegression    : est.named_steps["clf"]
+
+Cross-window transfer note:
+    When applying this decoder to a *different* time window, bypass the
+    ColumnTransformer entirely to avoid cross-scaler contamination:
+      1. Normalise new-window neural data with that window's own scaler.
+      2. Project through est's PCA.
+      3. Prepend a zeros column (null resampled feature).
+      4. Apply est's LogisticRegression directly.
+
+------------------------------------------------------------------------
+Acoustic decoder pipeline  (behavior_decoding_single_electrode_acoustic)
+Producer: fit_train_test_old / run_decoding_searchlight_single_electrode
+------------------------------------------------------------------------
+
+Each entry in models[DecoderFitKey] (one per repeat/fold) is a plain
+sklearn Pipeline built with make_pipeline:
+
+    Pipeline([
+        ("standardscaler",    StandardScaler()),
+        ("logisticregression", LogisticRegression(...)),
+    ])
+
+Input to the pipeline:  X of shape (n_epochs, n_neural_features)
+    n_neural_features = smax - smin  (always 15 samples for causal4 runs)
+    There is no resampled feature column; neural data only.
+
+Accessor shortcuts (given model = models[key][fold]):
+    StandardScaler        : model.named_steps["standardscaler"]
+    LogisticRegression    : model.named_steps["logisticregression"]
+
+Cross-window transfer note:
+    When applying this decoder to a *different* time window, bypass the
+    pipeline's own scaler to avoid cross-scaler contamination:
+      1. Normalise new-window data with that window's own scaler.
+      2. Apply model's LogisticRegression directly (predict_proba on scaled X).
+===========================================================================
 """
 import itertools
 from typing import Literal, Optional, Protocol, TypeAlias, cast

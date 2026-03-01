@@ -2431,6 +2431,7 @@ def evaluate_phonetic_transfer(
 def evaluate_behav_decoder_on_phon_window(
     data: PaperData,
     behavioral_decoder_checkpoints: dict,
+    phonetic_decoder_checkpoints: dict,
     t_subject,
     t_electrode_idx,
     t_phoneme_pair,
@@ -2447,14 +2448,21 @@ def evaluate_behav_decoder_on_phon_window(
     This asks: does the representation learned for behavioral prediction in the late
     window also encode acoustic content in the early window?
 
-    Checkpoints come from behavior_decoding_single_electrode/{subject}/results.pt.
-    The estimator takes X_full = [resampled_feature, neural_window_data].
-    Returns a DataFrame with columns:
-        epoch_idx, fold, decoder_target (acoustic, dummy coded 0/1), decoder_proba,
-        subject, electrode_idx, phoneme_pair, word_end, smin_phon, smax_phon, smin_behav, smax_behav
+    Cross-scaler normalization (mirroring evaluate_phonetic_transfer):
+      - Acoustic window data is normalized with the acoustic decoder's own StandardScaler
+        (fit on acoustic-window training data), not the behavioral decoder's scaler.
+      - After normalization, the behavioral decoder's PCA projects into its learned space.
+      - The resampled baseline feature is zeroed out (contributes nothing to the LR).
+      - Only the behavioral decoder's LogisticRegression is applied to the result.
+
+    Checkpoints:
+      behavioral_decoder_checkpoints: from behavior_decoding_single_electrode/{subject}/results.pt
+      phonetic_decoder_checkpoints:   from behavior_decoding_single_electrode_acoustic/{subject}/
     """
     outer_key = (t_subject, t_electrode_idx, t_phoneme_pair)
     inner_dict = behavioral_decoder_checkpoints[t_subject]["A_decoders"][outer_key]
+    phon_key = (t_subject, t_electrode_idx, t_phoneme_pair, t_smin_phon, t_smax_phon)
+    phon_models = phonetic_decoder_checkpoints[t_subject]["models"][phon_key]
 
     t_epochs = data.epochs[t_subject]
     md = t_epochs.metadata
@@ -2479,19 +2487,21 @@ def evaluate_behav_decoder_on_phon_window(
         test_preds = cp["test_predictions"]
         epoch_idxs = test_preds["epoch_idx"].values
 
-        # Apply behavioral decoder to acoustic-window neural data.
-        # Null out the resampled feature by setting it to the scaler's training mean,
-        # so after StandardScaler it becomes 0 and contributes nothing differential to
-        # the logistic regression. Predictions then depend solely on the neural features.
-        scaler_mean_resampled = (
-            estimator.best_estimator_.named_steps["prep"]
-            .named_transformers_["baseline"]
-            .mean_[0]
-        )
-        X_baseline = np.full((len(epoch_idxs), 1), scaler_mean_resampled)
+        # Decompose behavioral decoder pipeline components
+        behav_est = estimator.best_estimator_
+        behav_pca = behav_est.named_steps["prep"].named_transformers_["pca"].named_steps["pca"]
+        behav_lr  = behav_est.named_steps["clf"]
+
+        # Cross-scaler: normalize acoustic window data with the acoustic decoder's own scaler
+        # (fit on acoustic-window training data), so features are on the right scale.
+        phon_scaler = phon_models[fold].named_steps["standardscaler"]
         X_phon_neural = t_epoch_data[epoch_idxs][:, t_smin_phon:t_smax_phon]
-        X_full = np.concatenate([X_baseline, X_phon_neural], axis=1)
-        proba = estimator.predict_proba(X_full)[:, 1]
+        X_phon_scaled = phon_scaler.transform(X_phon_neural)
+
+        # Project through behavioral PCA, null the resampled column, apply behavioral LR
+        X_phon_pca = behav_pca.transform(X_phon_scaled)
+        X_for_lr   = np.concatenate([np.zeros((len(epoch_idxs), 1)), X_phon_pca], axis=1)
+        proba = behav_lr.predict_proba(X_for_lr)[:, 1]
 
         # Evaluate against acoustic target (not behavioral)
         acoustic_target = md.loc[epoch_idxs]["categorical_acoustic_cue"].values
@@ -2522,6 +2532,7 @@ def evaluate_behav_decoder_on_phon_window(
 def evaluate_phon_decoder_on_behav_window(
     data: PaperData,
     phonetic_decoder_checkpoints: dict,
+    behavioral_decoder_checkpoints: dict,
     t_subject,
     t_electrode_idx,
     t_phoneme_pair,
@@ -2537,15 +2548,22 @@ def evaluate_phon_decoder_on_behav_window(
     This asks: does the representation learned for acoustic decoding in the early
     window also predict behavioral choices at the late window?
 
-    Checkpoints come from behavior_decoding_single_electrode_acoustic/{subject}/.
-    The estimator takes X = neural_window_data only (no baseline features).
-    Returns a DataFrame with columns:
-        epoch_idx, fold, decoder_target (behavioral, dummy coded 0/1), decoder_proba,
-        subject, electrode_idx, phoneme_pair, word_end, smin, smax
+    Cross-scaler normalization (mirroring evaluate_phonetic_transfer):
+      - Behavioral window data is normalized with the behavioral decoder's own neural
+        StandardScaler (the one inside the pca branch of its ColumnTransformer, fit on
+        behavioral-window training data), not the acoustic decoder's scaler.
+      - Only the acoustic decoder's LogisticRegression is then applied to the result.
+
+    Checkpoints:
+      phonetic_decoder_checkpoints:   from behavior_decoding_single_electrode_acoustic/{subject}/
+      behavioral_decoder_checkpoints: from behavior_decoding_single_electrode/{subject}/results.pt
     """
     phon_key = (t_subject, t_electrode_idx, t_phoneme_pair, t_smin_phon, t_smax_phon)
     acoustic_models = phonetic_decoder_checkpoints[t_subject]["models"][phon_key]
     acoustic_outcomes = phonetic_decoder_checkpoints[t_subject]["outcomes"][phon_key]
+
+    behav_outer_key = (t_subject, t_electrode_idx, t_phoneme_pair)
+    behav_inner_dict = behavioral_decoder_checkpoints[t_subject]["A_decoders"][behav_outer_key]
 
     t_epochs = data.epochs[t_subject]
     md = t_epochs.metadata
@@ -2560,11 +2578,26 @@ def evaluate_phon_decoder_on_behav_window(
         if len(epoch_idxs) == 0:
             continue
 
-        model = acoustic_models[fold]
+        phon_clf = acoustic_models[fold].named_steps["logisticregression"]
 
-        # Apply acoustic decoder to behavioral-window neural data
-        X = t_epoch_data[epoch_idxs][:, t_smin_behav:t_smax_behav]
-        proba = model.predict_proba(X)[:, 1]
+        # Cross-scaler: normalize behavioral window data with the behavioral decoder's own
+        # neural StandardScaler (fit on behavioral-window training data).
+        behav_inner_key = (
+            t_subject, str(t_electrode_idx), t_phoneme_pair,
+            (t_word_end,), t_smin_behav, t_smax_behav, fold,
+        )
+        behav_cp = behav_inner_dict.get(behav_inner_key)
+        if behav_cp is None:
+            continue
+        behav_neural_scaler = (
+            behav_cp["estimator"].best_estimator_
+            .named_steps["prep"].named_transformers_["pca"]
+            .named_steps["standardscaler"]
+        )
+
+        X_behav_neural = t_epoch_data[epoch_idxs][:, t_smin_behav:t_smax_behav]
+        X_behav_scaled = behav_neural_scaler.transform(X_behav_neural)
+        proba = phon_clf.predict_proba(X_behav_scaled)[:, 1]
 
         # Evaluate against behavioral target (not acoustic)
         behav_target = md.loc[epoch_idxs]["behavior_dummy_forced"].values
