@@ -1389,6 +1389,10 @@ def pl_roc_auc(
     group_cols: list[str],
     roc_auc_name="roc_auc",
 ) -> pl.DataFrame:
+    assert set(df.select(pl.col(target_col).unique()).to_series()) <= {0, 1}, (
+        "Target column must be binary (0/1) for ROC AUC calculation."
+    )
+
     return (
         df.with_columns(
             pl.col(proba_col).rank(method="average").over(group_cols).alias("rank")
@@ -2422,3 +2426,166 @@ def evaluate_phonetic_transfer(
         pd.concat(late_late_outcomes),
         pd.concat(late_early_outcomes),
     )
+
+
+def evaluate_behav_decoder_on_phon_window(
+    data: PaperData,
+    behavioral_decoder_checkpoints: dict,
+    t_subject,
+    t_electrode_idx,
+    t_phoneme_pair,
+    t_word_end,
+    t_smin_phon,
+    t_smax_phon,
+    t_smin_behav,
+    t_smax_behav,
+    t_num_folds=5,
+) -> pd.DataFrame:
+    """Apply a behavioral decoder (trained at the behavioral/perceptual window) to
+    acoustic-window neural data, evaluated against the ACOUSTIC target.
+
+    This asks: does the representation learned for behavioral prediction in the late
+    window also encode acoustic content in the early window?
+
+    Checkpoints come from behavior_decoding_single_electrode/{subject}/results.pt.
+    The estimator takes X_full = [resampled_feature, neural_window_data].
+    Returns a DataFrame with columns:
+        epoch_idx, fold, decoder_target (acoustic, dummy coded 0/1), decoder_proba,
+        subject, electrode_idx, phoneme_pair, word_end, smin_phon, smax_phon, smin_behav, smax_behav
+    """
+    outer_key = (t_subject, t_electrode_idx, t_phoneme_pair)
+    inner_dict = behavioral_decoder_checkpoints[t_subject]["A_decoders"][outer_key]
+
+    t_epochs = data.epochs[t_subject]
+    md = t_epochs.metadata
+    t_epoch_data = t_epochs.get_data(picks=t_electrode_idx).squeeze(1)
+
+    outcomes = []
+    for fold in range(t_num_folds):
+        inner_key = (
+            t_subject,
+            str(t_electrode_idx),
+            t_phoneme_pair,
+            (t_word_end,),
+            t_smin_behav,
+            t_smax_behav,
+            fold,
+        )
+        if inner_key not in inner_dict:
+            continue
+
+        cp = inner_dict[inner_key]
+        estimator = cp["estimator"]
+        test_preds = cp["test_predictions"]
+        epoch_idxs = test_preds["epoch_idx"].values
+
+        # Apply behavioral decoder to acoustic-window neural data.
+        # Null out the resampled feature by setting it to the scaler's training mean,
+        # so after StandardScaler it becomes 0 and contributes nothing differential to
+        # the logistic regression. Predictions then depend solely on the neural features.
+        scaler_mean_resampled = (
+            estimator.best_estimator_.named_steps["prep"]
+            .named_transformers_["baseline"]
+            .mean_[0]
+        )
+        X_baseline = np.full((len(epoch_idxs), 1), scaler_mean_resampled)
+        X_phon_neural = t_epoch_data[epoch_idxs][:, t_smin_phon:t_smax_phon]
+        X_full = np.concatenate([X_baseline, X_phon_neural], axis=1)
+        proba = estimator.predict_proba(X_full)[:, 1]
+
+        # Evaluate against acoustic target (not behavioral)
+        acoustic_target = md.loc[epoch_idxs]["categorical_acoustic_cue"].values
+
+        outcomes.append(
+            pd.DataFrame(
+                {
+                    "epoch_idx": epoch_idxs,
+                    "fold": fold,
+                    "resampled": md.loc[epoch_idxs]["resampled"].values.astype(int),
+                    "decoder_target": (acoustic_target > 0).astype(int),
+                    "decoder_proba": proba,
+                    "subject": t_subject,
+                    "electrode_idx": t_electrode_idx,
+                    "phoneme_pair": t_phoneme_pair,
+                    "word_end": t_word_end,
+                    "smin_phon": t_smin_phon,
+                    "smax_phon": t_smax_phon,
+                    "smin_behav": t_smin_behav,
+                    "smax_behav": t_smax_behav,
+                }
+            )
+        )
+
+    return pd.concat(outcomes)
+
+
+def evaluate_phon_decoder_on_behav_window(
+    data: PaperData,
+    phonetic_decoder_checkpoints: dict,
+    t_subject,
+    t_electrode_idx,
+    t_phoneme_pair,
+    t_word_end,
+    t_smin_phon,
+    t_smax_phon,
+    t_smin_behav,
+    t_smax_behav,
+) -> pd.DataFrame:
+    """Apply an acoustic decoder (trained at the acoustic/phonetic window) to
+    behavioral-window neural data, evaluated against the BEHAVIORAL target.
+
+    This asks: does the representation learned for acoustic decoding in the early
+    window also predict behavioral choices at the late window?
+
+    Checkpoints come from behavior_decoding_single_electrode_acoustic/{subject}/.
+    The estimator takes X = neural_window_data only (no baseline features).
+    Returns a DataFrame with columns:
+        epoch_idx, fold, decoder_target (behavioral, dummy coded 0/1), decoder_proba,
+        subject, electrode_idx, phoneme_pair, word_end, smin, smax
+    """
+    phon_key = (t_subject, t_electrode_idx, t_phoneme_pair, t_smin_phon, t_smax_phon)
+    acoustic_models = phonetic_decoder_checkpoints[t_subject]["models"][phon_key]
+    acoustic_outcomes = phonetic_decoder_checkpoints[t_subject]["outcomes"][phon_key]
+
+    t_epochs = data.epochs[t_subject]
+    md = t_epochs.metadata
+    t_epoch_data = t_epochs.get_data(picks=t_electrode_idx).squeeze(1)
+
+    outcomes = []
+    for fold, fold_rows in acoustic_outcomes.groupby("fold"):
+        epoch_idxs_all = fold_rows["epoch_idx"].values
+        # Filter to the word_end of interest
+        we_mask = md.loc[epoch_idxs_all]["word_end"] == t_word_end
+        epoch_idxs = epoch_idxs_all[we_mask.values]
+        if len(epoch_idxs) == 0:
+            continue
+
+        model = acoustic_models[fold]
+
+        # Apply acoustic decoder to behavioral-window neural data
+        X = t_epoch_data[epoch_idxs][:, t_smin_behav:t_smax_behav]
+        proba = model.predict_proba(X)[:, 1]
+
+        # Evaluate against behavioral target (not acoustic)
+        behav_target = md.loc[epoch_idxs]["behavior_dummy_forced"].values
+
+        outcomes.append(
+            pd.DataFrame(
+                {
+                    "epoch_idx": epoch_idxs,
+                    "fold": fold,
+                    "decoder_target": (behav_target > 0).astype(int),
+                    "decoder_proba": proba,
+                    "subject": t_subject,
+                    "electrode_idx": t_electrode_idx,
+                    "phoneme_pair": t_phoneme_pair,
+                    "word_end": t_word_end,
+                    "smin_behav": t_smin_behav,
+                    "smax_behav": t_smax_behav,
+                    "smin_phon": t_smin_phon,
+                    "smax_phon": t_smax_phon,
+                }
+            )
+        )
+
+    return pd.concat(outcomes)

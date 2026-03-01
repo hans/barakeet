@@ -71,6 +71,8 @@ from src.viz_paper import (
     HandlerRectangle,
     PaperData,
     add_textgrid,
+    evaluate_behav_decoder_on_phon_window,
+    evaluate_phon_decoder_on_behav_window,
     evaluate_phonetic_transfer,
     p_to_stars,
     phoneme_pair_enum,
@@ -1422,57 +1424,150 @@ phonetic_transfer_extreme_results_mean.to_pandas().to_csv(
 )
 
 # %%
-# spaghetti plot
-early_col = "Acoustic window"
-transfer_col = "Acoustic window\n(transfer from\nperceptual window)"
-hue_order = [early_col, transfer_col]
+# Load saved behavioral decoders
+behavioral_decoder_checkpoints = {
+    subject: torch.load(
+        f"outputs/causal4/behavior_decoding_single_electrode/{subject}/results.pt"
+    )
+    for subject in tqdm(epochs.keys())
+}
 
-df_wide = (
-    phonetic_transfer_extreme_results_mean.group_by(
-        ["subject", "electrode_idx", "phoneme_pair"]
+# %%
+# Keys: electrodes with both a phonetic peak and a behavioral peak
+behav_transfer_keys = phon_peaks_df.join(
+    behav_peaks_df.rename({"smin": "smin_behav", "smax": "smax_behav"}),
+    on=["subject", "electrode_idx", "phoneme_pair"],
+    how="inner",
+)
+behav_transfer_keys
+
+# %%
+# Apply the behavioral decoder (trained on behavioral target at the perceptual peak)
+# to acoustic-window neural data, evaluated against the acoustic target.
+# Transfer from perceptual window decoder to phonetic decoding task in phonetic window.
+behav_on_phon_outcomes = []
+group_cols_we = [
+    "subject",
+    "electrode_idx",
+    "phoneme_pair",
+    "word_end",
+    "fold",
+    "smin_behav",
+    "smax_behav",
+    "smin_phon",
+    "smax_phon",
+]
+for key in tqdm(
+    behav_transfer_keys.iter_rows(named=True), total=behav_transfer_keys.height
+):
+    outcomes_i = evaluate_behav_decoder_on_phon_window(
+        data=paper_data,
+        behavioral_decoder_checkpoints=behavioral_decoder_checkpoints,
+        t_subject=key["subject"],
+        t_electrode_idx=key["electrode_idx"],
+        t_phoneme_pair=key["phoneme_pair"],
+        t_word_end=key["word_end"],
+        t_smin_phon=key["smin"],
+        t_smax_phon=key["smax"],
+        t_smin_behav=key["smin_behav"],
+        t_smax_behav=key["smax_behav"],
     )
-    .agg(
-        pl.mean("early_early_roc_auc").alias("early_early_roc_auc"),
-        pl.mean("late_early_roc_auc").alias("late_early_roc_auc"),
-    )
-    .rename(
-        {
-            "early_early_roc_auc": "Acoustic window",
-            "late_early_roc_auc": "Acoustic window\n(transfer from\nperceptual window)",
-        }
-    )
-    .to_pandas()
-    .query('phoneme_pair == "dn"')[
-        [*["subject", "electrode_idx", "phoneme_pair"], early_col, transfer_col]
-    ]
-    .dropna(subset=[early_col, transfer_col])
+    behav_on_phon_outcomes.append(outcomes_i)
+
+behav_on_phon_df = pl.from_pandas(
+    pd.concat(behav_on_phon_outcomes, ignore_index=True)
+).with_columns(
+    pl.col("subject").cast(subject_enum),
+    pl.col("phoneme_pair").cast(phoneme_pair_enum),
+    pl.col("word_end").cast(word_end_enum),
 )
 
-fig, ax = plt.subplots(figsize=(2, 2.5))
+# %%
+# ROC-AUC of behavioral decoder predicting acoustic target at acoustic window
+behav_on_phon_roc_auc = pl_roc_auc(
+    behav_on_phon_df.filter(pl.col("resampled").is_in([1, 6])),
+    target_col="decoder_target",
+    proba_col="decoder_proba",
+    group_cols=group_cols_we,
+    roc_auc_name="behav_decoder_phon_roc_auc",
+)
 
+# Compare to in-window acoustic decoding (already computed)
+behav_on_phon_comparison_df = (
+    behav_on_phon_roc_auc.join(
+        phon_roc_auc_searchlight_df.rename({"phon_roc_auc": "in_window_phon_roc_auc"}),
+        on=["subject", "electrode_idx", "phoneme_pair", "fold"],
+        how="left",
+    )
+    .filter(
+        pl.col("smin_phon")
+        == pl.col("smin"),  # ensure we're comparing predictions onto the same window
+        pl.col("smax_phon") == pl.col("smax"),
+    )
+    .drop(["smin", "smax"])
+)
+
+# %%
+# Mean over folds
+behav_on_phon_mean = behav_on_phon_comparison_df.group_by(
+    ["subject", "electrode_idx", "phoneme_pair", "word_end"]
+).agg(
+    pl.mean("behav_decoder_phon_roc_auc"),
+    pl.mean("in_window_phon_roc_auc"),
+)
+
+subject_means_phon_transfer = (
+    behav_on_phon_mean.group_by("subject")
+    .agg(
+        pl.mean("in_window_phon_roc_auc").alias("in_window"),
+        pl.mean("behav_decoder_phon_roc_auc").alias("transfer"),
+    )
+    .to_pandas()
+)
+
+t_phon, p_phon = stats.ttest_rel(
+    subject_means_phon_transfer["in_window"], subject_means_phon_transfer["transfer"]
+)
+print(
+    f"Phonetic transfer — acoustic decoding: in-window vs perceptual decoder transfer: "
+    f"t={t_phon:.3f}, p={p_phon:g}"
+)
+
+# %%
+# spaghetti plot: acoustic in-window vs perceptual (behavioral) decoder on acoustic window
+fig, ax = plt.subplots(figsize=(2, 2.5))
 colors = sns.color_palette(categorical_palette, 2)
 x0, x1 = 0, 1
 
-# spaghetti lines
+in_col = "Acoustic\nwindow"
+transfer_col = "Acoustic window\n(perceptual\ndecoder)"
+
+df_wide = (
+    behav_on_phon_mean.rename(
+        {
+            "in_window_phon_roc_auc": in_col,
+            "behav_decoder_phon_roc_auc": transfer_col,
+        }
+    )
+    .to_pandas()
+    .query('phoneme_pair == "dn"')
+    .dropna(subset=[in_col, transfer_col])
+)
+subject_means_plot = (
+    df_wide.groupby("subject")[[in_col, transfer_col]].mean().reset_index()
+)
+
 for _, row in df_wide.iterrows():
     ax.plot(
         [x0, x1],
-        [row[early_col], row[transfer_col]],
+        [row[in_col], row[transfer_col]],
         color="gray",
         alpha=0.2,
         linewidth=0.8,
         zorder=0,
     )
-
-# points at each end
 ax.scatter(
-    [x0] * len(df_wide),
-    df_wide[early_col],
-    color=colors[0],
-    s=12,
-    alpha=0.4,
-    zorder=2,
-    label=early_col,
+    [x0] * len(df_wide), df_wide[in_col], color=colors[0], s=12, alpha=0.4, zorder=2
 )
 ax.scatter(
     [x1] * len(df_wide),
@@ -1481,48 +1576,232 @@ ax.scatter(
     s=12,
     alpha=0.4,
     zorder=2,
-    label=transfer_col,
+)
+
+grand_0 = subject_means_plot[in_col].mean()
+grand_1 = subject_means_plot[transfer_col].mean()
+ax.plot([x0, x1], [grand_0, grand_1], color="black", linewidth=2.5, zorder=4, alpha=0.7)
+ax.scatter([x0, x1], [grand_0, grand_1], color="black", s=60, zorder=5, alpha=0.7)
+
+trans = blended_transform_factory(ax.transData, ax.transAxes)
+bracket_y, tick_h = 1.10, 0.03
+ax.plot(
+    [x0, x0, x1, x1],
+    [bracket_y - tick_h, bracket_y, bracket_y, bracket_y - tick_h],
+    color="black",
+    linewidth=1.0,
+    transform=trans,
+    clip_on=False,
+)
+ax.text(
+    0.5,
+    bracket_y + 0.01,
+    p_to_stars(p_phon),
+    ha="center",
+    va="bottom",
+    fontsize=11,
+    transform=trans,
 )
 
 ax.axhline(0.5, color="red", linestyle="--", linewidth=1)
 ax.set_xticks([x0, x1])
-ax.set_xticklabels(hue_order)
+ax.set_xticklabels([in_col, transfer_col])
 ax.set_ylabel("Acoustic prediction\n(ROC AUC)")
 ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: "{:.0%}".format(y)))
-# ax.legend(loc="lower right", fontsize=8)
 sns.despine(ax=ax)
-
 fig.savefig(Path(outdir) / "decoding_acoustic_transfer-roc_auc.pdf")
 
-# %%
-g = sns.displot(
-    data=phonetic_transfer_extreme_results_mean.to_pandas().assign(
-        early_transfer_effect=lambda df: -df["early_transfer_effect"]
-    ),
-    x="early_transfer_effect",
-    height=2.5,
-    aspect=2,
-    bins=15,
-)
-
-g.set_axis_labels("Early transfer effect\n($\Delta$ROC-AUC)")
-g.axes[0, 0].axvline(0, color="gray", linestyle="--")
+# %% [markdown]
+# #### Behavioral transfer analysis
 
 # %% [markdown]
-# #### Behavior
+# ##### Acoustic decoder → behavioral window → behavioral target
+#
+# Apply the acoustic decoder (trained on acoustic target at the acoustic peak)
+# to behavioral-window neural data, evaluated against the behavioral target.
+# Ask: does the learned acoustic representation in the early window generalize to the perceptual representation in the later window?
 
 # %%
-(
-    behav_roc_auc_comparison_phon.group_by(
-        ["subject", "electrode_idx", "phoneme_pair", "word_end", "smin", "smax"]
+phon_on_behav_outcomes = []
+for key in tqdm(
+    behav_transfer_keys.iter_rows(named=True), total=behav_transfer_keys.height
+):
+    outcomes_i = evaluate_phon_decoder_on_behav_window(
+        data=paper_data,
+        phonetic_decoder_checkpoints=phonetic_decoder_checkpoints,
+        t_subject=key["subject"],
+        t_electrode_idx=key["electrode_idx"],
+        t_phoneme_pair=key["phoneme_pair"],
+        t_word_end=key["word_end"],
+        t_smin_phon=key["smin"],
+        t_smax_phon=key["smax"],
+        t_smin_behav=key["smin_behav"],
+        t_smax_behav=key["smax_behav"],
     )
-    .agg(pl.mean("behav_roc_auc_improvement"))
-    .sort("behav_roc_auc_improvement", descending=True)
-    .filter(pl.col("behav_roc_auc_improvement") > 0.01)
+    phon_on_behav_outcomes.append(outcomes_i)
+
+phon_on_behav_df = pl.from_pandas(
+    pd.concat(phon_on_behav_outcomes, ignore_index=True)
+).with_columns(
+    pl.col("subject").cast(subject_enum),
+    pl.col("phoneme_pair").cast(phoneme_pair_enum),
+    pl.col("word_end").cast(word_end_enum),
 )
 
 # %%
-# TODO transfer analysis on these
+# ROC-AUC of acoustic decoder predicting behavioral target at behavioral window
+phon_on_behav_roc_auc = pl_roc_auc(
+    phon_on_behav_df,
+    target_col="decoder_target",
+    proba_col="decoder_proba",
+    group_cols=group_cols_we,
+    roc_auc_name="phon_decoder_behav_roc_auc",
+)
+
+# Compare to in-window behavioral decoding (behav_roc_auc_searchlight_df)
+phon_on_behav_comparison_df = (
+    phon_on_behav_roc_auc.join(
+        behav_roc_auc_searchlight_df.rename(
+            {
+                "behav_roc_auc": "in_window_behav_roc_auc",
+            }
+        ),
+        on=["subject", "electrode_idx", "phoneme_pair", "word_end", "fold"],
+        how="left",
+    )
+    .filter(
+        pl.col("smin_behav")
+        == pl.col("smin"),  # ensure we're comparing predictions onto the same window
+        pl.col("smax_behav") == pl.col("smax"),
+    )
+    .drop(["smin", "smax"])
+)
+
+# %%
+phon_on_behav_comparison_df
+
+# %%
+# Mean over folds
+phon_on_behav_mean = (
+    phon_on_behav_comparison_df.with_columns(
+        (
+            (
+                pl.col("phon_decoder_behav_roc_auc") - pl.col("behav_roc_auc_baseline")
+            ).alias("phon_decoder_behav_roc_auc_improvement")
+        ),
+        (
+            (
+                pl.col("in_window_behav_roc_auc") - pl.col("behav_roc_auc_baseline")
+            ).alias("in_window_behav_roc_auc_improvement")
+        ),
+    )
+    .group_by(["subject", "electrode_idx", "phoneme_pair", "word_end"])
+    .agg(
+        pl.mean("phon_decoder_behav_roc_auc"),
+        pl.mean("in_window_behav_roc_auc"),
+        pl.mean("phon_decoder_behav_roc_auc_improvement"),
+        pl.mean("in_window_behav_roc_auc_improvement"),
+    )
+)
+
+subject_means_2 = (
+    phon_on_behav_mean.group_by("subject")
+    .agg(
+        pl.mean("in_window_behav_roc_auc_improvement").alias("in_window"),
+        pl.mean("phon_decoder_behav_roc_auc_improvement").alias("transfer"),
+    )
+    .to_pandas()
+)
+
+t_2, p_2 = stats.ttest_rel(subject_means_2["in_window"], subject_means_2["transfer"])
+print(
+    f"Analysis 2 — behavioral decoding: in-window vs acoustic decoder transfer: "
+    f"t={t_2:.3f}, p={p_2:g}"
+)
+
+fig, ax = plt.subplots(figsize=(2, 2.5))
+colors = sns.color_palette(categorical_palette, 2)
+x0, x1 = 0, 1
+
+in_col_2, transfer_col_2 = "Perceptual\nwindow", "Perceptual window\n(acoustic decoder)"
+
+df_wide_2 = (
+    phon_on_behav_mean.rename(
+        {
+            "in_window_behav_roc_auc": in_col_2,
+            "phon_decoder_behav_roc_auc": transfer_col_2,
+        }
+    )
+    .to_pandas()
+    .query('phoneme_pair == "dn"')
+    .dropna(subset=[in_col_2, transfer_col_2])
+)
+subject_means_2_plot = (
+    df_wide_2.groupby("subject")[[in_col_2, transfer_col_2]].mean().reset_index()
+)
+
+for _, row in df_wide_2.iterrows():
+    ax.plot(
+        [x0, x1],
+        [row[in_col_2], row[transfer_col_2]],
+        color="gray",
+        alpha=0.2,
+        linewidth=0.8,
+        zorder=0,
+    )
+ax.scatter(
+    [x0] * len(df_wide_2),
+    df_wide_2[in_col_2],
+    color=colors[0],
+    s=12,
+    alpha=0.4,
+    zorder=2,
+)
+ax.scatter(
+    [x1] * len(df_wide_2),
+    df_wide_2[transfer_col_2],
+    color=colors[1],
+    s=12,
+    alpha=0.4,
+    zorder=2,
+)
+
+grand_0_2 = subject_means_2_plot[in_col_2].mean()
+grand_1_2 = subject_means_2_plot[transfer_col_2].mean()
+ax.plot(
+    [x0, x1], [grand_0_2, grand_1_2], color="black", linewidth=2.5, zorder=4, alpha=0.7
+)
+ax.scatter([x0, x1], [grand_0_2, grand_1_2], color="black", s=60, zorder=5, alpha=0.7)
+
+trans = blended_transform_factory(ax.transData, ax.transAxes)
+bracket_y, tick_h = 1.10, 0.03
+ax.plot(
+    [x0, x0, x1, x1],
+    [bracket_y - tick_h, bracket_y, bracket_y, bracket_y - tick_h],
+    color="black",
+    linewidth=1.0,
+    transform=trans,
+    clip_on=False,
+)
+ax.text(
+    0.5,
+    bracket_y + 0.01,
+    p_to_stars(p_2),
+    ha="center",
+    va="bottom",
+    fontsize=11,
+    transform=trans,
+)
+
+ax.axhline(0.5, color="red", linestyle="--", linewidth=1)
+ax.set_xticks([x0, x1])
+ax.set_xticklabels([in_col_2, transfer_col_2])
+# ylabel on right side
+ax.set_ylabel("Perceptual prediction\n(ROC AUC)")
+ax.yaxis.set_label_position("right")
+ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: "{:.0%}".format(y)))
+sns.despine(ax=ax, left=True, top=True, right=False)
+fig.savefig(Path(outdir) / "decoding_phon_decoder_on_behav_window.pdf")
 
 # %% [markdown]
 # ## Zoomin
@@ -1984,7 +2263,8 @@ preference_relationship_df = (
     )
     .set_index(["early_selectivity", "late_selectivity"])["count"]
     .unstack()
-    .fillna(0).astype(int)
+    .fillna(0)
+    .astype(int)
 )
 preference_relationship_df
 
