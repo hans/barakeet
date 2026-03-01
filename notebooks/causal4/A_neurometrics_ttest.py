@@ -14,7 +14,14 @@
 # ---
 
 # %% [markdown]
-# Neurometric response functions relating single-neuron activity to both phonetic content and subsequent behavioral choice.
+# Companion to A_neurometrics.py.
+#
+# Key difference: behaviorally-responsive sites were selected using a sliding
+# t-test (find_site_windows) rather than behavioral decoder ROC-AUC improvement.
+# All analyses are otherwise structurally identical.
+#
+# Neurometric response functions relating single-neuron activity to both phonetic
+# content and subsequent behavioral choice.
 # Compare two neural responses:
 # 1. early phonetic response
 # 2. late feedback response
@@ -93,7 +100,7 @@ phonetic_searchlight_paths = list(
     Path("outputs/causal4/behavior_decoding_single_electrode_acoustic/").glob("*")
 )
 
-neurometrics_dir = "outputs/causal4/prepare_neurometrics/p55_b5_a2"
+neurometrics_dir = "outputs/causal4/prepare_neurometrics_ttest/p60_a2_bp1"
 
 epoch_tmin = -0.4
 epoch_sfreq = 100
@@ -102,7 +109,7 @@ ambiguous_response_threshold = 2
 
 textgrid_dir = "textgrids"
 
-outdir = "outputs/causal4/A_neurometrics"
+outdir = "outputs/causal4/A_neurometrics_ttest"
 
 # %%
 max_plot_rows = 15
@@ -202,15 +209,23 @@ phon_peaks_df = pl.read_parquet(
     pl.col("subject").cast(subject_enum),
     pl.col("phoneme_pair").cast(phoneme_pair_enum),
 )
+# NOTE: behavioral peaks come from t-test selection (not ROC-AUC improvement).
+# behav_peaks_df has: behav_t_stat, behav_p_value, behav_smin/behav_smax (raw t-test
+# windows), smin/smax (snapped to nearest decoder searchlight window).
 behav_peaks_df = pl.read_parquet(
-    neurometrics_path / "behav_peaks_df.parquet"
+    neurometrics_path / "behav_peaks_ttest_df.parquet"
 ).with_columns(
     pl.col("subject").cast(subject_enum),
     pl.col("phoneme_pair").cast(phoneme_pair_enum),
     pl.col("word_end").cast(word_end_enum),
 )
+# NOTE: unfiltered = all candidate sites with a valid t-test window (pre p-value
+# threshold). smin/smax are snapped only for sites that passed the threshold; they
+# are null for non-significant sites. This means the unfiltered behavioral decoder
+# comparison (behav_roc_auc_comparison_behav) effectively covers significant sites
+# only (null smin/smax won't join to behav_roc_auc_searchlight_df).
 behav_peaks_df_unfiltered = pl.read_parquet(
-    neurometrics_path / "behav_peaks_df_unfiltered.parquet"
+    neurometrics_path / "ttest_behav_df_full.parquet"
 ).with_columns(
     pl.col("subject").cast(subject_enum),
     pl.col("phoneme_pair").cast(phoneme_pair_enum),
@@ -279,6 +294,7 @@ behav_roc_auc_mean_df = behav_roc_auc_searchlight_df.group_by(
 plot_phon_phon_keys = phon_peaks_df.select(
     ["subject", "electrode_idx", "phoneme_pair", "smin", "smax"]
 )
+# behav_peaks_df.smin/smax = snapped decoder searchlight windows
 plot_behav_phon_keys = behav_peaks_df.select(
     ["subject", "electrode_idx", "phoneme_pair", "smin", "smax", "word_end"]
 )
@@ -300,7 +316,7 @@ electrode_distribution_df = (
     phon_peaks_df.join(
         (
             behav_peaks_df.group_by(["subject", "electrode_idx", "phoneme_pair"]).agg(
-                pl.max("behav_roc_auc_improvement")
+                pl.max("behav_t_stat")
             )
         ),
         on=["subject", "electrode_idx", "phoneme_pair"],
@@ -309,7 +325,7 @@ electrode_distribution_df = (
     .group_by(["subject", "electrode_idx"])
     .agg(
         pl.col("phon_roc_auc").is_not_null().any().alias("phonetic_selective"),
-        pl.col("behav_roc_auc_improvement")
+        pl.col("behav_t_stat")
         .is_not_null()
         .any()
         .alias("behavior_selective"),
@@ -539,10 +555,23 @@ behav_roc_auc = (
 # ### Peak timing
 
 # %%
+# For the behavioral source, use raw t-test window centers (behav_smin/behav_smax),
+# not the snapped decoder searchlight windows.
+_behav_timing = behav_peaks_df.select(
+    [
+        "subject",
+        "electrode_idx",
+        "phoneme_pair",
+        "word_end",
+        pl.col("behav_smin").alias("smin"),
+        pl.col("behav_smax").alias("smax"),
+    ]
+).with_columns(pl.lit("behav").alias("source"))
+
 peak_timing_plot = pl.concat(
     [
         phon_peaks_df.with_columns(pl.lit("phon").alias("source")),
-        behav_peaks_df.with_columns(pl.lit("behav").alias("source")),
+        _behav_timing,
     ],
     how="align",
 ).with_columns(
@@ -595,8 +624,6 @@ def plot_peak_timing(
         ax.set_xlim(plot_xlim)
 
         word_stim_info = word_end_df.filter(pl.col("word_end").is_in(plot_word_ends))
-        # for word_end in word_stim_info.select("word_end_offset").to_series():
-        #     ax.axvline(word_end, color="red", linestyle="--")
         pod = word_stim_info.select("pod").unique().item()
         ax.axvline(
             pod,
@@ -809,10 +836,10 @@ behav_roc_auc_comparison_phon = plot_phon_behav_keys.join(
 ).with_columns(pl.lit("phon").alias("source"))
 
 # %%
-# NB we are using the unfiltered behav peaks here
-# we don't want to double-dip by just looking at improvement in the electrodes
-# that were already selected because they show improvement
-# we want a description of the trend within all phonetic electrodes
+# NB we are using the unfiltered behav peaks here (all sites with valid t-test
+# window, not just significant ones). For sites that did not pass the p-value
+# threshold, smin/smax is null so they won't join to behav_roc_auc_searchlight_df.
+# See the note at the top of the load section.
 behav_roc_auc_comparison_behav = plot_behav_behav_keys_unfiltered.join(
     behav_roc_auc_searchlight_df,
     on=["subject", "electrode_idx", "phoneme_pair", "word_end", "smin", "smax"],
@@ -869,7 +896,6 @@ g = sns.catplot(
     )
     .rename(columns={"source": "Evaluation"})
     .query("phoneme_pair == 'dn'"),
-    # x="phoneme_pair", order=phoneme_pair_order,
     x="Evaluation",
     order=evaluation_order,
     y="behav_roc_auc",
@@ -936,7 +962,6 @@ print(f"Early vs baseline: t={t_early:.3f}, p={p_early:.4f}")
 print(f"Late vs baseline:  t={t_late:.3f}, p={p_late:.4f}")
 
 
-# fig, ax = plt.subplots(figsize=(3.5, 3))
 fig, ax = plt.subplots(figsize=(2.75, 2.75))
 
 # Draw individual subject lines (3 points: early, baseline, late)
@@ -1101,7 +1126,6 @@ for ax in g.axes.flat:
 # %%
 g = sns.displot(
     data=behav_improvement_df.to_pandas(),
-    # x="improvement", row="comparison",
     x="behav_phon_diff",
     height=2.5,
     aspect=2.5,
@@ -1117,7 +1141,6 @@ for ax in g.axes.flat:
 # %%
 g = sns.displot(
     data=behav_improvement_df.to_pandas(),
-    # x="improvement", row="comparison",
     x="phon_baseline_diff",
     height=2.5,
     aspect=2.5,
@@ -1489,7 +1512,6 @@ ax.set_xticks([x0, x1])
 ax.set_xticklabels(hue_order)
 ax.set_ylabel("Acoustic prediction\n(ROC AUC)")
 ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: "{:.0%}".format(y)))
-# ax.legend(loc="lower right", fontsize=8)
 sns.despine(ax=ax)
 
 fig.savefig(Path(outdir) / "decoding_acoustic_transfer-roc_auc.pdf")
@@ -1537,7 +1559,8 @@ zoomin_keys = phon_peaks_df.join(
         "phoneme_pair",
         "word_end",
         "phon_roc_auc",
-        "behav_roc_auc_improvement",
+        "behav_t_stat",
+        "behav_p_value",
     ]
 )
 zoomin_keys
@@ -1551,52 +1574,6 @@ outf = "hga_zoomin_search.pdf"
 hga_zoomin_keys = zoomin_keys.unique(
     ["subject", "electrode_idx", "phoneme_pair", "word_end"]
 ).sort(["subject", "electrode_idx", "phoneme_pair", "word_end"])
-
-# # # pre-process epoch data
-# # epoch_data_preprocessed = {
-# #     subject: epochs[subject].copy().apply_baseline().get_data()
-# #     for subject in hga_zoomin_keys.select("subject").unique().to_series()
-# # }
-
-# with PdfPages(outf) as pdf:
-#     row_iter = iter(tqdm(hga_zoomin_keys.iter_rows(named=True), total=hga_zoomin_keys.height))
-
-#     i = 0
-#     try:
-#         while True:
-#             fig, axs = plt.subplots(5, cols_per_page, figsize=(cols_per_page * 3, 5 * 2.5),
-#                                     sharex=False)
-#             for i in range(cols_per_page):
-#                 row = next(row_iter)
-#                 subject = row["subject"]
-#                 electrode_idx = row["electrode_idx"]
-#                 phoneme_pair = row["phoneme_pair"]
-#                 word_end = row["word_end"]
-
-#                 print(subject, electrode_idx, phoneme_pair, word_end)
-#                 zoomin_search_hga(subject, electrode_idx, phoneme_pair, word_end,
-#                                   controlled_resampled_search_steps=[2, 3, 4, 5],
-#                                 #   epoch_data=epoch_data_preprocessed[subject],
-#                                   axs=axs[:, i])
-#                 axs[0, i].set_title(
-#                     f"Subject {subject}, Electrode {electrode_idx}, {phoneme_pair}, {word_end}",
-#                     pad=20)
-
-#             fig.tight_layout()
-#             pdf.savefig(fig)
-#             plt.close(fig)
-
-#             i += 1
-#             if i >= max_num_pages:
-#                 print(f"Reached max number of pages ({max_num_pages}), stopping.")
-#                 break
-#     except StopIteration:
-#         pass
-
-#     # if we have a partially filled page, save it as well
-#     if (hga_zoomin_keys.height % cols_per_page) != 0:
-#         pdf.savefig(fig)
-#         plt.close(fig)
 
 # %%
 hga_zoomin_keys.to_pandas().to_csv(
@@ -1637,10 +1614,7 @@ try:
 
     legend_handles_labels = fig.axes[0].get_legend_handles_labels()
     # reverse sort
-    legend_handles_labels = (
-        legend_handles_labels[0][::-1],
-        legend_handles_labels[1][::-1],
-    )
+    legend_handles_labels = (legend_handles_labels[0][::-1], legend_handles_labels[1][::-1])
     for handle in legend_handles_labels[0]:
         handle.set_linewidth(3)
         handle.set_color("black")
@@ -1651,14 +1625,11 @@ except:
     pass
 
 # %%
-# this may fail depending on whether the specific electrode is a peak in this analysis run
-try:
-    zoomin_hga(
-        paper_data, "EC278", 38, "dn", "necessary", hide_bottom=True, **star_plot_kwargs
-    )
-    plt.gcf().savefig(Path(outdir) / "zoomin_EC278_38_dn_necessary.pdf")
-except:
-    pass
+zoomin_hga(
+    paper_data, "EC278", 38, "dn", "necessary", hide_bottom=True, **star_plot_kwargs
+)
+plt.gcf().savefig(Path(outdir) / "zoomin_EC278_38_dn_necessary.pdf")
+None
 
 # %% [markdown]
 # ## Quant HGA search
@@ -1745,7 +1716,7 @@ plt.gcf().savefig(Path(outdir) / "behav_barplot_EC278_dn_necessary.pdf")
 # ## Exploratory: polarity relationships
 
 # %%
-early_polarity_strict = early_polarity.reset_index()
+early_polarity_strict = early_polarity.copy().reset_index()
 
 # %%
 late_polarity_strict = late_polarity.dropna().reset_index()
@@ -1765,52 +1736,43 @@ def plot_summary_acoustic_vs_presence_of_response(phoneme_pair: str):
     completion_2 = "-" + word_end_2[1:]
 
     sns.heatmap(
-        (
-            late_polarity_strict.query("phoneme_pair == @phoneme_pair")
-            .pivot_table(
-                index=["subject", "electrode_idx", "phoneme_pair"],
-                columns="lexical_evidence",
-                values="late_polarity",
-                aggfunc="count",
-            )
-            .fillna(0)
-            .astype(bool)
-            .rename(columns={0: completion_1, 1: completion_2})
-            # make sure we have both possible lexical evidences for this word pair
-            .assign(
-                **{
-                    completion_1: lambda df: df.get(completion_1, False),
-                    completion_2: lambda df: df.get(completion_2, False),
-                }
-            )
-            .merge(
-                (
-                    early_polarity_strict.query("phoneme_pair == @phoneme_pair")
-                    .groupby(["subject", "electrode_idx", "phoneme_pair"])
-                    .filter(lambda xs: xs.early_polarity.nunique() == 1)
-                    .drop(columns=["word_end"])
-                    .drop_duplicates()
-                    .set_index(["subject", "electrode_idx", "phoneme_pair"])
-                ),
-                left_index=True,
-                right_index=True,
-                how="inner",
-            )
-            .groupby("early_polarity")
-            .value_counts(sort=False)
-            .reset_index()
-            .pipe(
-                lambda df: df.assign(
-                    early_polarity=df.early_polarity.map(
-                        {-1: phoneme_pair[0], 1: phoneme_pair[1]}
-                    )
+        late_polarity_strict.query("phoneme_pair == @phoneme_pair")
+        .pivot_table(
+            index=["subject", "electrode_idx", "phoneme_pair"],
+            columns="lexical_evidence",
+            values="late_polarity",
+            aggfunc="count",
+        )
+        .fillna(0)
+        .astype({0: bool, 1: bool})
+        .merge(
+            (
+                early_polarity_strict.query("phoneme_pair == @phoneme_pair")
+                .groupby(["subject", "electrode_idx", "phoneme_pair"])
+                .filter(lambda xs: xs.early_polarity.nunique() == 1)
+                .drop(columns=["word_end"])
+                .drop_duplicates()
+                .set_index(["subject", "electrode_idx", "phoneme_pair"])
+            ),
+            left_index=True,
+            right_index=True,
+            how="inner",
+        )
+        .groupby("early_polarity")
+        .value_counts(sort=False)
+        .reset_index()
+        .pipe(
+            lambda df: df.assign(
+                early_polarity=df.early_polarity.map(
+                    {-1: phoneme_pair[0], 1: phoneme_pair[1]}
                 )
             )
-            .set_index([completion_1, completion_2, "early_polarity"])["count"]
-            .unstack()
-            .fillna(0)
-            .sort_index(ascending=False)
-        ),
+        )
+        .rename(columns={0: completion_1, 1: completion_2})
+        .set_index([completion_1, completion_2, "early_polarity"])["count"]
+        .unstack()
+        .fillna(0)
+        .sort_index(ascending=False),
         annot=True,
         ax=ax,
         cbar=False,
@@ -1915,14 +1877,6 @@ def plot_summary_acoustic_vs_presence_of_response_stackplot(
     )
     df = df[column_order]
 
-    # # Chi-square test on one-sided responses only
-    # # Create 2x2 contingency table: acoustic (rows) x perceptual completion (columns)
-    # chi2_table = df.values#[[completion_1, completion_2]].values
-    # from scipy.stats import chi2_contingency
-    # chi2, p_value, dof, expected = chi2_contingency(chi2_table)
-    # print(chi2, p_value)
-    # sig_stars = p_to_stars(p_value)
-
     df_pct = df.div(df.sum(axis=1), axis=0) * 100
 
     if ax is None:
@@ -1948,10 +1902,6 @@ def plot_summary_acoustic_vs_presence_of_response_stackplot(
     ax.set_xticklabels(df_pct.index, rotation=0)
     ax.set_ylim(0, 100)
     ax.yaxis.set_major_formatter(mtick.PercentFormatter())
-
-    # # Add significance annotation
-    # ax.text(0.5, 0.9, sig_stars, ha='center', va='bottom',
-    #         fontsize=14, transform=ax.transAxes)
 
     return f
 
@@ -1984,7 +1934,6 @@ preference_relationship_df = (
     )
     .set_index(["early_selectivity", "late_selectivity"])["count"]
     .unstack()
-    .fillna(0).astype(int)
 )
 preference_relationship_df
 
@@ -2034,10 +1983,11 @@ with open(Path(outdir) / "early_late_preference_relationship.txt", "w") as f:
         f"Significant at alpha=0.05: {'Yes' if test.pvalue < 0.05 else 'No'}\n"
     )
 
-print(f"Congruent responses: {congruent_responses}")
-print(f"Incongruent responses: {incongruent_responses}")
-print(f"Binomial test p-value: {test.pvalue:.4e}")
-print(f"Significant at alpha=0.05: {'Yes' if test.pvalue < 0.05 else 'No'}")
+print(f"Binomial test for congruent vs incongruent responses:\n"
+      f"Congruent responses: {congruent_responses}\n"
+      f"Incongruent responses: {incongruent_responses}\n"
+      f"Binomial test p-value: {test.pvalue:.4e}\n"
+      f"Significant at alpha=0.05: {'Yes' if test.pvalue < 0.05 else 'No'}\n")
 
 # %% [markdown]
 # #### More in-depth selectivity relationship
@@ -2190,23 +2140,23 @@ unambig_late_pl = (
 )
 
 # %%
-# # phonetic response on electrodes that don't show a behavioral response
-# ax, _, _ = plot_condition_contrast(
-#     (
-#         paper_data.plot_phon_phon_df.join(
-#             paper_data.plot_behav_behav_df,
-#             on=["subject", "electrode_idx", "phoneme_pair"],
-#             how="inner",
-#         ).filter(pl.col("phoneme_pair") == "dn")
-#     ),
-#     "categorical_acoustic_cue",
-#     data=paper_data,
-#     textgrid_dir=textgrid_dir,
-#     polarity_correct="early",
-#     epoch_data_cache=pcc_epoch_data_cache,
-#     pval_thresholds=(0.0000001, 0.000001, 0.00001),
-# )
-# ax.set_xlim(0, 2.0)
+# phonetic response on electrodes that don't show a behavioral response
+ax, _, _ = plot_condition_contrast(
+    (
+        paper_data.plot_phon_phon_df.join(
+            paper_data.plot_behav_behav_df,
+            on=["subject", "electrode_idx", "phoneme_pair"],
+            how="inner",
+        ).filter(pl.col("phoneme_pair") == "dn")
+    ),
+    "categorical_acoustic_cue",
+    data=paper_data,
+    textgrid_dir=textgrid_dir,
+    polarity_correct="early",
+    epoch_data_cache=pcc_epoch_data_cache,
+    pval_thresholds=(0.0000001, 0.000001, 0.00001),
+)
+ax.set_xlim(0, 2.0)
 
 # %%
 for plot_word_end, plot_xlim in zip(["necessary", "desolate"], [(0, 1.2), (0, 0.7)]):

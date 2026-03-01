@@ -23,6 +23,8 @@ analysis:
 
   fdr_alpha: 0.05
 
+  behav_ttest_pvalue_threshold: 0.01
+
   sweep:
     phon_response_peak_thresholds: [0.55, 0.60, 0.65]
     behav_response_peak_thresholds: [0.005, 0.010, 0.020]

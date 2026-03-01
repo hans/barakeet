@@ -59,6 +59,18 @@ def _params_tag(phon, behav, ambig):
     return f"p{int(phon * 100)}_b{int(behav * 1000)}_a{ambig}"
 
 
+def _ttest_params_tag(phon, ambig, pval):
+    """Encode ttest-based threshold triple as a filesystem-safe directory name."""
+    return f"p{int(phon * 100)}_a{ambig}_bp{int(pval * 100)}"
+
+
+NEUROMETRICS_TTEST_PARAMS_TAG = _ttest_params_tag(
+    config["analysis"]["phon_response_peak_threshold"],
+    config["analysis"]["ambiguous_response_threshold"],
+    config["analysis"]["behav_ttest_pvalue_threshold"],
+)
+
+
 NEUROMETRICS_PARAMS_GRID = {
     _params_tag(p, b, a): dict(
         phon_response_peak_threshold=p,
@@ -941,4 +953,131 @@ rule neurometrics_sweep_all:
         expand(
             "outputs/causal4/A_neurometrics/{params_id}/hga_zoomin_search_keys.csv",
             params_id=ALL_NEUROMETRICS_PARAMS,
+        )
+
+
+rule prepare_neurometrics_ttest:
+    """
+    T-test-based companion to prepare_neurometrics.
+    Behavioral site selection uses a sliding Welch's t-test (find_site_windows)
+    rather than behavioral decoder ROC-AUC improvement.
+    The slow window search is run here; results are saved pre-threshold so that
+    the p-value cut-off can be adjusted in a notebook without re-running.
+    """
+    input:
+        all_epochs = expand(
+            "outputs/epochs_preprocessed/{subject}_epo.fif",
+            subject=config["data"]["subjects"]
+        ),
+        A_behav_predictions = expand(
+            "outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/A-predictions.parquet",
+            subject=config["data"]["subjects"]
+        ),
+        A_early_behav_predictions = expand(
+            "outputs/causal4/behavior_decoding_single_electrode_summarize/{subject}/A_early-predictions.parquet",
+            subject=config["data"]["subjects"]
+        ),
+        phon_predictions = "outputs/causal4/A_predictions/behavior_to_phonetic_decoding.parquet",
+        electrode_paths = expand(
+            "outputs/causal4/find_speech_responsive/{subject}_results.csv",
+            subject=config["data"]["subjects"]
+        ),
+        notebook = "notebooks/causal4/prepare_neurometrics_ttest.py",
+
+    output:
+        notebook = "outputs/causal4/prepare_neurometrics_ttest/{params_id}/notebook.ipynb",
+        electrode_df = "outputs/causal4/prepare_neurometrics_ttest/{params_id}/electrode_df.parquet",
+        plot_phon_phon_df = "outputs/causal4/prepare_neurometrics_ttest/{params_id}/plot_phon_phon_df.parquet",
+        plot_behav_phon_df = "outputs/causal4/prepare_neurometrics_ttest/{params_id}/plot_behav_phon_df.parquet",
+        plot_behav_behav_df = "outputs/causal4/prepare_neurometrics_ttest/{params_id}/plot_behav_behav_df.parquet",
+        plot_phon_behav_df = "outputs/causal4/prepare_neurometrics_ttest/{params_id}/plot_phon_behav_df.parquet",
+        behav_roc_auc_searchlight_df = "outputs/causal4/prepare_neurometrics_ttest/{params_id}/behav_roc_auc_searchlight_df.parquet",
+        phon_roc_auc_searchlight_df = "outputs/causal4/prepare_neurometrics_ttest/{params_id}/phon_roc_auc_searchlight_df.parquet",
+        all_md = "outputs/causal4/prepare_neurometrics_ttest/{params_id}/all_md.parquet",
+        word_end_df = "outputs/causal4/prepare_neurometrics_ttest/{params_id}/word_end_df.parquet",
+        phon_peaks_df = "outputs/causal4/prepare_neurometrics_ttest/{params_id}/phon_peaks_df.parquet",
+        # ttest-specific outputs
+        ttest_behav_df = "outputs/causal4/prepare_neurometrics_ttest/{params_id}/ttest_behav_df.parquet",
+        behav_peaks_ttest_df = "outputs/causal4/prepare_neurometrics_ttest/{params_id}/behav_peaks_ttest_df.parquet",
+        ttest_snap_report = "outputs/causal4/prepare_neurometrics_ttest/{params_id}/ttest_snap_report.parquet",
+        ttest_behav_df_full = "outputs/causal4/prepare_neurometrics_ttest/{params_id}/ttest_behav_df_full.parquet",
+        behav_baseline_df = "outputs/causal4/prepare_neurometrics_ttest/{params_id}/behav_baseline_df.parquet",
+        zoomin_keys = "outputs/causal4/prepare_neurometrics_ttest/{params_id}/zoomin_keys.parquet",
+        early_polarity = "outputs/causal4/prepare_neurometrics_ttest/{params_id}/early_polarity.parquet",
+        late_polarity = "outputs/causal4/prepare_neurometrics_ttest/{params_id}/late_polarity.parquet",
+        hga_df = "outputs/causal4/prepare_neurometrics_ttest/{params_id}/hga_df.parquet",
+        reg_df = "outputs/causal4/prepare_neurometrics_ttest/{params_id}/reg_df.parquet",
+
+    wildcard_constraints:
+        params_id = NEUROMETRICS_TTEST_PARAMS_TAG
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                all_epochs=list(input.all_epochs),
+                A_behav_predictions=list(input.A_behav_predictions),
+                A_early_behav_predictions=list(input.A_early_behav_predictions),
+                phon_predictions_path=str(input.phon_predictions),
+                electrode_paths=list(input.electrode_paths),
+
+                phon_response_tmin_min=0.0,
+                all_response_tmax_max=1.3,
+
+                epoch_sfreq=config["analysis"]["epoch_sfreq"],
+                epoch_tmin=config["analysis"]["epoch_tmin"],
+
+                phon_response_peak_threshold=config["analysis"]["phon_response_peak_threshold"],
+                ambiguous_response_threshold=config["analysis"]["ambiguous_response_threshold"],
+                behav_ttest_pvalue_threshold=config["analysis"]["behav_ttest_pvalue_threshold"],
+
+                outdir=str(outdir),
+            ),
+        )
+
+
+rule A_neurometrics_ttest:
+    """
+    T-test-based companion to A_neurometrics.
+    Loads PaperData from prepare_neurometrics_ttest outputs and runs the same
+    suite of analyses with t-test-selected behavioral sites.
+    """
+    input:
+        all_epochs = expand(
+            "outputs/epochs_preprocessed/{subject}_epo.fif",
+            subject=config["data"]["subjects"]
+        ),
+        phonetic_searchlight_paths = expand(
+            "outputs/causal4/behavior_decoding_single_electrode_acoustic/{subject}/results.pt",
+            subject=config["data"]["subjects"]
+        ),
+        # Use zoomin_keys as the sentinel that prepare_neurometrics_ttest is done
+        neurometrics_sentinel = "outputs/causal4/prepare_neurometrics_ttest/{params_id}/zoomin_keys.parquet",
+        notebook = "notebooks/causal4/A_neurometrics_ttest.py",
+
+    output:
+        notebook = "outputs/causal4/A_neurometrics_ttest/{params_id}/notebook.ipynb",
+        hga_zoomin_search_keys = "outputs/causal4/A_neurometrics_ttest/{params_id}/hga_zoomin_search_keys.csv",
+        phonetic_transfer_results = "outputs/causal4/A_neurometrics_ttest/{params_id}/phonetic_transfer_extreme_results_mean.csv",
+
+    wildcard_constraints:
+        params_id = NEUROMETRICS_TTEST_PARAMS_TAG
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                all_epochs=list(input.all_epochs),
+                phonetic_searchlight_paths=list(input.phonetic_searchlight_paths),
+                neurometrics_dir=str(Path(input.neurometrics_sentinel).parent),
+                ambiguous_response_threshold=config["analysis"]["ambiguous_response_threshold"],
+                epoch_tmin=config["analysis"]["epoch_tmin"],
+                epoch_sfreq=config["analysis"]["epoch_sfreq"],
+                textgrid_dir="textgrids",
+                outdir=str(outdir),
+            ),
         )
