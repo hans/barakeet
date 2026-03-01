@@ -240,6 +240,10 @@ hga_df = pd.read_parquet(neurometrics_path / "hga_df.parquet")
 reg_df = pd.read_parquet(neurometrics_path / "reg_df.parquet")
 
 # %%
+# TODO why do we have nulls here?
+plot_phon_behav_df = plot_phon_behav_df.filter(pl.col("decoder_target").is_not_null())
+
+# %%
 paper_data = PaperData(
     electrode_df=electrode_df,
     plot_phon_phon_df=plot_phon_phon_df,
