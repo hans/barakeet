@@ -1,3 +1,100 @@
+"""
+Sliding-window decoding models for ECoG data.
+
+===========================================================================
+CHECKPOINT FILE FORMATS
+===========================================================================
+
+------------------------------------------------------------------------
+outputs/causal4/behavior_decoding_single_electrode/{subject}/results.pt
+------------------------------------------------------------------------
+Written by: notebooks/causal4/behavior_decoding_single_electrode.ipynb
+Producer:   run_decoding_model_comparison_population (this module)
+
+Load:
+    data = torch.load(path)
+
+Top-level keys:
+    "A_decoding_results", "B_decoding_results", "C_decoding_results"
+    "A_decoders",         "B_decoders",         "C_decoders"
+
+Scores (e.g. data["A_decoding_results"]):
+    dict[outer_key, pd.DataFrame]
+    outer_key = (subject: str, electrode_idx: int, phoneme_pair: str)
+    DataFrame columns (one row per fold × time-window × groupby-group):
+        subject, population (=str(electrode_idx)), phoneme_pair
+        smin, smax          – sample window bounds
+        fold                – repeat/fold index
+        word_end            – groupby value (e.g. "pb")
+        baseline_roc_auc, full_roc_auc
+        baseline_precision, full_precision
+        baseline_recall,    full_recall
+        baseline_log_loss,  full_log_loss
+        baseline_clf__C, full_clf__C           – best hparams
+        full_prep__pca__pca__n_components      – best PCA hparam (if PCA used)
+
+Estimators (e.g. data["A_decoders"]):
+    dict[outer_key, inner_dict]
+    outer_key = (subject, electrode_idx, phoneme_pair)   # same as above
+    inner_dict keys: (subject, population_name, phoneme_pair, name, smin, smax, fold)
+        name   – groupby tuple value, e.g. ("pb",)  (from groupby=["word_end"])
+        smin, smax – sample window
+        fold   – repeat index
+    inner_dict values: {
+        "electrode_idxs":   list[int],
+        "estimator":        fitted GridSearchCV (or _FixedHParamEstimator),
+        "test_predictions": pd.DataFrame with columns
+                                decoder_target, baseline_decoder_prediction,
+                                baseline_decoder_proba, full_decoder_prediction,
+                                full_decoder_proba, fold, epoch_idx
+    }
+
+Quick-access recipe:
+    key = (subject, electrode_idx, phoneme_pair)
+    # best window by full ROC-AUC:
+    df = data["A_decoding_results"][key]
+    best = df.groupby(["smin","smax","word_end"])["full_roc_auc"].mean().idxmax()
+    smin, smax, word_end = best
+    fold = 0
+    est_key = (subject, str(electrode_idx), phoneme_pair, (word_end,), smin, smax, fold)
+    estimator = data["A_decoders"][key][est_key]["estimator"]
+
+------------------------------------------------------------------------
+outputs/causal4/behavior_decoding_single_electrode_acoustic/{subject}/
+------------------------------------------------------------------------
+Written by: notebooks/causal4/behavior_decoding_single_electrode_acoustic.ipynb
+Producer:   run_decoding_searchlight_single_electrode (this module)
+
+Files saved per subject (some notebooks use .joblib, others .pt — same structure):
+    decoding_models.joblib  OR  results.pt   – fitted models (see below)
+    outcomes.parquet         – test-fold predictions
+    all_outcomes.parquet     – predictions on all relevant epochs (multiple targets)
+    train_scores.parquet, test_scores.parquet
+    avg_test_scores.csv
+
+decoding_models.joblib / results.pt (models dict):
+    import joblib; models = joblib.load(path)        # .joblib variant
+    import torch;  models = torch.load(path)         # .pt variant
+    # dict[DecoderFitKey, list[estimator]]
+    # DecoderFitKey = (subject: str, electrode_idx: int, phoneme_pair: str,
+    #                  smin: int, smax: int)
+    # list has one entry per repeat/fold (default num_repeats=5)
+
+outcomes.parquet / all_outcomes.parquet:
+    pd.read_parquet(path)
+    columns: subject, electrode_idx, phoneme_pair, smin, smax,
+             epoch_idx, fold, decoder_target, decoder_prediction, decoder_proba
+    (all_outcomes also has a "measure" level for categorical_acoustic_cue /
+     subject_specific_acoustics variants)
+
+Quick-access recipe:
+    import joblib  # or torch
+    models = joblib.load(".../decoding_models.joblib")
+    key = (subject, electrode_idx, phoneme_pair, smin, smax)
+    estimators = models[key]   # list of fitted models, one per repeat
+    proba = estimators[0].predict_proba(X)[:, 1]
+===========================================================================
+"""
 import itertools
 from typing import Literal, Optional, Protocol, TypeAlias, cast
 

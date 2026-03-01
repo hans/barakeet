@@ -61,7 +61,7 @@ def _params_tag(phon, behav, ambig):
 
 def _ttest_params_tag(phon, ambig, pval):
     """Encode ttest-based threshold triple as a filesystem-safe directory name."""
-    return f"p{int(phon * 100)}_a{ambig}_bp{int(pval * 100)}"
+    return f"p{int(phon * 100)}_a{ambig}_bp{pval:g}"
 
 
 NEUROMETRICS_TTEST_PARAMS_TAG = _ttest_params_tag(
@@ -69,7 +69,6 @@ NEUROMETRICS_TTEST_PARAMS_TAG = _ttest_params_tag(
     config["analysis"]["ambiguous_response_threshold"],
     config["analysis"]["behav_ttest_pvalue_threshold"],
 )
-
 
 NEUROMETRICS_PARAMS_GRID = {
     _params_tag(p, b, a): dict(
