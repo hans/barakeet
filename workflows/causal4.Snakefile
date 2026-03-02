@@ -817,6 +817,7 @@ rule prepare_neurometrics:
                 phon_response_peak_threshold=config["analysis"]["phon_response_peak_threshold"],
                 behav_response_peak_threshold=config["analysis"]["behav_response_peak_threshold"],
                 ambiguous_response_threshold=config["analysis"]["ambiguous_response_threshold"],
+                hga_window_source=config["analysis"]["hga_window_source"],
 
                 outdir=str(outdir),
             ),
@@ -895,6 +896,7 @@ rule prepare_neurometrics_sweep:
                 phon_response_peak_threshold=params["phon_response_peak_threshold"],
                 behav_response_peak_threshold=params["behav_response_peak_threshold"],
                 ambiguous_response_threshold=params["ambiguous_response_threshold"],
+                hga_window_source=config["analysis"]["hga_window_source"],
 
                 outdir=str(outdir),
             ),
