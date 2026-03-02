@@ -340,7 +340,23 @@ electrode_distribution_df = (
 electrode_distribution_df
 
 # %%
-electrode_distribution_df[["phonetic_selective", "behavior_selective"]].sum()
+summary_distribution = electrode_distribution_df[["phonetic_selective", "behavior_selective"]].sum()
+
+non_behavior_of_phonetic = (summary_distribution["phonetic_selective"] - summary_distribution["behavior_selective"]).sum() / summary_distribution["phonetic_selective"].sum()
+behavior_of_phonetic = summary_distribution["behavior_selective"].sum() / summary_distribution["phonetic_selective"].sum()
+
+# stackplot
+f, ax = plt.subplots(figsize=(2, 0.3))
+plot_palette = sns.color_palette(categorical_palette, 2)
+ax.barh(0, behavior_of_phonetic, left=0,
+        color=plot_palette[1], label="Behavior-selective")
+ax.barh(0, non_behavior_of_phonetic, left=behavior_of_phonetic,
+        color=plot_palette[0], label="Phonetic-selective\nonly")
+sns.despine(ax=ax, left=True, bottom=True)
+ax.set_yticks([])
+ax.xaxis.set_major_formatter(mtick.PercentFormatter(xmax=1.0))
+
+f.savefig(Path(outdir) / "phonetic_behavior_selective_stackbar.pdf", transparent=True)
 
 # %%
 fig, ax = plt.subplots(figsize=(1.8, 2.2))
@@ -726,7 +742,7 @@ print(
     f"t={ttest_t:.3f}, p={ttest_p:g}"
 )
 
-fig, ax = plt.subplots(figsize=(2.75, 2.75))
+fig, ax = plt.subplots(figsize=(3, 2.75))
 
 # Draw individual subject lines (3 points: early, baseline, late)
 for _, row in subject_means.iterrows():
@@ -775,7 +791,21 @@ ax.text(
 ax.set_xticks([0, 1])
 ax.set_xticklabels(["Acoustic\nwindow", "Perceptual\nwindow"])
 ax.set_xlabel("Evaluation")
-ax.set_ylabel("Acoustic prediction\n(ROC-AUC)")
+ax.set_ylabel("Acoustic\nprediction\n(ROC-AUC)", rotation=0, labelpad=40,
+              va="top")
+ax.yaxis.label.set_position((1, 1.0))
+ax.annotate(
+    "/n/ vs. /d/",
+    xy=(0.5, 0.0),
+    xycoords=ax.yaxis.label,
+    xytext=(0, -12),
+    textcoords="offset points",
+    ha="center",
+    va="top",
+    fontsize=10,
+    color="#666666",
+)
+
 ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: "{:.0%}".format(y)))
 ax.axhline(0.5, color="k", linestyle="--", alpha=0.3)
 ax.set_xlim(-0.3, 1.3)
@@ -1017,7 +1047,7 @@ t_early_vs_late, p_early_vs_late = stats.ttest_rel(
 print(f"Late vs early: t={t_early_vs_late:.3f}, p={p_early_vs_late:g}")
 
 
-fig, ax = plt.subplots(figsize=(2.75, 2.75))
+fig, ax = plt.subplots(figsize=(3, 2.75))
 
 # Draw individual subject lines
 for _, row in subject_means.iterrows():
@@ -1082,9 +1112,24 @@ ax.text(
 ax.set_xticks([0, 1])
 ax.set_xticklabels(["Acoustic\nwindow", "Perceptual\nwindow"])
 ax.set_xlabel("Evaluation")
-ax.set_ylabel("Perceptual prediction\n($\Delta$ROC-AUC)", labelpad=5)
+ax.set_ylabel("Perceptual\nprediction\n($\Delta$ROC-AUC)", rotation=0, labelpad=40)
+
 # put ylabel on right side
+ax.yaxis.label.set_position((1, 1.0))
 ax.yaxis.set_label_position("right")
+
+ax.annotate(
+    "heard /n/\nvs.\nheard /d/",
+    xy=(0.5, 0.0),
+    xycoords=ax.yaxis.label,
+    xytext=(0, -12),
+    textcoords="offset points",
+    ha="center",
+    va="top",
+    fontsize=10,
+    color="#666666",
+)
+
 ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: "{:.0%}".format(y)))
 ax.axhline(0, color="k", linestyle="--", alpha=0.3)
 ax.set_xlim(-0.3, 1.3)
@@ -1536,7 +1581,7 @@ behav_on_phon_mean.write_csv(Path(outdir) / "transfer-behavioral_decoder_on_phon
 
 # %%
 # spaghetti plot: acoustic in-window vs perceptual (behavioral) decoder on acoustic window
-fig, ax = plt.subplots(figsize=(2, 2.5))
+fig, ax = plt.subplots(figsize=(3, 2.5))
 colors = sns.color_palette(categorical_palette, 2)
 x0, x1 = 0, 1
 
@@ -1732,7 +1777,7 @@ print(
     f"t={t_2:.3f}, p={p_2:g}"
 )
 
-fig, ax = plt.subplots(figsize=(2, 2.5))
+fig, ax = plt.subplots(figsize=(3, 2.5))
 colors = sns.color_palette(categorical_palette, 2)
 x0, x1 = 0, 1
 
@@ -2046,7 +2091,7 @@ plot_behav_barplot(
 plt.gcf().savefig(Path(outdir) / "behav_barplot_EC278_dn_necessary.pdf")
 
 # %% [markdown]
-# ## Exploratory: polarity relationships
+# ## Polarity relationships
 
 # %%
 early_polarity_strict = early_polarity.reset_index()
@@ -2057,6 +2102,9 @@ late_polarity_strict["lexical_evidence"] = (
     late_polarity_strict.word_end.str[0] == late_polarity_strict.phoneme_pair.str[1]
 ).astype(int)
 
+
+# %% [markdown]
+# ### Acoustic tuning vs. presence of perceptual response
 
 # %%
 def plot_summary_acoustic_vs_presence_of_response(phoneme_pair: str):
@@ -2283,6 +2331,120 @@ f.savefig(Path(outdir) / "early_polarity-late_response_stackplot.pdf")
 # %%
 plot_summary_acoustic_vs_presence_of_response_stackplot("dn")
 None
+
+# %% [markdown]
+# ### Presence of preceptual response vs. perceptual tuning
+
+# %%
+late_polarity_strict.groupby("phoneme_pair")[["lexical_evidence", "late_polarity"]].value_counts().unstack("late_polarity").fillna(0).astype(int)
+
+# %%
+late_polarity_strict[["lexical_evidence", "late_polarity"]].value_counts().unstack("late_polarity").fillna(0).astype(int)
+
+
+# %%
+def plot_summary_perceptual_vs_presence_of_response_stackplot(
+    phoneme_pair=None, ax=None, palette="Set2"
+):
+    if phoneme_pair is None:
+        # use these labels w.l.o.g.
+        phoneme_pair_label = "dn"
+        completion_1, completion_2 = "-esolate", "-ecessary"
+        early_polarity_strict__ = early_polarity_strict
+        late_polarity_strict__ = late_polarity_strict
+    else:
+        phoneme_pair_label = phoneme_pair
+        completion_1, completion_2 = [
+            f"-{w[1:]}" for w in PHONEME_PAIR_TO_WORD_ENDS[phoneme_pair]
+        ]
+        early_polarity_strict__ = early_polarity_strict.query(
+            "phoneme_pair == @phoneme_pair"
+        )
+        late_polarity_strict__ = late_polarity_strict.query(
+            "phoneme_pair == @phoneme_pair"
+        )
+
+    df = (
+        late_polarity_strict__
+        [["lexical_evidence", "late_polarity"]]
+        .value_counts().unstack("late_polarity")
+        .fillna(0).astype(int)
+    )
+
+    df.index = df.index.map({0: completion_1, 1: completion_2})
+    df.columns = df.columns.map({-1: phoneme_pair_label[0], 1: phoneme_pair_label[1]})
+    df = df[list(phoneme_pair_label)]
+    # # map to readable columns
+    # column_order = [completion_1, completion_2, "Both"]
+    # df.columns = df.columns.map(
+    #     dict(zip([(True, False), (False, True), (True, True)], column_order))
+    # )
+    # df = df[column_order]
+
+    # Chi-square test on one-sided responses only
+    # Create 2x2 contingency table: acoustic (rows) x perceptual completion (columns)
+    chi2_table = df.values
+    from scipy.stats import chi2_contingency
+    chi2, p_value, dof, expected = chi2_contingency(chi2_table)
+    print(chi2, p_value)
+    sig_stars = p_to_stars(p_value)
+
+    df_pct = df.div(df.sum(axis=1), axis=0) * 100
+
+    if ax is None:
+        f, ax = plt.subplots(figsize=(1.3, 2))
+    else:
+        f = ax.get_figure()
+
+    df_pct.plot(
+        kind="bar",
+        stacked=True,
+        color=sns.color_palette(palette, n_colors=3),
+        ax=ax,
+        width=0.5,
+    )
+    sns.despine(ax=ax)
+    legend = ax.legend(
+        loc="upper right", bbox_to_anchor=(2.3, 1), title="Perceptual\nresponse"
+    )
+    plt.setp(legend.get_title(), multialignment="center")
+    ax.set_xlabel("Perceptual response")
+    ax.set_ylabel(None)
+    ax.set_xticks(range(len(df_pct.index)))
+    ax.set_xticklabels(df_pct.index, rotation=0)
+    ax.set_ylim(0, 100)
+    ax.yaxis.set_major_formatter(mtick.PercentFormatter())
+    ax.axhline(50, color="red", linestyle="--")
+
+    # bracket_y, tick_h = 1.10, 0.03
+    # trans = blended_transform_factory(ax.transData, ax.transAxes)
+    # ax.plot(
+    #     [0, 0, 1, 1],
+    #     [bracket_y - tick_h, bracket_y, bracket_y, bracket_y - tick_h],
+    #     color="black",
+    #     linewidth=1.0,
+    #     transform=trans,
+    #     clip_on=False,
+    # )
+    # ax.text(
+    #     0.5,
+    #     bracket_y + 0.01,
+    #     sig_stars,
+    #     ha="center",
+    #     va="bottom",
+    #     fontsize=11,
+    #     transform=trans,
+    # )
+
+    return f
+
+
+# %%
+plot_summary_perceptual_vs_presence_of_response_stackplot()
+None
+
+# %% [markdown]
+# ### Acoustic tuning vs perceptual tuning
 
 # %%
 preference_relationship_df = (
@@ -2649,6 +2811,106 @@ print(
 unambig_late_df.to_csv(Path(outdir) / "unambig_late_df.csv", index=False)
 unambig_late_df
 
+# %%
+# Polarity vs. late unambig or late all
+
+polarity_vs_unambig_late_df = pd.merge(
+    early_polarity_strict,
+    unambig_late_df[["subject", "electrode_idx", "phoneme_pair", "word_end", "late_on_unambig"]],
+    on=["subject", "electrode_idx", "phoneme_pair", "word_end"],
+    how="inner",
+).pipe(
+    lambda df: df.assign(
+        early_selectivity=df.early_polarity.map({-1: "d", 1: "n"}),
+    )
+).groupby("early_selectivity")["late_on_unambig"].value_counts().unstack().fillna(0)
+polarity_vs_unambig_late_df.columns = polarity_vs_unambig_late_df.columns.map(
+    {False: "Unambig.\nsounds", True: "Unambig.\nand ambig.\nsounds"}
+)
+
+# chi2 test
+chi2, p_value, dof, expected = chi2_contingency(polarity_vs_unambig_late_df.values)
+print(f"Chi-square test: chi2={chi2:.3f}, p={p_value:.4e}")
+sig_stars = p_to_stars(p_value)
+
+polarity_vs_unambig_late_df = polarity_vs_unambig_late_df.div(polarity_vs_unambig_late_df.sum(axis=1), axis=0) * 100
+
+f, ax = plt.subplots(figsize=(1.3, 2))
+polarity_vs_unambig_late_df.plot(
+    kind="bar",
+    stacked=True,
+    width=0.5,
+    color=sns.color_palette("Set2", n_colors=2),
+    ax=ax,
+)
+
+bracket_y, tick_h = 1.10, 0.03
+trans = blended_transform_factory(ax.transData, ax.transAxes)
+ax.plot(
+    [0, 0, 1, 1],
+    [bracket_y - tick_h, bracket_y, bracket_y, bracket_y - tick_h],
+    color="black",
+    linewidth=1.0,
+    transform=trans,
+    clip_on=False,
+)
+ax.text(
+    0.5,
+    bracket_y + 0.01,
+    sig_stars,
+    ha="center",
+    va="bottom",
+    fontsize=11,
+    transform=trans,
+)
+
+plt.xlabel("Acoustic tuning", fontsize=12)
+plt.ylabel(None)
+ax.set_xticklabels(ax.get_xticklabels(), rotation=0)
+plt.ylim(0, 100)
+ax.yaxis.set_major_formatter(mtick.PercentFormatter())
+ax.legend(title="Perceptual\nresponse", loc="upper right", bbox_to_anchor=(2.45, 1))
+sns.despine(ax=ax)
+
+f.savefig(Path(outdir) / "early_polarity-late_unambig_response_stackbar.pdf")
+
+# %%
+# Late polarity vs. late unambig or late all
+
+late_polarity_vs_unambig_late_df = pd.merge(
+    late_polarity_strict,
+    unambig_late_df[["subject", "electrode_idx", "phoneme_pair", "word_end", "late_on_unambig"]],
+    on=["subject", "electrode_idx", "phoneme_pair", "word_end"],
+    how="inner",
+).pipe(
+    lambda df: df.assign(
+        late_selectivity=df.late_polarity.map({-1: "d", 1: "n"}),
+    )
+).groupby("late_selectivity")["late_on_unambig"].value_counts().unstack().fillna(0)
+late_polarity_vs_unambig_late_df.columns = late_polarity_vs_unambig_late_df.columns.map(
+    {False: "Unambig.\nsounds", True: "Unambig.\nand ambig.\nsounds"}
+)
+late_polarity_vs_unambig_late_df = late_polarity_vs_unambig_late_df.div(late_polarity_vs_unambig_late_df.sum(axis=1), axis=0) * 100
+
+f, ax = plt.subplots(figsize=(1.3, 2))
+late_polarity_vs_unambig_late_df.plot(
+    kind="bar",
+    stacked=True,
+    width=0.5,
+    color=sns.color_palette("Set2", n_colors=2),
+    ax=ax,
+)
+
+plt.xlabel("Perceptual tuning", fontsize=12)
+plt.ylabel(None)
+ax.set_xticklabels(ax.get_xticklabels(), rotation=0)
+plt.ylim(0, 100)
+ax.yaxis.set_major_formatter(mtick.PercentFormatter())
+ax.legend(title="Perceptual\nresponse", loc="upper right", bbox_to_anchor=(2.45, 1))
+sns.despine(ax=ax)
+
+f.savefig(Path(outdir) / "late_polarity-late_unambig_response_stackbar.pdf")
+
 # %% [markdown]
 # ## Perceptual contrast on unambiguous trials, split by late-response generalization
 #
@@ -2770,7 +3032,7 @@ plot_xlim = (0, 1.2)
 
 plot_unambig = paper_data.plot_phon_phon_df.filter(
     pl.col("resampled").is_in([1.0, 6.0]),
-    pl.col("word_end").is_in(plot_word_ends),
+    # pl.col("word_end").is_in(plot_word_ends),
     pl.col("follows_acoustics") == True,
 )
 plot_generalize = plot_unambig.join(
@@ -2837,6 +3099,80 @@ f.savefig(Path(outdir) / "perceptual_contrast_unambig_split-both.pdf")
 
 # %%
 # Behavioral contrast on electrodes with vs without late unambiguous response,
+# plotted on the UNambiguous trials, with early polarity correction (so you can see the phon effect)
+
+plot_word_ends = ["necessary", "desolate"]
+plot_xlim = (0, 1.2)
+
+plot_unambig = paper_data.plot_phon_phon_df.filter(
+    pl.col("resampled").is_in([1.0, 6.0]),
+    # pl.col("word_end").is_in(plot_word_ends),
+    pl.col("follows_acoustics") == True,
+)
+plot_generalize = plot_unambig.join(
+    unambig_late_pl.filter(pl.col("late_on_unambig")), on=site_cols, how="inner"
+)
+plot_specific = plot_unambig.join(
+    unambig_late_pl.filter(~pl.col("late_on_unambig")), on=site_cols, how="inner"
+)
+
+n_generalize = plot_generalize.select(site_cols).unique().height
+n_specific = plot_specific.select(site_cols).unique().height
+
+f, ax = plt.subplots(figsize=(3, 2))
+plot_palette = sns.color_palette("Set1", 2)
+pval_thresholds = (0.001, 0.01)
+
+_, p_handles, p_labels = plot_condition_contrast(
+    plot_generalize,
+    "behavior_dummy_forced",
+    data=paper_data,
+    textgrid_dir=textgrid_dir,
+    polarity_correct="early",
+    epoch_data_cache=pcc_epoch_data_cache,
+    ax=ax,
+    color=plot_palette[0],
+    annotate=True,
+    textgrid_kwargs=dict(include_phonemes=False, include_offset=False),
+    label=f"Generalizes (n={n_generalize})",
+    pval_thresholds=pval_thresholds,
+)
+plot_condition_contrast(
+    plot_specific,
+    "behavior_dummy_forced",
+    data=paper_data,
+    textgrid_dir=textgrid_dir,
+    polarity_correct="early",
+    epoch_data_cache=pcc_epoch_data_cache,
+    ax=ax,
+    color=plot_palette[1],
+    annotate=False,
+    label=f"Ambig-only (n={n_specific})",
+    ttest_bar_y_ratio=0.87,
+    pval_thresholds=pval_thresholds,
+)
+
+ax.set_xlim(*plot_xlim)
+ax.set_ylabel("HGA effect size ($z$)")
+ax.set_xlabel("Time from word onset (s)")
+
+if p_handles is not None:
+    handles, labels = ax.get_legend_handles_labels()
+    handles += p_handles
+    labels += p_labels
+    ax.legend(
+        handles=handles,
+        labels=labels,
+        handler_map={Rectangle: HandlerRectangle()},
+        fontsize=8,
+        loc="upper right",
+        bbox_to_anchor=(1.3, 1.0),
+    )
+
+f.savefig(Path(outdir) / "perceptual_contrast_unambig_split-both-early_polarity_correction.pdf")
+
+# %%
+# Behavioral contrast on electrodes with vs without late unambiguous response,
 # plotted on the ambiguous trials
 
 plot_word_ends = ["necessary", "desolate"]
@@ -2844,7 +3180,7 @@ plot_xlim = (0, 1.2)
 
 plot_unambig = paper_data.plot_phon_phon_df.filter(
     ~pl.col("resampled").is_in([1.0, 6.0]),
-    pl.col("word_end").is_in(plot_word_ends),
+    # pl.col("word_end").is_in(plot_word_ends),
 )
 plot_generalize = plot_unambig.join(
     unambig_late_pl.filter(pl.col("late_on_unambig")), on=site_cols, how="inner"
