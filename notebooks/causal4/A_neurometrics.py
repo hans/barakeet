@@ -66,6 +66,7 @@ matplotlib.rcParams.update(
 from src.data import add_metadata_features
 from src.stimuli import (
     PHONEME_PAIR_TO_WORD_ENDS,
+    WORD_END_TO_PHONEME_PAIR,
 )
 from src.viz_paper import (
     HandlerRectangle,
@@ -95,7 +96,7 @@ phonetic_searchlight_paths = list(
     Path("outputs/causal4/behavior_decoding_single_electrode_acoustic/").glob("*")
 )
 
-neurometrics_dir = "outputs/causal4/prepare_neurometrics/p55_b5_a2"
+neurometrics_dir = "outputs/causal4/prepare_neurometrics/p65_b5_a3"
 
 epoch_tmin = -0.4
 epoch_sfreq = 100
@@ -337,6 +338,9 @@ electrode_distribution_df = (
     .sort("total_electrodes", descending=True)
 ).to_pandas()
 electrode_distribution_df
+
+# %%
+electrode_distribution_df[["phonetic_selective", "behavior_selective"]].sum()
 
 # %%
 fig, ax = plt.subplots(figsize=(1.8, 2.2))
@@ -1137,10 +1141,7 @@ for ax in g.axes.flat:
     ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: "{:.0%}".format(x)))
 
 # %% [markdown]
-# ### Cross-window transfer, no training
-
-# %% [markdown]
-# #### Transfer on phonetic target
+# ### Cross-window phonetic transfer, no training
 
 # %%
 early_to_late_transfer_keys = (
@@ -1394,9 +1395,6 @@ phonetic_transfer_extreme_results = (
 )
 
 # %%
-phonetic_transfer_extreme_results
-
-# %%
 # mean over folds
 phonetic_transfer_results_mean = phonetic_transfer_results.group_by(
     ["subject", "electrode_idx", "phoneme_pair"]
@@ -1420,11 +1418,6 @@ phonetic_transfer_extreme_results_mean = phonetic_transfer_extreme_results.group
     pl.mean("early_to_late_normalized_roc_auc"),
     pl.mean("late_to_early_normalized_roc_auc"),
     pl.mean("early_transfer_effect"),
-)
-
-# %%
-phonetic_transfer_extreme_results_mean.to_pandas().to_csv(
-    Path(outdir) / "phonetic_transfer_extreme_results_mean.csv", index=False
 )
 
 # %%
@@ -1467,6 +1460,7 @@ for key in tqdm(
     outcomes_i = evaluate_behav_decoder_on_phon_window(
         data=paper_data,
         behavioral_decoder_checkpoints=behavioral_decoder_checkpoints,
+        phonetic_decoder_checkpoints=phonetic_decoder_checkpoints,
         t_subject=key["subject"],
         t_electrode_idx=key["electrode_idx"],
         t_phoneme_pair=key["phoneme_pair"],
@@ -1518,6 +1512,8 @@ behav_on_phon_mean = behav_on_phon_comparison_df.group_by(
 ).agg(
     pl.mean("behav_decoder_phon_roc_auc"),
     pl.mean("in_window_phon_roc_auc"),
+).with_columns(
+    (pl.col("behav_decoder_phon_roc_auc") - pl.col("in_window_phon_roc_auc")).alias("roc_auc_diff")
 )
 
 subject_means_phon_transfer = (
@@ -1536,6 +1532,7 @@ print(
     f"Phonetic transfer — acoustic decoding: in-window vs perceptual decoder transfer: "
     f"t={t_phon:.3f}, p={p_phon:g}"
 )
+behav_on_phon_mean.write_csv(Path(outdir) / "transfer-behavioral_decoder_on_phonetic_window.csv")
 
 # %%
 # spaghetti plot: acoustic in-window vs perceptual (behavioral) decoder on acoustic window
@@ -1544,7 +1541,7 @@ colors = sns.color_palette(categorical_palette, 2)
 x0, x1 = 0, 1
 
 in_col = "Acoustic\nwindow"
-transfer_col = "Acoustic window\n(perceptual\ndecoder)"
+transfer_col = "Acoustic window\n(perceptual decoder)"
 
 df_wide = (
     behav_on_phon_mean.rename(
@@ -1607,6 +1604,7 @@ ax.text(
     transform=trans,
 )
 
+ax.set_ylim(0.025, 1)
 ax.axhline(0.5, color="red", linestyle="--", linewidth=1)
 ax.set_xticks([x0, x1])
 ax.set_xticklabels([in_col, transfer_col])
@@ -1615,12 +1613,21 @@ ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: "{:.0%}".format(y)))
 sns.despine(ax=ax)
 fig.savefig(Path(outdir) / "decoding_acoustic_transfer-roc_auc.pdf")
 
-# %% [markdown]
-# #### Behavioral transfer analysis
+# %%
+g = sns.displot(
+    data=behav_on_phon_mean.to_pandas(), x="roc_auc_diff", height=1.5, aspect=1.5,
+    bins=10, color="gray", edgecolor="black", alpha=0.3
+)
+g.set_axis_labels("$\Delta$ROC-AUC", "")
+g.axes[0, 0].xaxis.set_major_formatter(mtick.PercentFormatter(xmax=1.0))
+g.axes[0, 0].axvline(0, color="red", linestyle="--")
+g.savefig(Path(outdir) / "decoding_acoustic_transfer-roc_auc_diff_dist.pdf",
+          transparent=True)
 
 # %% [markdown]
-# ##### Acoustic decoder → behavioral window → behavioral target
-#
+# ### Cross-window behavioral transfer, no training
+
+# %% [markdown]
 # Apply the acoustic decoder (trained on acoustic target at the acoustic peak)
 # to behavioral-window neural data, evaluated against the behavioral target.
 # Ask: does the learned acoustic representation in the early window generalize to the perceptual representation in the later window?
@@ -1633,6 +1640,7 @@ for key in tqdm(
     outcomes_i = evaluate_phon_decoder_on_behav_window(
         data=paper_data,
         phonetic_decoder_checkpoints=phonetic_decoder_checkpoints,
+        behavioral_decoder_checkpoints=behavioral_decoder_checkpoints,
         t_subject=key["subject"],
         t_electrode_idx=key["electrode_idx"],
         t_phoneme_pair=key["phoneme_pair"],
@@ -1682,9 +1690,6 @@ phon_on_behav_comparison_df = (
 )
 
 # %%
-phon_on_behav_comparison_df
-
-# %%
 # Mean over folds
 phon_on_behav_mean = (
     phon_on_behav_comparison_df.with_columns(
@@ -1706,7 +1711,11 @@ phon_on_behav_mean = (
         pl.mean("phon_decoder_behav_roc_auc_improvement"),
         pl.mean("in_window_behav_roc_auc_improvement"),
     )
+    .with_columns(
+        (pl.col("phon_decoder_behav_roc_auc") - pl.col("in_window_behav_roc_auc")).alias("roc_auc_diff")
+    )
 )
+phon_on_behav_mean.write_csv(Path(outdir) / "transfer-phonetic_decoder_on_behav_window.csv")
 
 subject_means_2 = (
     phon_on_behav_mean.group_by("subject")
@@ -1797,6 +1806,7 @@ ax.text(
     transform=trans,
 )
 
+ax.set_ylim(0.025, 1)
 ax.axhline(0.5, color="red", linestyle="--", linewidth=1)
 ax.set_xticks([x0, x1])
 ax.set_xticklabels([in_col_2, transfer_col_2])
@@ -1806,6 +1816,17 @@ ax.yaxis.set_label_position("right")
 ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: "{:.0%}".format(y)))
 sns.despine(ax=ax, left=True, top=True, right=False)
 fig.savefig(Path(outdir) / "decoding_phon_decoder_on_behav_window.pdf")
+
+# %%
+g = sns.displot(
+    data=phon_on_behav_mean.to_pandas(), x="roc_auc_diff", height=1.5, aspect=1.5,
+    bins=10, color="gray", alpha=0.3
+)
+g.set_axis_labels("$\Delta$ROC-AUC", "")
+g.axes[0, 0].xaxis.set_major_formatter(mtick.PercentFormatter(xmax=1.0))
+g.axes[0, 0].axvline(0, color="red", linestyle="--")
+g.savefig(Path(outdir) / "decoding_phon_on_behav-roc_auc_diff_dist.pdf",
+          transparent=True)
 
 # %% [markdown]
 # ## Zoomin
@@ -1991,7 +2012,7 @@ plot_condition_contrasts_single_figure(
     textgrid_kwargs=dict(
         include_offset=False, include_phonemes=False, vline_extent=1.0
     ),
-    pval_thresholds=(0.00001, 0.0001, 0.001),
+    pval_thresholds=(0.00001,),
 )
 plt.gcf().savefig(Path(outdir) / "condition_contrasts-both.pdf")
 None
@@ -2198,18 +2219,18 @@ def plot_summary_acoustic_vs_presence_of_response_stackplot(
     )
     df = df[column_order]
 
-    # # Chi-square test on one-sided responses only
-    # # Create 2x2 contingency table: acoustic (rows) x perceptual completion (columns)
-    # chi2_table = df.values#[[completion_1, completion_2]].values
-    # from scipy.stats import chi2_contingency
-    # chi2, p_value, dof, expected = chi2_contingency(chi2_table)
-    # print(chi2, p_value)
-    # sig_stars = p_to_stars(p_value)
+    # Chi-square test on one-sided responses only
+    # Create 2x2 contingency table: acoustic (rows) x perceptual completion (columns)
+    chi2_table = df.values#[[completion_1, completion_2]].values
+    from scipy.stats import chi2_contingency
+    chi2, p_value, dof, expected = chi2_contingency(chi2_table)
+    print(chi2, p_value)
+    sig_stars = p_to_stars(p_value)
 
     df_pct = df.div(df.sum(axis=1), axis=0) * 100
 
     if ax is None:
-        f, ax = plt.subplots(figsize=(2.25, 2))
+        f, ax = plt.subplots(figsize=(1.3, 2))
     else:
         f = ax.get_figure()
 
@@ -2218,23 +2239,39 @@ def plot_summary_acoustic_vs_presence_of_response_stackplot(
         stacked=True,
         color=sns.color_palette(palette, n_colors=3),
         ax=ax,
-        width=0.7,
+        width=0.5,
     )
     sns.despine(ax=ax)
     legend = ax.legend(
-        loc="upper right", bbox_to_anchor=(1.75, 1), title="Perceptual\nresponse"
+        loc="upper right", bbox_to_anchor=(2.3, 1), title="Perceptual\nresponse"
     )
     plt.setp(legend.get_title(), multialignment="center")
-    ax.set_xlabel("Acoustic preference")
+    ax.set_xlabel("Acoustic tuning")
     ax.set_ylabel(None)
     ax.set_xticks(range(len(df_pct.index)))
     ax.set_xticklabels(df_pct.index, rotation=0)
     ax.set_ylim(0, 100)
     ax.yaxis.set_major_formatter(mtick.PercentFormatter())
 
-    # # Add significance annotation
-    # ax.text(0.5, 0.9, sig_stars, ha='center', va='bottom',
-    #         fontsize=14, transform=ax.transAxes)
+    bracket_y, tick_h = 1.10, 0.03
+    trans = blended_transform_factory(ax.transData, ax.transAxes)
+    ax.plot(
+        [0, 0, 1, 1],
+        [bracket_y - tick_h, bracket_y, bracket_y, bracket_y - tick_h],
+        color="black",
+        linewidth=1.0,
+        transform=trans,
+        clip_on=False,
+    )
+    ax.text(
+        0.5,
+        bracket_y + 0.01,
+        sig_stars,
+        ha="center",
+        va="bottom",
+        fontsize=11,
+        transform=trans,
+    )
 
     return f
 
@@ -2336,7 +2373,7 @@ print(f"Significant at alpha=0.05: {'Yes' if test.pvalue < 0.05 else 'No'}")
 # %%
 from scipy.stats import chi2_contingency
 
-chi2_contingency(preference_relationship_df)
+
 
 # %%
 preference_relationship_pct_df = (
@@ -2346,29 +2383,192 @@ preference_relationship_pct_df
 
 # %%
 # Stacked bar chart form
-f, ax = plt.subplots(figsize=(2.25, 2))
+f, ax = plt.subplots(figsize=(1.3, 2))
 (
     preference_relationship_pct_df.plot(
         kind="bar",
         stacked=True,
-        width=0.7,
+        width=0.5,
         color=sns.color_palette("Set2", n_colors=2),
         ax=ax,
     )
 )
 
+# chi2 test
+chi2, p_value, dof, expected = chi2_contingency(preference_relationship_df.values)
+print(f"Chi-square test: chi2={chi2:.3f}, p={p_value:.4e}")
+sig_stars = p_to_stars(p_value)
+
+bracket_y, tick_h = 1.10, 0.03
+trans = blended_transform_factory(ax.transData, ax.transAxes)
+ax.plot(
+    [0, 0, 1, 1],
+    [bracket_y - tick_h, bracket_y, bracket_y, bracket_y - tick_h],
+    color="black",
+    linewidth=1.0,
+    transform=trans,
+    clip_on=False,
+)
+ax.text(
+    0.5,
+    bracket_y + 0.01,
+    sig_stars,
+    ha="center",
+    va="bottom",
+    fontsize=11,
+    transform=trans,
+)
+
 # Add 50% chance line
 plt.axhline(y=50, color="black", linestyle="--", linewidth=1, alpha=0.5)
 
-plt.xlabel("Acoustic preference", fontsize=12)
+plt.xlabel("Acoustic tuning", fontsize=12)
 plt.ylabel(None)
 ax.set_xticklabels(ax.get_xticklabels(), rotation=0)
 plt.ylim(0, 100)
 ax.yaxis.set_major_formatter(mtick.PercentFormatter())
-ax.legend(title="Perceptual\npreference", loc="upper right", bbox_to_anchor=(1.6, 1))
+ax.legend(title="Perceptual\ntuning", loc="upper right", bbox_to_anchor=(2.1, 1))
 sns.despine(ax=ax)
 
 f.savefig(Path(outdir) / "early_polarity-late_polarity_stackbar.pdf")
+
+# %% [markdown]
+# ### Compare congruency analysis vs. decoder analysis
+#
+# Consistent results would make sense here -- sites with congruent acoustic and perceptual responses should be more likely to have a shared representation that supports cross-window transfer. Let's check that.
+
+# %%
+transfer_congruency_df = (
+    late_polarity_strict.drop_duplicates(
+        ["subject", "electrode_idx", "phoneme_pair", "word_end"]
+    )
+    .drop(columns=["lexical_evidence"])
+    .merge(
+        early_polarity_strict.drop_duplicates(),
+        on=["subject", "electrode_idx", "phoneme_pair", "word_end"],
+    )
+    .merge(
+        phon_on_behav_mean.to_pandas(),
+        on=["subject", "electrode_idx", "phoneme_pair", "word_end"],
+        how="left",
+    )
+    .merge(
+        behav_on_phon_mean.to_pandas(),
+        on=["subject", "electrode_idx", "phoneme_pair", "word_end"],
+        how="left",
+    )
+
+    # merge in facts about decoder timing as well
+    .merge(
+        behav_peaks_df.to_pandas()[["subject", "electrode_idx", "phoneme_pair", "word_end", "smin", "smax", "behav_roc_auc_improvement"]]
+        .rename(columns={"smin": "smin_behav", "smax": "smax_behav"}),
+        on=["subject", "electrode_idx", "phoneme_pair", "word_end"],
+    ).merge(
+        phon_peaks_df.to_pandas()[["subject", "electrode_idx", "phoneme_pair", "smin", "smax", "phon_roc_auc"]]
+        .rename(columns={"smin": "smin_phon", "smax": "smax_phon"}),
+        on=["subject", "electrode_idx", "phoneme_pair"],
+    )
+)
+transfer_congruency_df["behav_transfer_effect"] = transfer_congruency_df["behav_decoder_phon_roc_auc"] - transfer_congruency_df["in_window_phon_roc_auc"]
+transfer_congruency_df["phon_transfer_effect"] = transfer_congruency_df["phon_decoder_behav_roc_auc"] - transfer_congruency_df["in_window_behav_roc_auc"]
+transfer_congruency_df["congruent"] = transfer_congruency_df.early_polarity == transfer_congruency_df.late_polarity
+
+transfer_congruency_df["tmin_phon"] = transfer_congruency_df.smin_phon / epoch_sfreq + epoch_tmin
+transfer_congruency_df["tmax_phon"] = transfer_congruency_df.smax_phon / epoch_sfreq + epoch_tmin
+transfer_congruency_df["tmin_behav"] = transfer_congruency_df.smin_behav / epoch_sfreq + epoch_tmin
+transfer_congruency_df["tmax_behav"] = transfer_congruency_df.smax_behav / epoch_sfreq + epoch_tmin
+
+# %%
+sns.catplot(data=transfer_congruency_df, x="congruent", y="phon_transfer_effect", kind="box")
+
+# %%
+transfer_congruency_df.query("phoneme_pair == 'dn'").sort_values("behav_transfer_effect")
+
+# %%
+ambig_steps = paper_data.get_ambiguous_resampled_steps(3)
+
+
+# %%
+def plot_for_congruency(transfer_row):
+    plot_subject = transfer_row.subject
+    plot_electrode_idx = transfer_row.electrode_idx
+    plot_phoneme_pair = transfer_row.phoneme_pair
+    plot_word_end = transfer_row.word_end
+
+    f = zoomin_hga(
+        paper_data,
+        plot_subject,
+        plot_electrode_idx,
+        plot_phoneme_pair,
+        plot_word_end,
+        controlled_resampled_steps=ambig_steps[plot_subject, plot_phoneme_pair, plot_word_end],
+        textgrid_dir=textgrid_dir,
+    )
+
+    # highlight behav and acoustic windows
+    f.axes[0].axvspan(
+        transfer_row.tmin_phon,
+        transfer_row.tmax_phon,
+        color="blue",
+        alpha=0.3,)
+
+    f.axes[1].axvspan(
+        transfer_row.tmin_behav,
+        transfer_row.tmax_behav,
+        color="orange",
+        alpha=0.3,)
+
+    return f
+
+
+# %%
+explo_plots = transfer_congruency_df.query("phoneme_pair == 'dn'").sort_values("behav_transfer_effect")
+
+# write to pdfpages
+from matplotlib.backends.backend_pdf import PdfPages
+pdf = PdfPages(Path(outdir) / "congruency_exploration.pdf")
+
+def add_title_page(pdf, title: str):
+    fig, ax = plt.subplots(figsize=(8.5, 11))
+    ax.text(0.5, 0.5, title, ha="center", va="center", fontsize=24)
+    ax.axis("off")
+    pdf.savefig(fig)
+    plt.close(fig)
+
+with pdf:
+    for congruent, rows in explo_plots.groupby("congruent"):
+        # write title page
+        add_title_page(pdf, f"Congruent: {congruent}, worst transfer")
+        for _, row in rows.head(5).iterrows():
+            print(row[["subject", "electrode_idx", "phoneme_pair", "word_end", "behav_transfer_effect", "phon_transfer_effect"]])
+            f = plot_for_congruency(row)
+            f.suptitle(
+                f"Subject {row.subject}, Electrode {row.electrode_idx}, "
+                f"{row.phoneme_pair}, {row.word_end}\n"
+                f"Behav transfer effect: {row.behav_transfer_effect:.3f}, "
+                f"Phon transfer effect: {row.phon_transfer_effect:.3f},\n"
+                f"Behav ROC AUC improvement: {row.behav_roc_auc_improvement:.3f}, "
+                f"Phon ROC AUC: {row.phon_roc_auc:.3f}",
+                fontsize=10,
+            )
+            pdf.savefig(f)
+            plt.close(f)
+
+        add_title_page(pdf, f"Congruent: {congruent}, best transfer")
+        for _, row in rows.tail(5).iterrows():
+            print(row[["subject", "electrode_idx", "phoneme_pair", "word_end", "behav_transfer_effect", "phon_transfer_effect"]])
+            f = plot_for_congruency(row)
+            f.suptitle(
+                f"Subject {row.subject}, Electrode {row.electrode_idx}, "
+                f"{row.phoneme_pair}, {row.word_end}\n"
+                f"Behav transfer effect: {row.behav_transfer_effect:.3f}, "
+                f"Phon transfer effect: {row.phon_transfer_effect:.3f},\n"
+                f"Behav ROC AUC improvement: {row.behav_roc_auc_improvement:.3f}, "
+                f"Phon ROC AUC: {row.phon_roc_auc:.3f}",
+                fontsize=10,
+            )
+            pdf.savefig(f)
+            plt.close(f)
 
 # %% [markdown]
 # ## Late response on unambiguous vs. ambiguous trials
@@ -2417,12 +2617,12 @@ for site_key, site_data in reg_df_valid.groupby(site_cols):
         }
     )
 
-unambig_late_df = pd.DataFrame(unambig_late_results)
+unambig_late_df = pd.DataFrame(unambig_late_results).dropna()
 
 # Only look at behav peaks
 unambig_late_df = unambig_late_df.merge(
     behav_peaks_df.to_pandas()[
-        ["subject", "electrode_idx", "phoneme_pair", "word_end"]
+        ["subject", "electrode_idx", "phoneme_pair", "word_end", "behav_roc_auc_improvement"]
     ],
     on=["subject", "electrode_idx", "phoneme_pair", "word_end"],
     how="inner",
@@ -2585,7 +2785,7 @@ n_specific = plot_specific.select(site_cols).unique().height
 
 f, ax = plt.subplots(figsize=(3, 2))
 plot_palette = sns.color_palette("Set1", 2)
-pval_thresholds = (0.0001, 0.001, 0.01)
+pval_thresholds = (0.001, 0.01)
 
 _, p_handles, p_labels = plot_condition_contrast(
     plot_generalize,
@@ -2629,7 +2829,8 @@ if p_handles is not None:
         labels=labels,
         handler_map={Rectangle: HandlerRectangle()},
         fontsize=8,
-        loc="best",
+        loc="upper right",
+        bbox_to_anchor=(1.3, 1.0),
     )
 
 f.savefig(Path(outdir) / "perceptual_contrast_unambig_split-both.pdf")
@@ -2657,7 +2858,7 @@ n_specific = plot_specific.select(site_cols).unique().height
 
 f, ax = plt.subplots(figsize=(3, 2))
 plot_palette = sns.color_palette("Set1", 2)
-pval_thresholds = (0.001, 0.01, 0.05)
+pval_thresholds = (0.001, 0.01)
 
 _, p_handles, p_labels = plot_condition_contrast(
     plot_generalize,
