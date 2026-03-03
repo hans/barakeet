@@ -730,6 +730,8 @@ subject_means = (
     .agg(
         pl.col("roc_auc_from_phon").mean().alias("phon_mean"),
         pl.col("roc_auc_from_behav").mean().alias("behav_mean"),
+        (pl.col("roc_auc_from_phon").std() / pl.col("roc_auc_from_phon").count().cast(pl.Float64).sqrt()).alias("phon_sem"),
+        (pl.col("roc_auc_from_behav").std() / pl.col("roc_auc_from_behav").count().cast(pl.Float64).sqrt()).alias("behav_sem"),
     )
     .to_pandas()
 )
@@ -748,8 +750,9 @@ fig, ax = plt.subplots(figsize=(3, 2.75))
 for _, row in subject_means.iterrows():
     xs = [0, 1]
     ys = [row["phon_mean"], row["behav_mean"]]
+    errs = [row["phon_sem"], row["behav_sem"]]
     ax.plot(xs, ys, color="gray", alpha=0.4, linewidth=1, zorder=1)
-    ax.scatter(xs, ys, color="gray", alpha=0.4, s=20, zorder=2)
+    ax.errorbar(xs, ys, yerr=errs, color="gray", alpha=0.4, fmt="o", ms=3, zorder=2, capsize=1.5)
 
 # Draw grand mean
 grand_early = subject_means["phon_mean"].mean()
@@ -762,7 +765,13 @@ ax.plot(
     zorder=3,
     alpha=0.7,
 )
-ax.scatter([0, 1], [grand_early, grand_late], color="black", s=60, zorder=4, alpha=0.7)
+grand_phon_sem = subject_means["phon_mean"].sem()
+grand_behav_sem = subject_means["behav_mean"].sem()
+ax.errorbar(
+    [0, 1], [grand_early, grand_late],
+    yerr=[grand_phon_sem, grand_behav_sem],
+    color="black", fmt="o", ms=7, zorder=4, alpha=0.7, capsize=3,
+)
 
 # Annotate with significance star
 
@@ -1032,6 +1041,8 @@ subject_means = (
     .agg(
         pl.mean("phon_baseline_diff"),
         pl.mean("behav_baseline_diff"),
+        (pl.col("phon_baseline_diff").std() / pl.col("phon_baseline_diff").count().cast(pl.Float64).sqrt()).alias("phon_baseline_diff_sem"),
+        (pl.col("behav_baseline_diff").std() / pl.col("behav_baseline_diff").count().cast(pl.Float64).sqrt()).alias("behav_baseline_diff_sem"),
     )
     .to_pandas()
 )
@@ -1053,8 +1064,9 @@ fig, ax = plt.subplots(figsize=(3, 2.75))
 for _, row in subject_means.iterrows():
     xs = [0, 1]
     ys = [row["phon_baseline_diff"], row["behav_baseline_diff"]]
+    errs = [row["phon_baseline_diff_sem"], row["behav_baseline_diff_sem"]]
     ax.plot(xs, ys, color="gray", alpha=0.4, linewidth=1, zorder=1)
-    ax.scatter(xs, ys, color="gray", alpha=0.4, s=20, zorder=2)
+    ax.errorbar(xs, ys, yerr=errs, color="gray", alpha=0.4, fmt="o", ms=3, zorder=2, capsize=1.5)
 
 # Draw grand mean
 grand_early = subject_means["phon_baseline_diff"].mean()
@@ -1067,8 +1079,13 @@ ax.plot(
     zorder=3,
     alpha=0.7,
 )
-for x, y in zip([0, 1], [grand_early, grand_late]):
-    ax.scatter(x, y, color="black", s=60, zorder=4, alpha=0.7)
+grand_phon_sem = subject_means["phon_baseline_diff"].sem()
+grand_behav_sem = subject_means["behav_baseline_diff"].sem()
+ax.errorbar(
+    [0, 1], [grand_early, grand_late],
+    yerr=[grand_phon_sem, grand_behav_sem],
+    color="black", fmt="o", ms=7, zorder=4, alpha=0.7, capsize=3,
+)
 
 # --- Significance annotations ---
 # ...after drawing the plot elements...
@@ -2338,9 +2355,6 @@ None
 # %%
 late_polarity_strict.groupby("phoneme_pair")[["lexical_evidence", "late_polarity"]].value_counts().unstack("late_polarity").fillna(0).astype(int)
 
-# %%
-late_polarity_strict[["lexical_evidence", "late_polarity"]].value_counts().unstack("late_polarity").fillna(0).astype(int)
-
 
 # %%
 def plot_summary_perceptual_vs_presence_of_response_stackplot(
@@ -2405,7 +2419,7 @@ def plot_summary_perceptual_vs_presence_of_response_stackplot(
     )
     sns.despine(ax=ax)
     legend = ax.legend(
-        loc="upper right", bbox_to_anchor=(2.3, 1), title="Perceptual\nresponse"
+        loc="upper right", bbox_to_anchor=(2.1, 1), title="Perceptual\ntuning"
     )
     plt.setp(legend.get_title(), multialignment="center")
     ax.set_xlabel("Perceptual response")
@@ -2825,7 +2839,7 @@ polarity_vs_unambig_late_df = pd.merge(
     )
 ).groupby("early_selectivity")["late_on_unambig"].value_counts().unstack().fillna(0)
 polarity_vs_unambig_late_df.columns = polarity_vs_unambig_late_df.columns.map(
-    {False: "Unambig.\nsounds", True: "Unambig.\nand ambig.\nsounds"}
+    {False: "Ambig.\ntrials", True: "Unambig.\nand ambig.\ntrials"}
 )
 
 # chi2 test
