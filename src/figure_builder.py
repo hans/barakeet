@@ -71,6 +71,8 @@ class FigureBuilder:
         Use constrained layout (recommended).
     subplot_kw : dict | None
         Forwarded to subplot creation.
+    sharex, sharey : bool | str
+        Shared axes for multi-panel figures. Forwarded to ``Figure.subplots``.
     style : str | None
         Matplotlib style name to apply.
     fig_kw : dict | None
@@ -85,6 +87,8 @@ class FigureBuilder:
         gridspec_kw: dict | None = None,
         constrained_layout: bool = True,
         subplot_kw: dict | None = None,
+        sharex: bool | str = False,
+        sharey: bool | str = False,
         style: str | None = None,
         fig_kw: dict | None = None,
     ):
@@ -94,6 +98,8 @@ class FigureBuilder:
         self._gridspec_kw = gridspec_kw or {}
         self._constrained_layout = constrained_layout
         self._subplot_kw = subplot_kw or {}
+        self._sharex = sharex
+        self._sharey = sharey
         self._style = style
         self._fig_kw = fig_kw or {}
 
@@ -118,6 +124,8 @@ class FigureBuilder:
                 self._nrows, self._ncols,
                 gridspec_kw=self._gridspec_kw,
                 subplot_kw=self._subplot_kw,
+                sharex=self._sharex,
+                sharey=self._sharey,
             )
         return fig, axes
 

@@ -17,10 +17,12 @@ import textgrid
 from loguru import logger as L
 from matplotlib import transforms
 from matplotlib.legend_handler import HandlerPatch
+from matplotlib.lines import Line2D
 from matplotlib.patches import Patch, Rectangle
 from scipy.stats import ttest_1samp, ttest_ind
 from tqdm.auto import tqdm
 
+from src.figure_builder import FigureBuilder
 from src.stimuli import OFFSET_DICT
 
 subject_enum = pl.Enum(
@@ -282,6 +284,160 @@ def add_textgrid(
             )
 
 
+def _plot_phon_controlled(
+    plot_phon_keys,
+    ax,
+    epoch_data,
+    epochs_i,
+    plot_phon_smin,
+    plot_phon_smax,
+    controlled_resampled_steps,
+    color_strategy="resampled",
+):
+    # helper for zoomin_hga
+
+    if color_strategy == "extreme_vs_controlled":
+        palette = {
+            False: "#9E9E9E",  # extreme values, 1 or 6
+            True: "#D62728",  # controlled values
+        }
+    elif color_strategy == "resampled":
+        palette = resampled_palette
+    else:
+        raise ValueError(f"Unknown color strategy: {color_strategy}")
+
+    linestyles = {0: "solid", 1: "dashed"}
+
+    all_epoch_data = {}
+
+    i = 0
+    plot_phon_keys = plot_phon_keys.to_pandas()
+    # exclude cases of extreme stimuli with non-acoustic-following behavior
+    plot_phon_keys = plot_phon_keys[
+        ~((plot_phon_keys.resampled == 1) & (plot_phon_keys.behavior_dummy_forced == 1))
+        & ~(
+            (plot_phon_keys.resampled == 6)
+            & (plot_phon_keys.behavior_dummy_forced == 0)
+        )
+    ]
+    plot_phon_keys["controlled"] = plot_phon_keys.resampled.isin(
+        controlled_resampled_steps
+    )
+
+    word_ends = plot_phon_keys.word_end
+    assert word_ends.nunique() == 1
+    word_end = word_ends.iloc[0]
+
+    for (
+        controlled,
+        decoder_target,
+        label_behavior,
+    ), rows in plot_phon_keys.groupby(
+        ["controlled", "behavior_dummy_forced", "label_behavior_forced"]
+    ):
+        epoch_i = epoch_data[rows.epoch_idx, :]
+        all_epoch_data[controlled, decoder_target] = epoch_i
+        epoch_i = epoch_i[:, plot_phon_smin:plot_phon_smax]
+        epoch_mean = epoch_i.mean(axis=0)
+        epoch_sem = epoch_i.std(axis=0) / np.sqrt(epoch_i.shape[0])
+        times = epochs_i.times[plot_phon_smin:plot_phon_smax]
+
+        if color_strategy == "extreme_vs_controlled":
+            color = palette[controlled]
+        elif color_strategy == "resampled":
+            if rows.resampled.nunique() > 1:
+                L.warning(
+                    f"Multiple resampled values for controlled={controlled}, decoder_target={decoder_target}, label_behavior={label_behavior}: {rows.resampled.unique()}. Using color for most common resampled value."
+                )
+            most_common_resampled = int(rows.resampled.mode().iloc[0])
+            color = palette[most_common_resampled - 1]
+
+        linewidth = 3
+
+        # label = f"Chose $\\it{{{label_behavior}{word_end[1:]}}}$"
+        label = f"Chose /{label_behavior}/"
+        ax.plot(
+            times,
+            epoch_mean,
+            label=label,
+            color=color,
+            ls=linestyles[decoder_target],
+            linewidth=linewidth,
+        )
+        ax.fill_between(
+            times,
+            epoch_mean - epoch_sem,
+            epoch_mean + epoch_sem,
+            color=color,
+            alpha=0.3,
+            rasterized=True,
+        )
+        ax.set_xlim(times[0], times[-1])
+
+        i += 1
+
+    return all_epoch_data
+
+
+def _plot_windowed_ttest(
+    ax,
+    all_epoch_data,
+    group1,
+    group2,
+    test_smin,
+    test_smax,
+    test_window_size=4,
+    test_window_stride=4,
+    color="black",
+    alpha=0.5,
+    bar_height_ratio=0.01,
+    bar_y_ratio=0.95,
+):
+    # Windowed t-test. helper for zoomin_hga
+
+    # Get windowed means for each condition
+    test_window_starts = np.arange(
+        test_smin, test_smax - test_window_size + 1, test_window_stride
+    )
+    test_results = []
+    for start in test_window_starts:
+        group1_data = all_epoch_data.get(group1, np.empty((0, test_window_size)))[
+            :, start : start + test_window_size
+        ]
+        group2_data = all_epoch_data.get(group2, np.empty((0, test_window_size)))[
+            :, start : start + test_window_size
+        ]
+        # average over time within the window
+        group1_data = group1_data.mean(axis=1)
+        group2_data = group2_data.mean(axis=1)
+        if len(group1_data) > 0 and len(group2_data) > 0:
+            t_stat, p_value = ttest_ind(group1_data, group2_data, equal_var=False)
+        else:
+            t_stat, p_value = np.nan, np.nan
+        test_results.append((start, start + test_window_size, t_stat, p_value))
+    test_results_df = pd.DataFrame(
+        test_results, columns=["start_sample", "end_sample", "t_stat", "p_value"]
+    )
+    test_results_df["tmin"] = test_results_df["start_sample"] / epoch_sfreq + epoch_tmin
+    test_results_df["tmax"] = test_results_df["end_sample"] / epoch_sfreq + epoch_tmin
+    # print(test_results_df)
+
+    ymin, ymax = ax.get_ylim()
+    bar_height = (ymax - ymin) * bar_height_ratio
+    bar_y = ymin + (ymax - ymin) * bar_y_ratio
+    for row in test_results_df.itertuples():
+        if row.p_value < 0.05:
+            ax.barh(
+                y=bar_y,
+                width=row.tmax - row.tmin,
+                left=row.tmin,
+                height=bar_height,
+                color=color,
+                alpha=alpha,
+                edgecolor="none",
+            )
+
+
 def zoomin_hga(
     data: PaperData,
     subject,
@@ -383,10 +539,11 @@ def zoomin_hga(
         [plot_highlight_behav_window[0], plot_highlight_behav_window[1]]
     ]
 
-    f, axs = plt.subplots(2, 1, figsize=figsize, sharex=True)
+    fb = FigureBuilder(figsize=figsize, nrows=2, ncols=1, sharex=True)
+    axs = fb.axes
 
     if title:
-        f.suptitle(
+        fb.fig.suptitle(
             f"Subject {subject}, Electrode {electrode_idx}, {phoneme_pair}, {word_end}"
         )
 
@@ -395,154 +552,7 @@ def zoomin_hga(
     plot_phon_smin = plot_smin
     plot_phon_smax = plot_highlight_behav_window[1] + 10
 
-    def plot_phon_controlled(plot_phon_keys, ax, color_strategy="resampled"):
-        if color_strategy == "extreme_vs_controlled":
-            palette = {
-                False: "#9E9E9E",  # extreme values, 1 or 6
-                True: "#D62728",  # controlled values
-            }
-        elif color_strategy == "resampled":
-            palette = resampled_palette
-        else:
-            raise ValueError(f"Unknown color strategy: {color_strategy}")
-
-        linestyles = {0: "solid", 1: "dashed"}
-
-        all_epoch_data = {}
-
-        i = 0
-        plot_phon_keys = plot_phon_keys.to_pandas()
-        # exclude cases of extreme stimuli with non-acoustic-following behavior
-        plot_phon_keys = plot_phon_keys[
-            ~(
-                (plot_phon_keys.resampled == 1)
-                & (plot_phon_keys.behavior_dummy_forced == 1)
-            )
-            & ~(
-                (plot_phon_keys.resampled == 6)
-                & (plot_phon_keys.behavior_dummy_forced == 0)
-            )
-        ]
-        plot_phon_keys["controlled"] = plot_phon_keys.resampled.isin(
-            controlled_resampled_steps
-        )
-
-        word_ends = plot_phon_keys.word_end
-        assert word_ends.nunique() == 1
-        word_end = word_ends.iloc[0]
-
-        for (
-            controlled,
-            decoder_target,
-            label_behavior,
-        ), rows in plot_phon_keys.groupby(
-            ["controlled", "behavior_dummy_forced", "label_behavior_forced"]
-        ):
-            epoch_i = epoch_data[rows.epoch_idx, :]
-            all_epoch_data[controlled, decoder_target] = epoch_i
-            epoch_i = epoch_i[:, plot_phon_smin:plot_phon_smax]
-            epoch_mean = epoch_i.mean(axis=0)
-            epoch_sem = epoch_i.std(axis=0) / np.sqrt(epoch_i.shape[0])
-            times = epochs_i.times[plot_phon_smin:plot_phon_smax]
-
-            if color_strategy == "extreme_vs_controlled":
-                color = palette[controlled]
-            elif color_strategy == "resampled":
-                if rows.resampled.nunique() > 1:
-                    L.warning(
-                        f"Multiple resampled values for controlled={controlled}, decoder_target={decoder_target}, label_behavior={label_behavior}: {rows.resampled.unique()}. Using color for most common resampled value."
-                    )
-                most_common_resampled = int(rows.resampled.mode().iloc[0])
-                color = palette[most_common_resampled - 1]
-
-            linewidth = 3
-
-            # label = f"Chose $\\it{{{label_behavior}{word_end[1:]}}}$"
-            label = f"Chose /{label_behavior}/"
-            ax.plot(
-                times,
-                epoch_mean,
-                label=label,
-                color=color,
-                ls=linestyles[decoder_target],
-                linewidth=linewidth,
-            )
-            ax.fill_between(
-                times,
-                epoch_mean - epoch_sem,
-                epoch_mean + epoch_sem,
-                color=color,
-                alpha=0.3,
-                rasterized=True,
-            )
-            ax.set_xlim(times[0], times[-1])
-
-            i += 1
-
-        return all_epoch_data
-
-    def plot_windowed_ttest(
-        ax,
-        all_epoch_data,
-        group1,
-        group2,
-        test_smin=plot_phon_smin,
-        test_smax=plot_phon_smax,
-        test_window_size=4,
-        test_window_stride=4,
-        color="black",
-        alpha=0.5,
-        bar_height_ratio=0.01,
-        bar_y_ratio=0.95,
-    ):
-        # Windowed t-test
-
-        # Get windowed means for each condition
-        test_window_starts = np.arange(
-            test_smin, test_smax - test_window_size + 1, test_window_stride
-        )
-        test_results = []
-        for start in test_window_starts:
-            group1_data = all_epoch_data.get(group1, np.empty((0, test_window_size)))[
-                :, start : start + test_window_size
-            ]
-            group2_data = all_epoch_data.get(group2, np.empty((0, test_window_size)))[
-                :, start : start + test_window_size
-            ]
-            # average over time within the window
-            group1_data = group1_data.mean(axis=1)
-            group2_data = group2_data.mean(axis=1)
-            if len(group1_data) > 0 and len(group2_data) > 0:
-                t_stat, p_value = ttest_ind(group1_data, group2_data, equal_var=False)
-            else:
-                t_stat, p_value = np.nan, np.nan
-            test_results.append((start, start + test_window_size, t_stat, p_value))
-        test_results_df = pd.DataFrame(
-            test_results, columns=["start_sample", "end_sample", "t_stat", "p_value"]
-        )
-        test_results_df["tmin"] = (
-            test_results_df["start_sample"] / epoch_sfreq + epoch_tmin
-        )
-        test_results_df["tmax"] = (
-            test_results_df["end_sample"] / epoch_sfreq + epoch_tmin
-        )
-        # print(test_results_df)
-
-        ymin, ymax = ax.get_ylim()
-        bar_height = (ymax - ymin) * bar_height_ratio
-        bar_y = ymin + (ymax - ymin) * bar_y_ratio
-        for row in test_results_df.itertuples():
-            if row.p_value < 0.05:
-                ax.barh(
-                    y=bar_y,
-                    width=row.tmax - row.tmin,
-                    left=row.tmin,
-                    height=bar_height,
-                    color=color,
-                    alpha=alpha,
-                    edgecolor="none",
-                )
-
+    # --- Compute plot_epoch_keys first (needed for decorations) ---
     plot_epoch_keys = subplot_phon_phon_df.select(
         ["epoch_idx", "resampled", "textgrid_path"]
     ).unique()
@@ -564,48 +574,17 @@ def zoomin_hga(
             )
             .unique()
         )
-
-        all_epoch_data_extreme = plot_phon_controlled(
-            plot_epoch_keys.filter(pl.col("resampled").is_in([1, 6])), axs[0]
-        )
-        all_epoch_data_controlled = plot_phon_controlled(
-            plot_epoch_keys.filter(
-                pl.col("resampled").is_in(controlled_resampled_steps)
-            ),
-            axs[1],
-        )
-
-        # add windowed t-test results for behavior at controlled resampled step
-        plot_windowed_ttest(
-            axs[1],
-            all_epoch_data_controlled,
-            group1=(True, 0),
-            group2=(True, 1),
-            color="black",
-            alpha=0.5,
-            bar_height_ratio=0.04,
-        )
-        # add windowed t-test results for phonetic contrast
-        plot_windowed_ttest(
-            axs[0],
-            all_epoch_data_extreme,
-            group1=(False, 0),
-            group2=(False, 1),
-            color="black",
-            alpha=0.5,
-            bar_height_ratio=0.04,
-        )
-        # axs[0].axvspan(highlight_phon_times[0], highlight_phon_times[-1], color="gray", alpha=0.3)
-        # axs[0].axvspan(highlight_behav_times[0], highlight_behav_times[-1], color="yellow", alpha=0.3)
     else:
         raise NotImplementedError()
 
+    # --- Axis decorations (skeleton: axes/labels/vlines/textgrid in place, no data) ---
     vline_extent = 1.25
     pod_time = (
         data.word_end_df.filter(pl.col("word_end") == word_end)
         .select(pl.max("pod"))
         .item()
     )
+    ep_df = plot_epoch_keys.to_pandas()
     for i, ax in enumerate(axs):
         ax.axvline(
             pod_time,
@@ -617,7 +596,7 @@ def zoomin_hga(
             clip_on=False,
         )
         ax.set_ylabel("HGA ($z$)")
-        ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:.1f}"))
+        # ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:.1f}"))
         sns.despine(ax=ax, top=True, right=True)
 
         include_phonemes_i = include_phonemes and i == 0
@@ -625,23 +604,56 @@ def zoomin_hga(
         add_textgrid(
             ax,
             textgrid_dir,
-            ep_df=plot_epoch_keys.to_pandas(),
+            ep_df=ep_df,
             include_phonemes=include_phonemes_i,
             vline_extent=vline_extent_i,
             include_offset=include_offset,
         )
-
-    # # annotate POD on the upper axis
-    # axs[0].annotate("POD", xy=(pod_time, 1), xytext=(pod_time, 1.2),
-    #                 arrowprops=dict(arrowstyle="->", color="red"), ha="center", va="bottom", fontsize=11,
-    #                 xycoords=transforms.blended_transform_factory(axs[0].transData, axs[0].transAxes))
 
     if hide_bottom:
         axs[-1].tick_params(axis="x", which="both", labelbottom=False)
     else:
         axs[-1].set_xlabel("Time from word onset (s)")
 
-    # axs[0].set_title("Unambiguous", pad=18, loc="left", va="bottom")
+    if legend:
+        # Placeholder legend with dummy handles; replaced after data is plotted
+        phon_labels = list(phoneme_pair)[::-1]
+        dummy_handles = [
+            Line2D([0], [0], color="black", label=f"Chose /{l}/") for l in phon_labels
+        ]
+        axs[0].legend(
+            handles=dummy_handles,
+            title=None,
+            fontsize=10,
+            frameon=False,
+            loc="upper right",
+            bbox_to_anchor=(1.05, 1.575),
+        )
+
+    fb.stage("skeleton")
+
+    # --- Plot top panel: unambiguous/extreme trials ---
+    all_epoch_data_extreme = _plot_phon_controlled(
+        plot_epoch_keys.filter(pl.col("resampled").is_in([1, 6])),
+        axs[0],
+        epoch_data,
+        epochs_i,
+        plot_phon_smin,
+        plot_phon_smax,
+        controlled_resampled_steps,
+    )
+    # add windowed t-test results for phonetic contrast
+    _plot_windowed_ttest(
+        axs[0],
+        all_epoch_data_extreme,
+        group1=(False, 0),
+        group2=(False, 1),
+        color="black",
+        alpha=0.5,
+        bar_height_ratio=0.04,
+        test_smin=plot_phon_smin,
+        test_smax=plot_phon_smax,
+    )
 
     if legend:
         legend_handles_labels = axs[0].get_legend_handles_labels()
@@ -650,20 +662,48 @@ def zoomin_hga(
             legend_handles_labels[0][::-1],
             legend_handles_labels[1][::-1],
         )
-        legend = axs[0].legend(
+        leg = axs[0].legend(
             *legend_handles_labels,
-            title=None,  # "Behavior",
+            title=None,
             fontsize=10,
             frameon=False,
-            #    loc="upper right", bbox_to_anchor=(1.175, 0.9))
             loc="upper right",
             bbox_to_anchor=(1.05, 1.575),
         )
         # make the lines black to make clear that this is not specific to the top plot
-        for line in legend.get_lines():
+        for line in leg.get_lines():
             line.set_color("black")
 
-    return f
+    fb.stage("unambiguous")
+
+    # --- Plot bottom panel: controlled/ambiguous trials ---
+    all_epoch_data_controlled = _plot_phon_controlled(
+        plot_epoch_keys.filter(pl.col("resampled").is_in(controlled_resampled_steps)),
+        axs[1],
+        epoch_data,
+        epochs_i,
+        plot_phon_smin,
+        plot_phon_smax,
+        controlled_resampled_steps,
+    )
+    # add windowed t-test results for behavior at controlled resampled step
+    _plot_windowed_ttest(
+        axs[1],
+        all_epoch_data_controlled,
+        group1=(True, 0),
+        group2=(True, 1),
+        color="black",
+        alpha=0.5,
+        bar_height_ratio=0.04,
+        test_smin=plot_phon_smin,
+        test_smax=plot_phon_smax,
+    )
+    # axs[0].axvspan(highlight_phon_times[0], highlight_phon_times[-1], color="gray", alpha=0.3)
+    # axs[0].axvspan(highlight_behav_times[0], highlight_behav_times[-1], color="yellow", alpha=0.3)
+
+    fb.stage("controlled")
+
+    return fb
 
 
 def zoomin_search_hga(
@@ -1311,7 +1351,9 @@ def extract_hga_windows_df(
             )
         epoch_data = epoch_cache[cache_key][:, electrode_idx, :]
 
-        ambig_steps = ambiguous_resampled_steps.get((subject, phoneme_pair, word_end), None)
+        ambig_steps = ambiguous_resampled_steps.get(
+            (subject, phoneme_pair, word_end), None
+        )
 
         if window_source == "ttest_searchlight":
             # Original behaviour: run a sliding Welch's t-test searchlight per site.
@@ -1354,19 +1396,27 @@ def extract_hga_windows_df(
             )
             phon_smin_i = int(phon_row["smin"][0])
             phon_smax_i = int(phon_row["smax"][0])
-            behav_smin_i = int(behav_row["smin"][0]) if not behav_row.is_empty() else None
-            behav_smax_i = int(behav_row["smax"][0]) if not behav_row.is_empty() else None
+            behav_smin_i = (
+                int(behav_row["smin"][0]) if not behav_row.is_empty() else None
+            )
+            behav_smax_i = (
+                int(behav_row["smax"][0]) if not behav_row.is_empty() else None
+            )
 
         # Window timing metadata (same for every trial at this site)
         ep = data.epochs[subject]
         _t0, _sf = ep.tmin, ep.info["sfreq"]
         timing = {
-            "phon_tmin":  _t0 + phon_smin_i / _sf,
-            "phon_tmax":  _t0 + phon_smax_i / _sf,
-            "phon_smin":  phon_smin_i,
-            "phon_smax":  phon_smax_i,
-            "behav_tmin": _t0 + behav_smin_i / _sf if behav_smin_i is not None else np.nan,
-            "behav_tmax": _t0 + behav_smax_i / _sf if behav_smin_i is not None else np.nan,
+            "phon_tmin": _t0 + phon_smin_i / _sf,
+            "phon_tmax": _t0 + phon_smax_i / _sf,
+            "phon_smin": phon_smin_i,
+            "phon_smax": phon_smax_i,
+            "behav_tmin": _t0 + behav_smin_i / _sf
+            if behav_smin_i is not None
+            else np.nan,
+            "behav_tmax": _t0 + behav_smax_i / _sf
+            if behav_smin_i is not None
+            else np.nan,
             "behav_smin": behav_smin_i if behav_smin_i is not None else np.nan,
             "behav_smax": behav_smax_i if behav_smin_i is not None else np.nan,
             "behav_steps_chosen": str(ambig_steps),
@@ -1400,9 +1450,9 @@ def extract_hga_windows_df(
                     "behavior_dummy_forced": trial.behavior_dummy_forced,
                     "follows_acoustics": trial.follows_acoustics,
                     "mismatch": trial.mismatch,
-                    "hga_early": trace[phon_smin_i : phon_smax_i].mean(),
+                    "hga_early": trace[phon_smin_i:phon_smax_i].mean(),
                     "hga_late": (
-                        trace[behav_smin_i : behav_smax_i].mean()
+                        trace[behav_smin_i:behav_smax_i].mean()
                         if behav_smin_i is not None
                         else np.nan
                     ),
@@ -1675,12 +1725,52 @@ def plot_condition_contrasts_single_figure(
     vline_extent=1.2,
     plot_word_ends: list[str] = ("necessary",),
     plot_xlim=(0, 1.2),
+    plot_ylim=None,
     pval_thresholds=(0.00001, 0.0001, 0.001),
     ambiguous_response_threshold: int = 2,
 ):
-    f, ax = plt.subplots(figsize=(2.5, 2))
+    fb = FigureBuilder(figsize=(2.5, 2))
+    ax = fb.ax
 
     plot_palette = sns.color_palette("Set2", 2)
+
+    # Skeleton: axis labels/limits in place, no data lines yet
+    ax.set_xlim(*plot_xlim)
+    ax.set_ylabel("HGA effect size ($z$)")
+    ax.set_xlabel("Time from word onset (s)")
+
+    # Make dummy handles for the two lines and
+    # pval threshold bars
+    dummy_handles = [Line2D([0], [0], color=color, lw=2) for color in plot_palette]
+    dummy_labels = ["Acoustic\ncontrast", "Perceptual\ncontrast"]
+
+    for pval_threshold, height_mult in zip(pval_thresholds, [1.0, 0.5, 0.25]):
+        dummy_handles.append(
+            Rectangle(
+                (0, 0),
+                1,
+                height_mult,
+                facecolor="gray",
+                alpha=0.5,
+                label=f"p < {pval_threshold:g}".replace("-0", "-"),
+            )
+        )
+        dummy_labels.append(f"p < {pval_threshold:g}".replace("-0", "-"))
+    legend_bbox_to_anchor = (1.65, 1)
+
+    ax.legend(
+        handles=dummy_handles,
+        labels=dummy_labels,
+        handler_map={Rectangle: HandlerRectangle()},
+        fontsize=10,
+        loc="upper right",
+        bbox_to_anchor=legend_bbox_to_anchor,
+    )
+    sns.despine(ax=ax, top=True, right=True)
+    if plot_ylim is not None:
+        ax.set_ylim(*plot_ylim)
+
+    fb.stage("skeleton")
 
     _, p_handles, p_labels = plot_condition_contrast(
         (
@@ -1706,6 +1796,17 @@ def plot_condition_contrasts_single_figure(
         },
         label="Acoustic\ncontrast",
     )
+
+    ax.legend(
+        handles=dummy_handles,
+        labels=dummy_labels,
+        handler_map={Rectangle: HandlerRectangle()},
+        fontsize=10,
+        loc="upper right",
+        bbox_to_anchor=legend_bbox_to_anchor,
+    )
+
+    fb.stage("acoustic")
 
     ambiguous_keys = pl.DataFrame(
         [
@@ -1755,24 +1856,18 @@ def plot_condition_contrasts_single_figure(
         ttest_bar_y_ratio=0.87,
     )
 
-    ax.set_xlim(*plot_xlim)
-    ax.set_ylabel("HGA effect size ($z$)")
-    ax.set_xlabel("Time from word onset (s)")
+    ax.legend(
+        handles=dummy_handles,
+        labels=dummy_labels,
+        handler_map={Rectangle: HandlerRectangle()},
+        fontsize=10,
+        loc="upper right",
+        bbox_to_anchor=legend_bbox_to_anchor,
+    )
 
-    if p_handles is not None:
-        handles, labels = ax.get_legend_handles_labels()
-        handles += p_handles
-        labels += p_labels
-        ax.legend(
-            handles=handles,
-            labels=labels,
-            handler_map={Rectangle: HandlerRectangle()},
-            fontsize=10,
-            loc="upper right",
-            bbox_to_anchor=(1.65, 1),
-        )
+    fb.stage("behavioral")
 
-    return f
+    return fb
 
 
 def plot_condition_contrast_peak_aligned(
@@ -2154,8 +2249,10 @@ def plot_behav_barplot(
     plot_values: Literal["count", "proportion"] = "proportion",
     ax=None,
 ):
+    fb = None
     if ax is None:
-        f, ax = plt.subplots(figsize=figsize)
+        fb = FigureBuilder(figsize=figsize)
+        ax = fb.ax
 
     behav_barplot_data = (
         all_md.to_pandas()
@@ -2194,38 +2291,11 @@ def plot_behav_barplot(
         palette="viridis",
         orient="h",
         width=0.8,
+        ax=ax,
     )
 
     behavior_styles = {"d": "", "n": "//"}
     linestyles = {"d": "solid", "n": "dashed"}
-    for patch, (_, row) in zip(ax.patches, behav_barplot_data.iterrows()):
-        patch_color = resampled_palette[row["resampled"] - 1]
-        patch.set_facecolor(patch_color)
-        patch.set_alpha(0.3)
-        patch.set_edgecolor("black")
-        patch.set_linewidth(0.5)
-        # avoid PDF export oddities
-        patch.set_rasterized(True)
-
-        # draw line overlay for bars
-        x = patch.get_x()
-        width = patch.get_width()
-        y_center = patch.get_y() + patch.get_height() / 2
-        linestyle = linestyles[row["label_behavior"]]
-        ax.plot(
-            [x, x + width],
-            [y_center, y_center],
-            color=patch_color,
-            linestyle=linestyle,
-            linewidth=1.5,
-            solid_capstyle="butt",
-            clip_on=True,
-        )
-
-        # width = patch.get_width()
-        # y_center = patch.get_y() + patch.get_height() / 2
-        # prop = row["prop"]
-        # label = f"{prop:.0%}"
 
     max_width = behav_barplot_data["count"].max()
 
@@ -2272,6 +2342,43 @@ def plot_behav_barplot(
         ax.get_legend().remove()
 
     sns.despine(ax=ax, top=True, bottom=False, left=False, right=True)
+
+    # Skeleton: bars invisible, all labels/legend in place
+    if fb is not None:
+        for patch in ax.patches:
+            patch.set_alpha(0)
+            patch.set_edgecolor("none")
+        fb.stage("skeleton")
+
+    # Data: color and style bars, add line overlays
+    for patch, (_, row) in zip(ax.patches, behav_barplot_data.iterrows()):
+        patch_color = resampled_palette[row["resampled"] - 1]
+        patch.set_facecolor(patch_color)
+        patch.set_alpha(0.3)
+        patch.set_edgecolor("black")
+        patch.set_linewidth(0.5)
+        # avoid PDF export oddities
+        patch.set_rasterized(True)
+
+        # draw line overlay for bars
+        x = patch.get_x()
+        width = patch.get_width()
+        y_center = patch.get_y() + patch.get_height() / 2
+        linestyle = linestyles[row["label_behavior"]]
+        ax.plot(
+            [x, x + width],
+            [y_center, y_center],
+            color=patch_color,
+            linestyle=linestyle,
+            linewidth=1.5,
+            solid_capstyle="butt",
+            clip_on=True,
+        )
+
+    if fb is not None:
+        fb.stage("data")
+
+    return fb
 
 
 def evaluate_phonetic_transfer(
@@ -2520,8 +2627,10 @@ def evaluate_behav_decoder_on_phon_window(
 
         # Decompose behavioral decoder pipeline components
         behav_est = estimator.best_estimator_
-        behav_pca = behav_est.named_steps["prep"].named_transformers_["pca"].named_steps["pca"]
-        behav_lr  = behav_est.named_steps["clf"]
+        behav_pca = (
+            behav_est.named_steps["prep"].named_transformers_["pca"].named_steps["pca"]
+        )
+        behav_lr = behav_est.named_steps["clf"]
 
         # Cross-scaler: normalize acoustic window data with the acoustic decoder's own scaler
         # (fit on acoustic-window training data), so features are on the right scale.
@@ -2531,7 +2640,7 @@ def evaluate_behav_decoder_on_phon_window(
 
         # Project through behavioral PCA, null the resampled column, apply behavioral LR
         X_phon_pca = behav_pca.transform(X_phon_scaled)
-        X_for_lr   = np.concatenate([np.zeros((len(epoch_idxs), 1)), X_phon_pca], axis=1)
+        X_for_lr = np.concatenate([np.zeros((len(epoch_idxs), 1)), X_phon_pca], axis=1)
         proba = behav_lr.predict_proba(X_for_lr)[:, 1]
 
         # Evaluate against acoustic target (not behavioral)
@@ -2594,7 +2703,9 @@ def evaluate_phon_decoder_on_behav_window(
     acoustic_outcomes = phonetic_decoder_checkpoints[t_subject]["outcomes"][phon_key]
 
     behav_outer_key = (t_subject, t_electrode_idx, t_phoneme_pair)
-    behav_inner_dict = behavioral_decoder_checkpoints[t_subject]["A_decoders"][behav_outer_key]
+    behav_inner_dict = behavioral_decoder_checkpoints[t_subject]["A_decoders"][
+        behav_outer_key
+    ]
 
     t_epochs = data.epochs[t_subject]
     md = t_epochs.metadata
@@ -2614,15 +2725,21 @@ def evaluate_phon_decoder_on_behav_window(
         # Cross-scaler: normalize behavioral window data with the behavioral decoder's own
         # neural StandardScaler (fit on behavioral-window training data).
         behav_inner_key = (
-            t_subject, str(t_electrode_idx), t_phoneme_pair,
-            (t_word_end,), t_smin_behav, t_smax_behav, fold,
+            t_subject,
+            str(t_electrode_idx),
+            t_phoneme_pair,
+            (t_word_end,),
+            t_smin_behav,
+            t_smax_behav,
+            fold,
         )
         behav_cp = behav_inner_dict.get(behav_inner_key)
         if behav_cp is None:
             continue
         behav_neural_scaler = (
-            behav_cp["estimator"].best_estimator_
-            .named_steps["prep"].named_transformers_["pca"]
+            behav_cp["estimator"]
+            .best_estimator_.named_steps["prep"]
+            .named_transformers_["pca"]
             .named_steps["standardscaler"]
         )
 

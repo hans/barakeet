@@ -33,6 +33,7 @@ import pandas as pd
 import polars as pl
 import seaborn as sns
 import torch
+from matplotlib.lines import Line2D
 from matplotlib.patches import Rectangle
 from matplotlib.transforms import blended_transform_factory
 from scipy import stats
@@ -68,6 +69,7 @@ from src.stimuli import (
     PHONEME_PAIR_TO_WORD_ENDS,
     WORD_END_TO_PHONEME_PAIR,
 )
+from src.figure_builder import FigureBuilder
 from src.viz_paper import (
     HandlerRectangle,
     PaperData,
@@ -106,6 +108,8 @@ ambiguous_response_threshold = 2
 textgrid_dir = "textgrids"
 
 outdir = "outputs/causal4/A_neurometrics"
+outdir_talk = Path(outdir) / "talk"
+outdir_talk.mkdir(parents=True, exist_ok=True)
 
 # %%
 max_plot_rows = 15
@@ -583,8 +587,8 @@ def plot_peak_timing(
     plot_phoneme_pair, plot_word_ends, plot_xlim=None, vline_extent=1.1
 ):
     plot_textgrid = "11_necessary_dn_002.TextGrid"
-    g = sns.displot(
-        data=peak_timing_plot.filter(
+    plot_data = (
+        peak_timing_plot.filter(
             (pl.col("word_end").is_in(plot_word_ends))
             | (
                 (pl.col("source") == "phon")
@@ -594,84 +598,112 @@ def plot_peak_timing(
         .to_pandas()
         .assign(
             source=lambda df: df.source.map({"phon": "Acoustic", "behav": "Perceptual"})
-        ),
-        x="t_center",
-        hue="source",
-        hue_order={"Acoustic": 0, "Perceptual": 1},
-        palette=categorical_palette,
-        linewidth=2,
-        kind="kde",
-        common_norm=False,
-        clip=(0, None),
-        height=2,
-        aspect=2.75 / 2,
+        )
     )
-    g.set_axis_labels("Peak decoding time (s)", "Density")
-    sns.move_legend(
-        g,
-        "upper right",
-        bbox_to_anchor=(0.69, 0.93),
+
+    fb = FigureBuilder(figsize=(2.75, 2))
+    ax = fb.ax
+    legend_bbox_to_anchor = (0.85, 0.93)
+
+    ax.set_xlabel("Peak decoding time (s)")
+    ax.set_ylabel("Density")
+    ax.set_xlim(plot_xlim)
+
+    word_stim_info = word_end_df.filter(pl.col("word_end").is_in(plot_word_ends))
+    pod = word_stim_info.select("pod").unique().item()
+    ax.axvline(
+        pod,
+        ymax=vline_extent,
+        color="red",
+        alpha=0.5,
+        linewidth=2,
+        linestyle="--",
+        clip_on=False,
+    )
+
+    add_textgrid(
+        ax,
+        textgrid_dir,
+        textgrid_file=plot_textgrid,
+        include_phonemes=False,
+        fontsize=9,
+        vline_extent=vline_extent,
+    )
+
+    palette = sns.color_palette(categorical_palette, n_colors=2)
+    dummy_handles = [
+        Line2D([0], [0], color=palette[0], linewidth=2, label="Acoustic"),
+        Line2D([0], [0], color=palette[1], linewidth=2, label="Perceptual"),
+    ]
+    ax.legend(
+        handles=dummy_handles,
+        loc="upper right",
+        bbox_to_anchor=legend_bbox_to_anchor,
         fontsize=10,
         frameon=True,
-        title=None,
     )
+    sns.despine(ax=ax, top=True, right=True)
+    fb.stage("skeleton")
 
-    for (row, col, hue), data in g.facet_data():
-        ax = g.axes[row][col]
-        ax.set_xlim(plot_xlim)
+    source_order = ["Acoustic", "Perceptual"]
+    for i, source in enumerate(source_order):
+        subset = plot_data[plot_data["source"] == source]
 
-        word_stim_info = word_end_df.filter(pl.col("word_end").is_in(plot_word_ends))
-        # for word_end in word_stim_info.select("word_end_offset").to_series():
-        #     ax.axvline(word_end, color="red", linestyle="--")
-        pod = word_stim_info.select("pod").unique().item()
-        ax.axvline(
-            pod,
-            ymax=vline_extent,
-            color="red",
-            alpha=0.5,
+        sns.kdeplot(
+            data=subset,
+            x="t_center",
+            hue="source",
+            hue_order=["Acoustic", "Perceptual"],
+            palette=categorical_palette,
             linewidth=2,
-            linestyle="--",
-            clip_on=False,
+            common_norm=False,
+            clip=(0, None),
+            ax=ax,
+            legend=False,
         )
-
-        add_textgrid(
+        sns.move_legend(
             ax,
-            textgrid_dir,
-            textgrid_file=plot_textgrid,
-            include_phonemes=False,
-            fontsize=9,
-            vline_extent=vline_extent,
+            "upper right",
+            bbox_to_anchor=legend_bbox_to_anchor,
+            fontsize=10,
+            frameon=True,
+            title=None,
         )
+        fb.stage(f"data-{i}")
 
-    return g.fig
+    return fb
 
 
 # %%
-f = plot_peak_timing(
+fb = plot_peak_timing(
     plot_phoneme_pair="dn",
     plot_word_ends=["necessary"],
     plot_xlim=(0, 1.2),
     vline_extent=1.1,
 )
-f.savefig(Path(outdir) / "decoding_timing-necessary.pdf")
+fb.fig.savefig(Path(outdir) / "decoding_timing-necessary.pdf")
+fb.render(outdir_talk / "decoding_timing-necessary", fmt="pdf")
 
 # %%
-f = plot_peak_timing(
+fb = plot_peak_timing(
     plot_phoneme_pair="dn",
     plot_word_ends=["desolate"],
     plot_xlim=(0, 0.7),
     vline_extent=1.1,
 )
-f.savefig(Path(outdir) / "decoding_timing-desolate.pdf")
+fb.fig.savefig(Path(outdir) / "decoding_timing-desolate.pdf")
+fb.render(outdir_talk / "decoding_timing-desolate", fmt="pdf")
 
 # %%
-f = plot_peak_timing(
+fb = plot_peak_timing(
     plot_phoneme_pair="dn",
     plot_word_ends=["desolate", "necessary"],
     plot_xlim=(0, 1.2),
     vline_extent=1.1,
 )
-f.savefig(Path(outdir) / "decoding_timing-both.pdf")
+fb.fig.savefig(Path(outdir) / "decoding_timing-both.pdf")
+fb.render(outdir_talk / "decoding_timing-both", fmt="pdf")
+fb.fig
 
 # %% [markdown]
 # ## Cross-window analysis
@@ -744,85 +776,69 @@ print(
     f"t={ttest_t:.3f}, p={ttest_p:g}"
 )
 
-fig, ax = plt.subplots(figsize=(3, 2.75))
+def _plot_decoding_phonetic():
+    fb = FigureBuilder(figsize=(3, 2.75))
+    ax = fb.ax
 
-# Draw individual subject lines (3 points: early, baseline, late)
-for _, row in subject_means.iterrows():
-    xs = [0, 1]
-    ys = [row["phon_mean"], row["behav_mean"]]
-    errs = [row["phon_sem"], row["behav_sem"]]
-    ax.plot(xs, ys, color="gray", alpha=0.4, linewidth=1, zorder=1)
-    ax.errorbar(xs, ys, yerr=errs, color="gray", alpha=0.4, fmt="o", ms=3, zorder=2, capsize=1.5)
+    ax.set_xticks([0, 1])
+    ax.set_xticklabels(["Acoustic\nwindow", "Perceptual\nwindow"])
+    ax.set_xlabel("Evaluation")
+    ax.set_ylabel("Acoustic\nprediction\n(ROC-AUC)", rotation=0, labelpad=40, va="top")
+    ax.yaxis.label.set_position((1, 1.0))
+    ax.annotate(
+        "/n/ vs. /d/",
+        xy=(0.5, 0.0),
+        xycoords=ax.yaxis.label,
+        xytext=(0, -12),
+        textcoords="offset points",
+        ha="center",
+        va="top",
+        fontsize=10,
+        color="#666666",
+    )
+    ax.yaxis.set_major_formatter(mtick.PercentFormatter(1.0))
+    ax.axhline(0.5, color="k", linestyle="--", alpha=0.3)
+    ax.set_xlim(-0.3, 1.3)
+    sns.despine(ax=ax)
 
-# Draw grand mean
-grand_early = subject_means["phon_mean"].mean()
-grand_late = subject_means["behav_mean"].mean()
-ax.plot(
-    [0, 1],
-    [grand_early, grand_late],
-    color="black",
-    linewidth=2.5,
-    zorder=3,
-    alpha=0.7,
-)
-grand_phon_sem = subject_means["phon_mean"].sem()
-grand_behav_sem = subject_means["behav_mean"].sem()
-ax.errorbar(
-    [0, 1], [grand_early, grand_late],
-    yerr=[grand_phon_sem, grand_behav_sem],
-    color="black", fmt="o", ms=7, zorder=4, alpha=0.7, capsize=3,
-)
+    fb.stage("skeleton")
 
-# Annotate with significance star
+    # Draw individual subject lines
+    for _, row in subject_means.iterrows():
+        xs = [0, 1]
+        ys = [row["phon_mean"], row["behav_mean"]]
+        errs = [row["phon_sem"], row["behav_sem"]]
+        ax.plot(xs, ys, color="gray", alpha=0.4, linewidth=1, zorder=1)
+        ax.errorbar(xs, ys, yerr=errs, color="gray", alpha=0.4, fmt="o", ms=3, zorder=2, capsize=1.5)
 
-bracket_y = 1.10  # in axes coords
-tick_h = 0.03
-trans = blended_transform_factory(ax.transData, ax.transAxes)
-ax.plot(
-    [0, 0, 1, 1],
-    [bracket_y - tick_h, bracket_y, bracket_y, bracket_y - tick_h],
-    color="black",
-    linewidth=1.0,
-    transform=trans,
-    clip_on=False,
-)
+    # Draw grand mean
+    grand_early = subject_means["phon_mean"].mean()
+    grand_late = subject_means["behav_mean"].mean()
+    ax.plot([0, 1], [grand_early, grand_late], color="black", linewidth=2.5, zorder=3, alpha=0.7)
+    grand_phon_sem = subject_means["phon_mean"].sem()
+    grand_behav_sem = subject_means["behav_mean"].sem()
+    ax.errorbar(
+        [0, 1], [grand_early, grand_late],
+        yerr=[grand_phon_sem, grand_behav_sem],
+        color="black", fmt="o", ms=7, zorder=4, alpha=0.7, capsize=3,
+    )
 
-ax.text(
-    0.5,
-    bracket_y + 0.01,
-    p_to_stars(ttest_p),
-    ha="center",
-    va="bottom",
-    fontsize=11,
-    transform=trans,
-)
+    # Significance bracket
+    bracket_y, tick_h = 1.10, 0.03
+    trans = blended_transform_factory(ax.transData, ax.transAxes)
+    ax.plot(
+        [0, 0, 1, 1], [bracket_y - tick_h, bracket_y, bracket_y, bracket_y - tick_h],
+        color="black", linewidth=1.0, transform=trans, clip_on=False,
+    )
+    ax.text(0.5, bracket_y + 0.01, p_to_stars(ttest_p), ha="center", va="bottom", fontsize=11, transform=trans)
 
-ax.set_xticks([0, 1])
-ax.set_xticklabels(["Acoustic\nwindow", "Perceptual\nwindow"])
-ax.set_xlabel("Evaluation")
-ax.set_ylabel("Acoustic\nprediction\n(ROC-AUC)", rotation=0, labelpad=40,
-              va="top")
-ax.yaxis.label.set_position((1, 1.0))
-ax.annotate(
-    "/n/ vs. /d/",
-    xy=(0.5, 0.0),
-    xycoords=ax.yaxis.label,
-    xytext=(0, -12),
-    textcoords="offset points",
-    ha="center",
-    va="top",
-    fontsize=10,
-    color="#666666",
-)
+    fb.stage("data")
+    return fb
 
-ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: "{:.0%}".format(y)))
-ax.axhline(0.5, color="k", linestyle="--", alpha=0.3)
-ax.set_xlim(-0.3, 1.3)
-sns.despine()
-fig.tight_layout()
-plt.show()
-
-fig.savefig(Path(outdir) / "decoding_phonetic.pdf")
+fb = _plot_decoding_phonetic()
+fb.fig.savefig(Path(outdir) / "decoding_phonetic.pdf")
+fb.render(outdir_talk / "decoding_phonetic", fmt="pdf")
+fb.fig
 
 # %%
 g = sns.displot(
@@ -1058,102 +1074,85 @@ t_early_vs_late, p_early_vs_late = stats.ttest_rel(
 print(f"Late vs early: t={t_early_vs_late:.3f}, p={p_early_vs_late:g}")
 
 
-fig, ax = plt.subplots(figsize=(3, 2.75))
+def _plot_decoding_behavioral_improvement():
+    fb = FigureBuilder(figsize=(3, 2.75))
+    ax = fb.ax
 
-# Draw individual subject lines
-for _, row in subject_means.iterrows():
-    xs = [0, 1]
-    ys = [row["phon_baseline_diff"], row["behav_baseline_diff"]]
-    errs = [row["phon_baseline_diff_sem"], row["behav_baseline_diff_sem"]]
-    ax.plot(xs, ys, color="gray", alpha=0.4, linewidth=1, zorder=1)
-    ax.errorbar(xs, ys, yerr=errs, color="gray", alpha=0.4, fmt="o", ms=3, zorder=2, capsize=1.5)
-
-# Draw grand mean
-grand_early = subject_means["phon_baseline_diff"].mean()
-grand_late = subject_means["behav_baseline_diff"].mean()
-ax.plot(
-    [0, 1],
-    [grand_early, grand_late],
-    color="black",
-    linewidth=2.5,
-    zorder=3,
-    alpha=0.7,
-)
-grand_phon_sem = subject_means["phon_baseline_diff"].sem()
-grand_behav_sem = subject_means["behav_baseline_diff"].sem()
-ax.errorbar(
-    [0, 1], [grand_early, grand_late],
-    yerr=[grand_phon_sem, grand_behav_sem],
-    color="black", fmt="o", ms=7, zorder=4, alpha=0.7, capsize=3,
-)
-
-# --- Significance annotations ---
-# ...after drawing the plot elements...
-
-# Blended transform: x in data coords, y in axes coords
-trans = blended_transform_factory(ax.transData, ax.transAxes)
-
-# Stars above each column (early vs 0, late vs 0)
-for x, p in zip([0, 1], [p_early, p_late]):
-    ax.text(
-        x,
-        0.94,
-        p_to_stars(p),
-        ha="center",
-        va="bottom",
-        fontsize=11,
-        transform=trans,
+    ymax = 1.1 * max(
+        subject_means["phon_baseline_diff"].max() + subject_means["phon_baseline_diff_sem"].max(),
+        subject_means["behav_baseline_diff"].max() + subject_means["behav_baseline_diff_sem"].max(),
+    )
+    ymin = 1.1 * min(
+        subject_means["phon_baseline_diff"].min() - subject_means["phon_baseline_diff_sem"].max(),
+        subject_means["behav_baseline_diff"].min() - subject_means["behav_baseline_diff_sem"].max(),
     )
 
-# Bracket + stars for early vs late
-bracket_y = 1.10  # in axes coords
-tick_h = 0.03
-ax.plot(
-    [0, 0, 1, 1],
-    [bracket_y - tick_h, bracket_y, bracket_y, bracket_y - tick_h],
-    color="black",
-    linewidth=1.0,
-    transform=trans,
-    clip_on=False,
-)
-ax.text(
-    0.5,
-    bracket_y + 0.01,
-    p_to_stars(p_early_vs_late),
-    ha="center",
-    va="bottom",
-    fontsize=11,
-    transform=trans,
-)
+    ax.set_xticks([0, 1])
+    ax.set_xticklabels(["Acoustic\nwindow", "Perceptual\nwindow"])
+    ax.set_xlabel("Evaluation")
+    ax.set_ylabel("Perceptual\nprediction\n($\Delta$ROC-AUC)", rotation=0, labelpad=40)
+    ax.yaxis.label.set_position((1, 1.0))
+    ax.yaxis.set_label_position("right")
+    ax.annotate(
+        "heard /n/\nvs.\nheard /d/",
+        xy=(0.5, 0.0),
+        xycoords=ax.yaxis.label,
+        xytext=(0, -12),
+        textcoords="offset points",
+        ha="center",
+        va="top",
+        fontsize=10,
+        color="#666666",
+    )
+    ax.yaxis.set_major_formatter(mtick.PercentFormatter(1.0))
+    ax.axhline(0, color="k", linestyle="--", alpha=0.3)
+    ax.set_xlim(-0.3, 1.3)
+    ax.set_ylim(ymin, ymax)
+    sns.despine(ax=ax, left=True, top=True, right=False)
 
-ax.set_xticks([0, 1])
-ax.set_xticklabels(["Acoustic\nwindow", "Perceptual\nwindow"])
-ax.set_xlabel("Evaluation")
-ax.set_ylabel("Perceptual\nprediction\n($\Delta$ROC-AUC)", rotation=0, labelpad=40)
+    fb.stage("skeleton")
 
-# put ylabel on right side
-ax.yaxis.label.set_position((1, 1.0))
-ax.yaxis.set_label_position("right")
+    # Draw individual subject lines
+    for _, row in subject_means.iterrows():
+        xs = [0, 1]
+        ys = [row["phon_baseline_diff"], row["behav_baseline_diff"]]
+        errs = [row["phon_baseline_diff_sem"], row["behav_baseline_diff_sem"]]
+        ax.plot(xs, ys, color="gray", alpha=0.4, linewidth=1, zorder=1)
+        ax.errorbar(xs, ys, yerr=errs, color="gray", alpha=0.4, fmt="o", ms=3, zorder=2, capsize=1.5)
 
-ax.annotate(
-    "heard /n/\nvs.\nheard /d/",
-    xy=(0.5, 0.0),
-    xycoords=ax.yaxis.label,
-    xytext=(0, -12),
-    textcoords="offset points",
-    ha="center",
-    va="top",
-    fontsize=10,
-    color="#666666",
-)
+    # Draw grand mean
+    grand_early = subject_means["phon_baseline_diff"].mean()
+    grand_late = subject_means["behav_baseline_diff"].mean()
+    ax.plot([0, 1], [grand_early, grand_late], color="black", linewidth=2.5, zorder=3, alpha=0.7)
+    grand_phon_sem = subject_means["phon_baseline_diff"].sem()
+    grand_behav_sem = subject_means["behav_baseline_diff"].sem()
+    ax.errorbar(
+        [0, 1], [grand_early, grand_late],
+        yerr=[grand_phon_sem, grand_behav_sem],
+        color="black", fmt="o", ms=7, zorder=4, alpha=0.7, capsize=3,
+    )
 
-ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: "{:.0%}".format(y)))
-ax.axhline(0, color="k", linestyle="--", alpha=0.3)
-ax.set_xlim(-0.3, 1.3)
-sns.despine(left=True, top=True, right=False)
-fig.tight_layout()
+    # Significance annotations
+    trans = blended_transform_factory(ax.transData, ax.transAxes)
+    for x, p in zip([0, 1], [p_early, p_late]):
+        ax.text(x, 0.94, p_to_stars(p), ha="center", va="bottom", fontsize=11, transform=trans)
 
-fig.savefig(Path(outdir) / "decoding_behavioral_improvement-no_baseline.pdf")
+    bracket_y, tick_h = 1.10, 0.03
+    ax.plot(
+        [0, 0, 1, 1], [bracket_y - tick_h, bracket_y, bracket_y, bracket_y - tick_h],
+        color="black", linewidth=1.0, transform=trans, clip_on=False,
+    )
+    ax.text(0.5, bracket_y + 0.01, p_to_stars(p_early_vs_late), ha="center", va="bottom", fontsize=11, transform=trans)
+
+    ax.set_ylim(ymin, ymax)
+
+    fb.stage("data")
+    return fb
+
+fb = _plot_decoding_behavioral_improvement()
+fb.fig.savefig(Path(outdir) / "decoding_behavioral_improvement-no_baseline.pdf")
+fb.render(outdir_talk / "decoding_behavioral_improvement-no_baseline", fmt="pdf")
+fb.fig
 
 # %%
 g = sns.displot(
@@ -1598,7 +1597,6 @@ behav_on_phon_mean.write_csv(Path(outdir) / "transfer-behavioral_decoder_on_phon
 
 # %%
 # spaghetti plot: acoustic in-window vs perceptual (behavioral) decoder on acoustic window
-fig, ax = plt.subplots(figsize=(3, 2.5))
 colors = sns.color_palette(categorical_palette, 2)
 x0, x1 = 0, 1
 
@@ -1620,60 +1618,46 @@ subject_means_plot = (
     df_wide.groupby("subject")[[in_col, transfer_col]].mean().reset_index()
 )
 
-for _, row in df_wide.iterrows():
+
+def _plot_decoding_acoustic_transfer():
+    fb = FigureBuilder(figsize=(3, 2.5))
+    ax = fb.ax
+
+    ax.set_ylim(0.025, 1)
+    ax.axhline(0.5, color="red", linestyle="--", linewidth=1)
+    ax.set_xticks([x0, x1])
+    ax.set_xticklabels([in_col, transfer_col])
+    ax.set_ylabel("Acoustic prediction\n(ROC AUC)")
+    ax.yaxis.set_major_formatter(mtick.PercentFormatter(1.0))
+    sns.despine(ax=ax)
+
+    fb.stage("skeleton")
+
+    for _, row in df_wide.iterrows():
+        ax.plot([x0, x1], [row[in_col], row[transfer_col]], color="gray", alpha=0.2, linewidth=0.8, zorder=0)
+    ax.scatter([x0] * len(df_wide), df_wide[in_col], color=colors[0], s=12, alpha=0.4, zorder=2)
+    ax.scatter([x1] * len(df_wide), df_wide[transfer_col], color=colors[1], s=12, alpha=0.4, zorder=2)
+
+    grand_0 = subject_means_plot[in_col].mean()
+    grand_1 = subject_means_plot[transfer_col].mean()
+    ax.plot([x0, x1], [grand_0, grand_1], color="black", linewidth=2.5, zorder=4, alpha=0.7)
+    ax.scatter([x0, x1], [grand_0, grand_1], color="black", s=60, zorder=5, alpha=0.7)
+
+    trans = blended_transform_factory(ax.transData, ax.transAxes)
+    bracket_y, tick_h = 1.10, 0.03
     ax.plot(
-        [x0, x1],
-        [row[in_col], row[transfer_col]],
-        color="gray",
-        alpha=0.2,
-        linewidth=0.8,
-        zorder=0,
+        [x0, x0, x1, x1], [bracket_y - tick_h, bracket_y, bracket_y, bracket_y - tick_h],
+        color="black", linewidth=1.0, transform=trans, clip_on=False,
     )
-ax.scatter(
-    [x0] * len(df_wide), df_wide[in_col], color=colors[0], s=12, alpha=0.4, zorder=2
-)
-ax.scatter(
-    [x1] * len(df_wide),
-    df_wide[transfer_col],
-    color=colors[1],
-    s=12,
-    alpha=0.4,
-    zorder=2,
-)
+    ax.text(0.5, bracket_y + 0.01, p_to_stars(p_phon), ha="center", va="bottom", fontsize=11, transform=trans)
 
-grand_0 = subject_means_plot[in_col].mean()
-grand_1 = subject_means_plot[transfer_col].mean()
-ax.plot([x0, x1], [grand_0, grand_1], color="black", linewidth=2.5, zorder=4, alpha=0.7)
-ax.scatter([x0, x1], [grand_0, grand_1], color="black", s=60, zorder=5, alpha=0.7)
+    fb.stage("data")
+    return fb
 
-trans = blended_transform_factory(ax.transData, ax.transAxes)
-bracket_y, tick_h = 1.10, 0.03
-ax.plot(
-    [x0, x0, x1, x1],
-    [bracket_y - tick_h, bracket_y, bracket_y, bracket_y - tick_h],
-    color="black",
-    linewidth=1.0,
-    transform=trans,
-    clip_on=False,
-)
-ax.text(
-    0.5,
-    bracket_y + 0.01,
-    p_to_stars(p_phon),
-    ha="center",
-    va="bottom",
-    fontsize=11,
-    transform=trans,
-)
-
-ax.set_ylim(0.025, 1)
-ax.axhline(0.5, color="red", linestyle="--", linewidth=1)
-ax.set_xticks([x0, x1])
-ax.set_xticklabels([in_col, transfer_col])
-ax.set_ylabel("Acoustic prediction\n(ROC AUC)")
-ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: "{:.0%}".format(y)))
-sns.despine(ax=ax)
-fig.savefig(Path(outdir) / "decoding_acoustic_transfer-roc_auc.pdf")
+fb = _plot_decoding_acoustic_transfer()
+fb.fig.savefig(Path(outdir) / "decoding_acoustic_transfer-roc_auc.pdf")
+fb.render(outdir_talk / "decoding_acoustic_transfer-roc_auc", fmt="pdf")
+fb.fig
 
 # %%
 g = sns.displot(
@@ -1794,7 +1778,6 @@ print(
     f"t={t_2:.3f}, p={p_2:g}"
 )
 
-fig, ax = plt.subplots(figsize=(3, 2.5))
 colors = sns.color_palette(categorical_palette, 2)
 x0, x1 = 0, 1
 
@@ -1815,69 +1798,46 @@ subject_means_2_plot = (
     df_wide_2.groupby("subject")[[in_col_2, transfer_col_2]].mean().reset_index()
 )
 
-for _, row in df_wide_2.iterrows():
+
+def _plot_decoding_phon_on_behav():
+    fb = FigureBuilder(figsize=(3, 2.5))
+    ax = fb.ax
+
+    ax.set_ylim(0.025, 1)
+    ax.axhline(0.5, color="red", linestyle="--", linewidth=1)
+    ax.set_xticks([x0, x1])
+    ax.set_xticklabels([in_col_2, transfer_col_2])
+    ax.set_ylabel("Perceptual prediction\n(ROC AUC)")
+    ax.yaxis.set_label_position("right")
+    ax.yaxis.set_major_formatter(mtick.PercentFormatter(1.0))
+    sns.despine(ax=ax, left=True, top=True, right=False)
+
+    fb.stage("skeleton")
+
+    for _, row in df_wide_2.iterrows():
+        ax.plot([x0, x1], [row[in_col_2], row[transfer_col_2]], color="gray", alpha=0.2, linewidth=0.8, zorder=0)
+    ax.scatter([x0] * len(df_wide_2), df_wide_2[in_col_2], color=colors[0], s=12, alpha=0.4, zorder=2)
+    ax.scatter([x1] * len(df_wide_2), df_wide_2[transfer_col_2], color=colors[1], s=12, alpha=0.4, zorder=2)
+
+    grand_0_2 = subject_means_2_plot[in_col_2].mean()
+    grand_1_2 = subject_means_2_plot[transfer_col_2].mean()
+    ax.plot([x0, x1], [grand_0_2, grand_1_2], color="black", linewidth=2.5, zorder=4, alpha=0.7)
+    ax.scatter([x0, x1], [grand_0_2, grand_1_2], color="black", s=60, zorder=5, alpha=0.7)
+
+    trans = blended_transform_factory(ax.transData, ax.transAxes)
+    bracket_y, tick_h = 1.10, 0.03
     ax.plot(
-        [x0, x1],
-        [row[in_col_2], row[transfer_col_2]],
-        color="gray",
-        alpha=0.2,
-        linewidth=0.8,
-        zorder=0,
+        [x0, x0, x1, x1], [bracket_y - tick_h, bracket_y, bracket_y, bracket_y - tick_h],
+        color="black", linewidth=1.0, transform=trans, clip_on=False,
     )
-ax.scatter(
-    [x0] * len(df_wide_2),
-    df_wide_2[in_col_2],
-    color=colors[0],
-    s=12,
-    alpha=0.4,
-    zorder=2,
-)
-ax.scatter(
-    [x1] * len(df_wide_2),
-    df_wide_2[transfer_col_2],
-    color=colors[1],
-    s=12,
-    alpha=0.4,
-    zorder=2,
-)
+    ax.text(0.5, bracket_y + 0.01, p_to_stars(p_2), ha="center", va="bottom", fontsize=11, transform=trans)
 
-grand_0_2 = subject_means_2_plot[in_col_2].mean()
-grand_1_2 = subject_means_2_plot[transfer_col_2].mean()
-ax.plot(
-    [x0, x1], [grand_0_2, grand_1_2], color="black", linewidth=2.5, zorder=4, alpha=0.7
-)
-ax.scatter([x0, x1], [grand_0_2, grand_1_2], color="black", s=60, zorder=5, alpha=0.7)
+    fb.stage("data")
+    return fb
 
-trans = blended_transform_factory(ax.transData, ax.transAxes)
-bracket_y, tick_h = 1.10, 0.03
-ax.plot(
-    [x0, x0, x1, x1],
-    [bracket_y - tick_h, bracket_y, bracket_y, bracket_y - tick_h],
-    color="black",
-    linewidth=1.0,
-    transform=trans,
-    clip_on=False,
-)
-ax.text(
-    0.5,
-    bracket_y + 0.01,
-    p_to_stars(p_2),
-    ha="center",
-    va="bottom",
-    fontsize=11,
-    transform=trans,
-)
-
-ax.set_ylim(0.025, 1)
-ax.axhline(0.5, color="red", linestyle="--", linewidth=1)
-ax.set_xticks([x0, x1])
-ax.set_xticklabels([in_col_2, transfer_col_2])
-# ylabel on right side
-ax.set_ylabel("Perceptual prediction\n(ROC AUC)")
-ax.yaxis.set_label_position("right")
-ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: "{:.0%}".format(y)))
-sns.despine(ax=ax, left=True, top=True, right=False)
-fig.savefig(Path(outdir) / "decoding_phon_decoder_on_behav_window.pdf")
+fb = _plot_decoding_phon_on_behav()
+fb.fig.savefig(Path(outdir) / "decoding_phon_decoder_on_behav_window.pdf")
+fb.render(outdir_talk / "decoding_phon_decoder_on_behav_window", fmt="pdf")
 
 # %%
 g = sns.displot(
@@ -1985,7 +1945,7 @@ star_plot_kwargs = dict(
 # this may fail depending on whether the specific electrode is a peak in this
 # analysis run
 try:
-    fig = zoomin_hga(
+    fb = zoomin_hga(
         paper_data,
         "EC250",
         185,
@@ -1995,13 +1955,13 @@ try:
         legend=False,
         **star_plot_kwargs,
     )
-    fig.savefig(Path(outdir) / "zoomin_EC250_185_dn_desolate.pdf")
-    plt.close(fig)
+    fb.fig.savefig(Path(outdir) / "zoomin_EC250_185_dn_desolate.pdf")
+    plt.close(fb.fig)
     None
 
     legend_fig = plt.figure(figsize=(2, 2))
 
-    legend_handles_labels = fig.axes[0].get_legend_handles_labels()
+    legend_handles_labels = fb.fig.axes[0].get_legend_handles_labels()
     # reverse sort
     legend_handles_labels = (
         legend_handles_labels[0][::-1],
@@ -2019,10 +1979,11 @@ except:
 # %%
 # this may fail depending on whether the specific electrode is a peak in this analysis run
 try:
-    zoomin_hga(
+    fb = zoomin_hga(
         paper_data, "EC278", 38, "dn", "necessary", hide_bottom=True, **star_plot_kwargs
     )
-    plt.gcf().savefig(Path(outdir) / "zoomin_EC278_38_dn_necessary.pdf")
+    fb.fig.savefig(Path(outdir) / "zoomin_EC278_38_dn_necessary.pdf")
+    fb.render(outdir_talk / "zoomin_EC278_38_dn_necessary", fmt="pdf")
 except:
     pass
 
@@ -2042,29 +2003,31 @@ reg_df = paper_data.reg_df
 pcc_epoch_data_cache = {}
 
 # %%
-f = plot_condition_contrasts_single_figure(
+fb = plot_condition_contrasts_single_figure(
     paper_data,
     textgrid_dir,
     epoch_data_cache=pcc_epoch_data_cache,
     ambiguous_response_threshold=ambiguous_response_threshold,
     plot_word_ends=["necessary"],
 )
-f.savefig(Path(outdir) / "condition_contrasts-necessary.pdf")
+fb.fig.savefig(Path(outdir) / "condition_contrasts-necessary.pdf")
+plt.close(fb.fig)
 
 # %%
-plot_condition_contrasts_single_figure(
+fb = plot_condition_contrasts_single_figure(
     paper_data,
     textgrid_dir,
     epoch_data_cache=pcc_epoch_data_cache,
     ambiguous_response_threshold=ambiguous_response_threshold,
     plot_word_ends=["desolate"],
 )
-plt.gca().set_xlim(0, 0.7)
-plt.gcf().savefig(Path(outdir) / "condition_contrasts-desolate.pdf")
+fb.ax.set_xlim(0, 0.7)
+fb.fig.savefig(Path(outdir) / "condition_contrasts-desolate.pdf")
+plt.close(fb.fig)
 
 
 # %%
-plot_condition_contrasts_single_figure(
+fb = plot_condition_contrasts_single_figure(
     paper_data,
     textgrid_dir,
     epoch_data_cache=pcc_epoch_data_cache,
@@ -2075,16 +2038,18 @@ plot_condition_contrasts_single_figure(
         include_offset=False, include_phonemes=False, vline_extent=1.0
     ),
     pval_thresholds=(0.00001,),
+    plot_ylim=(-0.1, 0.7),
 )
-plt.gcf().savefig(Path(outdir) / "condition_contrasts-both.pdf")
-None
+fb.fig.savefig(Path(outdir) / "condition_contrasts-both.pdf")
+fb.render(outdir_talk / "condition_contrasts-both", fmt="pdf")
+plt.close(fb.fig)
 
 # %% [markdown]
 # ## Behav stackplot
 
 
 # %%
-plot_behav_barplot(
+fb = plot_behav_barplot(
     all_md,
     "EC250",
     "dn",
@@ -2093,10 +2058,24 @@ plot_behav_barplot(
     legend=False,
     resampled_palette=resampled_palette_simplified,
 )
-plt.gcf().savefig(Path(outdir) / "behav_barplot_EC250_dn_desolate.pdf")
+fb.fig.savefig(Path(outdir) / "behav_barplot_EC250_dn_desolate.pdf")
+plt.close(fb.fig)
 
 # %%
-plot_behav_barplot(
+fb = plot_behav_barplot(
+    all_md,
+    "EC250",
+    "dn",
+    "desolate",
+    [1, 2, 3, 4, 5, 6],
+    legend=False,
+    resampled_palette=resampled_palette_simplified,
+)
+fb.fig.savefig(Path(outdir) / "behav_barplot_EC250_dn_desolate-all_steps.pdf")
+plt.close(fb.fig)
+
+# %%
+fb = plot_behav_barplot(
     all_md,
     "EC278",
     "dn",
@@ -2105,7 +2084,21 @@ plot_behav_barplot(
     legend=False,
     resampled_palette=resampled_palette_simplified,
 )
-plt.gcf().savefig(Path(outdir) / "behav_barplot_EC278_dn_necessary.pdf")
+fb.fig.savefig(Path(outdir) / "behav_barplot_EC278_dn_necessary.pdf")
+fb.render(outdir_talk / "behav_barplot_EC278_dn_necessary", fmt="pdf")
+
+# %%
+fb = plot_behav_barplot(
+    all_md,
+    "EC278",
+    "dn",
+    "necessary",
+    [1, 2, 3, 4, 5, 6],
+    legend=False,
+    resampled_palette=resampled_palette_simplified,
+)
+fb.fig.savefig(Path(outdir) / "behav_barplot_EC278_dn_necessary-all_steps.pdf")
+plt.close(fb.fig)
 
 # %% [markdown]
 # ## Polarity relationships
@@ -2295,7 +2288,8 @@ def plot_summary_acoustic_vs_presence_of_response_stackplot(
     df_pct = df.div(df.sum(axis=1), axis=0) * 100
 
     if ax is None:
-        f, ax = plt.subplots(figsize=(1.3, 2))
+        fb = FigureBuilder(figsize=(1.3, 2))
+        ax = fb.ax
     else:
         f = ax.get_figure()
 
@@ -2338,12 +2332,15 @@ def plot_summary_acoustic_vs_presence_of_response_stackplot(
         transform=trans,
     )
 
-    return f
+    fb.stage("data")
+
+    return fb
 
 
 # %%
-f = plot_summary_acoustic_vs_presence_of_response_stackplot()
-f.savefig(Path(outdir) / "early_polarity-late_response_stackplot.pdf")
+fb = plot_summary_acoustic_vs_presence_of_response_stackplot()
+fb.fig.savefig(Path(outdir) / "early_polarity-late_response_stackplot.pdf")
+fb.render(outdir_talk / "early_polarity-late_response_stackplot", fmt="pdf")
 
 # %%
 plot_summary_acoustic_vs_presence_of_response_stackplot("dn")
@@ -2558,55 +2555,58 @@ preference_relationship_pct_df = (
 preference_relationship_pct_df
 
 # %%
-# Stacked bar chart form
-f, ax = plt.subplots(figsize=(1.3, 2))
-(
-    preference_relationship_pct_df.plot(
-        kind="bar",
-        stacked=True,
-        width=0.5,
-        color=sns.color_palette("Set2", n_colors=2),
-        ax=ax,
-    )
-)
-
 # chi2 test
 chi2, p_value, dof, expected = chi2_contingency(preference_relationship_df.values)
 print(f"Chi-square test: chi2={chi2:.3f}, p={p_value:.4e}")
 sig_stars = p_to_stars(p_value)
 
-bracket_y, tick_h = 1.10, 0.03
-trans = blended_transform_factory(ax.transData, ax.transAxes)
-ax.plot(
-    [0, 0, 1, 1],
-    [bracket_y - tick_h, bracket_y, bracket_y, bracket_y - tick_h],
-    color="black",
-    linewidth=1.0,
-    transform=trans,
-    clip_on=False,
-)
-ax.text(
-    0.5,
-    bracket_y + 0.01,
-    sig_stars,
-    ha="center",
-    va="bottom",
-    fontsize=11,
-    transform=trans,
-)
 
-# Add 50% chance line
-plt.axhline(y=50, color="black", linestyle="--", linewidth=1, alpha=0.5)
+def _plot_polarity_stackbar():
+    fb = FigureBuilder(figsize=(1.3, 2))
+    ax = fb.ax
 
-plt.xlabel("Acoustic tuning", fontsize=12)
-plt.ylabel(None)
-ax.set_xticklabels(ax.get_xticklabels(), rotation=0)
-plt.ylim(0, 100)
-ax.yaxis.set_major_formatter(mtick.PercentFormatter())
-ax.legend(title="Perceptual\ntuning", loc="upper right", bbox_to_anchor=(2.1, 1))
-sns.despine(ax=ax)
+    preference_relationship_pct_df.plot(
+        kind="bar", stacked=True, width=0.5,
+        color=sns.color_palette("Set2", n_colors=2), ax=ax,
+    )
 
-f.savefig(Path(outdir) / "early_polarity-late_polarity_stackbar.pdf")
+    # Set bars invisible for skeleton
+    for patch in ax.patches:
+        patch.set_alpha(0)
+        patch.set_edgecolor("none")
+
+    ax.set_xlabel("Acoustic tuning", fontsize=12)
+    ax.set_ylabel(None)
+    ax.set_xticklabels(ax.get_xticklabels(), rotation=0)
+    ax.set_ylim(0, 100)
+    ax.yaxis.set_major_formatter(mtick.PercentFormatter())
+    ax.legend(title="Perceptual\ntuning", loc="upper right", bbox_to_anchor=(2.1, 1))
+    sns.despine(ax=ax)
+
+    fb.stage("skeleton")
+
+    # Restore bars
+    for patch in ax.patches:
+        patch.set_alpha(1)
+        patch.set_edgecolor("black")
+        patch.set_linewidth(0.5)
+
+    ax.axhline(y=50, color="black", linestyle="--", linewidth=1, alpha=0.5)
+
+    bracket_y, tick_h = 1.10, 0.03
+    trans = blended_transform_factory(ax.transData, ax.transAxes)
+    ax.plot(
+        [0, 0, 1, 1], [bracket_y - tick_h, bracket_y, bracket_y, bracket_y - tick_h],
+        color="black", linewidth=1.0, transform=trans, clip_on=False,
+    )
+    ax.text(0.5, bracket_y + 0.01, sig_stars, ha="center", va="bottom", fontsize=11, transform=trans)
+
+    fb.stage("data")
+    return fb
+
+fb = _plot_polarity_stackbar()
+fb.fig.savefig(Path(outdir) / "early_polarity-late_polarity_stackbar.pdf")
+fb.render(outdir_talk / "early_polarity-late_polarity_stackbar", fmt="pdf")
 
 # %% [markdown]
 # ### Compare congruency analysis vs. decoder analysis
@@ -2671,7 +2671,7 @@ def plot_for_congruency(transfer_row):
     plot_phoneme_pair = transfer_row.phoneme_pair
     plot_word_end = transfer_row.word_end
 
-    f = zoomin_hga(
+    fb = zoomin_hga(
         paper_data,
         plot_subject,
         plot_electrode_idx,
@@ -2682,19 +2682,19 @@ def plot_for_congruency(transfer_row):
     )
 
     # highlight behav and acoustic windows
-    f.axes[0].axvspan(
+    fb.fig.axes[0].axvspan(
         transfer_row.tmin_phon,
         transfer_row.tmax_phon,
         color="blue",
         alpha=0.3,)
 
-    f.axes[1].axvspan(
+    fb.fig.axes[1].axvspan(
         transfer_row.tmin_behav,
         transfer_row.tmax_behav,
         color="orange",
         alpha=0.3,)
 
-    return f
+    return fb.fig
 
 
 # %%
@@ -2839,7 +2839,7 @@ polarity_vs_unambig_late_df = pd.merge(
     )
 ).groupby("early_selectivity")["late_on_unambig"].value_counts().unstack().fillna(0)
 polarity_vs_unambig_late_df.columns = polarity_vs_unambig_late_df.columns.map(
-    {False: "Ambig.\ntrials", True: "Unambig.\nand ambig.\ntrials"}
+    {False: "Ambig.\ntrials", True: "Ambig.\nand unambig.\ntrials"}
 )
 
 # chi2 test
@@ -2849,44 +2849,50 @@ sig_stars = p_to_stars(p_value)
 
 polarity_vs_unambig_late_df = polarity_vs_unambig_late_df.div(polarity_vs_unambig_late_df.sum(axis=1), axis=0) * 100
 
-f, ax = plt.subplots(figsize=(1.3, 2))
-polarity_vs_unambig_late_df.plot(
-    kind="bar",
-    stacked=True,
-    width=0.5,
-    color=sns.color_palette("Set2", n_colors=2),
-    ax=ax,
-)
+def _plot_unambig_stackbar():
+    fb = FigureBuilder(figsize=(1.3, 2))
+    ax = fb.ax
 
-bracket_y, tick_h = 1.10, 0.03
-trans = blended_transform_factory(ax.transData, ax.transAxes)
-ax.plot(
-    [0, 0, 1, 1],
-    [bracket_y - tick_h, bracket_y, bracket_y, bracket_y - tick_h],
-    color="black",
-    linewidth=1.0,
-    transform=trans,
-    clip_on=False,
-)
-ax.text(
-    0.5,
-    bracket_y + 0.01,
-    sig_stars,
-    ha="center",
-    va="bottom",
-    fontsize=11,
-    transform=trans,
-)
+    polarity_vs_unambig_late_df.plot(
+        kind="bar", stacked=True, width=0.5,
+        color=sns.color_palette("Set2", n_colors=2), ax=ax,
+    )
 
-plt.xlabel("Acoustic tuning", fontsize=12)
-plt.ylabel(None)
-ax.set_xticklabels(ax.get_xticklabels(), rotation=0)
-plt.ylim(0, 100)
-ax.yaxis.set_major_formatter(mtick.PercentFormatter())
-ax.legend(title="Perceptual\nresponse", loc="upper right", bbox_to_anchor=(2.45, 1))
-sns.despine(ax=ax)
+    # Set bars invisible for skeleton
+    for patch in ax.patches:
+        patch.set_alpha(0)
+        patch.set_edgecolor("none")
 
-f.savefig(Path(outdir) / "early_polarity-late_unambig_response_stackbar.pdf")
+    ax.set_xlabel("Acoustic tuning", fontsize=12)
+    ax.set_ylabel(None)
+    ax.set_xticklabels(ax.get_xticklabels(), rotation=0)
+    ax.set_ylim(0, 100)
+    ax.yaxis.set_major_formatter(mtick.PercentFormatter())
+    ax.legend(title="Perceptual\nresponse", loc="upper right", bbox_to_anchor=(2.45, 1))
+    sns.despine(ax=ax)
+
+    fb.stage("skeleton")
+
+    # Restore bars
+    for patch in ax.patches:
+        patch.set_alpha(1)
+        patch.set_edgecolor("black")
+        patch.set_linewidth(0.5)
+
+    bracket_y, tick_h = 1.10, 0.03
+    trans = blended_transform_factory(ax.transData, ax.transAxes)
+    ax.plot(
+        [0, 0, 1, 1], [bracket_y - tick_h, bracket_y, bracket_y, bracket_y - tick_h],
+        color="black", linewidth=1.0, transform=trans, clip_on=False,
+    )
+    ax.text(0.5, bracket_y + 0.01, sig_stars, ha="center", va="bottom", fontsize=11, transform=trans)
+
+    fb.stage("data")
+    return fb
+
+fb = _plot_unambig_stackbar()
+fb.fig.savefig(Path(outdir) / "early_polarity-late_unambig_response_stackbar.pdf")
+fb.render(outdir_talk / "early_polarity-late_unambig_response_stackbar", fmt="pdf")
 
 # %%
 # Late polarity vs. late unambig or late all
@@ -3059,57 +3065,68 @@ plot_specific = plot_unambig.join(
 n_generalize = plot_generalize.select(site_cols).unique().height
 n_specific = plot_specific.select(site_cols).unique().height
 
-f, ax = plt.subplots(figsize=(3, 2))
 plot_palette = sns.color_palette("Set1", 2)
 pval_thresholds = (0.001, 0.01)
 
-_, p_handles, p_labels = plot_condition_contrast(
-    plot_generalize,
-    "behavior_dummy_forced",
-    data=paper_data,
-    textgrid_dir=textgrid_dir,
-    polarity_correct="late",
-    epoch_data_cache=pcc_epoch_data_cache,
-    ax=ax,
-    color=plot_palette[0],
-    annotate=True,
-    textgrid_kwargs=dict(include_phonemes=False, include_offset=False),
-    label=f"Generalizes (n={n_generalize})",
-    pval_thresholds=pval_thresholds,
-)
-plot_condition_contrast(
-    plot_specific,
-    "behavior_dummy_forced",
-    data=paper_data,
-    textgrid_dir=textgrid_dir,
-    polarity_correct="late",
-    epoch_data_cache=pcc_epoch_data_cache,
-    ax=ax,
-    color=plot_palette[1],
-    annotate=False,
-    label=f"Ambig-only (n={n_specific})",
-    ttest_bar_y_ratio=0.87,
-    pval_thresholds=pval_thresholds,
-)
 
-ax.set_xlim(*plot_xlim)
-ax.set_ylabel("HGA effect size ($z$)")
-ax.set_xlabel("Time from word onset (s)")
+def _plot_perceptual_contrast_both():
+    fb = FigureBuilder(figsize=(3, 2))
+    ax = fb.ax
 
-if p_handles is not None:
-    handles, labels = ax.get_legend_handles_labels()
-    handles += p_handles
-    labels += p_labels
-    ax.legend(
-        handles=handles,
-        labels=labels,
-        handler_map={Rectangle: HandlerRectangle()},
-        fontsize=8,
-        loc="upper right",
-        bbox_to_anchor=(1.3, 1.0),
+    ax.set_xlim(*plot_xlim)
+    ax.set_ylabel("HGA effect size ($z$)")
+    ax.set_xlabel("Time from word onset (s)")
+
+    fb.stage("skeleton")
+
+    _, p_handles, p_labels = plot_condition_contrast(
+        plot_generalize,
+        "behavior_dummy_forced",
+        data=paper_data,
+        textgrid_dir=textgrid_dir,
+        polarity_correct="late",
+        epoch_data_cache=pcc_epoch_data_cache,
+        ax=ax,
+        color=plot_palette[0],
+        annotate=True,
+        textgrid_kwargs=dict(include_phonemes=False, include_offset=False),
+        label=f"Generalizes (n={n_generalize})",
+        pval_thresholds=pval_thresholds,
     )
 
-f.savefig(Path(outdir) / "perceptual_contrast_unambig_split-both.pdf")
+    fb.stage("generalize")
+
+    plot_condition_contrast(
+        plot_specific,
+        "behavior_dummy_forced",
+        data=paper_data,
+        textgrid_dir=textgrid_dir,
+        polarity_correct="late",
+        epoch_data_cache=pcc_epoch_data_cache,
+        ax=ax,
+        color=plot_palette[1],
+        annotate=False,
+        label=f"Ambig-only (n={n_specific})",
+        ttest_bar_y_ratio=0.87,
+        pval_thresholds=pval_thresholds,
+    )
+
+    if p_handles is not None:
+        handles, labels = ax.get_legend_handles_labels()
+        handles += p_handles
+        labels += p_labels
+        ax.legend(
+            handles=handles, labels=labels,
+            handler_map={Rectangle: HandlerRectangle()},
+            fontsize=8, loc="upper right", bbox_to_anchor=(1.3, 1.0),
+        )
+
+    fb.stage("specific")
+    return fb
+
+fb = _plot_perceptual_contrast_both()
+fb.fig.savefig(Path(outdir) / "perceptual_contrast_unambig_split-both.pdf")
+fb.render(outdir_talk / "perceptual_contrast_unambig_split-both", fmt="pdf")
 
 # %%
 # Behavioral contrast on electrodes with vs without late unambiguous response,
