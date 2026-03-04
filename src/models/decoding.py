@@ -1141,17 +1141,15 @@ def fit_train_test(
 
     seeds = np.random.RandomState(random_state).randint(0, 10000, num_repeats)
 
-    # Find if we are going to be able to have both positive and negative classes in each
-    # inner fold. If not, scale down the number of folds.
-    if stratify is not None:
-        min_class_count = test_fraction * np.min(
-            np.bincount(stratify, minlength=num_classes)
+    # Ensure there are enough of each label class for num_folds inner CV folds.
+    # Inner CV operates on the training set ((1 - test_fraction) of total), so check that
+    # the minority class has at least num_folds training examples.
+    min_label_count = np.min(np.bincount(y, minlength=num_classes))
+    if (1 - test_fraction) * min_label_count < num_folds:
+        num_folds = max(1, int(np.floor((1 - test_fraction) * min_label_count)))
+        L.warning(
+            f"Reducing num_folds to {num_folds} due to limited class samples per fold."
         )
-        if min_class_count < num_folds:
-            num_folds = max(1, int(np.floor(min_class_count)))
-            L.warning(
-                f"Reducing num_folds to {num_folds} due to limited class samples per fold."
-            )
 
     results = []
     for i, seed in enumerate(seeds):
@@ -1160,7 +1158,7 @@ def fit_train_test(
             y,
             np.arange(len(X)),
             test_size=test_fraction,
-            stratify=stratify,
+            stratify=y,
             shuffle=True,
             random_state=seed,
         )
