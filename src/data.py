@@ -47,12 +47,19 @@ key_resp.* -- outputs from psychopy
 [..]
 slider.response: where did the person click, where a lower number means closer to the left string, and higher number means closer to right string
 slider.rt: how long did their reaction time take (seconds)
+mouse.started: when did mouse recording begin (in ms; relative to audio offset)
 mouse.x: continuous timeseries of the x-axis mouse movements
 mouse.y: continuous timeseries of the y-axis mouse movements
 [..]
 Subject ID: participant code
 TDT Block: recording block (matches excel sheet for notes)
 block_type: for counter balancing which items are presented on the left/right
+
+
+?? missing
+audio.stopped: audio offset time (would need this to get mouse.started in absolute time)
+*** what I want to make:
+mouse_movement_started: absolute timestamp of earliest mouse movement (behavioral response onset)
 """
 
 
@@ -66,6 +73,8 @@ def add_metadata_features(md: pd.DataFrame) -> pd.DataFrame:
     assert set(md.resampled) == set(range(1, int(md.resampled.max()) + 1))
 
     md["textgrid_path"] = md.apply(lambda x: x.wav_file.replace(x.root, "").replace(".wav", ".TextGrid"), axis=1)
+
+    # Prepare behavior features
 
     # Prepare regression features
 
@@ -177,6 +186,33 @@ def add_metadata_features(md: pd.DataFrame) -> pd.DataFrame:
     # describes the degree of belief change from acoustic evidence to behavior
     md["behavior_based_belief_update"] = md.behavior_linear - md.resampled_on_behavior
     md["behavior_bin_based_belief_update"] = md.behavior_binned - md.resampled_on_behavior
+
+    # derive a "subject-specific acoustic" categorical cue.
+    # for each acoustic spectrum, find the zero-crossing point of the subject's behavior,
+    # and use that to define the categorical acoustic cue
+    # estimate the zero-crossing on non-mismatch trials only
+    md["subject_specific_acoustics"] = 0
+    def find_zero_crossing(mean_response):
+        # find the first index where the sign changes
+        signs = np.sign(mean_response)
+        zero_crossings = np.where(np.diff(signs))[0]
+        if len(zero_crossings) == 0:
+            return None
+        return zero_crossings[0] + 1  # +1 because diff reduces the index by 1
+    # zero_crossing_points: at and below this resampled step, behavior is
+    # on average in favor of the first phoneme of the pair
+    zero_crossing_points = md.query("mismatch == -1").groupby(["phoneme_pair", "resampled"])["behavior_linear"].mean() \
+        .groupby(["phoneme_pair"]).apply(find_zero_crossing)
+    for phoneme_pair, zero_crossing in zero_crossing_points.items():
+        if zero_crossing is None:
+            # no crossing found; all responses on one side
+            # assign all to the side of the mean response
+            mean_response = md.query("phoneme_pair == @phoneme_pair & mismatch == -1")["behavior_linear"].mean()
+            side = -1 if mean_response < 0 else 1
+            md.loc[(md.phoneme_pair == phoneme_pair), "subject_specific_acoustics"] = side
+        else:
+            md.loc[(md.phoneme_pair == phoneme_pair) & (md.resampled <= zero_crossing), "subject_specific_acoustics"] = -1
+            md.loc[(md.phoneme_pair == phoneme_pair) & (md.resampled > zero_crossing), "subject_specific_acoustics"] = 1
 
     md["label_behavior"] = "~"
     md.loc[md.behavior_categorical == -1, "label_behavior"] = md[md.behavior_categorical == -1].phoneme_pair.str[0]

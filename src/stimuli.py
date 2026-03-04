@@ -15,12 +15,12 @@ POD_dict = {
 }
 
 OFFSET_DICT = {
-    "desolate": 0.798,
-    "necessary": 1.187,
-    "bountiful": 0.974,
-    "mountains": 0.980,
-    "penecillin": 1.018,
-    "beneficial": 0.991,
+    "desolate": 0.498,
+    "necessary": 0.887,
+    "bountiful": 0.674,
+    "mountains": 0.680,
+    "penecillin": 0.718,
+    "beneficial": 0.691,
 }
 
 WORD_END_TO_PHONEME_PAIR = {
