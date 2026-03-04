@@ -27,6 +27,12 @@ analysis:
 
   hga_window_source: "decoder"
 
+  decoding:
+    # Global configuration for all sliding window decoders
+    min_sample: 1
+    window_size: 15
+    stride: 2
+
   sweep:
     phon_response_peak_thresholds: [0.55, 0.60, 0.65]
     behav_response_peak_thresholds: [0.005, 0.010, 0.020]

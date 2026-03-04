@@ -93,6 +93,46 @@ Quick-access recipe:
     key = (subject, electrode_idx, phoneme_pair, smin, smax)
     estimators = models[key]   # list of fitted models, one per repeat
     proba = estimators[0].predict_proba(X)[:, 1]
+
+------------------------------------------------------------------------
+outputs/causal5/behavior_decoding_single_electrode/{subject}/results.joblib
+------------------------------------------------------------------------
+Written by: notebooks/causal5/behavior_decoding_single_electrode.py
+Producer:   run_decoding_model_comparison_population (this module)
+
+Load:
+    import joblib
+    data = joblib.load(path)
+
+Top-level keys (simplified vs causal4 — no B/C variants):
+    "decoding_results"   (was "A_decoding_results" in causal4)
+    "decoders"           (was "A_decoders" in causal4)
+
+Same inner structure as causal4 A_decoding_results / A_decoders (see above).
+
+Note on viz_paper.py compatibility:
+    evaluate_behav_decoder_on_phon_window expects key name "A_decoders".
+    The causal5 A_neurometrics normalizes on load:
+        {"A_decoders": data["decoders"]}
+
+------------------------------------------------------------------------
+outputs/causal5/behavior_decoding_single_electrode_acoustic/{subject}/
+------------------------------------------------------------------------
+Same format as causal4 acoustic outputs. Files:
+    decoding_models.joblib  – fitted models (joblib, same structure as causal4)
+    outcomes.parquet         – test-fold predictions
+    all_outcomes.parquet     – predictions on all relevant epochs (multiple targets)
+    train_scores.parquet, test_scores.parquet, avg_test_scores.csv
+
+Loading for A_neurometrics (phonetic_decoder_checkpoints structure):
+    The causal5 A_neurometrics builds the structure expected by viz_paper.py from
+    the three separate files:
+        checkpoints[subject] = {
+            "models":       joblib.load("decoding_models.joblib"),
+            "outcomes":     dict from outcomes.parquet grouped by (subject, electrode_idx,
+                                phoneme_pair, smin, smax),
+            "all_outcomes": dict from all_outcomes.parquet grouped by (..., measure),
+        }
 ===========================================================================
 
 ===========================================================================
