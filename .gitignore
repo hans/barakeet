@@ -13,6 +13,7 @@
 *.parquet
 *.joblib
 *.h5
+*.ipynb
 
 .ipynb_checkpoints
 .snakemake
