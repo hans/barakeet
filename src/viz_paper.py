@@ -453,6 +453,7 @@ def zoomin_hga(
     hide_bottom=False,
     legend=False,
     figsize=(5.25, 4),
+    vline_extent=1.25,
     title=False,
 ):
     """
@@ -578,7 +579,6 @@ def zoomin_hga(
         raise NotImplementedError()
 
     # --- Axis decorations (skeleton: axes/labels/vlines/textgrid in place, no data) ---
-    vline_extent = 1.25
     pod_time = (
         data.word_end_df.filter(pl.col("word_end") == word_end)
         .select(pl.max("pod"))
@@ -600,7 +600,7 @@ def zoomin_hga(
         sns.despine(ax=ax, top=True, right=True)
 
         include_phonemes_i = include_phonemes and i == 0
-        vline_extent_i = 1.25 if i == 0 else 1
+        vline_extent_i = vline_extent if i == 0 else 1
         add_textgrid(
             ax,
             textgrid_dir,

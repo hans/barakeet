@@ -2671,6 +2671,7 @@ def plot_for_congruency(transfer_row):
     plot_phoneme_pair = transfer_row.phoneme_pair
     plot_word_end = transfer_row.word_end
 
+    vline_extent = 1.0
     fb = zoomin_hga(
         paper_data,
         plot_subject,
@@ -2679,18 +2680,21 @@ def plot_for_congruency(transfer_row):
         plot_word_end,
         controlled_resampled_steps=ambig_steps[plot_subject, plot_phoneme_pair, plot_word_end],
         textgrid_dir=textgrid_dir,
+        vline_extent=vline_extent,
     )
 
     # highlight behav and acoustic windows
     fb.fig.axes[0].axvspan(
         transfer_row.tmin_phon,
         transfer_row.tmax_phon,
+        ymax=vline_extent,
         color="blue",
         alpha=0.3,)
 
     fb.fig.axes[1].axvspan(
         transfer_row.tmin_behav,
         transfer_row.tmax_behav,
+        ymax=vline_extent,
         color="orange",
         alpha=0.3,)
 
@@ -2845,7 +2849,24 @@ polarity_vs_unambig_late_df.columns = polarity_vs_unambig_late_df.columns.map(
 # chi2 test
 chi2, p_value, dof, expected = chi2_contingency(polarity_vs_unambig_late_df.values)
 print(f"Chi-square test: chi2={chi2:.3f}, p={p_value:.4e}")
-sig_stars = p_to_stars(p_value)
+chi2_sig_stars = p_to_stars(p_value)
+
+# binomial test on each row
+binom_results = []
+for early_sel, row in polarity_vs_unambig_late_df.iterrows():
+    n_ambig_only = row["Ambig.\ntrials"]
+    n_total = row.sum()
+    test = stats.binomtest(n_ambig_only, n_total, p=0.5, alternative="greater")
+    binom_results.append(
+        {
+            "early_selectivity": early_sel,
+            "n_ambig_only": n_ambig_only,
+            "n_total": n_total,
+            "p_value": test.pvalue,
+            "significant": test.pvalue < 0.05,
+        }
+    )
+binom_results_df = pd.DataFrame(binom_results)
 
 polarity_vs_unambig_late_df = polarity_vs_unambig_late_df.div(polarity_vs_unambig_late_df.sum(axis=1), axis=0) * 100
 
@@ -2858,7 +2879,10 @@ def _plot_unambig_stackbar():
         color=sns.color_palette("Set2", n_colors=2), ax=ax,
     )
 
-    # Set bars invisible for skeleton
+    # Set bars invisible for skeleton, but keep old legend handles
+    old_handles, old_labels = ax.get_legend_handles_labels()
+    from copy import deepcopy
+    old_handles = deepcopy(old_handles)
     for patch in ax.patches:
         patch.set_alpha(0)
         patch.set_edgecolor("none")
@@ -2868,7 +2892,11 @@ def _plot_unambig_stackbar():
     ax.set_xticklabels(ax.get_xticklabels(), rotation=0)
     ax.set_ylim(0, 100)
     ax.yaxis.set_major_formatter(mtick.PercentFormatter())
-    ax.legend(title="Perceptual\nresponse", loc="upper right", bbox_to_anchor=(2.45, 1))
+
+    ax.legend(handles=old_handles, labels=old_labels,
+              title="Perceptual\nresponse", loc="upper right",
+              bbox_to_anchor=(2.6, 1))
+
     sns.despine(ax=ax)
 
     fb.stage("skeleton")
@@ -2879,13 +2907,24 @@ def _plot_unambig_stackbar():
         patch.set_edgecolor("black")
         patch.set_linewidth(0.5)
 
-    bracket_y, tick_h = 1.10, 0.03
+    # add stars for binomial test
     trans = blended_transform_factory(ax.transData, ax.transAxes)
+    for i, row in binom_results_df.iterrows():
+        early_sel = row.early_selectivity
+        p_value = row.p_value
+        sig_stars = p_to_stars(p_value)
+        if sig_stars:
+            tick_y = 1.01
+            ax.text(i, tick_y, sig_stars, ha="center", va="bottom", fontsize=11,
+                    transform=trans)
+
+    # add stars for chi2 test
+    bracket_y, tick_h = 1.19, 0.03
     ax.plot(
         [0, 0, 1, 1], [bracket_y - tick_h, bracket_y, bracket_y, bracket_y - tick_h],
         color="black", linewidth=1.0, transform=trans, clip_on=False,
     )
-    ax.text(0.5, bracket_y + 0.01, sig_stars, ha="center", va="bottom", fontsize=11, transform=trans)
+    ax.text(0.5, bracket_y + 0.01, chi2_sig_stars, ha="center", va="bottom", fontsize=11, transform=trans)
 
     fb.stage("data")
     return fb
@@ -2893,6 +2932,7 @@ def _plot_unambig_stackbar():
 fb = _plot_unambig_stackbar()
 fb.fig.savefig(Path(outdir) / "early_polarity-late_unambig_response_stackbar.pdf")
 fb.render(outdir_talk / "early_polarity-late_unambig_response_stackbar", fmt="pdf")
+fb.fig
 
 # %%
 # Late polarity vs. late unambig or late all
@@ -3090,7 +3130,8 @@ def _plot_perceptual_contrast_both():
         color=plot_palette[0],
         annotate=True,
         textgrid_kwargs=dict(include_phonemes=False, include_offset=False),
-        label=f"Generalizes (n={n_generalize})",
+        # label=f"Ambig. and unambig. (n={n_generalize})",
+        label=f"Ambig.\nand unambig.",
         pval_thresholds=pval_thresholds,
     )
 
@@ -3106,7 +3147,8 @@ def _plot_perceptual_contrast_both():
         ax=ax,
         color=plot_palette[1],
         annotate=False,
-        label=f"Ambig-only (n={n_specific})",
+        # label=f"Ambig-only (n={n_specific})",
+        label=f"Ambig-only",
         ttest_bar_y_ratio=0.87,
         pval_thresholds=pval_thresholds,
     )
@@ -3118,7 +3160,7 @@ def _plot_perceptual_contrast_both():
         ax.legend(
             handles=handles, labels=labels,
             handler_map={Rectangle: HandlerRectangle()},
-            fontsize=8, loc="upper right", bbox_to_anchor=(1.3, 1.0),
+            fontsize=8, loc="upper right", bbox_to_anchor=(1.5, 1.0),
         )
 
     fb.stage("specific")
@@ -3127,6 +3169,7 @@ def _plot_perceptual_contrast_both():
 fb = _plot_perceptual_contrast_both()
 fb.fig.savefig(Path(outdir) / "perceptual_contrast_unambig_split-both.pdf")
 fb.render(outdir_talk / "perceptual_contrast_unambig_split-both", fmt="pdf")
+fb.fig
 
 # %%
 # Behavioral contrast on electrodes with vs without late unambiguous response,
