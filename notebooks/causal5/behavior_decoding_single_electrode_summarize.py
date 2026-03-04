@@ -39,22 +39,16 @@ from src.data import add_metadata_features
 # %% tags=["parameters"]
 subject = "EC243"
 
-result_path = f"outputs/causal5/behavior_decoding_single_electrode/{subject}/results.joblib"
+result_path = (
+    f"outputs/causal5/behavior_decoding_single_electrode/{subject}/results.joblib"
+)
 groupby = ["word_end"]
 
 electrodes_path = f"outputs/causal5/find_speech_responsive/{subject}_results.csv"
 epochs_path = f"outputs/epochs_preprocessed/{subject}_epo.fif"
 
-# Partition the decoded time axis into early (acoustic) and late (perceptual) windows.
-# Early: smin in [min_decoding_sample, A_max_decoding_sample]
-# Late:  smin in [A_max_decoding_sample, max_decoding_sample]
 min_decoding_sample = 0
 max_decoding_sample = 290  # ~2.5 s post onset
-A_max_decoding_sample = (
-    70  # ~0.3 s post onset — boundary between early and late windows
-)
-
-phoneme_pair_order = ["bm", "dn", "pb"]
 
 outdir = "."
 
@@ -108,21 +102,6 @@ if len(A_decoding_results) > 0:
 else:
     A_results_df = pd.DataFrame(columns=dec_columns)
 
-# %% [markdown]
-# ## Partition into early (acoustic) and late (perceptual) windows
-
-# %%
-# Early window: smin falls before the early/late boundary
-# Late window:  smin falls at or after the boundary
-A_early_results_df = A_results_df[
-    (A_results_df.smin >= min_decoding_sample)
-    & (A_results_df.smin <= A_max_decoding_sample)
-]
-A_late_results_df = A_results_df[
-    (A_results_df.smin >= A_max_decoding_sample)
-    & (A_results_df.smax <= max_decoding_sample)
-]
-
 # %%
 # Sanity: the two windows together cover the full smax range
 target_smax = set(
@@ -130,38 +109,15 @@ target_smax = set(
     for smax in A_results_df.smax.unique()
     if min_decoding_sample <= smax <= max_decoding_sample
 )
-assert set(A_early_results_df.smax) | set(A_late_results_df.smax) == target_smax, (
-    f"Missing smaxes: {sorted(target_smax - (set(A_early_results_df.smax) | set(A_late_results_df.smax)))}"
-)
-assert set(A_early_results_df.smin).isdisjoint(set(A_late_results_df.smin))
-
-del A_results_df
 
 # %%
-A_early_results_df["diff"] = (
-    A_early_results_df["full_roc_auc"] - A_early_results_df["baseline_roc_auc"]
-)
-A_late_results_df["diff"] = (
-    A_late_results_df["full_roc_auc"] - A_late_results_df["baseline_roc_auc"]
-)
+A_results_df["diff"] = A_results_df["full_roc_auc"] - A_results_df["baseline_roc_auc"]
 
 # %% [markdown]
 # ## Find peak decoding window per site
 
 # %%
-A_early_summary = A_early_results_df.groupby(
-    ["subject", "population", "phoneme_pair", "smin", "smax"] + groupby
-)[["baseline_roc_auc", "full_roc_auc", "diff"]].mean()
-A_early_max_points = A_early_summary.groupby(
-    ["subject", "population", "phoneme_pair"] + groupby
-)["diff"].idxmax()
-A_early_final_summary = A_early_summary.loc[A_early_max_points]
-A_early_final_summary["electrode_idx"] = A_early_final_summary.index.get_level_values(
-    "population"
-).astype(int)
-
-# %%
-A_summary = A_late_results_df.groupby(
+A_summary = A_results_df.groupby(
     ["subject", "population", "phoneme_pair", "smin", "smax"] + groupby
 )[["baseline_roc_auc", "full_roc_auc", "diff"]].mean()
 A_max_points = A_summary.groupby(["subject", "population", "phoneme_pair"] + groupby)[
@@ -176,17 +132,9 @@ A_final_summary["electrode_idx"] = A_final_summary.index.get_level_values(
 # ## Save summary CSVs
 
 # %%
-A_late_results_df.to_csv(Path(outdir) / "A_results.csv")
-A_early_results_df.to_csv(Path(outdir) / "A_early_results.csv")
+A_results_df.to_csv(Path(outdir) / "A_results.csv")
 
 A_final_summary.to_csv(Path(outdir) / "A_final_summary.csv")
-A_early_final_summary.to_csv(Path(outdir) / "A_early_final_summary.csv")
-
-all_summary = pd.concat(
-    {"A": A_final_summary, "A_early": A_early_final_summary},
-    names=["source"],
-).reset_index()
-all_summary.to_csv(Path(outdir) / "all_summary.csv")
 
 # %% [markdown]
 # ## Collect trial-level predictions
@@ -236,29 +184,12 @@ for decs in A_decoders.values():
 if len(A_decoder_predictions) > 0:
     A_decoder_predictions = pd.concat(A_decoder_predictions, ignore_index=True)
 
-    A_early_decoder_predictions = A_decoder_predictions[
+    A_decoder_predictions = A_decoder_predictions[
         (A_decoder_predictions.smin >= min_decoding_sample)
-        & (A_decoder_predictions.smin <= A_max_decoding_sample)
+        & (A_decoder_predictions.smin <= max_decoding_sample)
     ]
-    A_late_decoder_predictions = A_decoder_predictions[
-        (A_decoder_predictions.smin >= A_max_decoding_sample)
-        & (A_decoder_predictions.smax <= max_decoding_sample)
-    ]
-
-    # Sanity: predictions cover the same smin range as the results
-    assert set(A_early_decoder_predictions.smin) == set(A_early_results_df.smin), (
-        f"Early smin mismatch: {sorted(set(A_early_decoder_predictions.smin) ^ set(A_early_results_df.smin))}"
-    )
-    assert set(A_late_decoder_predictions.smin) == set(A_late_results_df.smin), (
-        f"Late smin mismatch: {sorted(set(A_late_decoder_predictions.smin) ^ set(A_late_results_df.smin))}"
-    )
-    assert set(A_late_decoder_predictions.smin).isdisjoint(
-        set(A_early_decoder_predictions.smin)
-    )
 else:
     A_decoder_predictions = pd.DataFrame(columns=pred_columns)
-    A_early_decoder_predictions = pd.DataFrame(columns=pred_columns)
-    A_late_decoder_predictions = pd.DataFrame(columns=pred_columns)
 
 # %% [markdown]
 # ## Save prediction parquets
@@ -268,8 +199,7 @@ else:
 # `A_early_behav_predictions` parameters.
 
 # %%
-A_early_decoder_predictions.to_parquet(Path(outdir) / "A_early-predictions.parquet")
-A_late_decoder_predictions.to_parquet(Path(outdir) / "A-predictions.parquet")
+A_decoder_predictions.to_parquet(Path(outdir) / "A-predictions.parquet")
 
 # %% [markdown]
 # ## Ensembled trial analysis
@@ -322,9 +252,6 @@ def ensemble_trial_predictions(predictions_df, epochs):
 
 
 # %%
-ensemble_trial_predictions(A_early_decoder_predictions, epochs).to_csv(
-    Path(outdir) / "A_early-trial_analysis-ensembled.csv"
-)
-ensemble_trial_predictions(A_late_decoder_predictions, epochs).to_csv(
+ensemble_trial_predictions(A_decoder_predictions, epochs).to_csv(
     Path(outdir) / "A-trial_analysis-ensembled.csv"
 )

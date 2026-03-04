@@ -181,14 +181,9 @@ rule behavior_decoding_single_electrode_summarize:
     output:
         notebook         = "outputs/causal5/behavior_decoding_single_electrode_summarize/{subject}/notebook.ipynb",
         A_results        = "outputs/causal5/behavior_decoding_single_electrode_summarize/{subject}/A_results.csv",
-        A_early_results  = "outputs/causal5/behavior_decoding_single_electrode_summarize/{subject}/A_early_results.csv",
         A_final_summary  = "outputs/causal5/behavior_decoding_single_electrode_summarize/{subject}/A_final_summary.csv",
-        A_early_final_summary = "outputs/causal5/behavior_decoding_single_electrode_summarize/{subject}/A_early_final_summary.csv",
-        all_summary      = "outputs/causal5/behavior_decoding_single_electrode_summarize/{subject}/all_summary.csv",
         A_predictions    = "outputs/causal5/behavior_decoding_single_electrode_summarize/{subject}/A-predictions.parquet",
-        A_early_predictions = "outputs/causal5/behavior_decoding_single_electrode_summarize/{subject}/A_early-predictions.parquet",
         A_trial_analysis = "outputs/causal5/behavior_decoding_single_electrode_summarize/{subject}/A-trial_analysis-ensembled.csv",
-        A_early_trial_analysis = "outputs/causal5/behavior_decoding_single_electrode_summarize/{subject}/A_early-trial_analysis-ensembled.csv",
 
     run:
         outdir = Path(output.notebook).parent
@@ -200,6 +195,10 @@ rule behavior_decoding_single_electrode_summarize:
                 electrodes_path=str(input.electrodes),
                 result_path=str(input.result),
                 outdir=str(outdir),
+                groupby=["word_end"],
+
+                min_decoding_sample=0,
+                max_decoding_sample=290,
             ),
         )
 
@@ -287,7 +286,7 @@ rule prepare_neurometrics:
     of rerunning them.
 
     Inputs come from:
-      - behavior_decoding_single_electrode_summarize (A-/A_early-predictions.parquet)
+      - behavior_decoding_single_electrode_summarize (A-predictions.parquet)
       - A_predictions (behavior_to_phonetic_decoding.parquet)
       - find_speech_responsive (electrode_df)
       - raw epochs (for HGA extraction)
@@ -301,16 +300,12 @@ rule prepare_neurometrics:
             "outputs/causal5/behavior_decoding_single_electrode_summarize/{subject}/A-predictions.parquet",
             subject=config["data"]["subjects"],
         ),
-        A_early_behav_predictions = expand(
-            "outputs/causal5/behavior_decoding_single_electrode_summarize/{subject}/A_early-predictions.parquet",
-            subject=config["data"]["subjects"],
-        ),
         phon_predictions = "outputs/causal5/A_predictions/behavior_to_phonetic_decoding.parquet",
         electrode_paths = expand(
             "outputs/causal5/find_speech_responsive/{subject}_results.csv",
             subject=config["data"]["subjects"],
         ),
-        notebook = "notebooks/causal4/prepare_neurometrics.py",
+        notebook = "notebooks/causal5/prepare_neurometrics.py",
 
     output:
         notebook                    = "outputs/causal5/prepare_neurometrics/notebook.ipynb",
@@ -341,7 +336,6 @@ rule prepare_neurometrics:
             parameters=dict(
                 all_epochs=list(input.all_epochs),
                 A_behav_predictions=list(input.A_behav_predictions),
-                A_early_behav_predictions=list(input.A_early_behav_predictions),
                 phon_predictions_path=str(input.phon_predictions),
                 electrode_paths=list(input.electrode_paths),
 
