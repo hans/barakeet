@@ -297,6 +297,7 @@ def _prepare_decoding_population(
         "mismatch",
         "mismatch_left_right",
         "behavior_categorical",
+        "behavior_categorical_forced",
     ] = "lexical_evidence",
     groupby: Optional[list[str]] = None,
     filter: Optional[str] = None,
@@ -329,6 +330,7 @@ def _prepare_decoding_population(
         "mismatch",
         "mismatch_left_right",
         "behavior_categorical",
+        "behavior_categorical_forced",
     ]:
         raise ValueError(f"Invalid target {target}")
     assert epochs_i.metadata is not None
@@ -406,7 +408,7 @@ def _prepare_decoding_population(
                     # Subset data to only include mismatch trials
                     X_window = X_window[y != 0]
                     y = y[y != 0]
-                elif target == "behavior_categorical":
+                elif target in ("behavior_categorical", "behavior_categorical_forced"):
                     y = md.behavior_dummy_forced[selection_i].values
 
                 # stratify_class = epochs_ij.metadata.stratify_class[selection_i].values
@@ -553,6 +555,7 @@ def run_decoding_model_comparison_population(
         "mismatch",
         "mismatch_left_right",
         "behavior_categorical",
+        "behavior_categorical_forced",
     ] = "lexical_evidence",
     strategy: Literal["nested-cv", "train-test"] = "nested-cv",
     groupby: Optional[list[str]] = None,
@@ -879,6 +882,7 @@ def run_decoding_searchlight_single_electrode(
         "mismatch",
         "mismatch_left_right",
         "behavior_categorical",
+        "behavior_categorical_forced",
     ] = "lexical_evidence",
     strategy: Literal["nested-cv", "train-test"] = "nested-cv",
     filter_speech_responsive=True,
@@ -904,6 +908,7 @@ def run_decoding_searchlight_single_electrode(
         "mismatch",
         "mismatch_left_right",
         "behavior_categorical",
+        "behavior_categorical_forced",
     ]:
         raise ValueError(f"Invalid target {target}")
     if strategy not in ["nested-cv", "train-test"]:
@@ -979,7 +984,7 @@ def run_decoding_searchlight_single_electrode(
                     # Subset data to only include mismatch trials
                     X = X[y != 0]
                     y = y[y != 0]
-                elif target == "behavior_categorical":
+                elif target in ("behavior_categorical", "behavior_categorical_forced"):
                     y = epochs_ij.metadata.behavior_dummy_forced[selection].values
 
                 num_classes = len(set(y))

@@ -61,6 +61,9 @@ phon_predictions_path = Path(
 
 electrode_paths = list(Path("outputs/causal5/find_speech_responsive/").glob("*.csv"))
 
+ganong_peaks_path = Path("outputs/causal5/ganong_decoding/ganong_peaks.parquet")
+ganong_predictions_path = Path("outputs/causal5/ganong_decoding/ganong_predictions.parquet")
+
 epoch_tmin = -0.4
 epoch_sfreq = 100
 
@@ -515,5 +518,19 @@ paper_data.early_polarity.reset_index().to_parquet(outdir / "early_polarity.parq
 paper_data.late_polarity.reset_index().to_parquet(outdir / "late_polarity.parquet")
 paper_data.hga_df.to_parquet(outdir / "hga_df.parquet")
 paper_data.reg_df.to_parquet(outdir / "reg_df.parquet")
+
+# %% [markdown]
+# ## Ganong decoding outputs
+#
+# Copy ganong_peaks.parquet and ganong_predictions.parquet into the prepare_neurometrics
+# outdir so that A_neurometrics can find them via neurometrics_dir without needing
+# separate path parameters. No computation is done here — the files are produced by
+# ganong_decoding_summarize.
+
+# %%
+import shutil
+
+shutil.copy(ganong_peaks_path, outdir / "ganong_peaks.parquet")
+shutil.copy(ganong_predictions_path, outdir / "ganong_predictions.parquet")
 
 L.success(f"Saved all PaperData fields to {outdir}")

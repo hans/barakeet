@@ -203,6 +203,92 @@ rule behavior_decoding_single_electrode_summarize:
         )
 
 
+rule ganong_decoding_single_electrode:
+    """Ganong-effect decoding from single electrodes — across-completion behavioral decoder.
+
+    Drops the within-completion constraint of `behavior_decoding_single_electrode`:
+    decodes `behavior_categorical_forced` pooled across both lexical completions.
+    This exposes the systematic Ganong boundary shift alongside trial-level perceptual
+    variance.
+
+    Electrode set is restricted to sites that showed significant behavioral decoding
+    in `behavior_decoding_single_electrode_summarize` (full_roc_auc >= threshold).
+
+    Stratification on (resampled, lexical_evidence) balances acoustic steps and
+    completions across CV folds without trial filtering.
+
+    Runtime: ~hours per subject (parallelised within each site via n_jobs=5).
+    """
+    input:
+        epochs           = "outputs/epochs_preprocessed/{subject}_epo.fif",
+        electrodes       = "outputs/causal5/find_speech_responsive/{subject}_results.csv",
+        behav_summary    = "outputs/causal5/behavior_decoding_single_electrode_summarize/{subject}/A_final_summary.csv",
+        notebook         = "notebooks/causal5/ganong_decoding_single_electrode.py",
+
+    output:
+        notebook = "outputs/causal5/ganong_decoding/{subject}/notebook.ipynb",
+        results  = "outputs/causal5/ganong_decoding/{subject}/results.joblib",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                epochs_path=str(input.epochs),
+                electrodes_path=str(input.electrodes),
+                behav_summary_path=str(input.behav_summary),
+                outdir=str(outdir),
+
+                min_sample=config["analysis"]["decoding"]["min_sample"],
+                window_size=config["analysis"]["decoding"]["window_size"],
+                stride=config["analysis"]["decoding"]["stride"],
+                behav_peak_threshold=config["analysis"]["behav_response_peak_threshold"],
+            ),
+        )
+
+
+rule ganong_decoding_summarize:
+    """Summarise Ganong-effect decoding results across all subjects.
+
+    Loads `results.joblib` from every subject's `ganong_decoding_single_electrode` run,
+    finds the peak decoding window per (subject, electrode, phoneme_pair) site,
+    and saves combined trial-level predictions and peak-window summaries.
+
+    Key outputs:
+      ganong_peaks.parquet       → per-site peak Ganong window (consumed by prepare_neurometrics)
+      ganong_predictions.parquet → all trial-level predictions for transfer analyses
+    """
+    input:
+        notebook     = "notebooks/causal5/ganong_decoding_summarize.py",
+        result_paths = expand(
+            "outputs/causal5/ganong_decoding/{subject}/results.joblib",
+            subject=config["data"]["subjects"],
+        ),
+
+    output:
+        notebook             = "outputs/causal5/ganong_decoding/notebook.ipynb",
+        ganong_peaks         = "outputs/causal5/ganong_decoding/ganong_peaks.parquet",
+        ganong_predictions   = "outputs/causal5/ganong_decoding/ganong_predictions.parquet",
+
+    run:
+        outdir = "outputs/causal5/ganong_decoding"
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                result_paths=list(input.result_paths),
+                outdir=outdir,
+            ),
+        )
+
+
+rule ganong_decoding_all:
+    """Run Ganong decoding + summarise for all subjects."""
+    input:
+        "outputs/causal5/ganong_decoding/ganong_peaks.parquet",
+
+
 rule acoustic_decoding_single_electrode:
     """Acoustic-category searchlight decoding on all speech-responsive electrodes.
 
@@ -305,6 +391,8 @@ rule prepare_neurometrics:
             "outputs/causal5/find_speech_responsive/{subject}_results.csv",
             subject=config["data"]["subjects"],
         ),
+        ganong_peaks = "outputs/causal5/ganong_decoding/ganong_peaks.parquet",
+        ganong_predictions = "outputs/causal5/ganong_decoding/ganong_predictions.parquet",
         notebook = "notebooks/causal5/prepare_neurometrics.py",
 
     output:
@@ -327,6 +415,8 @@ rule prepare_neurometrics:
         late_polarity               = "outputs/causal5/prepare_neurometrics/late_polarity.parquet",
         hga_df                      = "outputs/causal5/prepare_neurometrics/hga_df.parquet",
         reg_df                      = "outputs/causal5/prepare_neurometrics/reg_df.parquet",
+        ganong_peaks                = "outputs/causal5/prepare_neurometrics/ganong_peaks.parquet",
+        ganong_predictions          = "outputs/causal5/prepare_neurometrics/ganong_predictions.parquet",
 
     run:
         outdir = Path(output.notebook).parent
@@ -338,6 +428,8 @@ rule prepare_neurometrics:
                 A_behav_predictions=list(input.A_behav_predictions),
                 phon_predictions_path=str(input.phon_predictions),
                 electrode_paths=list(input.electrode_paths),
+                ganong_peaks_path=str(input.ganong_peaks),
+                ganong_predictions_path=str(input.ganong_predictions),
 
                 phon_response_tmin_min=0.0,
                 all_response_tmax_max=1.3,
