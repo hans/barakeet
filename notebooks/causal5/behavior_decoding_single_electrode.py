@@ -97,7 +97,7 @@ for electrode_idx, phoneme_pair in tqdm(
         stride=stride,
         window_size=window_size,
         pca_num_components=[0.1, 0.25, 0.5, 0.75, 0.9],
-        target="behavior_categorical",
+        target="behavior_categorical_forced",
         baseline_features=["resampled"],
         strategy="train-test",
         groupby=["word_end"],
