@@ -181,7 +181,7 @@ Cross-window transfer note:
 
 ------------------------------------------------------------------------
 Acoustic decoder pipeline  (behavior_decoding_single_electrode_acoustic)
-Producer: fit_train_test_old / run_decoding_searchlight_single_electrode
+Producer: fit_train_test / run_decoding_searchlight_single_electrode
 ------------------------------------------------------------------------
 
 Each entry in models[DecoderFitKey] (one per repeat/fold) is a plain
@@ -1007,11 +1007,12 @@ def run_decoding_searchlight_single_electrode(
                         X, y, num_classes=num_classes, scoring=scoring
                     )
                 elif strategy == "train-test":
-                    fitted = fit_train_test_old(
+                    fitted = fit_train_test(
                         X,
                         y,
                         num_classes=num_classes,
                         scoring=scoring,
+                        stratify=y,
                         num_repeats=5,
                         n_jobs=n_jobs,
                     )
@@ -1323,98 +1324,6 @@ def fit_train_test(
     if len(results) == 0:
         return None
 
-    fitted = {
-        k: np.concatenate([r[k] for r in results])
-        if isinstance(results[0][k], np.ndarray)
-        else list(itertools.chain.from_iterable(r[k] for r in results))
-        for k in results[0].keys()
-    }
-    return fitted
-
-
-def fit_train_test_old(
-    X,
-    y,
-    num_classes: int,
-    scoring: list[str],
-    test_fraction=0.2,
-    num_folds=3,
-    pca_num_components: Optional[float] = None,
-    num_repeats=1,
-    random_state=42,
-    n_jobs=None,
-):
-    seeds = np.random.RandomState(random_state).randint(0, 10000, num_repeats)
-
-    results = []
-    for seed in seeds:
-        X_train, X_test, y_train, y_test, idxs_train, idxs_test = train_test_split(
-            X,
-            y,
-            np.arange(len(X)),
-            test_size=test_fraction,
-            stratify=y,
-            random_state=seed,
-        )
-
-        Cs = np.logspace(-3, 2, 6)
-
-        pipeline: list[BaseEstimator] = [StandardScaler()]
-        if pca_num_components is not None:
-            pipeline.append(PCA(n_components=pca_num_components))
-
-        solver = "liblinear" if num_classes == 2 else "saga"
-        pipeline.append(
-            LogisticRegressionCV(
-                Cs=Cs,
-                cv=StratifiedKFold(num_folds, shuffle=True, random_state=seed),
-                max_iter=100000,
-                class_weight="balanced",
-                fit_intercept=False,
-                solver=solver,
-                n_jobs=n_jobs,
-            )
-        )
-        model = make_pipeline(*pipeline)
-        model.fit(X_train, y_train)
-
-        # Get optimal C
-        if num_classes == 2:
-            best_C = model[-1].C_[0]
-        else:
-            best_C = model[-1].C_
-
-        # re-fit on whole training set
-        refit_model = make_pipeline(
-            *pipeline[:-1],
-            LogisticRegression(
-                C=best_C, class_weight="balanced", fit_intercept=False, solver=solver
-            ),
-        )
-        refit_model.fit(X_train, y_train)
-
-        if callable(scoring):
-            scorers = scoring
-        elif scoring is None or isinstance(scoring, str):
-            scorers = check_scoring(refit_model, scoring)
-        else:
-            scorers = _check_multimetric_scoring(refit_model, scoring)
-            # _check_refit_for_multimetric(scorers)
-            scorers = _MultimetricScorer(scorers=scorers)
-
-        train_scores = scorers(refit_model, X_train, y_train)
-        test_scores = scorers(refit_model, X_test, y_test)
-        results.append(
-            {
-                **{f"train_{k}": np.array([v]) for k, v in train_scores.items()},
-                **{f"test_{k}": np.array([v]) for k, v in test_scores.items()},
-                "train_idxs": [idxs_train],
-                "test_idxs": [idxs_test],
-                "estimator": [refit_model],
-            }
-        )
-
-    # Concatenate results from all repeats
     fitted = {
         k: np.concatenate([r[k] for r in results])
         if isinstance(results[0][k], np.ndarray)
