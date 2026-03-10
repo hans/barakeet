@@ -185,3 +185,8 @@ residualization and encoding model utilities).
 Raw preprocessed epochs at `outputs/epochs_preprocessed/{subject}_epo.fif`.
 Loaded via MNE; metadata enriched with `add_metadata_features()`.
 Phoneme pairs: `bm` (/b/-/m/), `dn` (/d/-/n/), `pb` (/p/-/b/).
+
+### Environment
+Conda environment: `/scratch/jgauthier/transformers3`
+Activate before running any notebooks or scripts: `conda activate /scratch/jgauthier/transformers3`
+Or run directly: `conda run -p /scratch/jgauthier/transformers3 <command>` (use `-p`, not `-n`)

@@ -234,6 +234,7 @@ from sklearn.model_selection import (
 )
 from sklearn.pipeline import Pipeline, make_pipeline
 from sklearn.preprocessing import StandardScaler
+from joblib import Parallel, delayed
 from tqdm.auto import tqdm
 
 DecoderFitKey: TypeAlias = tuple[
@@ -538,6 +539,217 @@ def run_decoding_population(
     return train_scores, test_scores, outcomes, models
 
 
+def _fit_comparison_window(
+    name,
+    smin: int,
+    smax: int,
+    selection,
+    X_window: np.ndarray,
+    y: np.ndarray,
+    metadata: pd.DataFrame,
+    baseline_features: list,
+    stratify_cols,
+    groupby,
+    electrode_idxs: list,
+    pca_num_components,
+    strategy: str,
+    fixed_hparams_df,
+    baseline_hparam_cols,
+    full_hparam_cols,
+    return_estimators: bool,
+    subject: str,
+    population_name: str,
+    phoneme_pair: str,
+    seed: int,
+) -> tuple[list[dict], dict]:
+    """Fit baseline + full models for one window/group. Called by Parallel."""
+    num_classes = len(set(y))
+    if num_classes != 2:
+        L.warning(
+            f"Skipping model comparison for {subject}, {population_name}, "
+            f"{phoneme_pair}, {name}, {smin}-{smax} because num_classes={num_classes} != 2"
+        )
+        return [], {}
+
+    md = metadata[selection]
+    X_baseline = md[baseline_features].values
+    X_full = np.concatenate([X_baseline, X_window], axis=1)
+
+    stratify_codes = None
+    if stratify_cols is not None:
+        stratify_codes = pd.factorize(md[list(stratify_cols)].apply(tuple, axis=1))[0]
+
+    baseline_fixed_params = None
+    full_fixed_params = None
+    if fixed_hparams_df is not None:
+        window_mask = (fixed_hparams_df["smin"] == smin) & (
+            fixed_hparams_df["smax"] == smax
+        )
+        for gb_var, gb_val in zip(groupby or [], name):
+            window_mask &= fixed_hparams_df[gb_var] == gb_val
+        window_rows = (
+            fixed_hparams_df[window_mask].sort_values("fold").to_dict("records")
+        )
+        if not window_rows:
+            return [], {}
+        baseline_fixed_params = [
+            {c.removeprefix("baseline_"): row[c] for c in baseline_hparam_cols}
+            for row in window_rows
+        ]
+        full_fixed_params = [
+            {c.removeprefix("full_"): row[c] for c in full_hparam_cols}
+            for row in window_rows
+        ]
+
+    def _fit(
+        X,
+        y,
+        num_classes,
+        stratify,
+        random_state,
+        reg_range,
+        reg_grid_size,
+        baseline_results=None,
+        pca_dimensions=None,
+        fixed_params_list=None,
+    ):
+        if strategy == "nested-cv":
+            return fit_nested_cv(
+                X,
+                y,
+                num_classes=num_classes,
+                stratify=stratify,
+                reg_range=reg_range,
+                reg_grid_size=reg_grid_size,
+                pca_num_components=pca_num_components,
+                pca_dimensions=pca_dimensions,
+                scoring=["roc_auc"],
+                random_state=random_state,
+            )
+        elif strategy == "train-test":
+            return fit_train_test(
+                X,
+                y,
+                num_classes=num_classes,
+                stratify=stratify,
+                reg_range=reg_range,
+                reg_grid_size=reg_grid_size,
+                pca_num_components=pca_num_components,
+                pca_dimensions=pca_dimensions,
+                baseline_results=baseline_results,
+                fixed_params_list=fixed_params_list,
+                scoring=["roc_auc"],
+                n_jobs=1,
+                num_repeats=len(fixed_params_list) if fixed_params_list is not None else 5,
+                random_state=random_state,
+            )
+        else:
+            raise ValueError("Unknown strategy: {}".format(strategy))
+
+    baseline_results = _fit(
+        X_baseline,
+        y,
+        num_classes,
+        stratify=stratify_codes,
+        reg_range=(-1, 1),
+        reg_grid_size=2,
+        random_state=seed,
+        fixed_params_list=baseline_fixed_params,
+    )
+    full_results = _fit(
+        X_full,
+        y,
+        num_classes,
+        stratify=stratify_codes,
+        reg_range=(-8, 3),
+        reg_grid_size=10,
+        pca_dimensions=np.arange(X_baseline.shape[1], X_full.shape[1]),
+        random_state=seed,
+        fixed_params_list=full_fixed_params,
+    )
+
+    if baseline_results is None or full_results is None:
+        L.warning(
+            f"Skipping model comparison for {subject}, {population_name}, "
+            f"{phoneme_pair}, {name}, {smin}-{smax} because fitting failed."
+        )
+        return [], {}
+
+    results_list = []
+    estimators_dict = {}
+
+    for fold, (baseline_test_idxs, baseline_estimator) in enumerate(
+        zip(baseline_results["test_idxs"], baseline_results["estimator"])
+    ):
+        full_test_idxs = full_results["test_idxs"][fold]
+        full_estimator = full_results["estimator"][fold]
+
+        assert full_test_idxs.tolist() == baseline_test_idxs.tolist()
+        test_idxs = full_test_idxs
+
+        baseline_proba = baseline_estimator.predict_proba(X_baseline[test_idxs])[:, 1]
+        full_proba = full_estimator.predict_proba(X_full[test_idxs])[:, 1]
+
+        baseline_prediction = baseline_estimator.predict(X_baseline[test_idxs])
+        full_prediction = full_estimator.predict(X_full[test_idxs])
+
+        baseline_precision, baseline_recall, _, _ = precision_recall_fscore_support(
+            y[test_idxs], baseline_prediction, average="binary", zero_division=0.0
+        )
+        full_precision, full_recall, _, _ = precision_recall_fscore_support(
+            y[test_idxs], full_prediction, average="binary", zero_division=0.0
+        )
+
+        baseline_log_loss = log_loss(y[test_idxs], baseline_proba)
+        full_log_loss = log_loss(y[test_idxs], full_proba)
+
+        result_i = {
+            "subject": subject,
+            "population": population_name,
+            "phoneme_pair": phoneme_pair,
+            "smin": smin,
+            "smax": smax,
+            "fold": fold,
+            "baseline_roc_auc": roc_auc_score(y[test_idxs], baseline_proba),
+            "full_roc_auc": roc_auc_score(y[test_idxs], full_proba),
+            "baseline_precision": baseline_precision,
+            "full_precision": full_precision,
+            "baseline_recall": baseline_recall,
+            "full_recall": full_recall,
+            "baseline_log_loss": baseline_log_loss,
+            "full_log_loss": full_log_loss,
+        }
+        for groupby_variable, value in zip(groupby or [], name):
+            result_i[groupby_variable] = value
+
+        for param, val in baseline_estimator.best_params_.items():
+            result_i["baseline_" + param] = val
+        for param, val in full_estimator.best_params_.items():
+            result_i["full_" + param] = val
+
+        results_list.append(result_i)
+
+        if return_estimators:
+            key = (subject, population_name, phoneme_pair, name, smin, smax, fold)
+            estimators_dict[key] = {
+                "electrode_idxs": electrode_idxs,
+                "estimator": full_estimator,
+                "test_predictions": pd.DataFrame(
+                    {
+                        "decoder_target": y[test_idxs],
+                        "baseline_decoder_prediction": baseline_prediction,
+                        "baseline_decoder_proba": baseline_proba,
+                        "full_decoder_prediction": full_prediction,
+                        "full_decoder_proba": full_proba,
+                        "fold": fold,
+                        "epoch_idx": md.iloc[test_idxs].index.values,
+                    }
+                ),
+            }
+
+    return results_list, estimators_dict
+
+
 def run_decoding_model_comparison_population(
     epochs_i: Epochs,
     electrode_idxs: list[int],
@@ -645,54 +857,10 @@ def run_decoding_model_comparison_population(
     )
 
     seed = 42
-    results = []
 
-    def _fit(
-        X,
-        y,
-        num_classes,
-        stratify,
-        random_state,
-        reg_range,
-        reg_grid_size,
-        baseline_results=None,
-        pca_dimensions=None,
-        fixed_params_list=None,
-    ):
-        if strategy == "nested-cv":
-            return fit_nested_cv(
-                X,
-                y,
-                num_classes=num_classes,
-                stratify=stratify,
-                reg_range=reg_range,
-                reg_grid_size=reg_grid_size,
-                pca_num_components=pca_num_components,
-                pca_dimensions=pca_dimensions,
-                scoring=["roc_auc"],
-                random_state=random_state,
-            )
-        elif strategy == "train-test":
-            return fit_train_test(
-                X,
-                y,
-                num_classes=num_classes,
-                stratify=stratify,
-                reg_range=reg_range,
-                reg_grid_size=reg_grid_size,
-                pca_num_components=pca_num_components,
-                pca_dimensions=pca_dimensions,
-                baseline_results=baseline_results,
-                fixed_params_list=fixed_params_list,
-                scoring=["roc_auc"],
-                n_jobs=n_jobs,
-                num_repeats=len(fixed_params_list) if fixed_params_list is not None else 5,
-                random_state=random_state,
-            )
-        else:
-            raise ValueError("Unknown strategy: {}".format(strategy))
-
-    # Pre-compute hparam column names once (columns containing "__" identify stored hparams).
+    # Pre-compute hparam column names (None when fixed_hparams_df not provided).
+    _baseline_hparam_cols = None
+    _full_hparam_cols = None
     if fixed_hparams_df is not None:
         _baseline_hparam_cols = [
             c
@@ -703,170 +871,134 @@ def run_decoding_model_comparison_population(
             c for c in fixed_hparams_df.columns if c.startswith("full_") and "__" in c
         ]
 
+    metadata = epochs_i.metadata
+
+    per_window = Parallel(n_jobs=n_jobs)(
+        delayed(_fit_comparison_window)(
+            name, smin, smax, selection, X_window, y,
+            metadata, baseline_features, stratify, groupby,
+            electrode_idxs, pca_num_components, strategy,
+            fixed_hparams_df, _baseline_hparam_cols, _full_hparam_cols,
+            return_estimators, subject, population_name, phoneme_pair, seed,
+        )
+        for name, smin, smax, selection, X_window, y in tqdm(
+            _gen, total=n_windows, unit="window", leave=False,
+        )
+    )
+
+    results = []
     all_estimators = {}
-
-    for name, smin, smax, selection, X_window, y in tqdm(
-        _gen,
-        total=n_windows,
-        unit="window",
-        leave=False,
-    ):
-        num_classes = len(set(y))
-        if num_classes != 2:
-            L.warning(
-                f"Skipping model comparison for {subject}, {population_name}, {phoneme_pair}, {name}, {smin}-{smax} because num_classes={num_classes} != 2"
-            )
-            continue
-
-        md = epochs_i.metadata[selection]
-
-        # Prepare baseline features
-        X_baseline = md[baseline_features].values
-        X_full = np.concatenate([X_baseline, X_window], axis=1)
-
-        # Prepare codes for stratified sampling of data
-        stratify_codes = None
-        if stratify is not None:
-            stratify_codes = pd.factorize(md[list(stratify)].apply(tuple, axis=1))[0]
-
-        # Build per-fold fixed hyperparameter lists from stored true-model results, if provided.
-        baseline_fixed_params = None
-        full_fixed_params = None
-        if fixed_hparams_df is not None:
-            window_mask = (fixed_hparams_df["smin"] == smin) & (
-                fixed_hparams_df["smax"] == smax
-            )
-            for gb_var, gb_val in zip(groupby or [], name):
-                window_mask &= fixed_hparams_df[gb_var] == gb_val
-            window_rows = (
-                fixed_hparams_df[window_mask].sort_values("fold").to_dict("records")
-            )
-            if not window_rows:
-                # This (group, window) was not present in fixed_hparams_df — skip.
-                continue
-            baseline_fixed_params = [
-                {c.removeprefix("baseline_"): row[c] for c in _baseline_hparam_cols}
-                for row in window_rows
-            ]
-            full_fixed_params = [
-                {c.removeprefix("full_"): row[c] for c in _full_hparam_cols}
-                for row in window_rows
-            ]
-
-        # Fit N baseline models
-        baseline_results = _fit(
-            X_baseline,
-            y,
-            num_classes,
-            stratify=stratify_codes,
-            reg_range=(-1, 1),
-            reg_grid_size=2,
-            random_state=seed,
-            fixed_params_list=baseline_fixed_params,
-        )
-        # Fit N full models
-        full_results = _fit(
-            X_full,
-            y,
-            num_classes,
-            stratify=stratify_codes,
-            reg_range=(-8, 3),
-            reg_grid_size=10,
-            pca_dimensions=np.arange(X_baseline.shape[1], X_full.shape[1]),
-            random_state=seed,
-            fixed_params_list=full_fixed_params,
-        )
-
-        if baseline_results is None or full_results is None:
-            L.warning(
-                f"Skipping model comparison for {subject}, {population_name}, {phoneme_pair}, {name}, {smin}-{smax} because fitting failed."
-            )
-            continue
-
-        # Because we matched seeds above, the fold of the ith baseline model
-        # has the same samples as the fold of the ith full model.
-        # So we will now do a paired comparison of ROC-AUC outcomes
-        for fold, (baseline_test_idxs, baseline_estimator) in enumerate(
-            zip(baseline_results["test_idxs"], baseline_results["estimator"])
-        ):
-            full_test_idxs = full_results["test_idxs"][fold]
-            full_estimator = full_results["estimator"][fold]
-
-            # Just validate the assumption first
-            assert full_test_idxs.tolist() == baseline_test_idxs.tolist()
-            test_idxs = full_test_idxs
-
-            baseline_proba = baseline_estimator.predict_proba(X_baseline[test_idxs])[
-                :, 1
-            ]
-            full_proba = full_estimator.predict_proba(X_full[test_idxs])[:, 1]
-
-            baseline_prediction = baseline_estimator.predict(X_baseline[test_idxs])
-            full_prediction = full_estimator.predict(X_full[test_idxs])
-
-            # compute precision/recall
-            baseline_precision, baseline_recall, _, _ = precision_recall_fscore_support(
-                y[test_idxs], baseline_prediction, average="binary", zero_division=0.0
-            )
-            full_precision, full_recall, _, _ = precision_recall_fscore_support(
-                y[test_idxs], full_prediction, average="binary", zero_division=0.0
-            )
-
-            # compute log-loss
-            baseline_log_loss = log_loss(y[test_idxs], baseline_proba)
-            full_log_loss = log_loss(y[test_idxs], full_proba)
-            # baseline_brier_score = brier_score_loss(y[test_idxs], baseline_proba)
-            # full_brier_score = brier_score_loss(y[test_idxs], full_proba)
-
-            result_i = {
-                "subject": subject,
-                "population": population_name,
-                "phoneme_pair": phoneme_pair,
-                "smin": smin,
-                "smax": smax,
-                "fold": fold,
-                "baseline_roc_auc": roc_auc_score(y[test_idxs], baseline_proba),
-                "full_roc_auc": roc_auc_score(y[test_idxs], full_proba),
-                "baseline_precision": baseline_precision,
-                "full_precision": full_precision,
-                "baseline_recall": baseline_recall,
-                "full_recall": full_recall,
-                "baseline_log_loss": baseline_log_loss,
-                "full_log_loss": full_log_loss,
-            }
-            for groupby_variable, value in zip(groupby or [], name):
-                result_i[groupby_variable] = value
-
-            # add hparam fits
-            for param, val in baseline_estimator.best_params_.items():
-                result_i["baseline_" + param] = val
-            for param, val in full_estimator.best_params_.items():
-                result_i["full_" + param] = val
-
-            results.append(result_i)
-
-            if return_estimators:
-                key = (subject, population_name, phoneme_pair, name, smin, smax, fold)
-                all_estimators[key] = {
-                    "electrode_idxs": electrode_idxs,
-                    "estimator": full_estimator,
-                    "test_predictions": pd.DataFrame(
-                        {
-                            "decoder_target": y[test_idxs],
-                            "baseline_decoder_prediction": baseline_prediction,
-                            "baseline_decoder_proba": baseline_proba,
-                            "full_decoder_prediction": full_prediction,
-                            "full_decoder_proba": full_proba,
-                            "fold": fold,
-                            "epoch_idx": md.iloc[test_idxs].index.values,
-                        }
-                    ),
-                }
+    for result_list, est_dict in per_window:
+        results.extend(result_list)
+        all_estimators.update(est_dict)
 
     if return_estimators:
         return pd.DataFrame(results), all_estimators
     else:
         return pd.DataFrame(results)
+
+
+def _fit_searchlight_electrode(
+    row: pd.Series,
+    windows: np.ndarray,
+    phoneme_pairs,
+    epoch_arrays: dict,
+    epoch_metadata: dict,
+    target: str,
+    strategy: str,
+    return_outcomes: bool,
+    randomize: bool,
+) -> tuple[dict, dict, dict, dict]:
+    """Fit all windows × phoneme_pairs for one electrode. Called by Parallel."""
+    train_scores: dict = {}
+    test_scores: dict = {}
+    outcomes: dict = {}
+    models: dict = {}
+
+    X_subj = epoch_arrays[row.subject]
+    md = epoch_metadata[row.subject]
+
+    for smin, smax in windows:
+        for phoneme_pair in phoneme_pairs:
+            selection = (md.phoneme_pair == phoneme_pair).values
+            if selection.sum() == 0:
+                continue
+
+            X = X_subj[selection, row.electrode_idx, smin:smax]
+
+            if target == "acoustic":
+                y = md.categorical_acoustic_cue[selection].values
+            elif target == "lexical_evidence":
+                y = (md.word_end.str[0] == phoneme_pair[0])[selection].values
+            elif target == "mismatch":
+                y = md.mismatch[selection].values
+            elif target == "mismatch_left_right":
+                y = md.mismatch_left_right[selection].values
+                X = X[y != 0]
+                y = y[y != 0]
+            elif target in ("behavior_categorical", "behavior_categorical_forced"):
+                y = md.behavior_dummy_forced[selection].values
+
+            num_classes = len(set(y))
+
+            if randomize:
+                y = np.random.permutation(y)
+
+            scoring = (
+                ["roc_auc", "neg_log_loss", "f1_macro", "accuracy"]
+                if num_classes == 2
+                else ["f1_macro", "accuracy"]
+            )
+
+            if strategy == "nested-cv":
+                fitted = fit_nested_cv(X, y, num_classes=num_classes, scoring=scoring)
+            elif strategy == "train-test":
+                fitted = fit_train_test(
+                    X,
+                    y,
+                    num_classes=num_classes,
+                    scoring=scoring,
+                    stratify=y,
+                    num_repeats=5,
+                    n_jobs=1,
+                )
+
+            if fitted is None:
+                continue
+
+            result_key = (row.subject, row.electrode_idx, phoneme_pair, smin, smax)
+
+            if isinstance(scoring, list):
+                train_scores[result_key] = {k: fitted["train_" + k] for k in scoring}
+                test_scores[result_key] = {k: fitted["test_" + k] for k in scoring}
+            else:
+                train_scores[result_key] = fitted["train_score"]
+                test_scores[result_key] = fitted["test_score"]
+
+            if return_outcomes:
+                fold_results = []
+                for fold, (test_idxs, estimator) in enumerate(
+                    zip(fitted["test_idxs"], fitted["estimator"])
+                ):
+                    test_epoch_idxs = md.index[selection][test_idxs]
+                    fold_results.append(
+                        pd.DataFrame(
+                            {
+                                "decoder_target": y[test_idxs],
+                                "decoder_prediction": estimator.predict(X[test_idxs]),
+                                "decoder_proba": estimator.predict_proba(
+                                    X[test_idxs]
+                                )[:, 1],
+                                "fold": fold,
+                                "epoch_idx": test_epoch_idxs,
+                            }
+                        )
+                    )
+                outcomes[result_key] = pd.concat(fold_results)
+
+            models[result_key] = fitted["estimator"]
+
+    return train_scores, test_scores, outcomes, models
 
 
 def run_decoding_searchlight_single_electrode(
@@ -937,13 +1069,6 @@ def run_decoding_searchlight_single_electrode(
     if include_only_full_windows:
         windows = windows[windows[:, 1] <= global_max_sample]
 
-    # `outcomes` stores prediction outcomes for each epoch under the optimal model
-    outcomes = {}
-    # `test_scores` stores cross-validated estimates of held-out generalization
-    train_scores, test_scores = {}, {}
-    # `models` stores the fitted models
-    models = {}
-
     phoneme_pairs = next(iter(epochs.values())).metadata.phoneme_pair.unique()
 
     if filter_speech_responsive:
@@ -955,106 +1080,25 @@ def run_decoding_searchlight_single_electrode(
     if smoke_test:
         electrodes = electrodes.iloc[:5]
 
-    for _, row in tqdm(electrodes.iterrows(), total=len(electrodes)):
-        for smin, smax in windows:
-            for phoneme_pair in phoneme_pairs:
-                epochs_ij = epochs[row.subject]
-                # manual filtering for performance
-                selection = epochs_ij.metadata.phoneme_pair == phoneme_pair
+    # Pre-extract epoch arrays once per subject so workers share memory-mapped arrays
+    # rather than calling get_data() inside the innermost loop.
+    epoch_arrays = {subj: epochs[subj].get_data() for subj in epochs}
+    epoch_metadata = {subj: epochs[subj].metadata for subj in epochs}
 
-                if selection.sum() == 0:
-                    continue
+    per_electrode = Parallel(n_jobs=n_jobs)(
+        delayed(_fit_searchlight_electrode)(
+            row, windows, phoneme_pairs, epoch_arrays, epoch_metadata,
+            target, strategy, return_outcomes, randomize,
+        )
+        for _, row in tqdm(electrodes.iterrows(), total=len(electrodes))
+    )
 
-                # num_trials * num_times
-                X = epochs_ij.get_data(picks=[row.electrode_idx])[selection][
-                    :, 0, smin:smax
-                ]
-
-                if target == "acoustic":
-                    y = epochs_ij.metadata.categorical_acoustic_cue[selection].values
-                elif target == "lexical_evidence":
-                    y = (epochs_ij.metadata.word_end.str[0] == phoneme_pair[0])[
-                        selection
-                    ].values
-                elif target == "mismatch":
-                    y = epochs_ij.metadata.mismatch[selection].values
-                elif target == "mismatch_left_right":
-                    y = epochs_ij.metadata.mismatch_left_right[selection].values
-
-                    # Subset data to only include mismatch trials
-                    X = X[y != 0]
-                    y = y[y != 0]
-                elif target in ("behavior_categorical", "behavior_categorical_forced"):
-                    y = epochs_ij.metadata.behavior_dummy_forced[selection].values
-
-                num_classes = len(set(y))
-                # stratify_class = epochs_ij.metadata.stratify_class[selection].values
-
-                if randomize:
-                    # Randomize the labels
-                    y = np.random.permutation(y)
-
-                ####
-
-                scoring = (
-                    ["roc_auc", "neg_log_loss", "f1_macro", "accuracy"]
-                    if num_classes == 2
-                    else ["f1_macro", "accuracy"]
-                )
-
-                if strategy == "nested-cv":
-                    fitted = fit_nested_cv(
-                        X, y, num_classes=num_classes, scoring=scoring
-                    )
-                elif strategy == "train-test":
-                    fitted = fit_train_test(
-                        X,
-                        y,
-                        num_classes=num_classes,
-                        scoring=scoring,
-                        stratify=y,
-                        num_repeats=5,
-                        n_jobs=n_jobs,
-                    )
-
-                result_key = (row.subject, row.electrode_idx, phoneme_pair, smin, smax)
-
-                if isinstance(scoring, list):
-                    train_scores[result_key] = {
-                        k: fitted["train_" + k] for k in scoring
-                    }
-                    test_scores[result_key] = {k: fitted["test_" + k] for k in scoring}
-                else:
-                    train_scores[result_key] = fitted["train_score"]
-                    test_scores[result_key] = fitted["test_score"]
-
-                if return_outcomes:
-                    # only store outcomes on test folds
-                    fold_results = []
-                    for fold, (test_idxs, estimator) in enumerate(
-                        zip(fitted["test_idxs"], fitted["estimator"])
-                    ):
-                        # test_idxs are indices into X, y, which themselves are indices into epochs_ij[selection]
-                        test_epoch_idxs = epochs_ij.metadata.index[selection][test_idxs]
-                        fold_results.append(
-                            pd.DataFrame(
-                                {
-                                    "decoder_target": y[test_idxs],
-                                    "decoder_prediction": estimator.predict(
-                                        X[test_idxs]
-                                    ),
-                                    "decoder_proba": estimator.predict_proba(
-                                        X[test_idxs]
-                                    )[:, 1],
-                                    "fold": fold,
-                                    "epoch_idx": test_epoch_idxs,
-                                }
-                            )
-                        )
-
-                    outcomes[result_key] = pd.concat(fold_results)
-
-                models[result_key] = fitted["estimator"]
+    train_scores, test_scores, outcomes, models = {}, {}, {}, {}
+    for ts, vs, oc, mo in per_electrode:
+        train_scores.update(ts)
+        test_scores.update(vs)
+        outcomes.update(oc)
+        models.update(mo)
 
     return train_scores, test_scores, outcomes, models
 
@@ -1150,7 +1194,7 @@ def fit_train_test(
     # Ensure there are enough of each label class for num_folds inner CV folds.
     # Inner CV operates on the training set ((1 - test_fraction) of total), so check that
     # the minority class has at least num_folds training examples.
-    min_label_count = np.min(np.bincount(y, minlength=num_classes))
+    min_label_count = np.min(np.unique(y, return_counts=True)[1])
     if (1 - test_fraction) * min_label_count < num_folds:
         num_folds = max(1, int(np.floor((1 - test_fraction) * min_label_count)))
         L.warning(
@@ -1174,8 +1218,8 @@ def fit_train_test(
         #     np.testing.assert_array_equal(idxs_test, baseline_results["test_idxs"][i])
 
         num_folds_i = num_folds
-        class_counts_train = np.bincount(y_train, minlength=num_classes)
-        class_counts_test = np.bincount(y_test, minlength=num_classes)
+        class_counts_train = np.unique(y_train, return_counts=True)[1]
+        class_counts_test = np.unique(y_test, return_counts=True)[1]
         if np.any(class_counts_train < num_folds) or np.any(
             class_counts_test < num_folds
         ):

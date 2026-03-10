@@ -39,10 +39,10 @@ import os
 
 import joblib
 
-os.environ["OMP_NUM_THREADS"] = "5"
-os.environ["MKL_NUM_THREADS"] = "5"
-os.environ["OPENBLAS_NUM_THREADS"] = "5"
-os.environ["NUMEXPR_MAX_THREADS"] = "5"
+os.environ["OMP_NUM_THREADS"] = "1"  # Limit OpenMP
+os.environ["MKL_NUM_THREADS"] = "1"  # Limit MKL (Intel Math Kernel Library)
+os.environ["OPENBLAS_NUM_THREADS"] = "1"  # Limit OpenBLAS
+os.environ["NUMEXPR_MAX_THREADS"] = "1"  # Limit NumExpr if installed
 
 # %%
 import itertools
@@ -60,14 +60,13 @@ from src.models.decoding import run_decoding_model_comparison_population
 subject = "EC282"
 epochs_path = f"outputs/epochs_preprocessed/{subject}_epo.fif"
 electrodes_path = f"outputs/causal5/find_speech_responsive/{subject}_results.csv"
-behav_summary_path = (
-    f"outputs/causal5/behavior_decoding_single_electrode_summarize/{subject}/A_final_summary.csv"
-)
+behav_summary_path = f"outputs/causal5/behavior_decoding_single_electrode_summarize/{subject}/A_final_summary.csv"
 outdir = "."
 
 min_sample = 1
 window_size = 15
 stride = 2
+n_jobs = 5
 
 # Minimum full-model ROC-AUC (averaged over folds at peak window) required for
 # a site to be included. Mirrors behav_response_peak_threshold from config.yaml.
@@ -145,7 +144,7 @@ for electrode_idx, phoneme_pair in tqdm(
         groupby=None,
         stratify=("resampled", "lexical_evidence"),
         return_estimators=True,
-        n_jobs=5,
+        n_jobs=n_jobs,
     )
 
 # %% [markdown]

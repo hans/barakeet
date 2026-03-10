@@ -19,10 +19,10 @@
 # %%
 import os
 
-os.environ["OMP_NUM_THREADS"] = "5"  # Limit OpenMP
-os.environ["MKL_NUM_THREADS"] = "5"  # Limit MKL (Intel Math Kernel Library)
-os.environ["OPENBLAS_NUM_THREADS"] = "5"  # Limit OpenBLAS
-os.environ["NUMEXPR_MAX_THREADS"] = "5"  # Limit NumExpr if installed
+os.environ["OMP_NUM_THREADS"] = "1"  # Limit OpenMP
+os.environ["MKL_NUM_THREADS"] = "1"  # Limit MKL (Intel Math Kernel Library)
+os.environ["OPENBLAS_NUM_THREADS"] = "1"  # Limit OpenBLAS
+os.environ["NUMEXPR_MAX_THREADS"] = "1"  # Limit NumExpr if installed
 
 # %%
 from pathlib import Path
@@ -58,6 +58,7 @@ outdir = "."
 min_sample = 1
 window_size = 15
 stride = 2
+n_jobs = 5
 
 # %%
 subject = Path(electrodes_path).name.split("_")[0]
@@ -89,6 +90,7 @@ train_scores, test_scores, outcomes, models = run_decoding_searchlight_single_el
     strategy="train-test",
     window_size=window_size,
     stride=stride,
+    n_jobs=n_jobs,
 )
 
 # %%

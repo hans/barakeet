@@ -32,10 +32,10 @@ import os
 
 import joblib
 
-os.environ["OMP_NUM_THREADS"] = "5"
-os.environ["MKL_NUM_THREADS"] = "5"
-os.environ["OPENBLAS_NUM_THREADS"] = "5"
-os.environ["NUMEXPR_MAX_THREADS"] = "5"
+os.environ["OMP_NUM_THREADS"] = "1"  # Limit OpenMP
+os.environ["MKL_NUM_THREADS"] = "1"  # Limit MKL (Intel Math Kernel Library)
+os.environ["OPENBLAS_NUM_THREADS"] = "1"  # Limit OpenBLAS
+os.environ["NUMEXPR_MAX_THREADS"] = "1"  # Limit NumExpr if installed
 
 # %%
 import itertools
@@ -58,6 +58,7 @@ outdir = "."
 min_sample = 1
 window_size = 15
 stride = 2
+n_jobs = 5
 
 # %%
 subject = re.findall(r"(EC[\d]+)_epo", str(epochs_path))[0]
@@ -102,7 +103,7 @@ for electrode_idx, phoneme_pair in tqdm(
         strategy="train-test",
         groupby=["word_end"],
         return_estimators=True,
-        n_jobs=5,
+        n_jobs=n_jobs,
     )
 
 # %% [markdown]

@@ -154,6 +154,7 @@ rule behavior_decoding_single_electrode:
                 min_sample=config["analysis"]["decoding"]["min_sample"],
                 window_size=config["analysis"]["decoding"]["window_size"],
                 stride=config["analysis"]["decoding"]["stride"],
+                n_jobs=config["analysis"]["decoding"]["n_jobs"],
             ),
         )
 
@@ -243,6 +244,7 @@ rule ganong_decoding_single_electrode:
                 min_sample=config["analysis"]["decoding"]["min_sample"],
                 window_size=config["analysis"]["decoding"]["window_size"],
                 stride=config["analysis"]["decoding"]["stride"],
+                n_jobs=config["analysis"]["decoding"]["n_jobs"],
                 behav_peak_threshold=config["analysis"]["behav_response_peak_threshold"],
             ),
         )
@@ -327,6 +329,7 @@ rule acoustic_decoding_single_electrode:
                 min_sample=config["analysis"]["decoding"]["min_sample"],
                 window_size=config["analysis"]["decoding"]["window_size"],
                 stride=config["analysis"]["decoding"]["stride"],
+                n_jobs=config["analysis"]["decoding"]["n_jobs"],
             ),
         )
 
