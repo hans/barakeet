@@ -364,6 +364,92 @@ rule A_predictions:
         )
 
 
+rule acoustic_decoding_peaks:
+    """Compute phonetic decoder peak windows from the acoustic searchlight.
+
+    Extracted from prepare_neurometrics so that downstream analyses (e.g.
+    acoustic_morphology_on_ambiguous) can run immediately after A_predictions
+    without waiting for the full prepare_neurometrics pipeline.
+
+    Outputs consumed by:
+      - acoustic_morphology_on_ambiguous (phon_peaks_df.parquet)
+      - prepare_neurometrics (both outputs, passed as inputs)
+    """
+    input:
+        phon_predictions = "outputs/causal5/A_predictions/behavior_to_phonetic_decoding.parquet",
+        notebook         = "notebooks/causal5/acoustic_decoding_peaks.py",
+
+    output:
+        notebook                 = "outputs/causal5/acoustic_decoding_peaks/notebook.ipynb",
+        phon_peaks               = "outputs/causal5/acoustic_decoding_peaks/phon_peaks_df.parquet",
+        phon_roc_auc_searchlight = "outputs/causal5/acoustic_decoding_peaks/phon_roc_auc_searchlight_df.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                phon_predictions_path=str(input.phon_predictions),
+                outdir=str(outdir),
+                phon_response_peak_threshold=config["analysis"]["phon_response_peak_threshold"],
+                phon_response_tmin_min=0.0,
+                all_response_tmax_max=1.3,
+                epoch_tmin=config["analysis"]["epoch_tmin"],
+                epoch_sfreq=config["analysis"]["epoch_sfreq"],
+            ),
+        )
+
+
+rule acoustic_morphology_on_ambiguous:
+    """Acoustic response morphology on ambiguous inputs at acoustically selective sites.
+
+    Applies the acoustic category decoder (trained on endpoints, steps 1 & 6) to
+    ambiguous trials (steps 2–5) and asks whether it remains confident (categorical
+    account) or collapses toward chance (intermediate/graded account).
+
+    Key measures per site:
+      - decoder_confidence on ambiguous vs. endpoint trials (abs(proba - 0.5))
+      - ROC-AUC of acoustic decoder predicting behavior on ambiguous trials
+        (AUC ≈ 0.5 = dissociation; AUC >> 0.5 = acoustic drives percept)
+
+    Runs after acoustic_decoding_peaks + acoustic_decoding_single_electrode;
+    does NOT require prepare_neurometrics.
+    """
+    input:
+        all_epochs = expand(
+            "outputs/epochs_preprocessed/{subject}_epo.fif",
+            subject=config["data"]["subjects"],
+        ),
+        all_outcomes = expand(
+            "outputs/causal5/acoustic_decoding_single_electrode/{subject}/all_outcomes.parquet",
+            subject=config["data"]["subjects"],
+        ),
+        phon_peaks = "outputs/causal5/acoustic_decoding_peaks/phon_peaks_df.parquet",
+        notebook   = "notebooks/causal5/acoustic_morphology_on_ambiguous.py",
+
+    output:
+        notebook   = "outputs/causal5/acoustic_morphology_on_ambiguous/notebook.ipynb",
+        site_stats = "outputs/causal5/acoustic_morphology_on_ambiguous/site_stats.parquet",
+        trial_df   = "outputs/causal5/acoustic_morphology_on_ambiguous/trial_df.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                all_epochs=list(input.all_epochs),
+                all_outcomes_paths=list(input.all_outcomes),
+                phon_peaks_path=str(input.phon_peaks),
+                outdir=str(outdir),
+                phon_response_peak_threshold=config["analysis"]["phon_response_peak_threshold"],
+                epoch_tmin=config["analysis"]["epoch_tmin"],
+                epoch_sfreq=config["analysis"]["epoch_sfreq"],
+            ),
+        )
+
+
 rule prepare_neurometrics:
     """Pre-compute PaperData for A_neurometrics visualisations.
 
@@ -374,6 +460,7 @@ rule prepare_neurometrics:
     Inputs come from:
       - behavior_decoding_single_electrode_summarize (A-predictions.parquet)
       - A_predictions (behavior_to_phonetic_decoding.parquet)
+      - acoustic_decoding_peaks (phon_peaks_df, phon_roc_auc_searchlight_df)
       - find_speech_responsive (electrode_df)
       - raw epochs (for HGA extraction)
     """
@@ -387,6 +474,8 @@ rule prepare_neurometrics:
             subject=config["data"]["subjects"],
         ),
         phon_predictions = "outputs/causal5/A_predictions/behavior_to_phonetic_decoding.parquet",
+        phon_peaks               = "outputs/causal5/acoustic_decoding_peaks/phon_peaks_df.parquet",
+        phon_roc_auc_searchlight = "outputs/causal5/acoustic_decoding_peaks/phon_roc_auc_searchlight_df.parquet",
         electrode_paths = expand(
             "outputs/causal5/find_speech_responsive/{subject}_results.csv",
             subject=config["data"]["subjects"],
@@ -427,6 +516,8 @@ rule prepare_neurometrics:
                 all_epochs=list(input.all_epochs),
                 A_behav_predictions=list(input.A_behav_predictions),
                 phon_predictions_path=str(input.phon_predictions),
+                phon_peaks_path=str(input.phon_peaks),
+                phon_roc_auc_searchlight_path=str(input.phon_roc_auc_searchlight),
                 electrode_paths=list(input.electrode_paths),
                 ganong_peaks_path=str(input.ganong_peaks),
                 ganong_predictions_path=str(input.ganong_predictions),
@@ -520,6 +611,12 @@ rule acoustic_decoding_single_electrode_all:
             "outputs/causal5/acoustic_decoding_single_electrode/{subject}/notebook.ipynb",
             subject=config["data"]["subjects"],
         ),
+
+
+rule acoustic_morphology_on_ambiguous_all:
+    """Run acoustic morphology analysis (after acoustic decoding + peak extraction)."""
+    input:
+        "outputs/causal5/acoustic_morphology_on_ambiguous/site_stats.parquet",
 
 
 rule causal5_all:

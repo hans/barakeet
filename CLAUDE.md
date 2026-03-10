@@ -119,10 +119,24 @@ reference; adds electrode pre-selection steps A/B/C that causal5 drops).
 | `behavior_decoding_single_electrode_summarize` | `behavior_decoding_single_electrode_summarize.py` | `A-predictions.parquet` (late/perceptual window), `A_early-predictions.parquet` (early/acoustic), `A_results.csv`, `A_final_summary.csv` |
 | `acoustic_decoding_single_electrode` | `acoustic_decoding_single_electrode.py` | `all_outcomes.parquet`, `outcomes.parquet`, `decoding_models.joblib` |
 | `A_predictions` | `A_predictions.py` | `behavior_to_phonetic_decoding.parquet` (acoustic outcomes filtered to `categorical_acoustic_cue`) |
+| `acoustic_decoding_peaks` | `acoustic_decoding_peaks.py` | `phon_peaks_df.parquet`, `phon_roc_auc_searchlight_df.parquet` (peak acoustic window per site) |
+| `acoustic_morphology_on_ambiguous` | `acoustic_morphology_on_ambiguous.py` | `trial_df.parquet`, `site_stats.parquet` (decoder confidence on ambiguous trials) |
 | `prepare_neurometrics` | `prepare_neurometrics.py` | 13+ parquets in `outputs/causal5/prepare_neurometrics/` (see below) |
 | `A_neurometrics` | `A_neurometrics.py` | Figures; `hga_zoomin_search_keys.csv` |
 
 All causal5 outputs live under `outputs/causal5/`.
+
+### Where to find structure documentation before reading source
+
+Check these docstrings/constants **before** tracing through notebook code — they are
+the canonical reference for data schemas and protocols:
+
+- **HGA extraction**: `src/viz_paper.py:extract_hga_windows_df()` docstring; `src/data.py` module docstring
+- **hga_df schema**: `src/viz_paper.py` `PaperData` docstring (~lines 124–155) — site/trial identifiers, `hga_early`/`hga_late`, window metadata
+- **Epoch metadata columns**: `src/data.py:add_metadata_features()` docstring — `resampled`, `behavior_categorical_forced`, `ambiguity`, `categorical_acoustic_cue`, etc.
+- **Decoder checkpoint formats**: `src/models/decoding.py` module docstring
+- **Timing constants**: `src/stimuli.py` — `POD_dict`, `OFFSET_DICT`, `WORD_PHASES`
+- **all_outcomes.parquet schema**: columns `subject, electrode_idx, phoneme_pair, smin, smax, measure, epoch_idx, fold, decoder_target, decoder_proba, decoder_prediction`; `measure` ∈ {`categorical_acoustic_cue`, `subject_specific_acoustics`}; predictions on ALL trials including ambiguous steps
 
 ### Key source files
 

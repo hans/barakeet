@@ -59,6 +59,14 @@ phon_predictions_path = Path(
     "outputs/causal5/A_predictions/behavior_to_phonetic_decoding.parquet"
 )
 
+phon_peaks_path = Path(
+    "outputs/causal5/acoustic_decoding_peaks/phon_peaks_df.parquet"
+)
+
+phon_roc_auc_searchlight_path = Path(
+    "outputs/causal5/acoustic_decoding_peaks/phon_roc_auc_searchlight_df.parquet"
+)
+
 electrode_paths = list(Path("outputs/causal5/find_speech_responsive/").glob("*.csv"))
 
 ganong_peaks_path = Path("outputs/causal5/ganong_decoding/ganong_peaks.parquet")
@@ -147,6 +155,10 @@ word_end_df = pl.from_pandas(
 
 # %% [markdown]
 # ## Prep phonetic
+#
+# phon_peaks_df and phon_roc_auc_searchlight_df are pre-computed by the
+# acoustic_decoding_peaks rule (notebooks/causal5/acoustic_decoding_peaks.py)
+# and loaded here to avoid duplication.
 
 # %%
 phon_pred_df = pl.read_parquet(phon_predictions_path).with_columns(
@@ -156,38 +168,15 @@ phon_pred_df = pl.read_parquet(phon_predictions_path).with_columns(
 )
 
 # %%
-group_cols = ["subject", "electrode_idx", "phoneme_pair", "smin", "smax", "fold"]
-phon_roc_auc_searchlight_df = pl_roc_auc(
-    df=phon_pred_df.filter(
-        (pl.col("smin") >= phon_response_smin_min)
-        & (pl.col("smax") <= all_response_smax_max)
-    ),
-    target_col="decoder_target",
-    proba_col="decoder_proba",
-    group_cols=group_cols,
-    roc_auc_name="phon_roc_auc",
+phon_peaks_df = pl.read_parquet(phon_peaks_path).with_columns(
+    pl.col("subject").cast(subject_enum),
+    pl.col("phoneme_pair").cast(phoneme_pair_enum),
 )
 
 # %%
-phon_roc_auc_mean_df = phon_roc_auc_searchlight_df.group_by(
-    ["subject", "electrode_idx", "phoneme_pair", "smin", "smax"]
-).agg(pl.col("phon_roc_auc").mean())
-
-# %%
-phon_peaks_df = (
-    phon_roc_auc_mean_df.join(
-        word_end_df.group_by(["phoneme_pair"]).agg(pl.max("word_end_offset_sample")),
-        on=["phoneme_pair"],
-        how="left",
-    )
-    .filter(
-        pl.col("smin") >= phon_response_smin_min,
-        pl.col("smax") <= pl.col("word_end_offset_sample"),
-        pl.col("phon_roc_auc") >= phon_response_peak_threshold,
-    )
-    .sort("phon_roc_auc", descending=True)
-    .group_by(["subject", "electrode_idx", "phoneme_pair"])
-    .first()
+phon_roc_auc_searchlight_df = pl.read_parquet(phon_roc_auc_searchlight_path).with_columns(
+    pl.col("subject").cast(subject_enum),
+    pl.col("phoneme_pair").cast(phoneme_pair_enum),
 )
 
 # %% [markdown]
