@@ -55,8 +55,8 @@ A_behav_predictions = list(
     )
 )
 
-phon_predictions_path = Path(
-    "outputs/causal5/A_predictions/behavior_to_phonetic_decoding.parquet"
+all_outcomes_paths = list(
+    Path("outputs/causal5/acoustic_decoding_single_electrode").rglob("*/all_outcomes.parquet")
 )
 
 phon_peaks_path = Path(
@@ -161,7 +161,12 @@ word_end_df = pl.from_pandas(
 # and loaded here to avoid duplication.
 
 # %%
-phon_pred_df = pl.read_parquet(phon_predictions_path).with_columns(
+phon_pred_df = pl.concat(
+    [
+        pl.read_parquet(p).filter(pl.col("measure") == "categorical_acoustic_cue").drop("measure")
+        for p in all_outcomes_paths
+    ]
+).with_columns(
     pl.col("subject").cast(subject_enum),
     pl.col("phoneme_pair").cast(phoneme_pair_enum),
     (pl.col("decoder_target") == 1).cast(pl.Int8).alias("decoder_target"),

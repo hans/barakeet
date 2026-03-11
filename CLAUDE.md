@@ -118,8 +118,7 @@ reference; adds electrode pre-selection steps A/B/C that causal5 drops).
 | `behavior_decoding_single_electrode` | `behavior_decoding_single_electrode.py` | `{subject}/results.joblib` → keys `decoding_results`, `decoders` |
 | `behavior_decoding_single_electrode_summarize` | `behavior_decoding_single_electrode_summarize.py` | `A-predictions.parquet` (late/perceptual window), `A_early-predictions.parquet` (early/acoustic), `A_results.csv`, `A_final_summary.csv` |
 | `acoustic_decoding_single_electrode` | `acoustic_decoding_single_electrode.py` | `all_outcomes.parquet`, `outcomes.parquet`, `decoding_models.joblib` |
-| `A_predictions` | `A_predictions.py` | `behavior_to_phonetic_decoding.parquet` (acoustic outcomes filtered to `categorical_acoustic_cue`) |
-| `acoustic_decoding_peaks` | `acoustic_decoding_peaks.py` | `phon_peaks_df.parquet`, `phon_roc_auc_searchlight_df.parquet` (peak acoustic window per site) |
+| `acoustic_decoding_peaks` | `acoustic_decoding_peaks.py` | `phon_peaks_df.parquet`, `phon_roc_auc_searchlight_df.parquet` (peak acoustic window per site; loads `all_outcomes.parquet` per subject and filters to `categorical_acoustic_cue` on the fly) |
 | `acoustic_morphology_on_ambiguous` | `acoustic_morphology_on_ambiguous.py` | `trial_df.parquet`, `site_stats.parquet` (decoder confidence on ambiguous trials) |
 | `prepare_neurometrics` | `prepare_neurometrics.py` | 13+ parquets in `outputs/causal5/prepare_neurometrics/` (see below) |
 | `A_neurometrics` | `A_neurometrics.py` | Figures; `hga_zoomin_search_keys.csv` |

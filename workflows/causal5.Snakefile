@@ -20,11 +20,9 @@
 #       │
 #       └─► acoustic_decoding_single_electrode
 #               Acoustic-category searchlight on all speech-responsive electrodes.
-#               → all_outcomes.parquet (used by A_predictions and A_neurometrics)
-#
-#   A_predictions
-#       Extracts fine-grained phonetic predictions from the acoustic searchlight.
-#       → behavior_to_phonetic_decoding.parquet (consumed by prepare_neurometrics)
+#               → all_outcomes.parquet (used directly by acoustic_decoding_peaks
+#                  and prepare_neurometrics; filtered to categorical_acoustic_cue
+#                  on the fly — no intermediate A_predictions step)
 #
 #   prepare_neurometrics
 #       Computes all DataFrames for neurometric visualizations (slow HGA extraction).
@@ -299,8 +297,7 @@ rule acoustic_decoding_single_electrode:
     predictions on all relevant epochs.
 
     Key outputs:
-      all_outcomes.parquet → A_predictions (behavior_to_phonetic_decoding.parquet)
-                             A_neurometrics (phonetic_decoder_checkpoints)
+      all_outcomes.parquet → acoustic_decoding_peaks, prepare_neurometrics, A_neurometrics
     """
     input:
         epochs           = "outputs/epochs_preprocessed/{subject}_epo.fif",
@@ -311,7 +308,7 @@ rule acoustic_decoding_single_electrode:
         notebook     = "outputs/causal5/acoustic_decoding_single_electrode/{subject}/notebook.ipynb",
         outcomes     = "outputs/causal5/acoustic_decoding_single_electrode/{subject}/outcomes.parquet",
         all_outcomes = "outputs/causal5/acoustic_decoding_single_electrode/{subject}/all_outcomes.parquet",
-        train_scores = "outputs/causal5/acoustic_decoding_single_electrode/{subject}/train_scores.parquet",
+        train_scores = "outputs/causal5/eh_single_electrode/{subject}/train_scores.parquet",
         test_scores  = "outputs/causal5/acoustic_decoding_single_electrode/{subject}/test_scores.parquet",
         avg_scores   = "outputs/causal5/acoustic_decoding_single_electrode/{subject}/avg_test_scores.csv",
         models       = "outputs/causal5/acoustic_decoding_single_electrode/{subject}/decoding_models.joblib",
@@ -334,52 +331,22 @@ rule acoustic_decoding_single_electrode:
         )
 
 
-rule A_predictions:
-    """Collect fine-grained phonetic predictions from the acoustic searchlight.
-
-    Loads `all_outcomes.parquet` from acoustic_decoding_single_electrode
-    for all subjects, filters to the `categorical_acoustic_cue` measure, and saves
-    a combined parquet used by prepare_neurometrics as `phon_predictions_path`.
-
-    Output:
-      behavior_to_phonetic_decoding.parquet → prepare_neurometrics phon_predictions_path
-    """
-    input:
-        notebook         = "notebooks/causal5/A_predictions.py",
-        behav_acoustic_paths = expand(
-            "outputs/causal5/acoustic_decoding_single_electrode/{subject}/all_outcomes.parquet",
-            subject=config["data"]["subjects"],
-        ),
-
-    output:
-        notebook                     = "outputs/causal5/A_predictions/notebook.ipynb",
-        behavior_to_phonetic_decoding = "outputs/causal5/A_predictions/behavior_to_phonetic_decoding.parquet",
-
-    run:
-        outdir = Path(output.notebook).parent
-        run_notebook(
-            str(input.notebook),
-            str(output.notebook),
-            dict(
-                behav_p_searchlight_paths=list(input.behav_acoustic_paths),
-                outdir=str(outdir),
-            ),
-        )
-
-
 rule acoustic_decoding_peaks:
     """Compute phonetic decoder peak windows from the acoustic searchlight.
 
     Extracted from prepare_neurometrics so that downstream analyses (e.g.
-    acoustic_morphology_on_ambiguous) can run immediately after A_predictions
-    without waiting for the full prepare_neurometrics pipeline.
+    acoustic_morphology_on_ambiguous) can run immediately without waiting for
+    the full prepare_neurometrics pipeline.
 
     Outputs consumed by:
       - acoustic_morphology_on_ambiguous (phon_peaks_df.parquet)
       - prepare_neurometrics (both outputs, passed as inputs)
     """
     input:
-        phon_predictions = "outputs/causal5/A_predictions/behavior_to_phonetic_decoding.parquet",
+        all_outcomes = expand(
+            "outputs/causal5/acoustic_decoding_single_electrode/{subject}/all_outcomes.parquet",
+            subject=config["data"]["subjects"],
+        ),
         notebook         = "notebooks/causal5/acoustic_decoding_peaks.py",
 
     output:
@@ -393,7 +360,7 @@ rule acoustic_decoding_peaks:
             str(input.notebook),
             str(output.notebook),
             parameters=dict(
-                phon_predictions_path=str(input.phon_predictions),
+                all_outcomes_paths=list(input.all_outcomes),
                 outdir=str(outdir),
                 phon_response_peak_threshold=config["analysis"]["phon_response_peak_threshold"],
                 phon_response_tmin_min=0.0,
@@ -462,7 +429,7 @@ rule prepare_neurometrics:
 
     Inputs come from:
       - behavior_decoding_single_electrode_summarize (A-predictions.parquet)
-      - A_predictions (behavior_to_phonetic_decoding.parquet)
+      - acoustic_decoding_single_electrode (all_outcomes.parquet, filtered on the fly)
       - acoustic_decoding_peaks (phon_peaks_df, phon_roc_auc_searchlight_df)
       - find_speech_responsive (electrode_df)
       - raw epochs (for HGA extraction)
@@ -476,7 +443,10 @@ rule prepare_neurometrics:
             "outputs/causal5/behavior_decoding_single_electrode_summarize/{subject}/A-predictions.parquet",
             subject=config["data"]["subjects"],
         ),
-        phon_predictions = "outputs/causal5/A_predictions/behavior_to_phonetic_decoding.parquet",
+        all_outcomes = expand(
+            "outputs/causal5/acoustic_decoding_single_electrode/{subject}/all_outcomes.parquet",
+            subject=config["data"]["subjects"],
+        ),
         phon_peaks               = "outputs/causal5/acoustic_decoding_peaks/phon_peaks_df.parquet",
         phon_roc_auc_searchlight = "outputs/causal5/acoustic_decoding_peaks/phon_roc_auc_searchlight_df.parquet",
         electrode_paths = expand(
@@ -518,7 +488,7 @@ rule prepare_neurometrics:
             parameters=dict(
                 all_epochs=list(input.all_epochs),
                 A_behav_predictions=list(input.A_behav_predictions),
-                phon_predictions_path=str(input.phon_predictions),
+                all_outcomes_paths=list(input.all_outcomes),
                 phon_peaks_path=str(input.phon_peaks),
                 phon_roc_auc_searchlight_path=str(input.phon_roc_auc_searchlight),
                 electrode_paths=list(input.electrode_paths),
