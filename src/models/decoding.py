@@ -133,6 +133,32 @@ Loading for A_neurometrics (phonetic_decoder_checkpoints structure):
                                 phoneme_pair, smin, smax),
             "all_outcomes": dict from all_outcomes.parquet grouped by (..., measure),
         }
+
+------------------------------------------------------------------------
+outputs/causal5/ganong_decoding/{subject}/results.joblib
+------------------------------------------------------------------------
+Written by: notebooks/causal5/ganong_decoding_single_electrode.py
+Producer:   run_decoding_model_comparison_population (this module)
+
+Load / structure: identical to causal5 behavior_decoding_single_electrode (above).
+    import joblib
+    data = joblib.load(path)
+    # top-level keys: "decoding_results", "decoders"
+
+Key difference from behavior_decoding_single_electrode:
+    - groupby=None  (pooled across both lexical completions — no word_end split)
+    - stratify=("resampled", "lexical_evidence")  (balance steps AND completions per fold)
+
+Because groupby=None, the `name` tuple in inner keys is always an empty tuple ():
+    outer_key = (subject, electrode_idx, phoneme_pair)
+    inner_key = (subject, str(electrode_idx), phoneme_pair, (), smin, smax, fold)
+
+decoding_results DataFrames have the same columns as behavior_decoding_single_electrode,
+EXCEPT there is no `word_end` column (groupby was not applied).
+
+Electrode set: restricted to sites where behavior_decoding_single_electrode_summarize
+reports full_roc_auc >= behav_peak_threshold (default 0.6) at their peak window
+(i.e. only sites with significant behavioral decoding are decoded here).
 ===========================================================================
 
 ===========================================================================
