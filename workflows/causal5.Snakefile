@@ -399,9 +399,10 @@ rule acoustic_morphology_on_ambiguous:
         notebook   = "notebooks/causal5/acoustic_morphology_on_ambiguous.py",
 
     output:
-        notebook   = "outputs/causal5/acoustic_morphology_on_ambiguous/notebook.ipynb",
-        site_stats = "outputs/causal5/acoustic_morphology_on_ambiguous/site_stats.parquet",
-        trial_df   = "outputs/causal5/acoustic_morphology_on_ambiguous/trial_df.parquet",
+        notebook              = "outputs/causal5/acoustic_morphology_on_ambiguous/notebook.ipynb",
+        site_stats            = "outputs/causal5/acoustic_morphology_on_ambiguous/site_stats.parquet",
+        trial_df              = "outputs/causal5/acoustic_morphology_on_ambiguous/trial_df.parquet",
+        neurometrics_clusters = "outputs/causal5/acoustic_morphology_on_ambiguous/neurometrics_clusters.parquet",
 
     run:
         outdir = Path(output.notebook).parent
@@ -536,6 +537,7 @@ rule A_neurometrics:
             "outputs/causal5/acoustic_decoding_single_electrode/{subject}/decoding_models.joblib",
             subject=config["data"]["subjects"],
         ),
+        neurometrics_clusters = "outputs/causal5/acoustic_morphology_on_ambiguous/neurometrics_clusters.parquet",
         notebook = "notebooks/causal5/A_neurometrics.py",
 
     output:
@@ -555,6 +557,7 @@ rule A_neurometrics:
                 acoustic_decoder_dirs=[
                     str(Path(p).parent) for p in input.acoustic_decoder_models
                 ],
+                acoustic_morphology_dir=str(Path(input.neurometrics_clusters).parent),
                 ambiguous_response_threshold=config["analysis"]["ambiguous_response_threshold"],
                 epoch_tmin=config["analysis"]["epoch_tmin"],
                 epoch_sfreq=config["analysis"]["epoch_sfreq"],

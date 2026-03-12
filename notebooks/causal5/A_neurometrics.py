@@ -112,6 +112,8 @@ acoustic_decoder_dirs = [
 
 neurometrics_dir = "outputs/causal5/prepare_neurometrics"
 
+acoustic_morphology_dir = "outputs/causal5/acoustic_morphology_on_ambiguous"
+
 epoch_tmin = -0.4
 epoch_sfreq = 100
 
@@ -316,6 +318,12 @@ paper_data = PaperData(
     late_polarity=late_polarity,
     hga_df=hga_df,
     reg_df=reg_df,
+)
+
+# %%
+# Load neurometric cluster assignments from acoustic_morphology_on_ambiguous
+neurometrics_clusters = pd.read_parquet(
+    Path(acoustic_morphology_dir) / "neurometrics_clusters.parquet"
 )
 
 # %%
@@ -3369,5 +3377,164 @@ if p_handles is not None:
     )
 
 f.savefig(Path(outdir) / "perceptual_contrast_ambig_split-both.pdf")
+
+# %% [markdown]
+# ## Neurometric cluster analysis: latency and ROC-AUC
+#
+# Cluster assignments come from `acoustic_morphology_on_ambiguous` (k-means on
+# min-subtracted, range-normalised neurometric curve shapes; cluster 0 = highest
+# mean phon_roc_auc). Here we ask whether cluster membership predicts:
+#   1. Peak decoding latency (acoustic / perceptual)
+#   2. Acoustic and perceptual decoder ROC-AUC
+
+# %%
+_cluster_join_cols = ["subject", "electrode_idx", "phoneme_pair"]
+_cluster_key = neurometrics_clusters[_cluster_join_cols + ["cluster"]].copy()
+_cluster_key["cluster"] = _cluster_key["cluster"].astype(int)
+_n_clusters = _cluster_key["cluster"].nunique()
+_cluster_palette = plt.cm.tab10(np.linspace(0, 0.9, _n_clusters))
+
+# %% [markdown]
+# ### Fig C1 — Peak latency by cluster
+
+# %%
+peak_timing_clustered = (
+    peak_timing_plot.to_pandas()
+    .merge(_cluster_key, on=_cluster_join_cols, how="inner")
+)
+peak_timing_clustered["source_label"] = peak_timing_clustered["source"].map(
+    {"phon": "Acoustic", "behav": "Perceptual"}
+)
+
+fig, axes = plt.subplots(1, 2, figsize=(10, 4), sharey=False)
+for ax, source_label, source_key in zip(
+    axes, ["Acoustic", "Perceptual"], ["phon", "behav"]
+):
+    subset = peak_timing_clustered[peak_timing_clustered["source"] == source_key]
+    sns.violinplot(
+        data=subset,
+        x="cluster",
+        y="t_center",
+        palette=list(_cluster_palette),
+        inner="quartile",
+        ax=ax,
+    )
+    from scipy.stats import kruskal as _kruskal
+    _vgroups = [g["t_center"].dropna().values for _, g in subset.groupby("cluster")]
+    if len(_vgroups) >= 2 and all(len(g) > 0 for g in _vgroups):
+        _kw_stat, _kw_p = _kruskal(*_vgroups)
+        ax.set_title(
+            f"{source_label} peak latency by cluster\n"
+            f"Kruskal-Wallis H={_kw_stat:.2f}, p={_kw_p:.3g}"
+        )
+    else:
+        ax.set_title(f"{source_label} peak latency by cluster")
+    ax.set_xlabel("Neurometric curve cluster")
+    ax.set_ylabel("Peak decoding time (s)")
+    sns.despine(ax=ax)
+
+plt.tight_layout()
+fig.savefig(Path(outdir) / "cluster_peak_timing.pdf", bbox_inches="tight")
+plt.close(fig)
+print("Saved cluster_peak_timing.pdf")
+
+# %% [markdown]
+# ### Fig C2 — Acoustic ROC-AUC by cluster
+
+# %%
+phon_auc_clustered = (
+    phon_peaks_df.to_pandas()
+    .merge(_cluster_key, on=_cluster_join_cols, how="inner")
+)
+
+fig, ax = plt.subplots(figsize=(6, 4))
+sns.boxplot(
+    data=phon_auc_clustered,
+    x="cluster",
+    y="phon_roc_auc",
+    palette=list(_cluster_palette),
+    showfliers=False,
+    ax=ax,
+)
+sns.stripplot(
+    data=phon_auc_clustered,
+    x="cluster",
+    y="phon_roc_auc",
+    color="black",
+    alpha=0.3,
+    size=3,
+    jitter=True,
+    ax=ax,
+)
+_pa_groups = [g["phon_roc_auc"].dropna().values for _, g in phon_auc_clustered.groupby("cluster")]
+if len(_pa_groups) >= 2 and all(len(g) > 0 for g in _pa_groups):
+    _kw_pa, _kw_pa_p = _kruskal(*_pa_groups)
+    ax.set_title(
+        f"Acoustic decoder ROC-AUC by cluster\n"
+        f"Kruskal-Wallis H={_kw_pa:.2f}, p={_kw_pa_p:.3g}"
+    )
+else:
+    ax.set_title("Acoustic decoder ROC-AUC by cluster")
+ax.axhline(0.5, color="gray", linestyle="--", linewidth=1, label="chance")
+ax.set_xlabel("Neurometric curve cluster")
+ax.set_ylabel("Acoustic ROC-AUC (peak window)")
+ax.yaxis.set_major_formatter(mtick.PercentFormatter(1.0))
+ax.legend(fontsize=9)
+sns.despine(ax=ax)
+fig.tight_layout()
+fig.savefig(Path(outdir) / "cluster_phon_roc_auc.pdf", bbox_inches="tight")
+plt.close(fig)
+print("Saved cluster_phon_roc_auc.pdf")
+
+# %% [markdown]
+# ### Fig C3 — Perceptual ROC-AUC improvement by cluster
+
+# %%
+behav_auc_clustered = (
+    behav_peaks_df.to_pandas()
+    .merge(_cluster_key, on=_cluster_join_cols, how="inner")
+)
+
+fig, ax = plt.subplots(figsize=(6, 4))
+sns.boxplot(
+    data=behav_auc_clustered,
+    x="cluster",
+    y="behav_roc_auc_improvement",
+    palette=list(_cluster_palette),
+    showfliers=False,
+    ax=ax,
+)
+sns.stripplot(
+    data=behav_auc_clustered,
+    x="cluster",
+    y="behav_roc_auc_improvement",
+    color="black",
+    alpha=0.3,
+    size=3,
+    jitter=True,
+    ax=ax,
+)
+_ba_groups = [
+    g["behav_roc_auc_improvement"].dropna().values
+    for _, g in behav_auc_clustered.groupby("cluster")
+]
+if len(_ba_groups) >= 2 and all(len(g) > 0 for g in _ba_groups):
+    _kw_ba, _kw_ba_p = _kruskal(*_ba_groups)
+    ax.set_title(
+        f"Perceptual ROC-AUC improvement by cluster\n"
+        f"Kruskal-Wallis H={_kw_ba:.2f}, p={_kw_ba_p:.3g}"
+    )
+else:
+    ax.set_title("Perceptual ROC-AUC improvement by cluster")
+ax.axhline(0, color="gray", linestyle="--", linewidth=1, label="baseline")
+ax.set_xlabel("Neurometric curve cluster")
+ax.set_ylabel("Perceptual ROC-AUC improvement\nover baseline (peak window)")
+ax.yaxis.set_major_formatter(mtick.PercentFormatter(1.0))
+ax.legend(fontsize=9)
+sns.despine(ax=ax)
+fig.tight_layout()
+fig.savefig(Path(outdir) / "cluster_behav_roc_auc.pdf", bbox_inches="tight")
+plt.close(fig)
+print("Saved cluster_behav_roc_auc.pdf")
 
 # %%

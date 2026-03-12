@@ -1129,3 +1129,33 @@ plt.tight_layout()
 fig.savefig(outdir / "cluster_curves.pdf", bbox_inches="tight")
 plt.close(fig)
 print("Saved cluster_curves.pdf")
+
+# %%
+# Export cluster assignments + key neurometric properties for downstream analysis
+# (used by A_neurometrics to relate cluster membership to latency / ROC-AUC)
+_cluster_export = (
+    nm_clust[["subject", "electrode_idx", "phoneme_pair", "cluster", "phon_roc_auc"]]
+    .merge(
+        neurometrics_df[
+            ["subject", "electrode_idx", "phoneme_pair", "pse", "slope_k", "sigmoid_r2"]
+        ],
+        on=["subject", "electrode_idx", "phoneme_pair"],
+        how="left",
+    )
+    .merge(
+        site_stats[
+            [
+                "subject",
+                "electrode_idx",
+                "phoneme_pair",
+                "mean_ambig_confidence",
+                "confidence_drop_auc",
+                "behavior_auc_on_ambig",
+            ]
+        ],
+        on=["subject", "electrode_idx", "phoneme_pair"],
+        how="left",
+    )
+)
+_cluster_export.to_parquet(outdir / "neurometrics_clusters.parquet", index=False)
+print(f"Saved neurometrics_clusters.parquet: {len(_cluster_export)} sites")
