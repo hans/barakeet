@@ -104,6 +104,7 @@ for electrode_idx, phoneme_pair in tqdm(
         groupby=["word_end"],
         return_estimators=True,
         n_jobs=n_jobs,
+        min_samples_per_class=3,
     )
 
 # %% [markdown]

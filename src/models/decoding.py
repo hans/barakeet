@@ -587,6 +587,7 @@ def _fit_comparison_window(
     population_name: str,
     phoneme_pair: str,
     seed: int,
+    min_samples_per_class: int = 3,
 ) -> tuple[list[dict], dict]:
     """Fit baseline + full models for one window/group. Called by Parallel."""
     num_classes = len(set(y))
@@ -594,6 +595,16 @@ def _fit_comparison_window(
         L.warning(
             f"Skipping model comparison for {subject}, {population_name}, "
             f"{phoneme_pair}, {name}, {smin}-{smax} because num_classes={num_classes} != 2"
+        )
+        return [], {}
+
+    class_counts = np.unique(y, return_counts=True)[1]
+    min_class_count = np.min(class_counts)
+    if min_class_count < min_samples_per_class:
+        L.warning(
+            f"Skipping model comparison for {subject}, {population_name}, "
+            f"{phoneme_pair}, {name}, {smin}-{smax} because min_class_count="
+            f"{min_class_count} < {min_samples_per_class}"
         )
         return [], {}
 
@@ -806,6 +817,7 @@ def run_decoding_model_comparison_population(
     smoke_test=False,
     randomize=False,
     fixed_hparams_df: Optional[pd.DataFrame] = None,
+    min_samples_per_class: int = 3,
 ):
     """
     Run a model comparison evaluating target prediction using either
@@ -906,6 +918,7 @@ def run_decoding_model_comparison_population(
             electrode_idxs, pca_num_components, strategy,
             fixed_hparams_df, _baseline_hparam_cols, _full_hparam_cols,
             return_estimators, subject, population_name, phoneme_pair, seed,
+            min_samples_per_class,
         )
         for name, smin, smax, selection, X_window, y in tqdm(
             _gen, total=n_windows, unit="window", leave=False,
@@ -1265,7 +1278,15 @@ def fit_train_test(
                 continue
 
         # Prepare stratified CV inner splits
-        if stratify is None:
+        # If minority class in y_train is small relative to num_folds_i,
+        # fall back to stratifying by y_train to guarantee each fold has
+        # both classes (metadata-based stratification can concentrate all
+        # minority samples into one fold).
+        min_y_train_count = np.min(np.unique(y_train, return_counts=True)[1])
+        if stratify is not None and min_y_train_count < num_folds_i * 2:
+            cv_inner = StratifiedKFold(num_folds_i, shuffle=True, random_state=seed)
+            splits = list(cv_inner.split(X_train, y_train))
+        elif stratify is None:
             cv_inner = KFold(num_folds_i, shuffle=True, random_state=seed)
             splits = list(cv_inner.split(X_train))
         else:
