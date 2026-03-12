@@ -795,6 +795,8 @@ for _, site_row in tqdm(
             "subject": sub,
             "electrode_idx": ei,
             "phoneme_pair": pp,
+            "smin": site_row["smin"],
+            "smax": site_row["smax"],
             "phon_roc_auc": site_row["phon_roc_auc"],
             "pse": x0,
             "slope_k": k,
@@ -963,3 +965,167 @@ plt.tight_layout()
 fig.savefig(outdir / "neurometrics_by_auc.pdf", bbox_inches="tight")
 plt.close(fig)
 print("Saved neurometrics_by_auc.pdf")
+
+# %% [markdown]
+# ## Electrode clustering by neurometric curve shape
+#
+# Cluster electrodes by the *shape* of their raw neurometric curve — mean
+# decoder_proba per morph step, computed directly from trial_pd with no polarity
+# correction. (Polarity correction is appropriate for sigmoid fitting but not
+# here: it would artificially invert some curves and create spurious clusters.)
+#
+# Before clustering we subtract each site's curve minimum to remove y-intercept
+# differences (driven by overall HGA level or decoder calibration), leaving
+# only the trajectory shape. We then divide by the per-site range so that
+# amplitude differences don't dominate distance.
+#
+# k is chosen via silhouette score over k=2..6.
+
+# %%
+from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score
+
+# Raw mean decoder_proba per (site, step) — no polarity correction
+_raw_means = (
+    trial_df.group_by(["subject", "electrode_idx", "phoneme_pair", "resampled"])
+    .agg(pl.col("decoder_proba").mean())
+    .sort(["subject", "electrode_idx", "phoneme_pair", "resampled"])
+    .to_pandas()
+)
+_raw_wide = _raw_means.pivot_table(
+    index=["subject", "electrode_idx", "phoneme_pair"],
+    columns="resampled",
+    values="decoder_proba",
+)
+_raw_wide.columns = [f"raw_proba_step{int(c)}" for c in _raw_wide.columns]
+_raw_wide = _raw_wide.reset_index()
+
+# Merge in phon_roc_auc, smin, smax
+_auc_lookup = neurometrics_df[["subject", "electrode_idx", "phoneme_pair", "phon_roc_auc", "smin", "smax"]]
+nm_clust = _raw_wide.merge(_auc_lookup, on=["subject", "electrode_idx", "phoneme_pair"], how="inner")
+
+_step_cols = [f"raw_proba_step{int(s)}" for s in steps_all]
+nm_clust = nm_clust.dropna(subset=_step_cols).copy().reset_index(drop=True)
+
+_curves = nm_clust[_step_cols].values  # (n_sites, 6)
+
+# Remove y-intercept (subtract min) then normalize range
+_curves_norm = _curves - _curves.min(axis=1, keepdims=True)
+_ranges = _curves_norm.max(axis=1, keepdims=True)
+_ranges[_ranges == 0] = 1  # avoid divide-by-zero for flat sites
+_curves_norm = _curves_norm / _ranges
+
+# Store shape-normalized values for plotting
+_norm_cols = [f"_cn_step{int(s)}" for s in steps_all]
+for _i, _c in enumerate(_norm_cols):
+    nm_clust[_c] = _curves_norm[:, _i]
+
+# Select k by silhouette
+_k_range = range(4, 7)
+_sil = []
+for _k in _k_range:
+    _labels = KMeans(n_clusters=_k, random_state=0, n_init=20).fit_predict(_curves_norm)
+    _sil.append(silhouette_score(_curves_norm, _labels))
+
+best_k = list(_k_range)[int(np.argmax(_sil))]
+print(f"Best k={best_k}  (silhouette scores: { {k: f'{s:.3f}' for k, s in zip(_k_range, _sil)} })")
+
+km_final = KMeans(n_clusters=best_k, random_state=0, n_init=20)
+nm_clust["cluster"] = km_final.fit_predict(_curves_norm)
+
+# Sort cluster labels so cluster 0 has the largest mean AUC (cosmetic convenience)
+_cl_mean_auc = nm_clust.groupby("cluster")["phon_roc_auc"].mean().sort_values(ascending=False)
+_cl_remap = {old: new for new, old in enumerate(_cl_mean_auc.index)}
+nm_clust["cluster"] = nm_clust["cluster"].map(_cl_remap)
+
+print(nm_clust.groupby("cluster")[["phon_roc_auc", "smin", "smax"]].agg(["count", "mean", "std"]).round(3))
+
+# %%
+import seaborn as sns
+sns.displot(data=nm_clust, x="smax", kind="kde", hue="cluster",
+            cut=0)
+
+# %%
+# Fig — Cluster counts and AUC score distribution
+_cluster_colors = plt.cm.tab10(np.linspace(0, 0.9, best_k))
+
+fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+
+_counts = nm_clust["cluster"].value_counts().sort_index()
+axes[0].bar(
+    _counts.index,
+    _counts.values,
+    color=[_cluster_colors[i] for i in _counts.index],
+    edgecolor="k",
+)
+axes[0].set_xlabel("Cluster")
+axes[0].set_ylabel("Number of sites")
+axes[0].set_title("Electrode counts per cluster")
+axes[0].set_xticks(_counts.index)
+
+_shared_bins = np.linspace(nm_clust["phon_roc_auc"].min(), nm_clust["phon_roc_auc"].max(), 16)
+for _cl in sorted(nm_clust["cluster"].unique()):
+    _aucs = nm_clust.loc[nm_clust["cluster"] == _cl, "phon_roc_auc"]
+    axes[1].hist(
+        _aucs,
+        bins=_shared_bins,
+        alpha=0.6,
+        color=_cluster_colors[_cl],
+        edgecolor="k",
+        label=f"Cluster {_cl}  (n={len(_aucs)}, mean={_aucs.mean():.2f})",
+    )
+axes[1].axvline(phon_response_peak_threshold, color="gray", linestyle=":", linewidth=1)
+axes[1].set_xlabel("phon_roc_auc")
+axes[1].set_ylabel("Count")
+axes[1].set_title("Acoustic AUC distribution by cluster")
+axes[1].legend(fontsize=8)
+
+plt.tight_layout()
+fig.savefig(outdir / "cluster_stats.pdf", bbox_inches="tight")
+plt.close(fig)
+print("Saved cluster_stats.pdf")
+
+# %%
+# Fig — Cluster mean curves (thick black) + sample member curves
+_n_sample_per_cluster = 10
+_rng_cl = np.random.default_rng(42)
+
+fig, axes = plt.subplots(1, best_k, figsize=(5 * best_k, 4), sharey=True)
+if best_k == 1:
+    axes = [axes]
+
+for _cl in sorted(nm_clust["cluster"].unique()):
+    ax = axes[_cl]
+    _members = nm_clust[nm_clust["cluster"] == _cl]
+    _n_draw = min(_n_sample_per_cluster, len(_members))
+    _sampled = _members.sample(n=_n_draw, random_state=int(_rng_cl.integers(1000)))
+
+    # Individual sample curves (normalized)
+    for _, _row in _sampled.iterrows():
+        _c = np.array([_row[_nc] for _nc in _norm_cols])
+        ax.plot(steps_all, _c, "-", color=_cluster_colors[_cl], alpha=0.3, linewidth=0.9)
+
+    # Cluster mean curve (thick black)
+    _mean_c = np.array([_members[_nc].mean() for _nc in _norm_cols])
+    ax.plot(steps_all, _mean_c, "k-", linewidth=2.5, zorder=5, label="cluster mean")
+
+    _mean_auc = _members["phon_roc_auc"].mean()
+    ax.set_title(
+        f"Cluster {_cl}  (n={len(_members)}, AUC={_mean_auc:.2f})", fontsize=9
+    )
+    ax.set_xlabel("Morph step")
+    if _cl == 0:
+        ax.set_ylabel("Min-subtracted normalized decoder output")
+    ax.axhline(0, color="gray", linestyle="--", linewidth=0.5)
+    ax.set_xticks([1, 2, 3, 4, 5, 6])
+    ax.set_xlim(0.5, 6.5)
+    ax.legend(fontsize=8)
+
+fig.suptitle(
+    f"Neurometric curve clusters (k={best_k}, y-intercept removed before clustering)",
+    fontsize=11,
+)
+plt.tight_layout()
+fig.savefig(outdir / "cluster_curves.pdf", bbox_inches="tight")
+plt.close(fig)
+print("Saved cluster_curves.pdf")
