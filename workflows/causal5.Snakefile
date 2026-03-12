@@ -92,6 +92,12 @@ def run_notebook(input_path: str, output_path: str, parameters, **kwargs):
 # Rules
 # =============================================================================
 
+rule all:
+    """Default target: run the full causal5 pipeline end-to-end."""
+    input:
+        "outputs/causal5/A_neurometrics/notebook.ipynb",
+
+
 rule find_speech_responsive:
     """Identify speech-responsive electrodes for a single subject.
 
