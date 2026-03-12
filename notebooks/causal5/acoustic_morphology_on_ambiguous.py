@@ -262,6 +262,79 @@ print(f"site_stats: {len(site_stats)} sites")
 site_stats.describe()
 
 # %% [markdown]
+# ## AX discrimination: adjacent-step decoders
+#
+# For each site and each adjacent step pair (1v2, 2v3, ..., 5v6), train a fresh
+# binary decoder on the raw HGA at the site's peak acoustic window. This tests
+# whether the neural signal itself can distinguish adjacent morph steps — the
+# hallmark of categorical perception is high discrimination at the category
+# boundary and low discrimination within categories.
+
+# %%
+from src.models.decoding import fit_train_test
+
+ax_rows = []
+step_pairs = [(1, 2), (2, 3), (3, 4), (4, 5), (5, 6)]
+
+for _, site_row in tqdm(site_keys.iterrows(), total=len(site_keys), desc="AX discrimination"):
+    sub = site_row["subject"]
+    ei = int(site_row["electrode_idx"])
+    pp = site_row["phoneme_pair"]
+    smin_w, smax_w = int(site_row["smin"]), int(site_row["smax"])
+
+    data_arr = epoch_data_cache[sub]
+
+    # Get metadata for this site's trials (need resampled step)
+    site_md = all_md.filter(
+        (pl.col("subject") == sub) & (pl.col("phoneme_pair") == pp)
+    ).to_pandas()
+
+    for step_a, step_b in step_pairs:
+        mask_a = site_md["resampled"] == step_a
+        mask_b = site_md["resampled"] == step_b
+        idx_a = site_md.loc[mask_a, "epoch_idx"].values.astype(int)
+        idx_b = site_md.loc[mask_b, "epoch_idx"].values.astype(int)
+
+        if len(idx_a) < 5 or len(idx_b) < 5:
+            continue
+
+        # Extract windowed HGA for this electrode
+        X_a = data_arr[idx_a, ei, smin_w:smax_w]  # (n_a, window_size)
+        X_b = data_arr[idx_b, ei, smin_w:smax_w]  # (n_b, window_size)
+        X = np.vstack([X_a, X_b])
+        y = np.array([0] * len(idx_a) + [1] * len(idx_b))
+
+        fitted = fit_train_test(
+            X, y,
+            num_classes=2,
+            scoring=["roc_auc"],
+            stratify=y,
+            num_repeats=5,
+            n_jobs=1,
+        )
+
+        if fitted is None:
+            continue
+
+        test_aucs = fitted["test_roc_auc"]
+        ax_rows.append({
+            "subject": sub,
+            "electrode_idx": ei,
+            "phoneme_pair": pp,
+            "step_a": step_a,
+            "step_b": step_b,
+            "n_a": len(idx_a),
+            "n_b": len(idx_b),
+            "roc_auc": float(np.mean(test_aucs)),
+            "roc_auc_std": float(np.std(test_aucs)),
+        })
+
+ax_discrimination_df = pd.DataFrame(ax_rows)
+ax_discrimination_df.to_parquet(outdir / "ax_discrimination_df.parquet", index=False)
+print(f"ax_discrimination_df: {len(ax_discrimination_df)} rows")
+ax_discrimination_df.head()
+
+# %% [markdown]
 # ## Figures
 
 # %%
@@ -504,6 +577,24 @@ for ax_idx, (_, site_row) in enumerate(sample_sites.iterrows()):
     means = site_data.groupby("resampled")["decoder_proba"].mean().sort_index()
     ax.plot(means.index, means.values, "k-o", linewidth=1.5, markersize=4, zorder=5)
 
+    # AX discrimination curve on secondary y-axis
+    site_ax = ax_discrimination_df[
+        (ax_discrimination_df["subject"] == site_row["subject"])
+        & (ax_discrimination_df["electrode_idx"] == site_row["electrode_idx"])
+        & (ax_discrimination_df["phoneme_pair"] == site_row["phoneme_pair"])
+    ]
+    if len(site_ax) > 0:
+        ax2 = ax.twinx()
+        midpoints = (site_ax["step_a"].values + site_ax["step_b"].values) / 2.0
+        ax2.plot(
+            midpoints, site_ax["roc_auc"].values,
+            "D--", color="green", linewidth=1.2, markersize=4, alpha=0.8, zorder=6,
+        )
+        ax2.set_ylim(0.4, 1.0)
+        ax2.tick_params(axis="y", labelcolor="green", labelsize=6)
+        if ax_idx % n_cols == n_cols - 1:
+            ax2.set_ylabel("AX discrim. AUC", color="green", fontsize=7)
+
     ax.axhline(0.5, color="gray", linestyle="--", linewidth=0.8)
     ax.set_xticks([1, 2, 3, 4, 5, 6])
     ax.set_xlim(0.5, 6.5)
@@ -529,8 +620,18 @@ handles = [
         markersize=4,
         label="overall mean",
     ),
+    plt.Line2D(
+        [0],
+        [0],
+        color="green",
+        linewidth=1.2,
+        linestyle="--",
+        marker="D",
+        markersize=4,
+        label="AX discrim. AUC",
+    ),
 ]
-fig.legend(handles=handles, loc="lower right", fontsize=9, ncol=4)
+fig.legend(handles=handles, loc="lower right", fontsize=9, ncol=5)
 fig.suptitle(
     "Neurometric function at individual acoustic sites (sorted by AUC, low→high)",
     fontsize=11,
@@ -539,6 +640,51 @@ plt.tight_layout()
 fig.savefig(outdir / "catplots_sample.pdf", bbox_inches="tight")
 plt.close(fig)
 print("Saved catplots_sample.pdf")
+
+# %% [markdown]
+# ### Fig 5b — Population AX discrimination curve
+#
+# Average AX discrimination AUC across all sites for each adjacent step pair.
+# Categorical prediction: peak discrimination at boundary pairs (3v4), low at
+# within-category pairs (1v2, 5v6).
+
+# %%
+fig, ax = plt.subplots(figsize=(6, 4))
+
+pair_labels = [f"{a}v{b}" for a, b in step_pairs]
+pair_midpoints = [(a + b) / 2.0 for a, b in step_pairs]
+
+# Mean ± SEM across sites for each step pair
+for i, (step_a, step_b) in enumerate(step_pairs):
+    pair_data = ax_discrimination_df[
+        (ax_discrimination_df["step_a"] == step_a)
+        & (ax_discrimination_df["step_b"] == step_b)
+    ]["roc_auc"]
+    mean_auc = pair_data.mean()
+    sem_auc = pair_data.std() / np.sqrt(len(pair_data))
+    ax.bar(
+        pair_midpoints[i], mean_auc - 0.5, bottom=0.5,
+        width=0.6, color="steelblue", edgecolor="k", alpha=0.8,
+    )
+    ax.errorbar(
+        pair_midpoints[i], mean_auc, yerr=sem_auc,
+        fmt="none", ecolor="k", capsize=4, linewidth=1.5,
+    )
+
+ax.axhline(0.5, color="gray", linestyle="--", linewidth=1, label="chance")
+ax.set_xticks(pair_midpoints)
+ax.set_xticklabels(pair_labels)
+ax.set_xlabel("Adjacent step pair")
+ax.set_ylabel("Mean AX discrimination AUC")
+ax.set_title(
+    "Population AX discrimination: can single electrodes\n"
+    "distinguish adjacent morph steps?"
+)
+ax.legend(fontsize=9)
+plt.tight_layout()
+fig.savefig(outdir / "ax_discrimination_population.pdf", bbox_inches="tight")
+plt.close(fig)
+print("Saved ax_discrimination_population.pdf")
 
 # %% [markdown]
 # ### Fig 6 — HGA timecourse by morph step (sample sites)
@@ -1021,7 +1167,7 @@ for _i, _c in enumerate(_norm_cols):
     nm_clust[_c] = _curves_norm[:, _i]
 
 # Select k by silhouette
-_k_range = range(4, 7)
+_k_range = range(4, 8)
 _sil = []
 for _k in _k_range:
     _labels = KMeans(n_clusters=_k, random_state=0, n_init=20).fit_predict(_curves_norm)
