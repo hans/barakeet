@@ -65,30 +65,31 @@ for result_path in tqdm(result_paths):
     # --- Trial-level predictions ---
     # Key structure: (subject, electrode_idx, phoneme_pair, name, smin, smax, fold)
     # where name = () since groupby=None.
-    for (
-        subj,
-        electrode_idx,
-        phoneme_pair,
-        name,   # () — empty tuple since groupby=None
-        smin,
-        smax,
-        fold,
-    ), dec_detail in A_decoders.items():
-        if "test_predictions" not in dec_detail:
-            raise ValueError(
-                f"Unexpected decoder format for {subj} electrode {electrode_idx}: "
-                "missing test_predictions"
+    for (subj, electrode_idx, phoneme_pair), decoders_i in A_decoders.items():
+        for (
+            _,
+            _,
+            _,
+            name,   # () — empty tuple since groupby=None
+            smin,
+            smax,
+            fold,
+        ), dec_detail in decoders_i.items():
+            if "test_predictions" not in dec_detail:
+                raise ValueError(
+                    f"Unexpected decoder format for {subj} electrode {electrode_idx}: "
+                    "missing test_predictions"
+                )
+            all_decoder_predictions.append(
+                dec_detail["test_predictions"].assign(
+                    subject=subj,
+                    electrode_idx=int(electrode_idx),
+                    phoneme_pair=phoneme_pair,
+                    smin=smin,
+                    smax=smax,
+                    fold=fold,
+                )
             )
-        all_decoder_predictions.append(
-            dec_detail["test_predictions"].assign(
-                subject=subj,
-                electrode_idx=int(electrode_idx),
-                phoneme_pair=phoneme_pair,
-                smin=smin,
-                smax=smax,
-                fold=fold,
-            )
-        )
 
 # %% [markdown]
 # ## Find peak decoding window per site
