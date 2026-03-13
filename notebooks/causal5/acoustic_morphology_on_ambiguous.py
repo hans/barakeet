@@ -1146,38 +1146,61 @@ _raw_wide = _raw_means.pivot_table(
 _raw_wide.columns = [f"raw_proba_step{int(c)}" for c in _raw_wide.columns]
 _raw_wide = _raw_wide.reset_index()
 
-# Merge in phon_roc_auc, smin, smax
+# Pivot AX discrimination to wide format: one column per step pair
+_ax_wide = ax_discrimination_df.assign(
+    pair_label=lambda df: df["step_a"].astype(str) + "v" + df["step_b"].astype(str)
+).pivot_table(
+    index=["subject", "electrode_idx", "phoneme_pair"],
+    columns="pair_label",
+    values="roc_auc",
+).reset_index()
+_ax_pair_cols = [f"{a}v{b}" for a, b in step_pairs]
+_ax_wide.columns.name = None
+
+# Merge identification curves, AX curves, and metadata
 _auc_lookup = neurometrics_df[["subject", "electrode_idx", "phoneme_pair", "phon_roc_auc", "smin", "smax"]]
-nm_clust = _raw_wide.merge(_auc_lookup, on=["subject", "electrode_idx", "phoneme_pair"], how="inner")
+nm_clust = (
+    _raw_wide
+    .merge(_auc_lookup, on=["subject", "electrode_idx", "phoneme_pair"], how="inner")
+    .merge(_ax_wide, on=["subject", "electrode_idx", "phoneme_pair"], how="inner")
+)
 
 _step_cols = [f"raw_proba_step{int(s)}" for s in steps_all]
-nm_clust = nm_clust.dropna(subset=_step_cols).copy().reset_index(drop=True)
+nm_clust = nm_clust.dropna(subset=_step_cols + _ax_pair_cols).copy().reset_index(drop=True)
 
 _curves = nm_clust[_step_cols].values  # (n_sites, 6)
 
-# Remove y-intercept (subtract min) then normalize range
+# Remove y-intercept (subtract min) then normalize range for identification curves
 _curves_norm = _curves - _curves.min(axis=1, keepdims=True)
 _ranges = _curves_norm.max(axis=1, keepdims=True)
 _ranges[_ranges == 0] = 1  # avoid divide-by-zero for flat sites
 _curves_norm = _curves_norm / _ranges
 
-# Store shape-normalized values for plotting
+# AX discrimination: use raw AUC values (absolute level matters)
+_ax_curves = nm_clust[_ax_pair_cols].values  # (n_sites, 5)
+
+# Store shape-normalized values for plotting (identification only)
 _norm_cols = [f"_cn_step{int(s)}" for s in steps_all]
 for _i, _c in enumerate(_norm_cols):
     nm_clust[_c] = _curves_norm[:, _i]
 
+# Cluster on concatenation of normalized identification + raw AX discrimination
+_joint = np.hstack([_curves_norm, _ax_curves])  # (n_sites, 11)
+
 # Select k by silhouette
-_k_range = range(4, 8)
+_k_range = range(3, 8)
 _sil = []
 for _k in _k_range:
-    _labels = KMeans(n_clusters=_k, random_state=0, n_init=20).fit_predict(_curves_norm)
-    _sil.append(silhouette_score(_curves_norm, _labels))
+    _labels = KMeans(n_clusters=_k, random_state=0, n_init=20).fit_predict(_joint)
+    _sil.append(silhouette_score(_joint, _labels))
 
 best_k = list(_k_range)[int(np.argmax(_sil))]
 print(f"Best k={best_k}  (silhouette scores: { {k: f'{s:.3f}' for k, s in zip(_k_range, _sil)} })")
 
 km_final = KMeans(n_clusters=best_k, random_state=0, n_init=20)
-nm_clust["cluster"] = km_final.fit_predict(_curves_norm)
+nm_clust["cluster"] = km_final.fit_predict(_joint)
+
+nm_clust["tmax"] = nm_clust.smax / epoch_sfreq + epoch_tmin
 
 # Sort cluster labels so cluster 0 has the largest mean AUC (cosmetic convenience)
 _cl_mean_auc = nm_clust.groupby("cluster")["phon_roc_auc"].mean().sort_values(ascending=False)
@@ -1188,12 +1211,13 @@ print(nm_clust.groupby("cluster")[["phon_roc_auc", "smin", "smax"]].agg(["count"
 
 # %%
 import seaborn as sns
-sns.displot(data=nm_clust, x="smax", kind="kde", hue="cluster",
+sns.displot(data=nm_clust, x="tmax", kind="kde", hue="cluster",
             cut=0)
 
 # %%
 # Fig — Cluster counts and AUC score distribution
-_cluster_colors = plt.cm.tab10(np.linspace(0, 0.9, best_k))
+import seaborn as sns
+_cluster_colors = sns.color_palette("tab10", n_colors=best_k)
 
 fig, axes = plt.subplots(1, 2, figsize=(10, 4))
 
@@ -1233,42 +1257,60 @@ print("Saved cluster_stats.pdf")
 
 # %%
 # Fig — Cluster mean curves (thick black) + sample member curves
-_n_sample_per_cluster = 10
+# Top row: identification (neurometric) curves; bottom row: AX discrimination curves
+_n_sample_per_cluster = 20
 _rng_cl = np.random.default_rng(42)
+_pair_midpoints = [(a + b) / 2.0 for a, b in step_pairs]
 
-fig, axes = plt.subplots(1, best_k, figsize=(5 * best_k, 4), sharey=True)
+fig, axes = plt.subplots(2, best_k, figsize=(5 * best_k, 7), sharey="row")
 if best_k == 1:
-    axes = [axes]
+    axes = axes.reshape(2, 1)
 
 for _cl in sorted(nm_clust["cluster"].unique()):
-    ax = axes[_cl]
     _members = nm_clust[nm_clust["cluster"] == _cl]
     _n_draw = min(_n_sample_per_cluster, len(_members))
     _sampled = _members.sample(n=_n_draw, random_state=int(_rng_cl.integers(1000)))
+    _mean_auc = _members["phon_roc_auc"].mean()
 
-    # Individual sample curves (normalized)
+    # --- Top row: identification curves ---
+    ax = axes[0, _cl]
     for _, _row in _sampled.iterrows():
         _c = np.array([_row[_nc] for _nc in _norm_cols])
         ax.plot(steps_all, _c, "-", color=_cluster_colors[_cl], alpha=0.3, linewidth=0.9)
 
-    # Cluster mean curve (thick black)
     _mean_c = np.array([_members[_nc].mean() for _nc in _norm_cols])
     ax.plot(steps_all, _mean_c, "k-", linewidth=2.5, zorder=5, label="cluster mean")
 
-    _mean_auc = _members["phon_roc_auc"].mean()
     ax.set_title(
         f"Cluster {_cl}  (n={len(_members)}, AUC={_mean_auc:.2f})", fontsize=9
     )
-    ax.set_xlabel("Morph step")
     if _cl == 0:
-        ax.set_ylabel("Min-subtracted normalized decoder output")
+        ax.set_ylabel("Identification\n(normalized decoder output)")
     ax.axhline(0, color="gray", linestyle="--", linewidth=0.5)
     ax.set_xticks([1, 2, 3, 4, 5, 6])
     ax.set_xlim(0.5, 6.5)
     ax.legend(fontsize=8)
 
+    # --- Bottom row: AX discrimination curves (raw AUC values) ---
+    ax = axes[1, _cl]
+    for _, _row in _sampled.iterrows():
+        _c = np.array([_row[_p] for _p in _ax_pair_cols])
+        ax.plot(_pair_midpoints, _c, "-", color=_cluster_colors[_cl], alpha=0.3, linewidth=0.9)
+
+    _mean_ax = np.array([_members[_p].mean() for _p in _ax_pair_cols])
+    ax.plot(_pair_midpoints, _mean_ax, "k-D", linewidth=2.5, markersize=5, zorder=5, label="cluster mean")
+
+    ax.set_xlabel("Step pair midpoint")
+    if _cl == 0:
+        ax.set_ylabel("AX discrimination\n(ROC-AUC)")
+    ax.axhline(0.5, color="gray", linestyle="--", linewidth=0.5)
+    ax.set_xticks(_pair_midpoints)
+    ax.set_xticklabels([f"{a}v{b}" for a, b in step_pairs], fontsize=8)
+    ax.set_xlim(1.0, 6.0)
+    ax.legend(fontsize=8)
+
 fig.suptitle(
-    f"Neurometric curve clusters (k={best_k}, y-intercept removed before clustering)",
+    f"Joint identification + discrimination clusters (k={best_k})",
     fontsize=11,
 )
 plt.tight_layout()
