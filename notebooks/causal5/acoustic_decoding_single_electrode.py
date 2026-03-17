@@ -141,12 +141,14 @@ for target in tqdm(targets):
 
 # %%
 # model predictions on test folds
+# so these will just contain epochs with resampled in (1, 6) since that's what the decoders were trained on
 pd.concat(
     outcomes, names=["subject", "electrode_idx", "phoneme_pair", "smin", "smax"]
 ).droplevel(-1).reset_index().to_parquet(Path(outdir) / "outcomes.parquet")
 
 # model predictions on all relevant epochs for a given decoder (e.g. all p/b epochs for a p/b decoder)
-# incorporating multiple measures
+# so these will contain epochs with any resampled value, since we're applying the decoders to all epochs
+# these will include multiple measures
 pd.concat(
     all_outcomes,
     names=["subject", "electrode_idx", "phoneme_pair", "smin", "smax", "measure"],
