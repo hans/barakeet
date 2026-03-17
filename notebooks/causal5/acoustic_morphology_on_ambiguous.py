@@ -539,17 +539,19 @@ beh_labels = {0: "heard cat-0", 1: "heard cat-1"}
 
 for ax_idx, (_, site_row) in enumerate(sample_sites.iterrows()):
     ax = axes_flat[ax_idx]
-    site_data = sample_trials[
-        sample_trials["site_label"] == site_row["site_label"]
-    ].dropna(subset=["resampled", "decoder_proba"])
+    # Use per-fold trial data for both scatter and lines so they are on
+    # the same scale (all_outcomes has one row per trial × model).
+    site_fold_data = sample_trials_fold[
+        sample_trials_fold["site_label"] == site_row["site_label"]
+    ].dropna(subset=["resampled", "decoder_proba", "fold"])
 
-    # Per-behavior jittered scatter
+    # Per-behavior jittered scatter (per-fold trial values)
     for beh, color in beh_colors.items():
-        mask = site_data["behavior_dummy_forced"] == beh
-        xvals = site_data.loc[mask, "resampled"] + rng.uniform(-0.2, 0.2, mask.sum())
+        mask = site_fold_data["behavior_dummy_forced"] == beh
+        xvals = site_fold_data.loc[mask, "resampled"] + rng.uniform(-0.2, 0.2, mask.sum())
         ax.scatter(
             xvals,
-            site_data.loc[mask, "decoder_proba"],
+            site_fold_data.loc[mask, "decoder_proba"],
             c=color,
             alpha=0.3,
             s=8,
@@ -558,9 +560,6 @@ for ax_idx, (_, site_row) in enumerate(sample_sites.iterrows()):
         )
 
     # Per-fold neurometric lines (thin, behind the mean)
-    site_fold_data = sample_trials_fold[
-        sample_trials_fold["site_label"] == site_row["site_label"]
-    ].dropna(subset=["resampled", "decoder_proba", "fold"])
     for fold_id, fold_grp in site_fold_data.groupby("fold"):
         fold_means = fold_grp.groupby("resampled")["decoder_proba"].mean().sort_index()
         ax.plot(
@@ -573,8 +572,8 @@ for ax_idx, (_, site_row) in enumerate(sample_sites.iterrows()):
             zorder=3,
         )
 
-    # Overall mean neurometric line (across folds)
-    means = site_data.groupby("resampled")["decoder_proba"].mean().sort_index()
+    # Overall mean neurometric line (across all folds)
+    means = site_fold_data.groupby("resampled")["decoder_proba"].mean().sort_index()
     ax.plot(means.index, means.values, "k-o", linewidth=1.5, markersize=4, zorder=5)
 
     # AX discrimination curve on secondary y-axis
@@ -1208,6 +1207,12 @@ _cl_remap = {old: new for new, old in enumerate(_cl_mean_auc.index)}
 nm_clust["cluster"] = nm_clust["cluster"].map(_cl_remap)
 
 print(nm_clust.groupby("cluster")[["phon_roc_auc", "smin", "smax"]].agg(["count", "mean", "std"]).round(3))
+
+# %%
+nm_clust.groupby("subject").cluster.value_counts().unstack("cluster")
+
+# %%
+nm_clust.groupby("phoneme_pair").cluster.value_counts().unstack("cluster")
 
 # %%
 import seaborn as sns
