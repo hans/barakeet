@@ -1671,6 +1671,26 @@ g.savefig(Path(outdir) / "decoding_acoustic_transfer-roc_auc_diff_dist.pdf",
           transparent=True)
 
 # %% [markdown]
+# #### Exploratory analyses relating phonetic transfer to other properties
+
+# %%
+behav_on_phon_mean_explo = (
+    behav_on_phon_mean
+    .join(behav_peaks_df, on=["subject", "electrode_idx", "phoneme_pair", "word_end"],
+           how="inner")
+    .join(phon_peaks_df.rename({"smin": "smin_phon", "smax": "smax_phon"}),
+            on=["subject", "electrode_idx", "phoneme_pair"])
+)
+behav_on_phon_mean_explo
+
+# %%
+(
+    behav_on_phon_mean_explo.to_pandas()
+    [["roc_auc_diff", "smax", "smax_phon",
+      "phon_roc_auc", "behav_roc_auc_improvement"]].corr()
+)
+
+# %% [markdown]
 # ### Cross-window behavioral transfer, no training
 
 # %% [markdown]
@@ -2766,12 +2786,13 @@ with pdf:
 # %%
 
 site_cols = ["subject", "electrode_idx", "phoneme_pair", "word_end"]
+extra_cols = ["behav_smin", "behav_smax", "phon_smin", "phon_smax"]
 
 # Only sites with a valid late window
 reg_df_valid = reg_df.dropna(subset=["hga_late_signed"])
 
 unambig_late_results = []
-for site_key, site_data in reg_df_valid.groupby(site_cols):
+for site_key, site_data in reg_df_valid.groupby(site_cols + extra_cols):
     # unambiguous acoustic-consistent trials only
     unambig = site_data[
         site_data.resampled.isin([1.0, 6.0]) & site_data.follows_acoustics
@@ -2787,7 +2808,7 @@ for site_key, site_data in reg_df_valid.groupby(site_cols):
 
     unambig_late_results.append(
         {
-            **dict(zip(site_cols, site_key)),
+            **dict(zip(site_cols + extra_cols, site_key)),
             "n_unambig": len(unambig),
             "n_grp0": len(grp0),
             "n_grp1": len(grp1),
@@ -2799,12 +2820,16 @@ for site_key, site_data in reg_df_valid.groupby(site_cols):
 
 unambig_late_df = pd.DataFrame(unambig_late_results).dropna()
 
-# Only look at behav peaks
+# Merge in behav and phon peaks
 unambig_late_df = unambig_late_df.merge(
     behav_peaks_df.to_pandas()[
         ["subject", "electrode_idx", "phoneme_pair", "word_end", "behav_roc_auc_improvement"]
     ],
     on=["subject", "electrode_idx", "phoneme_pair", "word_end"],
+    how="inner",
+).merge(
+    phon_peaks_df.to_pandas()[["subject", "electrode_idx", "phoneme_pair", "phon_roc_auc"]],
+    on=["subject", "electrode_idx", "phoneme_pair"],
     how="inner",
 )
 
@@ -2828,6 +2853,117 @@ print(
 )
 unambig_late_df.to_csv(Path(outdir) / "unambig_late_df.csv", index=False)
 unambig_late_df
+
+# %%
+print(stats.ttest_ind(
+    unambig_late_df.query("late_on_unambig")["behav_smax"],
+    unambig_late_df.query("~late_on_unambig")["behav_smax"],
+))
+sns.catplot(data=unambig_late_df, x="late_on_unambig", y="behav_smax", kind="box")
+
+# %%
+unambig_late_df["phon_behav_smax_latency"] = unambig_late_df.behav_smax - unambig_late_df.phon_smax
+print(stats.ttest_ind(
+    unambig_late_df.query("late_on_unambig")["phon_behav_smax_latency"],
+    unambig_late_df.query("~late_on_unambig")["phon_behav_smax_latency"],
+))
+
+# %%
+unambig_late_df["behav_tmax"] = unambig_late_df.behav_smax / epoch_sfreq + epoch_tmin
+sns.displot(
+    data=(
+        late_polarity_strict.drop_duplicates(
+            ["subject", "electrode_idx", "phoneme_pair", "word_end"]
+        )
+        .drop(columns=["lexical_evidence"])
+        .merge(
+            early_polarity_strict.drop_duplicates(),
+            on=["subject", "electrode_idx", "phoneme_pair", "word_end"],
+        )
+        .merge(unambig_late_df, on=["subject", "electrode_idx", "phoneme_pair", "word_end"], how="left")
+        .assign(congruent=lambda xs: xs.early_polarity == xs.late_polarity)
+    ),
+    x="behav_tmax", hue="late_on_unambig",
+    # kind="kde", cut=0,
+    row="phoneme_pair",
+    height=2, aspect=2
+)
+
+# %%
+# In congruent late_on_unambig windows, does cross-decoding with retraining work?
+# Show that the signals are still distinct
+sns.catplot(
+    data=(
+        pd.merge(unambig_late_df,
+                phon_roc_auc_pivot_df.to_pandas(),
+                on=["subject", "electrode_idx", "phoneme_pair"])
+        .assign(roc_auc_diff=lambda xs: xs.roc_auc_from_phon - xs.roc_auc_from_behav)
+    ),
+    x="late_on_unambig",
+    y="roc_auc_diff"
+)
+
+# %%
+# In congruent late_on_unambig windows, does cross-decoding with retraining work?
+# Show that the signals are still distinct
+sns.catplot(
+    data=(
+        pd.merge(unambig_late_df,
+                behav_improvement_df.to_pandas(),
+                on=["subject", "electrode_idx", "phoneme_pair", "word_end"])
+    ),
+    x="late_on_unambig",
+    y="behav_phon_diff"
+)
+
+# %%
+print(stats.ttest_ind(
+    unambig_late_df.query("late_on_unambig")["behav_roc_auc_improvement"],
+    unambig_late_df.query("~late_on_unambig")["behav_roc_auc_improvement"],
+))
+sns.catplot(data=unambig_late_df, x="late_on_unambig", y="behav_roc_auc_improvement",
+            hue="phoneme_pair", kind="box")
+
+# %%
+print(stats.ttest_ind(
+    unambig_late_df.query("late_on_unambig")["phon_roc_auc"],
+    unambig_late_df.query("~late_on_unambig")["phon_roc_auc"],
+))
+sns.catplot(data=unambig_late_df, x="late_on_unambig", y="phon_roc_auc",
+            hue="phoneme_pair", kind="box")
+
+# %%
+# Transfer results in sites with unambiguous late responses vs. not
+sns.catplot(
+    data=pd.merge(
+        unambig_late_df,
+        behav_on_phon_mean.to_pandas()[["subject", "electrode_idx", "phoneme_pair", "word_end",
+                                        "in_window_phon_roc_auc", "behav_decoder_phon_roc_auc",
+                                        "roc_auc_diff"]],
+        on=["subject", "electrode_idx", "phoneme_pair", "word_end"],     
+    ),
+    x="late_on_unambig",
+    y="roc_auc_diff",
+    kind="box",
+    height=3
+)
+
+# %%
+(
+    late_polarity_strict.drop_duplicates(
+        ["subject", "electrode_idx", "phoneme_pair", "word_end"]
+    )
+    .drop(columns=["lexical_evidence"])
+    .merge(
+        early_polarity_strict.drop_duplicates(),
+        on=["subject", "electrode_idx", "phoneme_pair", "word_end"],
+    )
+    .merge(unambig_late_df, on=["subject", "electrode_idx", "phoneme_pair", "word_end"], how="left")
+    .assign(congruent=lambda xs: xs.early_polarity == xs.late_polarity,
+            t_abs=lambda xs: xs.t.abs())
+    [["late_on_unambig", "congruent"]].value_counts()
+    .unstack("congruent")
+)
 
 # %%
 # Polarity vs. late unambig or late all
@@ -3281,7 +3417,7 @@ _, p_handles, p_labels = plot_condition_contrast(
     color=plot_palette[0],
     annotate=True,
     textgrid_kwargs=dict(include_phonemes=False, include_offset=False),
-    label=f"Generalizes (n={n_generalize})",
+    label=f"Ambig.\nand unambig. (n={n_generalize})",
     pval_thresholds=pval_thresholds,
 )
 plot_condition_contrast(
@@ -3312,7 +3448,8 @@ if p_handles is not None:
         labels=labels,
         handler_map={Rectangle: HandlerRectangle()},
         fontsize=8,
-        loc="best",
+        loc="upper right",
+        bbox_to_anchor=(1.3, 1)
     )
 
 f.savefig(Path(outdir) / "perceptual_contrast_ambig_split-both.pdf")
