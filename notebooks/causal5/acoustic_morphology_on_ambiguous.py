@@ -822,10 +822,12 @@ print(f"Polarity computed for {len(site_polarity)} sites")
 # For each acoustic site, fit a sigmoid to the neurometric function
 # (mapping from morph step to mean decoder_proba):
 #
-#   f(x; a, b, x0, k) = a / (1 + exp(-(x - x0) / k)) + b
+#   f(x; a, x0, k) = a / (1 + exp(-(x - x0) / k)) + (0.5 - a/2)
 #
-# All four parameters are free: amplitude a, offset b, PSE x0, and
-# steepness k. The fitted k is the key descriptor:
+# Three free parameters: amplitude a, PSE x0, and steepness k.
+# The offset is constrained so that f(x0) = 0.5, making x0 the
+# true PSE (the morph step where decoder output crosses 0.5).
+# The fitted k is the key descriptor:
 # - Small k (→ 0): step-function, categorical encoding
 # - Large k (→ ∞): nearly linear, graded tracking of acoustics
 #
@@ -833,8 +835,9 @@ print(f"Polarity computed for {len(site_polarity)} sites")
 # fold-averaged step means for final parameter estimates and plotting.
 
 # %%
-def sigmoid_model(x, a, b, x0, k):
-    return a / (1.0 + np.exp(-(x - x0) / k)) + b
+def sigmoid_model(x, a, x0, k):
+    """Sigmoid constrained so f(x0) = 0.5 (x0 is the true PSE)."""
+    return a / (1.0 + np.exp(-(x - x0) / k)) + (0.5 - a / 2.0)
 
 
 def fit_model(func, x, y, p0_list, bounds, maxfev=5000):
@@ -854,12 +857,12 @@ def fit_model(func, x, y, p0_list, bounds, maxfev=5000):
 
 
 SIGMOID_P0_LIST = [
-    [1.0, 0.0, 3.5, 0.5],
-    [-1.0, 1.0, 3.5, 0.5],
-    [1.0, 0.0, 3.5, 1.5],
-    [-1.0, 1.0, 3.5, 1.5],
+    [1.0, 3.5, 0.5],
+    [-1.0, 3.5, 0.5],
+    [1.0, 3.5, 1.5],
+    [-1.0, 3.5, 1.5],
 ]
-SIGMOID_BOUNDS = ([-3, -2, 0.5, 0.05], [3, 2, 6.5, 5.0])
+SIGMOID_BOUNDS = ([-3, 0.5, 0.05], [3, 6.5, 5.0])
 
 # %%
 steps_all = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
@@ -882,7 +885,7 @@ for _, site_row in tqdm(
         continue
 
     # Per-fold fits for stability estimates
-    fold_params = []  # list of (a, b, x0, k) per fold
+    fold_params = []  # list of (a, x0, k) per fold
     for fold_id, fold_grp in site_fold.groupby("fold"):
         means = fold_grp.groupby("resampled")["decoder_proba"].mean().reindex(steps_all)
         valid = means.dropna()
@@ -919,23 +922,22 @@ for _, site_row in tqdm(
         ss_res = np.sum((y_all - y_pred) ** 2)
         ss_tot = np.sum((y_all - y_all.mean()) ** 2)
         row["sigmoid_a"] = float(popt[0])
-        row["sigmoid_b"] = float(popt[1])
-        row["sigmoid_x0"] = float(popt[2])
-        row["sigmoid_k"] = float(popt[3])
+        row["sigmoid_x0"] = float(popt[1])
+        row["sigmoid_k"] = float(popt[2])
         row["sigmoid_r2"] = 1.0 - ss_res / ss_tot if ss_tot > 0 else np.nan
     else:
         row.update({
-            "sigmoid_a": np.nan, "sigmoid_b": np.nan,
+            "sigmoid_a": np.nan,
             "sigmoid_x0": np.nan, "sigmoid_k": np.nan, "sigmoid_r2": np.nan,
         })
 
     # Per-fold parameter stability
     if fold_params:
         fp = np.array(fold_params)
-        row["sigmoid_k_fold_mean"] = float(np.mean(fp[:, 3]))
-        row["sigmoid_k_fold_std"] = float(np.std(fp[:, 3]))
-        row["sigmoid_x0_fold_mean"] = float(np.mean(fp[:, 2]))
-        row["sigmoid_x0_fold_std"] = float(np.std(fp[:, 2]))
+        row["sigmoid_k_fold_mean"] = float(np.mean(fp[:, 2]))
+        row["sigmoid_k_fold_std"] = float(np.std(fp[:, 2]))
+        row["sigmoid_x0_fold_mean"] = float(np.mean(fp[:, 1]))
+        row["sigmoid_x0_fold_std"] = float(np.std(fp[:, 1]))
         row["n_folds_fit"] = len(fold_params)
     else:
         row.update({
@@ -1166,8 +1168,7 @@ if n_extreme > 0:
         ax.plot(means.index, means.values, "k-o", linewidth=1.5, markersize=4, zorder=3)
 
         # Sigmoid fit
-        sig_params = [erow["sigmoid_a"], erow["sigmoid_b"],
-                      erow["sigmoid_x0"], erow["sigmoid_k"]]
+        sig_params = [erow["sigmoid_a"], erow["sigmoid_x0"], erow["sigmoid_k"]]
         if not any(np.isnan(p) for p in sig_params):
             x_curve = np.linspace(1, 6, 100)
             ax.plot(
@@ -1255,11 +1256,10 @@ for ax_idx, (_, site_row) in enumerate(sample_sites.iterrows()):
     # Sigmoid fit overlay
     key = (site_row["subject"], site_row["electrode_idx"], site_row["phoneme_pair"])
     mc_row = mc_lookup.get(key)
-    k_label = ""
+    sig_label = ""
     if mc_row is not None:
         sig_params = [
-            mc_row["sigmoid_a"], mc_row["sigmoid_b"],
-            mc_row["sigmoid_x0"], mc_row["sigmoid_k"],
+            mc_row["sigmoid_a"], mc_row["sigmoid_x0"], mc_row["sigmoid_k"],
         ]
         if not any(np.isnan(p) for p in sig_params):
             x_curve = np.linspace(1, 6, 100)
@@ -1270,14 +1270,18 @@ for ax_idx, (_, site_row) in enumerate(sample_sites.iterrows()):
                 linewidth=2.0,
                 zorder=4,
             )
-            k_label = f"  k={mc_row['sigmoid_k']:.2f}"
+            sig_label = (
+                f"  PSE={mc_row['sigmoid_x0']:.2f}  k={mc_row['sigmoid_k']:.2f}\n"
+                f"a={mc_row['sigmoid_a']:.2f}  "
+                f"R²={mc_row['sigmoid_r2']:.2f}"
+            )
 
     ax.axhline(0.5, color="gray", linestyle="--", linewidth=0.8)
     ax.set_xticks([1, 2, 3, 4, 5, 6])
     ax.set_xlim(0.5, 6.5)
     ax.set_title(
         f"{site_row['site_label']}\n"
-        f"AUC={site_row['phon_roc_auc']:.2f}{k_label}",
+        f"{site_row['site_label']}  AUC={site_row['phon_roc_auc']:.2f}\n{sig_label}",
         fontsize=7.5,
     )
     ax.set_xlabel("Morph step")
