@@ -301,6 +301,44 @@ rule ganong_decoding_all:
         "outputs/causal5/ganong_decoding/ganong_peaks.parquet",
 
 
+rule ganong_decoding_inspect_population:
+    """Population-level inspection of Ganong decoding results.
+
+    Compares Ganong decoding (across-completion) with within-completion behavioral
+    decoding. Analyses: peak Δ distributions, lexical-evidence symmetry, timing
+    vs. performance, and Ganong Δ vs. behavioral Δ.
+    """
+    input:
+        notebook           = "notebooks/causal5/ganong_decoding_inspect_population.py",
+        ganong_peaks       = "outputs/causal5/ganong_decoding/ganong_peaks.parquet",
+        ganong_predictions = "outputs/causal5/ganong_decoding/ganong_predictions.parquet",
+        behav_summaries    = expand(
+            "outputs/causal5/behavior_decoding_single_electrode_summarize/{subject}/A_final_summary.csv",
+            subject=config["data"]["subjects"],
+        ),
+        all_epochs         = expand(
+            "outputs/epochs_preprocessed/{subject}_epo.fif",
+            subject=config["data"]["subjects"],
+        ),
+
+    output:
+        notebook = "outputs/causal5/ganong_decoding_inspect_population/notebook.ipynb",
+
+    run:
+        outdir = "outputs/causal5/ganong_decoding_inspect_population"
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                ganong_peaks_path=str(input.ganong_peaks),
+                ganong_predictions_path=str(input.ganong_predictions),
+                behav_summary_paths=list(input.behav_summaries),
+                all_epochs=list(input.all_epochs),
+                outdir=outdir,
+            ),
+        )
+
+
 rule acoustic_decoding_single_electrode:
     """Acoustic-category searchlight decoding on all speech-responsive electrodes.
 

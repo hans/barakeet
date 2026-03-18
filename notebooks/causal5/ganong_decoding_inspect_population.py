@@ -63,6 +63,7 @@ all_epochs = list(Path("outputs/epochs_preprocessed").glob("*_epo.fif"))
 epoch_tmin = -0.4
 epoch_sfreq = 100
 window_size = 15
+behav_peak_post_offset_s = 0.2
 
 outdir = "outputs/causal5/ganong_decoding_inspect_population"
 
@@ -256,6 +257,8 @@ lim_d = [
     max(lex_wide["diff_0"].max(), lex_wide["diff_1"].max()) + 0.01,
 ]
 ax.plot(lim_d, lim_d, "k--", linewidth=0.8)
+ax.axvline(0, color="k", linestyle="--", linewidth=0.8)
+ax.axhline(0, color="k", linestyle="--", linewidth=0.8)
 ax.set_xlim(lim_d)
 ax.set_ylim(lim_d)
 ax.set_xlabel("Δ ROC-AUC (lexical_evidence = 0)")
