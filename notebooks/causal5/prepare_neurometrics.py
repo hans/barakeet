@@ -81,6 +81,7 @@ all_response_tmax_max = 1.3
 phon_response_peak_threshold = 0.6
 behav_response_peak_threshold = 0.01
 ambiguous_response_threshold = 2
+behav_peak_post_offset_s = 0.2
 
 hga_window_source = "decoder"
 
@@ -267,7 +268,7 @@ behav_peaks_df_unfiltered = (
     .join(word_end_df, on=["phoneme_pair", "word_end"], how="left")
     .filter(
         pl.col("smin") > pl.col("smax_phon"),
-        pl.col("smax") <= pl.col("word_end_offset_sample") + 20,
+        pl.col("smax") <= pl.col("word_end_offset_sample") + int(behav_peak_post_offset_s * epoch_sfreq),
     )
     .drop(["smax_phon"])
     .sort("behav_roc_auc_improvement", descending=True)

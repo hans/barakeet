@@ -35,6 +35,7 @@ import pandas as pd
 
 # %%
 from src.data import add_metadata_features
+from src.stimuli import OFFSET_DICT, WORD_END_TO_PHONEME_PAIR
 
 # %% tags=["parameters"]
 subject = "EC243"
@@ -49,6 +50,10 @@ epochs_path = f"outputs/epochs_preprocessed/{subject}_epo.fif"
 
 min_decoding_sample = 0
 max_decoding_sample = 290  # ~2.5 s post onset
+
+epoch_tmin = -0.4
+epoch_sfreq = 100
+behav_peak_post_offset_s = 0.2
 
 outdir = "."
 
@@ -112,6 +117,20 @@ target_smax = set(
 
 # %%
 A_results_df["diff"] = A_results_df["full_roc_auc"] - A_results_df["baseline_roc_auc"]
+
+# %%
+# Filter windows to those ending before word offset + post-offset allowance
+_word_end_offset_samples = {
+    we: (offset_s - epoch_tmin) * epoch_sfreq
+    for we, offset_s in OFFSET_DICT.items()
+}
+A_results_df["_smax_limit"] = (
+    A_results_df["word_end"].map(_word_end_offset_samples)
+    + behav_peak_post_offset_s * epoch_sfreq
+)
+A_results_df = A_results_df[A_results_df["smax"] <= A_results_df["_smax_limit"]].drop(
+    columns=["_smax_limit"]
+)
 
 # %% [markdown]
 # ## Find peak decoding window per site

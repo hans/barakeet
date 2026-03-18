@@ -25,6 +25,8 @@ analysis:
 
   behav_ttest_pvalue_threshold: 0.001
 
+  behav_peak_post_offset_s: 0.2
+
   hga_window_source: "decoder"
 
   decoding:

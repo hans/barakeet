@@ -20,6 +20,9 @@
 # finds the peak decoding window per (subject, electrode, phoneme_pair) site,
 # and saves combined trial-level predictions and peak-window summaries.
 #
+# We restrict our peak search to a fixed delta after the latest possible word offset
+# for each phoneme pair, configurable with the parameter `behav_peak_post_offset_s`.
+#
 # Key outputs:
 #   - `ganong_predictions.parquet` — trial-level predictions across all windows, all subjects
 #   - `ganong_peaks.parquet`       — peak full_roc_auc window per site, all subjects
@@ -31,12 +34,18 @@ import joblib
 import pandas as pd
 from tqdm.auto import tqdm
 
+from src.stimuli import OFFSET_DICT, WORD_END_TO_PHONEME_PAIR
+
 # %% tags=["parameters"]
 # List of paths to `results.joblib` files from ganong_decoding_single_electrode,
 # one per subject.
 result_paths = list(
     Path("outputs/causal5/ganong_decoding").glob("*/results.joblib")
 )
+
+epoch_tmin = -0.4
+epoch_sfreq = 100
+behav_peak_post_offset_s = 0.2
 
 outdir = "outputs/causal5/ganong_decoding"
 
@@ -112,6 +121,25 @@ pred_columns = [
 
 if all_results_dfs:
     A_results_df = pd.concat(all_results_dfs, ignore_index=True)
+
+    # Build max word-end offset (in samples) per phoneme_pair.
+    # Ganong decoder pools across completions, so use the later offset.
+    _pp_max_offset = (
+        pd.DataFrame({
+            "word_end": list(OFFSET_DICT.keys()),
+            "offset_s": list(OFFSET_DICT.values()),
+        })
+        .assign(phoneme_pair=lambda df: df["word_end"].map(WORD_END_TO_PHONEME_PAIR))
+        .groupby("phoneme_pair")["offset_s"].max()
+        .rename("max_word_end_offset_s")
+    )
+    A_results_df = A_results_df.join(_pp_max_offset, on="phoneme_pair")
+    smax_limit = (
+        (A_results_df["max_word_end_offset_s"] - epoch_tmin) * epoch_sfreq
+        + behav_peak_post_offset_s * epoch_sfreq
+    )
+    A_results_df = A_results_df[A_results_df["smax"] <= smax_limit]
+
     # Group without word_end — Ganong decoder pools across completions
     A_summary = A_results_df.groupby(
         ["subject", "population", "phoneme_pair", "smin", "smax"]

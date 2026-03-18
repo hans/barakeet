@@ -204,6 +204,9 @@ rule behavior_decoding_single_electrode_summarize:
 
                 min_decoding_sample=0,
                 max_decoding_sample=290,
+                epoch_tmin=config["analysis"]["epoch_tmin"],
+                epoch_sfreq=config["analysis"]["epoch_sfreq"],
+                behav_peak_post_offset_s=config["analysis"]["behav_peak_post_offset_s"],
             ),
         )
 
@@ -284,6 +287,9 @@ rule ganong_decoding_summarize:
             str(output.notebook),
             parameters=dict(
                 result_paths=list(input.result_paths),
+                epoch_tmin=config["analysis"]["epoch_tmin"],
+                epoch_sfreq=config["analysis"]["epoch_sfreq"],
+                behav_peak_post_offset_s=config["analysis"]["behav_peak_post_offset_s"],
                 outdir=outdir,
             ),
         )
@@ -512,6 +518,7 @@ rule prepare_neurometrics:
                 behav_response_peak_threshold=config["analysis"]["behav_response_peak_threshold"],
                 ambiguous_response_threshold=config["analysis"]["ambiguous_response_threshold"],
                 hga_window_source=config["analysis"]["hga_window_source"],
+                behav_peak_post_offset_s=config["analysis"]["behav_peak_post_offset_s"],
 
                 outdir=str(outdir),
             ),
