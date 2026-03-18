@@ -480,8 +480,6 @@ plt.tight_layout()
 fig.savefig(outdir / "site_example.pdf")
 plt.close(fig)
 
-print("All figures saved.")
-
 # %% [markdown]
 # ### Fig 5 — Sample catplots: decoder output by morph step (individual electrodes)
 #
@@ -817,299 +815,492 @@ for subject, subj_sites in acoustic_sites.select(
 
 print(f"Polarity computed for {len(site_polarity)} sites")
 
-# %% [markdown]
-# ## Neurometric analysis: sigmoid fits to per-site decoder response functions
-#
-# For each acoustic site, we characterize the shape of its neurometric function —
-# the mapping from morph step to mean decoder_proba — by fitting a logistic sigmoid:
-#
-#   f(x; x0, k) = 1 / (1 + exp(-(x - x0) / k))
-#
-# where x0 is the PSE (point of subjective equality, inflection point of the curve)
-# and k controls slope steepness (smaller k = steeper near x0 = more sigmoid-like).
-#
-# Before fitting we normalize the curve direction: all sites are flipped so that
-# the curve is monotonically decreasing (step 1 high → step 6 low), making x0
-# and k directly comparable across sites regardless of phoneme-pair polarity.
-#
-# Hypothesis (graded tuning / compression):
-#   Strong acoustic sites (high phon_roc_auc) should show a steep transition near
-#   the decision boundary (steps 3–4) with flat extremes — i.e., smaller k. Sites
-#   with weaker tuning may show shallower, more linear functions (larger k).
 
+# %% [markdown]
+# ## Neurometric sigmoid fits with free steepness
+#
+# For each acoustic site, fit a sigmoid to the neurometric function
+# (mapping from morph step to mean decoder_proba):
+#
+#   f(x; a, b, x0, k) = a / (1 + exp(-(x - x0) / k)) + b
+#
+# All four parameters are free: amplitude a, offset b, PSE x0, and
+# steepness k. The fitted k is the key descriptor:
+# - Small k (→ 0): step-function, categorical encoding
+# - Large k (→ ∞): nearly linear, graded tracking of acoustics
+#
+# Procedure: fit per CV fold to get stability estimates, then fit to
+# fold-averaged step means for final parameter estimates and plotting.
 
 # %%
-def sigmoid(x, x0, k):
-    return 1.0 / (1.0 + np.exp(-(x - x0) / k))
+def sigmoid_model(x, a, b, x0, k):
+    return a / (1.0 + np.exp(-(x - x0) / k)) + b
 
 
-neurometric_rows = []
-steps_all = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+def fit_model(func, x, y, p0_list, bounds, maxfev=5000):
+    """Try multiple initial guesses, return (best_params, best_rss)."""
+    best_rss = np.inf
+    best_popt = None
+    for p0 in p0_list:
+        try:
+            popt, _ = curve_fit(func, x, y, p0=p0, bounds=bounds, maxfev=maxfev)
+            rss = float(np.sum((y - func(x, *popt)) ** 2))
+            if rss < best_rss:
+                best_rss = rss
+                best_popt = popt
+        except Exception:
+            pass
+    return best_popt, best_rss
+
+
+SIGMOID_P0_LIST = [
+    [1.0, 0.0, 3.5, 0.5],
+    [-1.0, 1.0, 3.5, 0.5],
+    [1.0, 0.0, 3.5, 1.5],
+    [-1.0, 1.0, 3.5, 1.5],
+]
+SIGMOID_BOUNDS = ([-3, -2, 0.5, 0.05], [3, 2, 6.5, 5.0])
+
+# %%
+steps_all = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+model_rows = []
 
 for _, site_row in tqdm(
-    site_stats.iterrows(), total=len(site_stats), desc="Fitting neurometrics"
+    site_stats.iterrows(), total=len(site_stats), desc="Sigmoid fits"
 ):
     sub = site_row["subject"]
     ei = site_row["electrode_idx"]
     pp = site_row["phoneme_pair"]
 
-    site = trial_pd[
-        (trial_pd["subject"] == sub)
-        & (trial_pd["electrode_idx"] == ei)
-        & (trial_pd["phoneme_pair"] == pp)
-    ].dropna(subset=["resampled", "decoder_proba"])
-
-    means_s = site.groupby("resampled")["decoder_proba"].mean().reindex(steps_all)
-    valid = means_s.dropna()
-
-    if len(valid) < 4:
-        continue
-
-    x = valid.index.values.astype(float)
-    y = valid.values
-
-    # Polarity from HGA means in the acoustic window (not decoder outputs)
-    early_polarity = site_polarity.get((sub, ei, pp), np.nan)
-
-    y_fit = (1.0 - y) if (not np.isnan(early_polarity) and early_polarity < 0) else y
-
-    try:
-        popt, _ = curve_fit(
-            sigmoid,
-            x,
-            y_fit,
-            p0=[3.5, 1.0],
-            bounds=([1.0, 0.05], [6.0, 10.0]),
-            maxfev=2000,
-        )
-        x0, k = popt
-        y_pred = sigmoid(x, x0, k)
-        ss_res = np.sum((y_fit - y_pred) ** 2)
-        ss_tot = np.sum((y_fit - y_fit.mean()) ** 2)
-        r2 = float(1.0 - ss_res / ss_tot) if ss_tot > 0 else np.nan
-    except Exception:
-        x0, k, r2 = np.nan, np.nan, np.nan
-
-    # Per-fold sigmoid fits (use same polarity convention as aggregate fit)
     site_fold = trial_df_fold_pd[
         (trial_df_fold_pd["subject"] == sub)
         & (trial_df_fold_pd["electrode_idx"] == ei)
         & (trial_df_fold_pd["phoneme_pair"] == pp)
     ].dropna(subset=["resampled", "decoder_proba", "fold"])
 
-    pse_folds, k_folds = [], []
-    for fold_id, fold_grp in site_fold.groupby("fold"):
-        fold_means = (
-            fold_grp.groupby("resampled")["decoder_proba"].mean().reindex(steps_all)
-        )
-        fold_valid = fold_means.dropna()
-        if len(fold_valid) < 4:
-            continue
-        x_f = fold_valid.index.values.astype(float)
-        y_f = fold_valid.values
-        y_f_fit = (
-            (1.0 - y_f)
-            if (not np.isnan(early_polarity) and early_polarity < 0)
-            else y_f
-        )
-        try:
-            popt_f, _ = curve_fit(
-                sigmoid,
-                x_f,
-                y_f_fit,
-                p0=[3.5, 1.0],
-                bounds=([1.0, 0.05], [6.0, 10.0]),
-                maxfev=2000,
-            )
-            pse_folds.append(popt_f[0])
-            k_folds.append(popt_f[1])
-        except Exception:
-            pass
+    if len(site_fold) == 0:
+        continue
 
-    norm_probas = {
-        f"norm_proba_step{int(s)}": (
-            float(1.0 - means_s[s])
-            if (early_polarity is not np.nan and early_polarity < 0)
-            else float(means_s[s])
-        )
-        for s in steps_all
+    # Per-fold fits for stability estimates
+    fold_params = []  # list of (a, b, x0, k) per fold
+    for fold_id, fold_grp in site_fold.groupby("fold"):
+        means = fold_grp.groupby("resampled")["decoder_proba"].mean().reindex(steps_all)
+        valid = means.dropna()
+        if len(valid) < 5:
+            continue
+
+        x = valid.index.values.astype(float)
+        y = valid.values
+        popt, _ = fit_model(sigmoid_model, x, y, SIGMOID_P0_LIST, SIGMOID_BOUNDS)
+        if popt is not None:
+            fold_params.append(popt)
+
+    # Fit to overall (fold-averaged) step means
+    overall_means = site_fold.groupby("resampled")["decoder_proba"].mean().reindex(
+        steps_all
+    )
+    overall_valid = overall_means.dropna()
+    x_all = overall_valid.index.values.astype(float)
+    y_all = overall_valid.values
+
+    popt, rss = fit_model(sigmoid_model, x_all, y_all, SIGMOID_P0_LIST, SIGMOID_BOUNDS)
+
+    row = {
+        "subject": sub,
+        "electrode_idx": ei,
+        "phoneme_pair": pp,
+        "phon_roc_auc": site_row["phon_roc_auc"],
+        "smin": site_row["smin"],
+        "smax": site_row["smax"],
     }
 
-    neurometric_rows.append(
-        {
-            "subject": sub,
-            "electrode_idx": ei,
-            "phoneme_pair": pp,
-            "smin": site_row["smin"],
-            "smax": site_row["smax"],
-            "phon_roc_auc": site_row["phon_roc_auc"],
-            "pse": x0,
-            "slope_k": k,
-            "sigmoid_r2": r2,
-            "early_polarity": early_polarity,
-            "pse_fold_mean": float(np.nanmean(pse_folds)) if pse_folds else np.nan,
-            "pse_fold_std": float(np.nanstd(pse_folds)) if pse_folds else np.nan,
-            "slope_k_fold_mean": float(np.nanmean(k_folds)) if k_folds else np.nan,
-            "slope_k_fold_std": float(np.nanstd(k_folds)) if k_folds else np.nan,
-            "n_folds_fit": len(pse_folds),
-            **norm_probas,
-        }
-    )
+    if popt is not None:
+        y_pred = sigmoid_model(x_all, *popt)
+        ss_res = np.sum((y_all - y_pred) ** 2)
+        ss_tot = np.sum((y_all - y_all.mean()) ** 2)
+        row["sigmoid_a"] = float(popt[0])
+        row["sigmoid_b"] = float(popt[1])
+        row["sigmoid_x0"] = float(popt[2])
+        row["sigmoid_k"] = float(popt[3])
+        row["sigmoid_r2"] = 1.0 - ss_res / ss_tot if ss_tot > 0 else np.nan
+    else:
+        row.update({
+            "sigmoid_a": np.nan, "sigmoid_b": np.nan,
+            "sigmoid_x0": np.nan, "sigmoid_k": np.nan, "sigmoid_r2": np.nan,
+        })
 
-neurometrics_df = pd.DataFrame(neurometric_rows)
-neurometrics_df.to_parquet(outdir / "neurometrics_df.parquet", index=False)
-print(f"neurometrics_df: {len(neurometrics_df)} sites")
-neurometrics_df.describe()
+    # Per-fold parameter stability
+    if fold_params:
+        fp = np.array(fold_params)
+        row["sigmoid_k_fold_mean"] = float(np.mean(fp[:, 3]))
+        row["sigmoid_k_fold_std"] = float(np.std(fp[:, 3]))
+        row["sigmoid_x0_fold_mean"] = float(np.mean(fp[:, 2]))
+        row["sigmoid_x0_fold_std"] = float(np.std(fp[:, 2]))
+        row["n_folds_fit"] = len(fold_params)
+    else:
+        row.update({
+            "sigmoid_k_fold_mean": np.nan, "sigmoid_k_fold_std": np.nan,
+            "sigmoid_x0_fold_mean": np.nan, "sigmoid_x0_fold_std": np.nan,
+            "n_folds_fit": 0,
+        })
 
-# %% [markdown]
-# ### Neurometric Fig 1 — PSE and slope vs. AUC
+    # Normalized step probas for clustering
+    early_polarity = site_polarity.get((sub, ei, pp), np.nan)
+    for s in steps_all:
+        val = overall_means.get(s, np.nan)
+        if not np.isnan(early_polarity) and early_polarity < 0 and not np.isnan(val):
+            val = 1.0 - val
+        row[f"norm_proba_step{int(s)}"] = (
+            float(val) if not np.isnan(val) else np.nan
+        )
 
-# %%
-nm = neurometrics_df.dropna(subset=["pse", "slope_k", "sigmoid_r2"])
+    model_rows.append(row)
 
-fig, axes = plt.subplots(1, 3, figsize=(15, 4))
-
-# PSE vs AUC — errorbars show fold std
-ax = axes[0]
-sc = ax.scatter(
-    nm["phon_roc_auc"],
-    nm["pse"],
-    c=nm["sigmoid_r2"],
-    cmap="viridis",
-    alpha=0.6,
-    edgecolors="k",
-    linewidths=0.4,
-    s=30,
-    zorder=3,
-)
-ax.errorbar(
-    nm["phon_roc_auc"],
-    nm["pse"],
-    yerr=nm["pse_fold_std"].fillna(0),
-    fmt="none",
-    ecolor="gray",
-    elinewidth=0.6,
-    alpha=0.5,
-    zorder=2,
-)
-ax.axhline(3.5, color="gray", linestyle="--", linewidth=1, label="midpoint (step 3.5)")
-ax.set_xlabel("phon_roc_auc")
-ax.set_ylabel("PSE (sigmoid midpoint, steps)")
-ax.set_title("PSE vs. acoustic AUC")
-ax.legend(fontsize=8)
-plt.colorbar(sc, ax=ax, label="sigmoid R²")
-
-# slope k vs AUC — errorbars show fold std
-ax = axes[1]
-sc = ax.scatter(
-    nm["phon_roc_auc"],
-    nm["slope_k"],
-    c=nm["sigmoid_r2"],
-    cmap="viridis",
-    alpha=0.6,
-    edgecolors="k",
-    linewidths=0.4,
-    s=30,
-    zorder=3,
-)
-ax.errorbar(
-    nm["phon_roc_auc"],
-    nm["slope_k"],
-    yerr=nm["slope_k_fold_std"].fillna(0),
-    fmt="none",
-    ecolor="gray",
-    elinewidth=0.6,
-    alpha=0.5,
-    zorder=2,
-)
-ax.set_xlabel("phon_roc_auc")
-ax.set_ylabel("Slope parameter k (smaller = steeper)")
-ax.set_title("Neurometric steepness vs. acoustic AUC\n(low k → compressed extremes)")
-plt.colorbar(sc, ax=ax, label="sigmoid R²")
-
-r_pse, p_pse = scipy.stats.pearsonr(nm["phon_roc_auc"], nm["pse"].fillna(3.5))
-r_k, p_k = scipy.stats.pearsonr(
-    nm.dropna(subset=["slope_k"])["phon_roc_auc"],
-    nm.dropna(subset=["slope_k"])["slope_k"],
-)
-axes[0].set_title(f"PSE vs. AUC  r={r_pse:.2f}, p={p_pse:.3g}")
-axes[1].set_title(
-    f"Slope k vs. AUC  r={r_k:.2f}, p={p_k:.3g}\n(low k → steeper at boundary)"
-)
-
-# Sigmoid R² distribution
-ax = axes[2]
-ax.hist(nm["sigmoid_r2"], bins=20, color="steelblue", edgecolor="k", alpha=0.8)
-ax.axvline(
-    nm["sigmoid_r2"].median(),
-    color="red",
-    linestyle="--",
-    label=f"median={nm['sigmoid_r2'].median():.2f}",
-)
-ax.set_xlabel("Sigmoid R²  (goodness of fit to neurometric)")
-ax.set_ylabel("Number of sites")
-ax.set_title("How well does a sigmoid describe the neurometric?")
-ax.legend(fontsize=9)
-
-plt.tight_layout()
-fig.savefig(outdir / "neurometrics_scatter.pdf", bbox_inches="tight")
-plt.close(fig)
-print("Saved neurometrics_scatter.pdf")
+model_comparison_df = pd.DataFrame(model_rows)
+model_comparison_df.to_parquet(outdir / "model_comparison_df.parquet", index=False)
+print(f"model_comparison_df: {len(model_comparison_df)} sites")
+model_comparison_df[["sigmoid_k", "sigmoid_x0", "sigmoid_r2"]].describe()
 
 # %% [markdown]
-# ### Neurometric Fig 2 — Average neurometric curves by AUC tertile
+# ### Sigmoid Fig 1 — Ideal shapes at different steepness values
 #
-# Split sites into three AUC groups. Show the mean ± SEM normalized neurometric
-# curve for each group. A steeper, more sigmoid-shaped curve in the high-AUC group
-# would support the compression hypothesis.
+# Sigmoid model shown at several k values to illustrate the continuum
+# from categorical (k → 0) to graded (large k ≈ linear).
 
 # %%
-nm_valid = neurometrics_df.dropna(
-    subset=[f"norm_proba_step{int(s)}" for s in steps_all]
-)
-nm_valid = nm_valid.assign(
-    auc_tertile=pd.qcut(
-        nm_valid["phon_roc_auc"], 3, labels=["low AUC", "mid AUC", "high AUC"]
-    )
-)
-
 fig, ax = plt.subplots(figsize=(6, 4))
-tertile_colors = {"low AUC": "lightcoral", "mid AUC": "gold", "high AUC": "steelblue"}
+x_fine = np.linspace(1, 6, 200)
 
-for tertile, grp in nm_valid.groupby("auc_tertile", observed=True):
-    curves = grp[[f"norm_proba_step{int(s)}" for s in steps_all]].values  # (n_sites, 6)
-    mean_curve = np.nanmean(curves, axis=0)
-    sem_curve = np.nanstd(curves, axis=0) / np.sqrt(np.sum(~np.isnan(curves), axis=0))
-    auc_range = f"[{grp['phon_roc_auc'].min():.2f}–{grp['phon_roc_auc'].max():.2f}]"
-    label = f"{tertile} {auc_range} (n={len(grp)})"
-    color = tertile_colors[str(tertile)]
+k_examples = [0.2, 0.5, 1.0, 2.0, 5.0]
+cmap = plt.cm.Reds
+for i, k_val in enumerate(k_examples):
+    color = cmap(0.4 + 0.5 * i / (len(k_examples) - 1))
     ax.plot(
-        steps_all, mean_curve, "o-", color=color, linewidth=2, markersize=5, label=label
-    )
-    ax.fill_between(
-        steps_all,
-        mean_curve - sem_curve,
-        mean_curve + sem_curve,
+        x_fine,
+        1.0 / (1.0 + np.exp(-(x_fine - 3.5) / k_val)),
         color=color,
-        alpha=0.2,
+        linewidth=2.0,
+        label=f"k={k_val}",
     )
 
-ax.axhline(0.5, color="gray", linestyle="--", linewidth=0.8)
+ax.set_xlabel("Morph step")
+ax.set_ylabel("Normalized model prediction")
+ax.set_title("Sigmoid shapes: small k = categorical, large k ≈ linear")
 ax.set_xticks(range(1, 7))
 ax.set_xlim(0.5, 6.5)
 ax.set_ylim(-0.05, 1.05)
-ax.set_xlabel("Morph step")
-ax.set_ylabel(
-    "Mean normalized decoder P(cat-0)\n(polarity-corrected so step-1 is high)"
-)
-ax.set_title(
-    "Average neurometric function by AUC tertile\n(compression hypothesis: high-AUC sites steepest near boundary)"
-)
-ax.legend(fontsize=8, loc="upper right")
+ax.legend(fontsize=8, title="Steepness k")
 plt.tight_layout()
-fig.savefig(outdir / "neurometrics_by_auc.pdf", bbox_inches="tight")
+fig.savefig(outdir / "ideal_model_shapes.pdf")
 plt.close(fig)
-print("Saved neurometrics_by_auc.pdf")
+print("Saved ideal_model_shapes.pdf")
+
+# %% [markdown]
+# ### Sigmoid Fig 2 — Fitted parameter distributions
+
+# %%
+fig, axes = plt.subplots(1, 3, figsize=(14, 4))
+
+valid = model_comparison_df.dropna(subset=["sigmoid_k"])
+
+# k distribution
+ax = axes[0]
+ax.hist(valid["sigmoid_k"], bins=25, color="tomato", edgecolor="k", alpha=0.8)
+ax.set_xlabel("Fitted sigmoid k (steepness)")
+ax.set_ylabel("Count")
+ax.set_title(f"Steepness distribution (n={len(valid)})\nsmall k = categorical")
+
+# PSE (x0) distribution
+ax = axes[1]
+ax.hist(valid["sigmoid_x0"], bins=25, color="mediumpurple", edgecolor="k", alpha=0.8)
+ax.axvline(3.5, color="gray", linestyle="--", linewidth=1, label="midpoint (3.5)")
+ax.set_xlabel("Fitted PSE (x0)")
+ax.set_ylabel("Count")
+ax.set_title("PSE distribution")
+ax.legend(fontsize=8)
+
+# R² distribution
+ax = axes[2]
+ax.hist(valid["sigmoid_r2"], bins=25, color="steelblue", edgecolor="k", alpha=0.8)
+ax.axvline(
+    valid["sigmoid_r2"].median(), color="red", linestyle="--",
+    label=f"median={valid['sigmoid_r2'].median():.2f}",
+)
+ax.set_xlabel("Sigmoid R²")
+ax.set_ylabel("Count")
+ax.set_title("Goodness of fit")
+ax.legend(fontsize=8)
+
+plt.tight_layout()
+fig.savefig(outdir / "sigmoid_parameter_distributions.pdf", bbox_inches="tight")
+plt.close(fig)
+print("Saved sigmoid_parameter_distributions.pdf")
+
+# %% [markdown]
+# ### Sigmoid Fig 3 — Steepness vs. acoustic decoding quality
+#
+# Filtered to sites with well-centered PSE (x0 ∈ [2, 5]). Sites with
+# PSE at the bounds have unreliable k estimates because the inflection
+# point is outside the data range and k/x0 trade off.
+
+# %%
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+PSE_RANGE = (2.0, 5.0)
+valid_all = model_comparison_df.dropna(subset=["sigmoid_k", "sigmoid_r2"])
+valid = valid_all[valid_all["sigmoid_x0"].between(*PSE_RANGE)]
+n_excluded = len(valid_all) - len(valid)
+print(f"PSE filter: keeping {len(valid)}/{len(valid_all)} sites "
+      f"(excluded {n_excluded} with x0 outside {PSE_RANGE})")
+
+# k vs AUC
+ax = axes[0]
+sc = ax.scatter(
+    valid["phon_roc_auc"],
+    valid["sigmoid_k"],
+    c=valid["sigmoid_r2"],
+    cmap="viridis",
+    alpha=0.6,
+    edgecolors="k",
+    linewidths=0.4,
+    s=30,
+)
+ax.errorbar(
+    valid["phon_roc_auc"],
+    valid["sigmoid_k"],
+    yerr=valid["sigmoid_k_fold_std"].fillna(0),
+    fmt="none",
+    ecolor="gray",
+    elinewidth=0.5,
+    alpha=0.4,
+)
+r_k, p_k = scipy.stats.pearsonr(valid["phon_roc_auc"], valid["sigmoid_k"])
+ax.set_xlabel("phon_roc_auc")
+ax.set_ylabel("Fitted sigmoid k (steepness)")
+ax.set_title(f"Steepness vs. AUC  r={r_k:.2f}, p={p_k:.3g}")
+plt.colorbar(sc, ax=ax, label="sigmoid R²")
+
+# x0 vs AUC
+ax = axes[1]
+sc = ax.scatter(
+    valid["phon_roc_auc"],
+    valid["sigmoid_x0"],
+    c=valid["sigmoid_r2"],
+    cmap="viridis",
+    alpha=0.6,
+    edgecolors="k",
+    linewidths=0.4,
+    s=30,
+)
+ax.errorbar(
+    valid["phon_roc_auc"],
+    valid["sigmoid_x0"],
+    yerr=valid["sigmoid_x0_fold_std"].fillna(0),
+    fmt="none",
+    ecolor="gray",
+    elinewidth=0.5,
+    alpha=0.4,
+)
+ax.axhline(3.5, color="gray", linestyle="--", linewidth=1)
+r_x0, p_x0 = scipy.stats.pearsonr(valid["phon_roc_auc"], valid["sigmoid_x0"])
+ax.set_xlabel("phon_roc_auc")
+ax.set_ylabel("Fitted PSE (x0)")
+ax.set_title(f"PSE vs. AUC  r={r_x0:.2f}, p={p_x0:.3g}")
+plt.colorbar(sc, ax=ax, label="sigmoid R²")
+
+plt.tight_layout()
+fig.savefig(outdir / "sigmoid_vs_auc.pdf", bbox_inches="tight")
+plt.close(fig)
+print("Saved sigmoid_vs_auc.pdf")
+
+# %% [markdown]
+# ### Sigmoid Fig 3b — Example sites with extreme PSE
+#
+# Sites where the fitted PSE falls at the edge of the step range (x0 < 2 or
+# x0 > 5). These typically have one-sided tuning or weak modulation, causing
+# the sigmoid inflection to be pushed outside the data range.
+
+# %%
+extreme_pse = valid_all[~valid_all["sigmoid_x0"].between(*PSE_RANGE)].copy()
+extreme_pse = extreme_pse.sort_values("sigmoid_x0").reset_index(drop=True)
+n_extreme = min(12, len(extreme_pse))
+
+# Sample evenly: some low-x0, some high-x0
+if n_extreme > 0:
+    sample_idx_ext = np.round(
+        np.linspace(0, len(extreme_pse) - 1, n_extreme)
+    ).astype(int)
+    extreme_sample = extreme_pse.iloc[sample_idx_ext]
+
+    n_cols_ext = 4
+    n_rows_ext = int(np.ceil(n_extreme / n_cols_ext))
+    fig, axes = plt.subplots(
+        n_rows_ext, n_cols_ext,
+        figsize=(4 * n_cols_ext, 4 * n_rows_ext), sharey=False,
+    )
+    axes_flat_ext = axes.flatten()
+
+    for ax_idx, (_, erow) in enumerate(extreme_sample.iterrows()):
+        ax = axes_flat_ext[ax_idx]
+        sub, ei, pp = erow["subject"], erow["electrode_idx"], erow["phoneme_pair"]
+
+        site_data = trial_df_fold_pd[
+            (trial_df_fold_pd["subject"] == sub)
+            & (trial_df_fold_pd["electrode_idx"] == ei)
+            & (trial_df_fold_pd["phoneme_pair"] == pp)
+        ].dropna(subset=["resampled", "decoder_proba", "fold"])
+
+        # Per-behavior jittered scatter
+        for beh, color in beh_colors.items():
+            mask = site_data["behavior_dummy_forced"] == beh
+            xvals = site_data.loc[mask, "resampled"] + rng.uniform(
+                -0.2, 0.2, mask.sum()
+            )
+            ax.scatter(
+                xvals, site_data.loc[mask, "decoder_proba"],
+                c=color, alpha=0.3, s=8, linewidths=0,
+            )
+
+        # Mean neurometric
+        means = site_data.groupby("resampled")["decoder_proba"].mean().sort_index()
+        ax.plot(means.index, means.values, "k-o", linewidth=1.5, markersize=4, zorder=3)
+
+        # Sigmoid fit
+        sig_params = [erow["sigmoid_a"], erow["sigmoid_b"],
+                      erow["sigmoid_x0"], erow["sigmoid_k"]]
+        if not any(np.isnan(p) for p in sig_params):
+            x_curve = np.linspace(1, 6, 100)
+            ax.plot(
+                x_curve, sigmoid_model(x_curve, *sig_params),
+                color="tomato", linewidth=2.0, zorder=4,
+            )
+
+        ax.axhline(0.5, color="gray", linestyle="--", linewidth=0.8)
+        ax.set_xticks([1, 2, 3, 4, 5, 6])
+        ax.set_xlim(0.5, 6.5)
+        ax.set_title(
+            f"{sub} e{int(ei)} {pp}\n"
+            f"x0={erow['sigmoid_x0']:.1f}  k={erow['sigmoid_k']:.2f}  "
+            f"R²={erow['sigmoid_r2']:.2f}",
+            fontsize=7.5,
+        )
+        ax.set_xlabel("Morph step")
+        if ax_idx % n_cols_ext == 0:
+            ax.set_ylabel("Decoder P(cat-1)")
+
+    # Hide unused axes
+    for ax_idx in range(n_extreme, len(axes_flat_ext)):
+        axes_flat_ext[ax_idx].set_visible(False)
+
+    fig.suptitle(
+        f"Sites with extreme PSE (x0 outside {PSE_RANGE}, n={len(extreme_pse)})",
+        fontsize=11,
+    )
+    plt.tight_layout()
+    fig.savefig(outdir / "extreme_pse_examples.pdf", bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved extreme_pse_examples.pdf ({n_extreme} examples)")
+else:
+    print("No sites with extreme PSE found")
+
+# %% [markdown]
+# ### Sigmoid Fig 4 — Catplots with sigmoid fit overlays
+#
+# Same sample sites as Fig 5 catplots, with the fitted sigmoid overlaid.
+
+# %%
+# Build lookup from model_comparison_df for sample sites
+mc_lookup = {}
+for _, r in model_comparison_df.iterrows():
+    mc_lookup[(r["subject"], r["electrode_idx"], r["phoneme_pair"])] = r
+
+n_cols_mc = 4
+n_rows_mc = int(np.ceil(n_sample / n_cols_mc))
+fig, axes = plt.subplots(
+    n_rows_mc,
+    n_cols_mc,
+    figsize=(4 * n_cols_mc, 4 * n_rows_mc),
+    sharey=False,
+)
+axes_flat_mc = axes.flatten()
+
+for ax_idx, (_, site_row) in enumerate(sample_sites.iterrows()):
+    ax = axes_flat_mc[ax_idx]
+
+    site_fold_data = sample_trials_fold[
+        sample_trials_fold["site_label"] == site_row["site_label"]
+    ].dropna(subset=["resampled", "decoder_proba", "fold"])
+
+    # Per-behavior jittered scatter
+    for beh, color in beh_colors.items():
+        mask = site_fold_data["behavior_dummy_forced"] == beh
+        xvals = site_fold_data.loc[mask, "resampled"] + rng.uniform(
+            -0.2, 0.2, mask.sum()
+        )
+        ax.scatter(
+            xvals,
+            site_fold_data.loc[mask, "decoder_proba"],
+            c=color,
+            alpha=0.3,
+            s=8,
+            linewidths=0,
+        )
+
+    # Overall mean neurometric line
+    means = (
+        site_fold_data.groupby("resampled")["decoder_proba"].mean().sort_index()
+    )
+    ax.plot(means.index, means.values, "k-o", linewidth=1.5, markersize=4, zorder=3)
+
+    # Sigmoid fit overlay
+    key = (site_row["subject"], site_row["electrode_idx"], site_row["phoneme_pair"])
+    mc_row = mc_lookup.get(key)
+    k_label = ""
+    if mc_row is not None:
+        sig_params = [
+            mc_row["sigmoid_a"], mc_row["sigmoid_b"],
+            mc_row["sigmoid_x0"], mc_row["sigmoid_k"],
+        ]
+        if not any(np.isnan(p) for p in sig_params):
+            x_curve = np.linspace(1, 6, 100)
+            ax.plot(
+                x_curve,
+                sigmoid_model(x_curve, *sig_params),
+                color="tomato",
+                linewidth=2.0,
+                zorder=4,
+            )
+            k_label = f"  k={mc_row['sigmoid_k']:.2f}"
+
+    ax.axhline(0.5, color="gray", linestyle="--", linewidth=0.8)
+    ax.set_xticks([1, 2, 3, 4, 5, 6])
+    ax.set_xlim(0.5, 6.5)
+    ax.set_title(
+        f"{site_row['site_label']}\n"
+        f"AUC={site_row['phon_roc_auc']:.2f}{k_label}",
+        fontsize=7.5,
+    )
+    ax.set_xlabel("Morph step")
+    if ax_idx % n_cols_mc == 0:
+        ax.set_ylabel("Decoder P(cat-1)")
+
+# Legend
+model_handles = [
+    plt.Line2D([0], [0], color="tomato", linewidth=2.0, label="sigmoid fit"),
+    plt.Line2D(
+        [0], [0], color="k", linewidth=1.5, marker="o", markersize=4,
+        label="data mean",
+    ),
+]
+fig.legend(handles=model_handles, loc="lower right", fontsize=9, ncol=2)
+fig.suptitle(
+    "Neurometric functions with sigmoid fits (sorted by AUC, low→high)", fontsize=11
+)
+plt.tight_layout()
+fig.savefig(outdir / "catplots_sigmoid_fits.pdf", bbox_inches="tight")
+plt.close(fig)
+print("Saved catplots_sigmoid_fits.pdf")
+
 
 # %% [markdown]
 # ## Electrode clustering by neurometric curve shape
@@ -1157,7 +1348,7 @@ _ax_pair_cols = [f"{a}v{b}" for a, b in step_pairs]
 _ax_wide.columns.name = None
 
 # Merge identification curves, AX curves, and metadata
-_auc_lookup = neurometrics_df[["subject", "electrode_idx", "phoneme_pair", "phon_roc_auc", "smin", "smax"]]
+_auc_lookup = model_comparison_df[["subject", "electrode_idx", "phoneme_pair", "phon_roc_auc", "smin", "smax"]]
 nm_clust = (
     _raw_wide
     .merge(_auc_lookup, on=["subject", "electrode_idx", "phoneme_pair"], how="inner")
@@ -1184,10 +1375,11 @@ for _i, _c in enumerate(_norm_cols):
     nm_clust[_c] = _curves_norm[:, _i]
 
 # Cluster on concatenation of normalized identification + raw AX discrimination
-_joint = np.hstack([_curves_norm, _ax_curves])  # (n_sites, 11)
+# _joint = np.hstack([_curves_norm, _ax_curves])  # (n_sites, 11)
+_joint = np.hstack([_ax_curves])  # (n_sites, 11)
 
 # Select k by silhouette
-_k_range = range(3, 8)
+_k_range = range(3, 10)
 _sil = []
 for _k in _k_range:
     _labels = KMeans(n_clusters=_k, random_state=0, n_init=20).fit_predict(_joint)
@@ -1296,6 +1488,20 @@ for _cl in sorted(nm_clust["cluster"].unique()):
     ax.set_xlim(0.5, 6.5)
     ax.legend(fontsize=8)
 
+    # show an inset barh of phoneme pair counts for the cluster members
+    phoneme_pair_ax = ax.inset_axes([0.7, 0.2, 0.2, 0.2])
+    phoneme_pair_counts = _members.phoneme_pair.value_counts()
+    phoneme_pair_ax.barh(
+        list(range(len(phoneme_pair_counts))),
+        phoneme_pair_counts.values,
+        color=_cluster_colors[_cl],
+        edgecolor="k",
+    )
+    phoneme_pair_ax.set_yticks(list(range(len(phoneme_pair_counts))))
+    phoneme_pair_ax.set_yticklabels(phoneme_pair_counts.index, fontsize=6)
+    phoneme_pair_ax.set_xlabel("Count")
+    sns.despine(ax=phoneme_pair_ax, left=True, bottom=True)
+
     # --- Bottom row: AX discrimination curves (raw AUC values) ---
     ax = axes[1, _cl]
     for _, _row in _sampled.iterrows():
@@ -1329,8 +1535,9 @@ print("Saved cluster_curves.pdf")
 _cluster_export = (
     nm_clust[["subject", "electrode_idx", "phoneme_pair", "cluster", "phon_roc_auc"]]
     .merge(
-        neurometrics_df[
-            ["subject", "electrode_idx", "phoneme_pair", "pse", "slope_k", "sigmoid_r2"]
+        model_comparison_df[
+            ["subject", "electrode_idx", "phoneme_pair",
+             "sigmoid_k", "sigmoid_x0", "sigmoid_r2"]
         ],
         on=["subject", "electrode_idx", "phoneme_pair"],
         how="left",

@@ -16,8 +16,15 @@ on ambiguous trials — tests whether the representation aligns with or dissocia
 
 ## Follow-up: graded vs. intermediate
 
-The primary analysis does not distinguish graded from intermediate (both predict confidence
-collapse). To distinguish: inspect step-wise mean `decoder_proba` trajectory on ambiguous
-trials in the collapsed-confidence regime. Graded predicts a monotonic gradient (step 2 > 3
-> 4 > 5 in confidence); intermediate predicts all ambiguous steps collapse equally. Readable
-from the step-wise confidence figure (Fig 1 of the analysis) with no additional computation.
+**Deprioritized.** The intermediate account (all ambiguous steps collapse equally to a fixed
+blend) is less of an important target right now. At the level of mean decoder_proba per step,
+intermediate and categorical can look similar — both predict a sharp transition. The key
+distinction is trial-level variance (bimodal vs. unimodal at ambiguous steps), which the
+confidence analysis already partially captures. The main model comparison (steep sigmoid vs.
+shallow sigmoid vs. linear) focuses on the more tractable categorical-vs-graded question.
+
+Original note: The primary analysis does not distinguish graded from intermediate (both
+predict confidence collapse). To distinguish: inspect step-wise mean `decoder_proba`
+trajectory on ambiguous trials in the collapsed-confidence regime. Graded predicts a
+monotonic gradient (step 2 > 3 > 4 > 5 in confidence); intermediate predicts all ambiguous
+steps collapse equally.
