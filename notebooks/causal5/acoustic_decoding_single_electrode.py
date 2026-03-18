@@ -49,7 +49,7 @@ from src.models.decoding import (
 sns.set_context("paper", font_scale=2)
 
 # %% tags=["parameters"]
-subject = "EC279"
+subject = "EC250"
 
 epochs_path = Path(f"outputs/epochs_preprocessed/{subject}_epo.fif")
 electrodes_path = Path(f"outputs/causal5/find_speech_responsive/{subject}_results.csv")

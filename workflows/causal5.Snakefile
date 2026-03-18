@@ -314,7 +314,7 @@ rule acoustic_decoding_single_electrode:
         notebook     = "outputs/causal5/acoustic_decoding_single_electrode/{subject}/notebook.ipynb",
         outcomes     = "outputs/causal5/acoustic_decoding_single_electrode/{subject}/outcomes.parquet",
         all_outcomes = "outputs/causal5/acoustic_decoding_single_electrode/{subject}/all_outcomes.parquet",
-        train_scores = "outputs/causal5/eh_single_electrode/{subject}/train_scores.parquet",
+        train_scores = "outputs/causal5/acoustic_decoding_single_electrode/{subject}/train_scores.parquet",
         test_scores  = "outputs/causal5/acoustic_decoding_single_electrode/{subject}/test_scores.parquet",
         avg_scores   = "outputs/causal5/acoustic_decoding_single_electrode/{subject}/avg_test_scores.csv",
         models       = "outputs/causal5/acoustic_decoding_single_electrode/{subject}/decoding_models.joblib",

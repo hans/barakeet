@@ -31,14 +31,14 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 # %% tags=["parameters"]
-subject = "EC270"
+subject = "EC248"
 
 results_path = f"outputs/causal5/ganong_decoding/{subject}/results.joblib"
 
 # Timing parameters (from config.yaml)
 sfreq = 100       # Hz
 window_size = 15  # samples
-epoch_tmin = -0.5  # seconds; epoch start relative to word onset
+epoch_tmin = -0.4  # seconds; epoch start relative to word onset
 
 # %%
 data = joblib.load(results_path)
@@ -117,11 +117,11 @@ axes[1, 0].legend(title="phoneme_pair")
 
 # Scatter: peak time vs peak performance
 for phoneme_pair, grp in peak.groupby("phoneme_pair"):
-    axes[1, 1].scatter(grp["window_center_s"], grp["full_roc_auc"], alpha=0.6, label=phoneme_pair, s=25)
-axes[1, 1].axhline(0.5, color="k", linestyle="--", linewidth=0.8)
+    axes[1, 1].scatter(grp["window_center_s"], grp["diff"], alpha=0.6, label=phoneme_pair, s=25)
+axes[1, 1].axhline(0, color="k", linestyle="--", linewidth=0.8)
 axes[1, 1].set_xlabel("Peak window center (s from onset)")
-axes[1, 1].set_ylabel("Peak full ROC-AUC")
-axes[1, 1].set_title(f"{subject} — Peak time vs. performance")
+axes[1, 1].set_ylabel("Peak Δ ROC-AUC (full − baseline)")
+axes[1, 1].set_title(f"{subject} — Peak time vs. Δ performance")
 axes[1, 1].legend(title="phoneme_pair")
 
 plt.tight_layout()

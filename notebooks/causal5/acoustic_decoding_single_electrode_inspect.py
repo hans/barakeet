@@ -34,6 +34,8 @@ sfreq = 100       # Hz
 window_size = 15  # samples
 epoch_tmin = -0.5  # seconds; epoch start relative to word onset
 
+peak_threshold = 0.75
+
 # %%
 scores = pd.read_parquet(scores_path)
 scores.head()
@@ -49,6 +51,13 @@ mean_scores = (
     scores
     .groupby(["electrode_idx", "phoneme_pair", "smin", "smax"])["roc_auc"]
     .mean()
+)
+
+# drop electrode-phoneme pairs that never exceed the threshold, to focus on the responsive ones
+mean_scores = (
+    mean_scores
+    .groupby(["electrode_idx", "phoneme_pair"])
+    .filter(lambda x: (x > peak_threshold).any())
     .reset_index()
 )
 
@@ -63,7 +72,7 @@ peak.describe()
 # ## Distributions
 
 # %%
-fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+fig, axes = plt.subplots(1, 3, figsize=(15, 4))
 
 for phoneme_pair, grp in peak.groupby("phoneme_pair"):
     axes[0].hist(grp["roc_auc"], bins=20, alpha=0.6, label=phoneme_pair)
@@ -79,6 +88,13 @@ axes[1].set_xlabel("Peak window center (s from onset)")
 axes[1].set_ylabel("Sites")
 axes[1].set_title(f"{subject} — Acoustic peak time")
 axes[1].legend()
+
+# show mean performance time-course for each phoneme pair
+for phoneme_pair, grp in mean_scores.groupby("phoneme_pair"):
+    # compute mean across electrodes for each time point
+    time_course = grp.groupby(["smin", "smax"])["roc_auc"].median().reset_index()
+    time_course["window_center_s"] = (time_course["smin"] + window_size / 2) / sfreq + epoch_tmin
+    axes[2].plot(time_course["window_center_s"], time_course["roc_auc"], label=phoneme_pair)
 
 plt.tight_layout()
 plt.show()

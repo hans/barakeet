@@ -53,7 +53,7 @@ epoch_sfreq = 100
 phon_response_tmin_min = 0.0
 all_response_tmax_max = 1.3
 
-phon_response_peak_threshold = 0.6
+phon_response_peak_threshold = 0.65
 
 outdir = "outputs/causal5/acoustic_decoding_peaks"
 
@@ -156,7 +156,8 @@ phon_peaks_df = (
     .first()
 )
 
-print(f"Acoustic sites: {len(phon_peaks_df)}")
+mean_count = phon_peaks_df.group_by('subject').agg(pl.len()).with_columns(pl.col('len').mean().alias('mean_count')).select('mean_count').to_numpy()[0][0]
+print(f"Acoustic sites: {len(phon_peaks_df)}, per subject mean: {mean_count}")
 phon_peaks_df.head()
 
 # %% [markdown]
