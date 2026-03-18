@@ -160,25 +160,104 @@ all_md = pl.from_pandas(pd.concat(all_md_rows, ignore_index=True)).with_columns(
     pl.col("phoneme_pair").cast(phoneme_pair_enum),
 )
 
+# %% [markdown]
+# ## Per-site threshold calibration
+#
+# The acoustic decoder is optimized on ROC-AUC (rank-based), so `decoder_proba = 0.5`
+# is not necessarily the optimal decision boundary. For each site, find the threshold
+# that maximizes Youden's J (sensitivity + specificity - 1) on endpoint trials, then
+# shift all probabilities so that this threshold maps to 0.5. This makes
+# `|adjusted_proba - 0.5|` a meaningful confidence measure and ensures the sigmoid
+# constraint `f(x0) = 0.5` corresponds to the true PSE.
+
 # %%
-trial_df = proba_by_trial.join(
+from sklearn.metrics import roc_curve
+
+
+def find_optimal_threshold(y_true, y_score):
+    """Find the threshold maximizing Youden's J on the ROC curve."""
+    fpr, tpr, thresholds = roc_curve(y_true, y_score)
+    j_scores = tpr - fpr
+    best_idx = np.argmax(j_scores)
+    return float(thresholds[best_idx])
+
+
+# Join fold-level data with metadata, then compute per-(site, fold) thresholds
+_fold_with_md = proba_by_trial_fold.join(
     all_md, on=["subject", "epoch_idx", "phoneme_pair"], how="left"
-).with_columns(
-    (pl.col("decoder_proba") - 0.5).abs().alias("confidence"),
-    pl.col("resampled").is_in([1, 6]).alias("is_endpoint"),
-    pl.col("resampled").is_in([2, 3, 4, 5]).alias("is_ambiguous"),
+)
+
+fold_threshold_records = []
+for (sub, ei, pp, fold), group in _fold_with_md.filter(
+    pl.col("resampled").is_in([1, 6])
+).group_by(["subject", "electrode_idx", "phoneme_pair", "fold"]):
+    gdf = group.to_pandas()
+    labels = (gdf["resampled"] == 6).astype(int).values  # 1 = cat-1 endpoint
+    probas = gdf["decoder_proba"].values
+    if len(np.unique(labels)) < 2 or len(labels) < 5:
+        continue
+    fold_threshold_records.append({
+        "subject": sub,
+        "electrode_idx": ei,
+        "phoneme_pair": pp,
+        "fold": fold,
+        "optimal_threshold": find_optimal_threshold(labels, probas),
+    })
+
+fold_threshold_df = pl.DataFrame(fold_threshold_records).with_columns(
+    pl.col("subject").cast(subject_enum),
+    pl.col("phoneme_pair").cast(phoneme_pair_enum),
+)
+
+# Site-level threshold: mean across folds (used for fold-averaged trial_df)
+threshold_df = (
+    fold_threshold_df
+    .group_by(["subject", "electrode_idx", "phoneme_pair"])
+    .agg(pl.col("optimal_threshold").mean())
+)
+
+threshold_df.write_parquet(outdir / "site_thresholds.parquet")
+_thresh_vals = threshold_df["optimal_threshold"].to_numpy()
+print(f"Thresholds computed for {len(threshold_df)} sites × {fold_threshold_df['fold'].n_unique()} folds")
+print(f"  site-mean median threshold: {np.median(_thresh_vals):.3f}")
+print(f"  range: [{np.min(_thresh_vals):.3f}, {np.max(_thresh_vals):.3f}]")
+
+# %%
+# Apply threshold shift: adjusted_proba = decoder_proba - threshold + 0.5
+# For fold-averaged trial_df: use site-level (fold-averaged) threshold
+_trial_with_md = proba_by_trial.join(
+    all_md, on=["subject", "epoch_idx", "phoneme_pair"], how="left"
+)
+
+trial_df = (
+    _trial_with_md
+    .join(threshold_df, on=["subject", "electrode_idx", "phoneme_pair"], how="left")
+    .with_columns(
+        (pl.col("decoder_proba") - pl.col("optimal_threshold") + 0.5).alias("decoder_proba_adjusted"),
+    )
+    .with_columns(
+        (pl.col("decoder_proba_adjusted") - 0.5).abs().alias("confidence"),
+        pl.col("resampled").is_in([1, 6]).alias("is_endpoint"),
+        pl.col("resampled").is_in([2, 3, 4, 5]).alias("is_ambiguous"),
+    )
 )
 
 trial_df.write_parquet(outdir / "trial_df.parquet")
 print(f"trial_df saved: {len(trial_df)} rows")
 
-# Per-fold trial frame: same as trial_df but with fold column preserved
-trial_df_fold = proba_by_trial_fold.join(
-    all_md, on=["subject", "epoch_idx", "phoneme_pair"], how="left"
-).with_columns(
-    (pl.col("decoder_proba") - 0.5).abs().alias("confidence"),
-    pl.col("resampled").is_in([1, 6]).alias("is_endpoint"),
-    pl.col("resampled").is_in([2, 3, 4, 5]).alias("is_ambiguous"),
+# Per-fold trial frame: use per-fold thresholds so each fold's decoder
+# is calibrated with its own endpoint predictions
+trial_df_fold = (
+    _fold_with_md
+    .join(fold_threshold_df, on=["subject", "electrode_idx", "phoneme_pair", "fold"], how="left")
+    .with_columns(
+        (pl.col("decoder_proba") - pl.col("optimal_threshold") + 0.5).alias("decoder_proba_adjusted"),
+    )
+    .with_columns(
+        (pl.col("decoder_proba_adjusted") - 0.5).abs().alias("confidence"),
+        pl.col("resampled").is_in([1, 6]).alias("is_endpoint"),
+        pl.col("resampled").is_in([2, 3, 4, 5]).alias("is_ambiguous"),
+    )
 )
 trial_df_fold_pd = trial_df_fold.to_pandas()
 print(f"trial_df_fold: {len(trial_df_fold_pd)} rows (incl. fold dim)")
@@ -457,7 +536,7 @@ labels = {0: "Heard /d/ (or /b/ or /p/)", 1: "Heard /n/ (or /m/ or /b/)"}
 for beh, grp in site_trials.groupby("behavior_dummy_forced"):
     ax.scatter(
         grp["resampled"] + np.random.uniform(-0.15, 0.15, len(grp)),
-        grp["decoder_proba"],
+        grp["decoder_proba_adjusted"],
         c=colors.get(beh, "gray"),
         alpha=0.35,
         s=15,
@@ -541,7 +620,7 @@ for ax_idx, (_, site_row) in enumerate(sample_sites.iterrows()):
     # the same scale (all_outcomes has one row per trial × model).
     site_fold_data = sample_trials_fold[
         sample_trials_fold["site_label"] == site_row["site_label"]
-    ].dropna(subset=["resampled", "decoder_proba", "fold"])
+    ].dropna(subset=["resampled", "decoder_proba_adjusted", "fold"])
 
     # Per-behavior jittered scatter (per-fold trial values)
     for beh, color in beh_colors.items():
@@ -549,7 +628,7 @@ for ax_idx, (_, site_row) in enumerate(sample_sites.iterrows()):
         xvals = site_fold_data.loc[mask, "resampled"] + rng.uniform(-0.2, 0.2, mask.sum())
         ax.scatter(
             xvals,
-            site_fold_data.loc[mask, "decoder_proba"],
+            site_fold_data.loc[mask, "decoder_proba_adjusted"],
             c=color,
             alpha=0.3,
             s=8,
@@ -559,7 +638,7 @@ for ax_idx, (_, site_row) in enumerate(sample_sites.iterrows()):
 
     # Per-fold neurometric lines (thin, behind the mean)
     for fold_id, fold_grp in site_fold_data.groupby("fold"):
-        fold_means = fold_grp.groupby("resampled")["decoder_proba"].mean().sort_index()
+        fold_means = fold_grp.groupby("resampled")["decoder_proba_adjusted"].mean().sort_index()
         ax.plot(
             fold_means.index,
             fold_means.values,
@@ -571,7 +650,7 @@ for ax_idx, (_, site_row) in enumerate(sample_sites.iterrows()):
         )
 
     # Overall mean neurometric line (across all folds)
-    means = site_fold_data.groupby("resampled")["decoder_proba"].mean().sort_index()
+    means = site_fold_data.groupby("resampled")["decoder_proba_adjusted"].mean().sort_index()
     ax.plot(means.index, means.values, "k-o", linewidth=1.5, markersize=4, zorder=5)
 
     # AX discrimination curve on secondary y-axis
@@ -879,7 +958,7 @@ for _, site_row in tqdm(
         (trial_df_fold_pd["subject"] == sub)
         & (trial_df_fold_pd["electrode_idx"] == ei)
         & (trial_df_fold_pd["phoneme_pair"] == pp)
-    ].dropna(subset=["resampled", "decoder_proba", "fold"])
+    ].dropna(subset=["resampled", "decoder_proba_adjusted", "fold"])
 
     if len(site_fold) == 0:
         continue
@@ -887,7 +966,7 @@ for _, site_row in tqdm(
     # Per-fold fits for stability estimates
     fold_params = []  # list of (a, x0, k) per fold
     for fold_id, fold_grp in site_fold.groupby("fold"):
-        means = fold_grp.groupby("resampled")["decoder_proba"].mean().reindex(steps_all)
+        means = fold_grp.groupby("resampled")["decoder_proba_adjusted"].mean().reindex(steps_all)
         valid = means.dropna()
         if len(valid) < 5:
             continue
@@ -899,7 +978,7 @@ for _, site_row in tqdm(
             fold_params.append(popt)
 
     # Fit to overall (fold-averaged) step means
-    overall_means = site_fold.groupby("resampled")["decoder_proba"].mean().reindex(
+    overall_means = site_fold.groupby("resampled")["decoder_proba_adjusted"].mean().reindex(
         steps_all
     )
     overall_valid = overall_means.dropna()
@@ -1150,7 +1229,7 @@ if n_extreme > 0:
             (trial_df_fold_pd["subject"] == sub)
             & (trial_df_fold_pd["electrode_idx"] == ei)
             & (trial_df_fold_pd["phoneme_pair"] == pp)
-        ].dropna(subset=["resampled", "decoder_proba", "fold"])
+        ].dropna(subset=["resampled", "decoder_proba_adjusted", "fold"])
 
         # Per-behavior jittered scatter
         for beh, color in beh_colors.items():
@@ -1159,12 +1238,12 @@ if n_extreme > 0:
                 -0.2, 0.2, mask.sum()
             )
             ax.scatter(
-                xvals, site_data.loc[mask, "decoder_proba"],
+                xvals, site_data.loc[mask, "decoder_proba_adjusted"],
                 c=color, alpha=0.3, s=8, linewidths=0,
             )
 
         # Mean neurometric
-        means = site_data.groupby("resampled")["decoder_proba"].mean().sort_index()
+        means = site_data.groupby("resampled")["decoder_proba_adjusted"].mean().sort_index()
         ax.plot(means.index, means.values, "k-o", linewidth=1.5, markersize=4, zorder=3)
 
         # Sigmoid fit
@@ -1230,7 +1309,7 @@ for ax_idx, (_, site_row) in enumerate(sample_sites.iterrows()):
 
     site_fold_data = sample_trials_fold[
         sample_trials_fold["site_label"] == site_row["site_label"]
-    ].dropna(subset=["resampled", "decoder_proba", "fold"])
+    ].dropna(subset=["resampled", "decoder_proba_adjusted", "fold"])
 
     # Per-behavior jittered scatter
     for beh, color in beh_colors.items():
@@ -1240,7 +1319,7 @@ for ax_idx, (_, site_row) in enumerate(sample_sites.iterrows()):
         )
         ax.scatter(
             xvals,
-            site_fold_data.loc[mask, "decoder_proba"],
+            site_fold_data.loc[mask, "decoder_proba_adjusted"],
             c=color,
             alpha=0.3,
             s=8,
@@ -1249,7 +1328,7 @@ for ax_idx, (_, site_row) in enumerate(sample_sites.iterrows()):
 
     # Overall mean neurometric line
     means = (
-        site_fold_data.groupby("resampled")["decoder_proba"].mean().sort_index()
+        site_fold_data.groupby("resampled")["decoder_proba_adjusted"].mean().sort_index()
     )
     ax.plot(means.index, means.values, "k-o", linewidth=1.5, markersize=4, zorder=3)
 
@@ -1325,17 +1404,17 @@ print("Saved catplots_sigmoid_fits.pdf")
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 
-# Raw mean decoder_proba per (site, step) — no polarity correction
+# Raw mean decoder_proba_adjusted per (site, step) — no polarity correction
 _raw_means = (
     trial_df.group_by(["subject", "electrode_idx", "phoneme_pair", "resampled"])
-    .agg(pl.col("decoder_proba").mean())
+    .agg(pl.col("decoder_proba_adjusted").mean())
     .sort(["subject", "electrode_idx", "phoneme_pair", "resampled"])
     .to_pandas()
 )
 _raw_wide = _raw_means.pivot_table(
     index=["subject", "electrode_idx", "phoneme_pair"],
     columns="resampled",
-    values="decoder_proba",
+    values="decoder_proba_adjusted",
 )
 _raw_wide.columns = [f"raw_proba_step{int(c)}" for c in _raw_wide.columns]
 _raw_wide = _raw_wide.reset_index()
