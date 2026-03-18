@@ -66,6 +66,7 @@ all_outcomes_paths = list(
     )
 )
 phon_peaks_path = "outputs/causal5/acoustic_decoding_peaks/phon_peaks_df.parquet"
+ax_discrimination_path = "outputs/causal5/acoustic_ax_discrimination/ax_discrimination_df.parquet"
 
 epoch_tmin = -0.4
 epoch_sfreq = 100
@@ -341,75 +342,14 @@ print(f"site_stats: {len(site_stats)} sites")
 site_stats.describe()
 
 # %% [markdown]
-# ## AX discrimination: adjacent-step decoders
+# ## AX discrimination: load precomputed adjacent-step decoders
 #
-# For each site and each adjacent step pair (1v2, 2v3, ..., 5v6), train a fresh
-# binary decoder on the raw HGA at the site's peak acoustic window. This tests
-# whether the neural signal itself can distinguish adjacent morph steps — the
-# hallmark of categorical perception is high discrimination at the category
-# boundary and low discrimination within categories.
+# Per-site adjacent-step discrimination AUCs are computed in the
+# `acoustic_ax_discrimination` notebook (upstream in the pipeline).
 
 # %%
-from src.models.decoding import fit_train_test
-
-ax_rows = []
 step_pairs = [(1, 2), (2, 3), (3, 4), (4, 5), (5, 6)]
-
-for _, site_row in tqdm(site_keys.iterrows(), total=len(site_keys), desc="AX discrimination"):
-    sub = site_row["subject"]
-    ei = int(site_row["electrode_idx"])
-    pp = site_row["phoneme_pair"]
-    smin_w, smax_w = int(site_row["smin"]), int(site_row["smax"])
-
-    data_arr = epoch_data_cache[sub]
-
-    # Get metadata for this site's trials (need resampled step)
-    site_md = all_md.filter(
-        (pl.col("subject") == sub) & (pl.col("phoneme_pair") == pp)
-    ).to_pandas()
-
-    for step_a, step_b in step_pairs:
-        mask_a = site_md["resampled"] == step_a
-        mask_b = site_md["resampled"] == step_b
-        idx_a = site_md.loc[mask_a, "epoch_idx"].values.astype(int)
-        idx_b = site_md.loc[mask_b, "epoch_idx"].values.astype(int)
-
-        if len(idx_a) < 5 or len(idx_b) < 5:
-            continue
-
-        # Extract windowed HGA for this electrode
-        X_a = data_arr[idx_a, ei, smin_w:smax_w]  # (n_a, window_size)
-        X_b = data_arr[idx_b, ei, smin_w:smax_w]  # (n_b, window_size)
-        X = np.vstack([X_a, X_b])
-        y = np.array([0] * len(idx_a) + [1] * len(idx_b))
-
-        fitted = fit_train_test(
-            X, y,
-            num_classes=2,
-            scoring=["roc_auc"],
-            stratify=y,
-            num_repeats=5,
-            n_jobs=1,
-        )
-
-        if fitted is None:
-            continue
-
-        test_aucs = fitted["test_roc_auc"]
-        ax_rows.append({
-            "subject": sub,
-            "electrode_idx": ei,
-            "phoneme_pair": pp,
-            "step_a": step_a,
-            "step_b": step_b,
-            "n_a": len(idx_a),
-            "n_b": len(idx_b),
-            "roc_auc": float(np.mean(test_aucs)),
-            "roc_auc_std": float(np.std(test_aucs)),
-        })
-
-ax_discrimination_df = pd.DataFrame(ax_rows)
-ax_discrimination_df.to_parquet(outdir / "ax_discrimination_df.parquet", index=False)
+ax_discrimination_df = pd.read_parquet(ax_discrimination_path)
 print(f"ax_discrimination_df: {len(ax_discrimination_df)} rows")
 ax_discrimination_df.head()
 

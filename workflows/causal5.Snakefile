@@ -421,6 +421,45 @@ rule acoustic_decoding_peaks:
         )
 
 
+rule acoustic_ax_discrimination:
+    """Adjacent-step AX discrimination decoders at acoustically selective sites.
+
+    For each site and each adjacent step pair (1v2, 2v3, ..., 5v6), trains a
+    fresh binary decoder on the raw HGA at the site's peak acoustic window.
+    Tests whether the neural signal can distinguish adjacent morph steps — the
+    hallmark of categorical perception is high discrimination at the category
+    boundary and low discrimination within categories.
+
+    Separated from acoustic_morphology_on_ambiguous because decoding is slow.
+    """
+    input:
+        all_epochs = expand(
+            "outputs/epochs_preprocessed/{subject}_epo.fif",
+            subject=config["data"]["subjects"],
+        ),
+        phon_peaks = "outputs/causal5/acoustic_decoding_peaks/phon_peaks_df.parquet",
+        notebook   = "notebooks/causal5/acoustic_ax_discrimination.py",
+
+    output:
+        notebook             = "outputs/causal5/acoustic_ax_discrimination/notebook.ipynb",
+        ax_discrimination_df = "outputs/causal5/acoustic_ax_discrimination/ax_discrimination_df.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                all_epochs=list(input.all_epochs),
+                phon_peaks_path=str(input.phon_peaks),
+                outdir=str(outdir),
+                phon_response_peak_threshold=config["analysis"]["phon_response_peak_threshold"],
+                epoch_tmin=config["analysis"]["epoch_tmin"],
+                epoch_sfreq=config["analysis"]["epoch_sfreq"],
+            ),
+        )
+
+
 rule acoustic_morphology_on_ambiguous:
     """Acoustic response morphology on ambiguous inputs at acoustically selective sites.
 
@@ -446,6 +485,7 @@ rule acoustic_morphology_on_ambiguous:
             subject=config["data"]["subjects"],
         ),
         phon_peaks = "outputs/causal5/acoustic_decoding_peaks/phon_peaks_df.parquet",
+        ax_discrimination_df = "outputs/causal5/acoustic_ax_discrimination/ax_discrimination_df.parquet",
         notebook   = "notebooks/causal5/acoustic_morphology_on_ambiguous.py",
 
     output:
@@ -463,6 +503,7 @@ rule acoustic_morphology_on_ambiguous:
                 all_epochs=list(input.all_epochs),
                 all_outcomes_paths=list(input.all_outcomes),
                 phon_peaks_path=str(input.phon_peaks),
+                ax_discrimination_path=str(input.ax_discrimination_df),
                 outdir=str(outdir),
                 phon_response_peak_threshold=config["analysis"]["phon_response_peak_threshold"],
                 epoch_tmin=config["analysis"]["epoch_tmin"],
