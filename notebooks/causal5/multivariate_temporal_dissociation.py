@@ -173,7 +173,9 @@ def _run_sliding_window_population(
         if fitted is None:
             continue
 
-        result_key = (subject, phoneme_pair, name, smin, smax)
+        # Flatten groupby name tuple to a string for use as dict key
+        name_str = "_".join(str(x) for x in name) if name else ""
+        result_key = (subject, phoneme_pair, name_str, smin, smax)
 
         scores[result_key] = {k: fitted["test_" + k] for k in scoring}
 
@@ -233,7 +235,7 @@ for window_size in window_sizes:
                 target="behavior_categorical_forced",
                 window_size=window_size,
                 groupby=["word_end"],
-                filter_str="ambiguity == 'ambiguous'",
+                filter_str="ambiguity > 0",
             )
             for k, v in scores.items():
                 all_perceptual_scores[(window_size,) + k] = v
