@@ -28,7 +28,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 # %% tags=["parameters"]
-subject = "EC243"
+subject = "EC270"
 
 results_path = f"outputs/causal5/behavior_decoding_single_electrode_summarize/{subject}/A_results.csv"
 
@@ -98,11 +98,11 @@ axes[1, 0].legend(title="word_end")
 
 # Scatter: peak time vs peak performance
 for word_end, grp in peak.groupby("word_end"):
-    axes[1, 1].scatter(grp["window_center_s"], grp["full_roc_auc"], alpha=0.5, label=word_end, s=20)
-axes[1, 1].axhline(0.5, color="k", linestyle="--", linewidth=0.8)
+    axes[1, 1].scatter(grp["window_center_s"], grp["diff"], alpha=0.5, label=word_end, s=20)
+axes[1, 1].axhline(0, color="k", linestyle="--", linewidth=0.8)
 axes[1, 1].set_xlabel("Peak window center (s from onset)")
-axes[1, 1].set_ylabel("Peak full ROC-AUC")
-axes[1, 1].set_title(f"{subject} — Peak time vs. performance")
+axes[1, 1].set_ylabel("Peak Δ ROC-AUC (full − baseline)")
+axes[1, 1].set_title(f"{subject} — Peak time vs. Δ performance")
 axes[1, 1].legend(title="word_end")
 
 plt.tight_layout()
