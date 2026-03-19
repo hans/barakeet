@@ -72,6 +72,7 @@ phon_peaks_df = pd.read_parquet(phon_peaks_path)
 
 # %%
 all_regression_predictions = []
+all_endpoint_predictions = []
 all_gradient_stats = []
 
 # %%
@@ -141,6 +142,24 @@ for epochs_path in tqdm(epochs_paths, desc="Subjects"):
             if fitted is None:
                 print(f"  {phoneme_pair}: regression failed (insufficient data)")
                 continue
+
+            # --- Endpoint test-fold predictions (held-out) ---
+            endpoint_md_selected = endpoint_epochs.metadata[selection]
+            for fold_i, (estimator, test_idx) in enumerate(
+                zip(fitted["estimator"], fitted["test_idxs"])
+            ):
+                X_test = X_window[test_idx]
+                y_pred_endpoint = estimator.predict(X_test)
+                all_endpoint_predictions.append(
+                    pd.DataFrame({
+                        "subject": subject,
+                        "phoneme_pair": phoneme_pair,
+                        "fold": fold_i,
+                        "epoch_idx": endpoint_md_selected.index.values[test_idx],
+                        "resampled": y_continuous[test_idx],
+                        "predicted_step": y_pred_endpoint,
+                    })
+                )
 
             # --- Apply to ambiguous trials ---
             ambiguous_epochs = epochs[
@@ -213,6 +232,14 @@ if all_regression_predictions:
     print(f"Regression predictions: {len(regression_predictions_df)} rows")
 else:
     print("No regression predictions to save")
+
+# %%
+if all_endpoint_predictions:
+    endpoint_predictions_df = pd.concat(all_endpoint_predictions, ignore_index=True)
+    endpoint_predictions_df.to_parquet(outdir / "endpoint_predictions.parquet")
+    print(f"Endpoint predictions: {len(endpoint_predictions_df)} rows")
+else:
+    print("No endpoint predictions to save")
 
 # %%
 if all_gradient_stats:

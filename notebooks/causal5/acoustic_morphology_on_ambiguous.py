@@ -46,7 +46,7 @@ import numpy as np
 import pandas as pd
 import polars as pl
 import scipy.stats
-from scipy.optimize import curve_fit
+from src.models.sigmoid import sigmoid_model, fit_model, SIGMOID_P0_LIST, SIGMOID_BOUNDS
 from sklearn.metrics import roc_auc_score
 from tqdm.auto import tqdm
 
@@ -854,36 +854,7 @@ print(f"Polarity computed for {len(site_polarity)} sites")
 # fold-averaged step means for final parameter estimates and plotting.
 
 # %%
-def sigmoid_model(x, a, x0, k):
-    """Sigmoid constrained so f(x0) = 0.5 (x0 is the true PSE)."""
-    return a / (1.0 + np.exp(-(x - x0) / k)) + (0.5 - a / 2.0)
-
-
-def fit_model(func, x, y, p0_list, bounds, maxfev=5000):
-    """Try multiple initial guesses, return (best_params, best_rss)."""
-    best_rss = np.inf
-    best_popt = None
-    for p0 in p0_list:
-        try:
-            popt, _ = curve_fit(func, x, y, p0=p0, bounds=bounds, maxfev=maxfev)
-            rss = float(np.sum((y - func(x, *popt)) ** 2))
-            if rss < best_rss:
-                best_rss = rss
-                best_popt = popt
-        except Exception:
-            pass
-    return best_popt, best_rss
-
-
-SIGMOID_P0_LIST = [
-    [1.0, 3.5, 0.5],
-    [-1.0, 3.5, 0.5],
-    [1.0, 3.5, 1.5],
-    [-1.0, 3.5, 1.5],
-    [1.0, 3.5, 5.0],
-    [-1.0, 3.5, 5.0],
-]
-SIGMOID_BOUNDS = ([-3, 0.5, 0.05], [3, 6.5, 1000.0])
+# sigmoid_model, fit_model, SIGMOID_P0_LIST, SIGMOID_BOUNDS imported from src.models.sigmoid
 
 # %%
 steps_all = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
