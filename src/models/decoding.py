@@ -1369,7 +1369,12 @@ def fit_train_test(
                 if "pca" in model.named_steps:
                     param_grid["pca__n_components"] = pca_num_components
                 elif "prep" in model.named_steps:
-                    param_grid["prep__pca__pca__n_components"] = pca_num_components
+                    if isinstance(model.named_steps["prep"], ColumnTransformer):
+                        # ColumnTransformer → named transformer "pca" → make_pipeline → PCA
+                        param_grid["prep__pca__pca__n_components"] = pca_num_components
+                    else:
+                        # make_pipeline(StandardScaler(), PCA()) → auto-named "pca" step
+                        param_grid["prep__pca__n_components"] = pca_num_components
 
             gs = GridSearchCV(
                 model,
