@@ -880,8 +880,10 @@ SIGMOID_P0_LIST = [
     [-1.0, 3.5, 0.5],
     [1.0, 3.5, 1.5],
     [-1.0, 3.5, 1.5],
+    [1.0, 3.5, 5.0],
+    [-1.0, 3.5, 5.0],
 ]
-SIGMOID_BOUNDS = ([-3, 0.5, 0.05], [3, 6.5, 5.0])
+SIGMOID_BOUNDS = ([-3, 0.5, 0.05], [3, 6.5, 1000.0])
 
 # %%
 steps_all = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
@@ -944,10 +946,12 @@ for _, site_row in tqdm(
         row["sigmoid_x0"] = float(popt[1])
         row["sigmoid_k"] = float(popt[2])
         row["sigmoid_r2"] = 1.0 - ss_res / ss_tot if ss_tot > 0 else np.nan
+        row["sigmoid_effectively_linear"] = float(popt[2]) > 10.0
     else:
         row.update({
             "sigmoid_a": np.nan,
             "sigmoid_x0": np.nan, "sigmoid_k": np.nan, "sigmoid_r2": np.nan,
+            "sigmoid_effectively_linear": np.nan,
         })
 
     # Per-fold parameter stability
@@ -1022,11 +1026,23 @@ print("Saved ideal_model_shapes.pdf")
 # %%
 fig, axes = plt.subplots(1, 3, figsize=(14, 4))
 
+PSE_RANGE = (2.0, 5.0)
 valid = model_comparison_df.dropna(subset=["sigmoid_k"])
+valid = valid[valid["sigmoid_x0"].between(*PSE_RANGE)]
 
-# k distribution
+# k distribution — bin "effectively linear" sites (k > 10) together
 ax = axes[0]
-ax.hist(valid["sigmoid_k"], bins=25, color="tomato", edgecolor="k", alpha=0.8)
+k_thresh = 10.0
+k_sigmoidal = valid.loc[valid["sigmoid_k"] <= k_thresh, "sigmoid_k"]
+n_linear = (valid["sigmoid_k"] > k_thresh).sum()
+bins_sig = np.linspace(0, k_thresh, 20)
+ax.hist(k_sigmoidal, bins=bins_sig, color="tomato", edgecolor="k", alpha=0.8)
+# Add a single bar for all effectively-linear sites
+if n_linear > 0:
+    bar_width = bins_sig[1] - bins_sig[0]
+    ax.bar(k_thresh + bar_width / 2, n_linear, width=bar_width,
+           color="gray", edgecolor="k", alpha=0.8, label=f"linear (k>{k_thresh:.0f}, n={n_linear})")
+    ax.legend(fontsize=8)
 ax.set_xlabel("Fitted sigmoid k (steepness)")
 ax.set_ylabel("Count")
 ax.set_title(f"Steepness distribution (n={len(valid)})\nsmall k = categorical")
@@ -1074,31 +1090,54 @@ n_excluded = len(valid_all) - len(valid)
 print(f"PSE filter: keeping {len(valid)}/{len(valid_all)} sites "
       f"(excluded {n_excluded} with x0 outside {PSE_RANGE})")
 
-# k vs AUC
+# k vs AUC — cap effectively-linear sites at threshold
 ax = axes[0]
+k_thresh = 10.0
+k_display = valid["sigmoid_k"].clip(upper=k_thresh)
+is_linear = valid["sigmoid_k"] > k_thresh
 sc = ax.scatter(
-    valid["phon_roc_auc"],
-    valid["sigmoid_k"],
-    c=valid["sigmoid_r2"],
+    valid.loc[~is_linear, "phon_roc_auc"],
+    k_display[~is_linear],
+    c=valid.loc[~is_linear, "sigmoid_r2"],
     cmap="viridis",
     alpha=0.6,
     edgecolors="k",
     linewidths=0.4,
     s=30,
 )
-ax.errorbar(
-    valid["phon_roc_auc"],
-    valid["sigmoid_k"],
-    yerr=valid["sigmoid_k_fold_std"].fillna(0),
-    fmt="none",
-    ecolor="gray",
-    elinewidth=0.5,
-    alpha=0.4,
+ax.scatter(
+    valid.loc[is_linear, "phon_roc_auc"],
+    k_display[is_linear],
+    c="gray",
+    alpha=0.6,
+    edgecolors="k",
+    linewidths=0.4,
+    s=30,
+    marker="^",
+    label=f"linear (k>{k_thresh:.0f}, n={is_linear.sum()})",
 )
-r_k, p_k = scipy.stats.pearsonr(valid["phon_roc_auc"], valid["sigmoid_k"])
+# # Clip error bars so they don't extend past the threshold
+# _k_vals = valid.loc[~is_linear, "sigmoid_k"]
+# _k_err = valid.loc[~is_linear, "sigmoid_k_fold_std"].fillna(0)
+# _err_lower = np.minimum(_k_err, _k_vals).clip(lower=0)
+# _err_upper = np.minimum(_k_err, k_thresh - _k_vals).clip(lower=0)
+# ax.errorbar(
+#     valid.loc[~is_linear, "phon_roc_auc"],
+#     _k_vals,
+#     yerr=[_err_lower, _err_upper],
+#     fmt="none",
+#     ecolor="gray",
+#     elinewidth=0.5,
+#     alpha=0.4,
+# )
+ax.axhline(k_thresh, color="gray", linestyle=":", linewidth=1, alpha=0.5)
+# Correlation computed on non-linear sites only
+valid_sig = valid[~is_linear]
+r_k, p_k = scipy.stats.pearsonr(valid_sig["phon_roc_auc"], valid_sig["sigmoid_k"])
 ax.set_xlabel("phon_roc_auc")
 ax.set_ylabel("Fitted sigmoid k (steepness)")
-ax.set_title(f"Steepness vs. AUC  r={r_k:.2f}, p={p_k:.3g}")
+ax.set_title(f"Steepness vs. AUC  r={r_k:.2f}, p={p_k:.3g}\n(excluding {is_linear.sum()} linear sites)")
+ax.legend(fontsize=8)
 plt.colorbar(sc, ax=ax, label="sigmoid R²")
 
 # x0 vs AUC
