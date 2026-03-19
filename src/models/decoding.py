@@ -243,7 +243,7 @@ from loguru import logger as L
 from sklearn.base import BaseEstimator
 from sklearn.compose import ColumnTransformer
 from sklearn.decomposition import PCA
-from sklearn.linear_model import LogisticRegression, LogisticRegressionCV
+from sklearn.linear_model import LogisticRegression, LogisticRegressionCV, Ridge
 from sklearn.metrics import (
     check_scoring,
     log_loss,
@@ -254,6 +254,7 @@ from sklearn.metrics._scorer import _check_multimetric_scoring, _MultimetricScor
 from sklearn.model_selection import (
     GridSearchCV,
     KFold,
+    ShuffleSplit,
     StratifiedKFold,
     cross_validate,
     train_test_split,
@@ -1412,6 +1413,130 @@ def fit_train_test(
         results.append(scores_dict)
 
     # Concatenate results from all repeats
+    if len(results) == 0:
+        return None
+
+    fitted = {
+        k: np.concatenate([r[k] for r in results])
+        if isinstance(results[0][k], np.ndarray)
+        else list(itertools.chain.from_iterable(r[k] for r in results))
+        for k in results[0].keys()
+    }
+    return fitted
+
+
+def fit_train_test_regression(
+    X,
+    y,
+    scoring: list[str],
+    test_fraction=0.2,
+    num_folds=3,
+    alpha_range: tuple[float, float] = (-3, 6),
+    alpha_grid_size: int = 10,
+    pca_num_components: Optional[float | Literal["auto"]] = None,
+    num_repeats=5,
+    n_jobs=None,
+    random_state=42,
+):
+    """Repeated train/test regression with Ridge + optional PCA, mirroring fit_train_test.
+
+    Designed for continuous targets (e.g. morph step). Uses Ridge regression
+    with GridSearchCV over regularization alpha and optional PCA components.
+
+    Args:
+        X: Feature matrix (n_samples, n_features).
+        y: Continuous target vector (n_samples,).
+        scoring: List of scoring metrics (e.g. ["r2", "neg_mean_squared_error"]).
+        alpha_range: (min_exp, max_exp) for log10 alpha grid.
+        alpha_grid_size: Number of alpha values in grid.
+        pca_num_components: PCA variance ratio(s) to search. "auto" → [0.25, 0.5, 0.9].
+        num_repeats: Number of random train/test splits.
+
+    Returns:
+        dict with keys:
+            train_{metric}, test_{metric}: arrays of shape (num_repeats,)
+            train_idxs, test_idxs: lists of index arrays
+            estimator: list of fitted GridSearchCV objects
+        Returns None if all repeats are skipped.
+    """
+    seeds = np.random.RandomState(random_state).randint(0, 10000, num_repeats)
+
+    results = []
+    for i, seed in enumerate(seeds):
+        X_train, X_test, y_train, y_test, idxs_train, idxs_test = train_test_split(
+            X,
+            y,
+            np.arange(len(X)),
+            test_size=test_fraction,
+            shuffle=True,
+            random_state=seed,
+        )
+
+        if len(X_train) < num_folds:
+            L.warning(
+                f"Skipping repeat with seed {seed}: only {len(X_train)} training "
+                f"samples for {num_folds} inner CV folds."
+            )
+            continue
+
+        cv_inner = ShuffleSplit(
+            n_splits=num_folds, test_size=0.2, random_state=seed
+        )
+
+        alphas = np.logspace(*alpha_range, alpha_grid_size).tolist()
+        pca_num_components_resolved = (
+            [0.25, 0.5, 0.9] if pca_num_components == "auto" else pca_num_components
+        )
+
+        pipeline = []
+        if pca_num_components_resolved is not None and X.shape[1] > 1:
+            pca_init = (
+                pca_num_components_resolved[0]
+                if isinstance(pca_num_components_resolved, list)
+                else pca_num_components_resolved
+            )
+            pipeline.append(
+                ("prep", make_pipeline(StandardScaler(), PCA(n_components=pca_init)))
+            )
+        else:
+            pipeline.append(("prep", StandardScaler()))
+
+        pipeline.append(("reg", Ridge(fit_intercept=True)))
+        model = Pipeline(pipeline)
+
+        param_grid = {"reg__alpha": alphas}
+        if (
+            pca_num_components_resolved is not None
+            and X.shape[1] > 1
+            and isinstance(pca_num_components_resolved, list)
+        ):
+            param_grid["prep__pca__n_components"] = pca_num_components_resolved
+
+        gs = GridSearchCV(
+            model,
+            param_grid,
+            cv=cv_inner,
+            scoring="r2",
+            refit=True,
+            n_jobs=n_jobs,
+        )
+        gs.fit(X_train, y_train)
+
+        scorers = _check_multimetric_scoring(gs, scoring)
+        scorers = _MultimetricScorer(scorers=scorers)
+
+        train_scores = scorers(gs, X_train, y_train)
+        test_scores = scorers(gs, X_test, y_test)
+
+        scores_dict = {
+            **{f"train_{k}": np.array([v]) for k, v in train_scores.items()},
+            **{f"test_{k}": np.array([v]) for k, v in test_scores.items()},
+            "train_idxs": [idxs_train],
+            "test_idxs": [idxs_test],
+            "estimator": [gs],
+        }
+        results.append(scores_dict)
+
     if len(results) == 0:
         return None
 

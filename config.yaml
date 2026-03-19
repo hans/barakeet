@@ -36,6 +36,12 @@ analysis:
     stride: 2
     n_jobs: 4
 
+  multivariate:
+    window_sizes: [10]          # 100ms at 100Hz; robustness: [5, 10, 15]
+    stride: 2                   # match existing univariate pipeline
+    pca_num_components: "auto"  # GridSearchCV over [0.25, 0.5, 0.9]
+    n_jobs: 4
+
   sweep:
     phon_response_peak_thresholds: [0.55, 0.60, 0.65]
     behav_response_peak_thresholds: [0.005, 0.010, 0.020]

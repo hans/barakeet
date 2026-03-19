@@ -512,6 +512,102 @@ rule acoustic_morphology_on_ambiguous:
         )
 
 
+rule multivariate_temporal_dissociation:
+    """Sliding-window multivariate temporal dissociation for one subject.
+
+    Decodes acoustic identity and perceptual report using a sliding-window
+    multivariate decoder across time. Tests whether the double dissociation
+    (peak acoustic decoding early, peak perceptual decoding late) holds at
+    the population level.
+
+    NOTE: Electrode selection is a double-dip (overall responsiveness collapsed
+    across time). TODO: revisit with held-out selection.
+    """
+    input:
+        epochs        = "outputs/epochs_preprocessed/{subject}_epo.fif",
+        phon_peaks    = "outputs/causal5/acoustic_decoding_peaks/phon_peaks_df.parquet",
+        behav_summary = "outputs/causal5/behavior_decoding_single_electrode_summarize/{subject}/A_final_summary.csv",
+        notebook      = "notebooks/causal5/multivariate_temporal_dissociation.py",
+
+    output:
+        notebook         = "outputs/causal5/multivariate_temporal_dissociation/{subject}/notebook.ipynb",
+        acoustic_scores  = "outputs/causal5/multivariate_temporal_dissociation/{subject}/acoustic_scores.parquet",
+        perceptual_scores = "outputs/causal5/multivariate_temporal_dissociation/{subject}/perceptual_scores.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                epochs_path=str(input.epochs),
+                phon_peaks_path=str(input.phon_peaks),
+                behav_summary_path=str(input.behav_summary),
+                outdir=str(outdir),
+
+                window_sizes=config["analysis"]["multivariate"]["window_sizes"],
+                stride=config["analysis"]["multivariate"]["stride"],
+                pca_num_components=config["analysis"]["multivariate"]["pca_num_components"],
+                n_jobs=config["analysis"]["multivariate"]["n_jobs"],
+
+                phon_response_peak_threshold=config["analysis"]["phon_response_peak_threshold"],
+                behav_response_peak_threshold=config["analysis"]["behav_response_peak_threshold"],
+                epoch_tmin=config["analysis"]["epoch_tmin"],
+                epoch_sfreq=config["analysis"]["epoch_sfreq"],
+            ),
+        )
+
+
+rule multivariate_temporal_dissociation_all:
+    """Run multivariate temporal dissociation for all subjects."""
+    input:
+        expand(
+            "outputs/causal5/multivariate_temporal_dissociation/{subject}/notebook.ipynb",
+            subject=config["data"]["subjects"],
+        ),
+
+
+rule multivariate_gradient_perception:
+    """Population-level gradient perception from acoustically selective sites.
+
+    Trains ridge regression (with PCA) on endpoint trials to predict morph step,
+    then applies to ambiguous trials. If predictions track morph step continuously,
+    that's evidence for graded acoustic population coding despite individually
+    categorical electrodes. Includes permutation test for significance.
+    """
+    input:
+        all_epochs = expand(
+            "outputs/epochs_preprocessed/{subject}_epo.fif",
+            subject=config["data"]["subjects"],
+        ),
+        phon_peaks = "outputs/causal5/acoustic_decoding_peaks/phon_peaks_df.parquet",
+        notebook   = "notebooks/causal5/multivariate_gradient_perception.py",
+
+    output:
+        notebook              = "outputs/causal5/multivariate_gradient_perception/notebook.ipynb",
+        regression_predictions = "outputs/causal5/multivariate_gradient_perception/regression_predictions.parquet",
+        gradient_stats        = "outputs/causal5/multivariate_gradient_perception/gradient_stats.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                epochs_paths=list(input.all_epochs),
+                phon_peaks_path=str(input.phon_peaks),
+                outdir=str(outdir),
+
+                pca_num_components=config["analysis"]["multivariate"]["pca_num_components"],
+                n_jobs=config["analysis"]["multivariate"]["n_jobs"],
+
+                phon_response_peak_threshold=config["analysis"]["phon_response_peak_threshold"],
+                epoch_tmin=config["analysis"]["epoch_tmin"],
+                epoch_sfreq=config["analysis"]["epoch_sfreq"],
+            ),
+        )
+
+
 rule prepare_neurometrics:
     """Pre-compute PaperData for A_neurometrics visualisations.
 
