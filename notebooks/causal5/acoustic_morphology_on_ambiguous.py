@@ -17,23 +17,25 @@
 # # Acoustic response morphology on ambiguous inputs
 #
 # At acoustically selective electrodes (significant phon_roc_auc), this notebook
-# applies the endpoint-trained acoustic decoder to ambiguous trials (steps 2–5)
-# and asks: does the decoder remain confident (categorical account) or collapse
-# toward chance (intermediate / graded account)?
+# extracts raw HGA in each site's peak acoustic window and asks: does the neural
+# response remain categorically committed on ambiguous trials (steps 2–5), or does
+# it collapse toward the midpoint (graded account)?
 #
 # Key measures per site:
-#   - decoder_confidence = abs(decoder_proba - 0.5) on ambiguous vs. endpoint trials
-#   - ROC-AUC of acoustic decoder predicting behavior_categorical_forced on ambiguous trials
+#   - confidence = |hga_norm - 0.5| on ambiguous vs. endpoint trials
+#     (hga_norm is min-max normalized so step-1 mean=0, step-6 mean=1)
+#   - ROC-AUC of raw HGA predicting behavior_categorical_forced on ambiguous trials
 #     (AUC ≈ 0.5 = acoustic representation dissociates from percept;
 #      AUC >> 0.5 = acoustic representation aligns with percept)
+#   - Sigmoid neurometric fit: steepness k distinguishes categorical (small k) from graded (large k)
 #
 # Inputs:
-#   all_outcomes.parquet  — acoustic decoder predictions on all trials (from acoustic_decoding_single_electrode)
 #   phon_peaks_df.parquet — peak acoustic window per site (from acoustic_decoding_peaks)
-#   {subject}_epo.fif     — epoch files for metadata
+#   {subject}_epo.fif     — epoch files for HGA and metadata
+#   ax_discrimination_df.parquet — adjacent-step discrimination AUCs (from acoustic_ax_discrimination)
 #
 # Outputs:
-#   trial_df.parquet   — per-trial decoder outputs with metadata at peak acoustic window
+#   trial_df.parquet   — per-trial HGA with metadata at peak acoustic window
 #   site_stats.parquet — per-site summary statistics
 
 # %%
@@ -60,11 +62,6 @@ from src.viz_paper import phoneme_pair_enum, subject_enum
 
 # %% tags=["parameters"]
 all_epochs = list(Path("outputs/epochs_preprocessed").glob("*_epo.fif"))
-all_outcomes_paths = list(
-    Path("outputs/causal5/acoustic_decoding_single_electrode").glob(
-        "*/all_outcomes.parquet"
-    )
-)
 phon_peaks_path = "outputs/causal5/acoustic_decoding_peaks/phon_peaks_df.parquet"
 ax_discrimination_path = "outputs/causal5/acoustic_ax_discrimination/ax_discrimination_df.parquet"
 
@@ -93,40 +90,7 @@ acoustic_sites = phon_peaks.filter(
 print(f"Acoustic sites: {len(acoustic_sites)}")
 
 # %% [markdown]
-# ## Load decoder outcomes and filter to peak acoustic windows
-
-# %%
-outcomes = pl.concat(
-    [pl.read_parquet(p) for p in tqdm(all_outcomes_paths, desc="Loading all_outcomes")]
-).with_columns(
-    pl.col("subject").cast(subject_enum),
-    pl.col("phoneme_pair").cast(phoneme_pair_enum),
-)
-
-# keep only the acoustic category decoder (categorical_acoustic_cue measure)
-outcomes = outcomes.filter(pl.col("measure") == "categorical_acoustic_cue")
-
-# Filter to peak acoustic window per site by joining on (subject, electrode_idx, phoneme_pair)
-# and keeping only rows where (smin, smax) matches the peak window
-outcomes = outcomes.join(
-    acoustic_sites.select(["subject", "electrode_idx", "phoneme_pair", "smin", "smax"]),
-    on=["subject", "electrode_idx", "phoneme_pair", "smin", "smax"],
-    how="inner",
-)
-
-# Per-fold version: keep fold column for per-fold neurometric estimates
-# (each epoch appears once per fold as a held-out test trial)
-proba_by_trial_fold = outcomes  # already one row per (site, epoch, fold)
-
-# Average decoder_proba across CV folds per (site, epoch)
-proba_by_trial = outcomes.group_by(
-    ["subject", "electrode_idx", "phoneme_pair", "epoch_idx"]
-).agg(pl.col("decoder_proba").mean())
-
-print(f"Trials × sites: {len(proba_by_trial)}")
-
-# %% [markdown]
-# ## Load epoch metadata
+# ## Load epochs and metadata
 
 # %%
 all_md_rows = []
@@ -162,106 +126,121 @@ all_md = pl.from_pandas(pd.concat(all_md_rows, ignore_index=True)).with_columns(
 )
 
 # %% [markdown]
-# ## Per-site threshold calibration
+# ## Extract raw HGA at peak acoustic windows
 #
-# The acoustic decoder is optimized on ROC-AUC (rank-based), so `decoder_proba = 0.5`
-# is not necessarily the optimal decision boundary. For each site, find the threshold
-# that maximizes Youden's J (sensitivity + specificity - 1) on endpoint trials, then
-# shift all probabilities so that this threshold maps to 0.5. This makes
-# `|adjusted_proba - 0.5|` a meaningful confidence measure and ensures the sigmoid
-# constraint `f(x0) = 0.5` corresponds to the true PSE.
+# For each acoustic site, extract mean HGA amplitude in the peak acoustic window
+# for every trial. This replaces the decoder probability outputs and avoids
+# confounds from cross-fold hyperparameter variation.
 
 # %%
-from sklearn.metrics import roc_curve
+hga_records = []
+acoustic_sites_pd = acoustic_sites.select(
+    ["subject", "electrode_idx", "phoneme_pair", "smin", "smax"]
+).to_pandas()
 
+for subject, subj_sites in tqdm(
+    acoustic_sites_pd.groupby("subject", observed=True),
+    desc="Extracting HGA",
+    total=acoustic_sites_pd["subject"].nunique(),
+):
+    data_arr = epoch_data_cache[subject]  # (n_trials, n_channels, n_samples)
+    n_trials = data_arr.shape[0]
+    epoch_idxs = np.arange(n_trials)
+    for _, site_row in subj_sites.iterrows():
+        ei = int(site_row["electrode_idx"])
+        pp = site_row["phoneme_pair"]
+        smin_w, smax_w = int(site_row["smin"]), int(site_row["smax"])
+        # Vectorized: mean HGA across window for all trials at once
+        hga_vals = data_arr[:, ei, smin_w:smax_w].mean(axis=1)  # (n_trials,)
+        for epoch_idx, hga_val in zip(epoch_idxs, hga_vals):
+            hga_records.append({
+                "subject": subject,
+                "electrode_idx": ei,
+                "phoneme_pair": pp,
+                "epoch_idx": epoch_idx,
+                "hga_raw": float(hga_val),
+            })
 
-def find_optimal_threshold(y_true, y_score):
-    """Find the threshold maximizing Youden's J on the ROC curve."""
-    fpr, tpr, thresholds = roc_curve(y_true, y_score)
-    j_scores = tpr - fpr
-    best_idx = np.argmax(j_scores)
-    return float(thresholds[best_idx])
-
-
-# Join fold-level data with metadata, then compute per-(site, fold) thresholds
-_fold_with_md = proba_by_trial_fold.join(
-    all_md, on=["subject", "epoch_idx", "phoneme_pair"], how="left"
-)
-
-fold_threshold_records = []
-for (sub, ei, pp, fold), group in _fold_with_md.filter(
-    pl.col("resampled").is_in([1, 6])
-).group_by(["subject", "electrode_idx", "phoneme_pair", "fold"]):
-    gdf = group.to_pandas()
-    labels = (gdf["resampled"] == 6).astype(int).values  # 1 = cat-1 endpoint
-    probas = gdf["decoder_proba"].values
-    if len(np.unique(labels)) < 2 or len(labels) < 5:
-        continue
-    fold_threshold_records.append({
-        "subject": sub,
-        "electrode_idx": ei,
-        "phoneme_pair": pp,
-        "fold": fold,
-        "optimal_threshold": find_optimal_threshold(labels, probas),
-    })
-
-fold_threshold_df = pl.DataFrame(fold_threshold_records).with_columns(
+hga_by_trial = pl.DataFrame(hga_records).with_columns(
     pl.col("subject").cast(subject_enum),
     pl.col("phoneme_pair").cast(phoneme_pair_enum),
 )
+print(f"Trials × sites: {len(hga_by_trial)}")
 
-# Site-level threshold: mean across folds (used for fold-averaged trial_df)
-threshold_df = (
-    fold_threshold_df
-    .group_by(["subject", "electrode_idx", "phoneme_pair"])
-    .agg(pl.col("optimal_threshold").mean())
-)
-
-threshold_df.write_parquet(outdir / "site_thresholds.parquet")
-_thresh_vals = threshold_df["optimal_threshold"].to_numpy()
-print(f"Thresholds computed for {len(threshold_df)} sites × {fold_threshold_df['fold'].n_unique()} folds")
-print(f"  site-mean median threshold: {np.median(_thresh_vals):.3f}")
-print(f"  range: [{np.min(_thresh_vals):.3f}, {np.max(_thresh_vals):.3f}]")
+# %% [markdown]
+# ## Min-max normalization using endpoint means
+#
+# For each site, normalize HGA so that the endpoint with lower mean HGA
+# maps to 0 and the endpoint with higher mean HGA maps to 1. All curves
+# thus go 0→1, regardless of the site's acoustic tuning (/d/ vs /n/).
+# The sigmoid constraint f(x0) = 0.5 corresponds to the midpoint between
+# endpoint responses.
+#
+# We track `hga_polarity` per site: +1 if step 6 has higher HGA (curve
+# naturally rises from step 1→6), −1 if step 1 has higher HGA (curve is
+# flipped so it rises from step 1→6 in normalized space).
 
 # %%
-# Apply threshold shift: adjusted_proba = decoder_proba - threshold + 0.5
-# For fold-averaged trial_df: use site-level (fold-averaged) threshold
-_trial_with_md = proba_by_trial.join(
+# Join with metadata
+_trial_with_md = hga_by_trial.join(
     all_md, on=["subject", "epoch_idx", "phoneme_pair"], how="left"
+)
+
+# Compute per-site endpoint means for normalization
+endpoint_stats = (
+    _trial_with_md.filter(pl.col("resampled").is_in([1, 6]))
+    .group_by(["subject", "electrode_idx", "phoneme_pair", "resampled"])
+    .agg(pl.col("hga_raw").mean())
+    .pivot(on="resampled", index=["subject", "electrode_idx", "phoneme_pair"],
+           values="hga_raw")
+    .rename({"1.0": "mean_hga_step1", "6.0": "mean_hga_step6"})
+)
+
+# Drop sites with zero range (no acoustic selectivity — shouldn't exist after AUC filter)
+endpoint_stats = endpoint_stats.filter(
+    pl.col("mean_hga_step1") != pl.col("mean_hga_step6")
+)
+
+# Polarity: +1 if step6 > step1, −1 if step1 > step6
+# For normalization, always use (hga - low_endpoint) / (high_endpoint - low_endpoint)
+# so that hga_norm goes 0→1 from step 1→6 for all sites
+endpoint_stats = endpoint_stats.with_columns(
+    pl.when(pl.col("mean_hga_step6") > pl.col("mean_hga_step1"))
+    .then(pl.lit(1))
+    .otherwise(pl.lit(-1))
+    .alias("hga_polarity"),
+    # low/high endpoints for normalization
+    pl.min_horizontal("mean_hga_step1", "mean_hga_step6").alias("hga_low"),
+    pl.max_horizontal("mean_hga_step1", "mean_hga_step6").alias("hga_high"),
 )
 
 trial_df = (
     _trial_with_md
-    .join(threshold_df, on=["subject", "electrode_idx", "phoneme_pair"], how="left")
+    .join(endpoint_stats, on=["subject", "electrode_idx", "phoneme_pair"], how="inner")
     .with_columns(
-        (pl.col("decoder_proba") - pl.col("optimal_threshold") + 0.5).alias("decoder_proba_adjusted"),
+        # Raw min-max normalization: 0 at low endpoint, 1 at high endpoint
+        ((pl.col("hga_raw") - pl.col("hga_low"))
+         / (pl.col("hga_high") - pl.col("hga_low"))).alias("_hga_minmax"),
     )
     .with_columns(
-        (pl.col("decoder_proba_adjusted") - 0.5).abs().alias("confidence"),
-        pl.col("resampled").is_in([1, 6]).alias("is_endpoint"),
-        pl.col("resampled").is_in([2, 3, 4, 5]).alias("is_ambiguous"),
+        # Flip negative-polarity sites so all curves go 0→1 from step 1→6
+        pl.when(pl.col("hga_polarity") < 0)
+        .then(1.0 - pl.col("_hga_minmax"))
+        .otherwise(pl.col("_hga_minmax"))
+        .alias("hga_norm"),
+    )
+    .drop("_hga_minmax")
+    .with_columns(
+        (pl.col("hga_norm") - 0.5).abs().alias("confidence"),
+        pl.col("resampled").is_in([1, 6]).fill_null(False).alias("is_endpoint"),
+        pl.col("resampled").is_in([2, 3, 4, 5]).fill_null(False).alias("is_ambiguous"),
     )
 )
 
 trial_df.write_parquet(outdir / "trial_df.parquet")
 print(f"trial_df saved: {len(trial_df)} rows")
-
-# Per-fold trial frame: use per-fold thresholds so each fold's decoder
-# is calibrated with its own endpoint predictions
-trial_df_fold = (
-    _fold_with_md
-    .join(fold_threshold_df, on=["subject", "electrode_idx", "phoneme_pair", "fold"], how="left")
-    .with_columns(
-        (pl.col("decoder_proba") - pl.col("optimal_threshold") + 0.5).alias("decoder_proba_adjusted"),
-    )
-    .with_columns(
-        (pl.col("decoder_proba_adjusted") - 0.5).abs().alias("confidence"),
-        pl.col("resampled").is_in([1, 6]).alias("is_endpoint"),
-        pl.col("resampled").is_in([2, 3, 4, 5]).alias("is_ambiguous"),
-    )
-)
-trial_df_fold_pd = trial_df_fold.to_pandas()
-print(f"trial_df_fold: {len(trial_df_fold_pd)} rows (incl. fold dim)")
+_pol_counts = endpoint_stats["hga_polarity"].value_counts().to_pandas()
+print(f"Polarity distribution: {_pol_counts.to_dict()}")
 
 trial_df.head()
 
@@ -303,18 +282,16 @@ for _, row in tqdm(
     # AUC: 0.5 = same confidence, 0.0 = ambig uniformly less confident
     confidence_drop_auc = stat / (len(ambig) * len(endpoints))
 
-    # --- Decoder-behavior agreement on ambiguous trials ---
+    # --- HGA-behavior agreement on ambiguous trials ---
     ambig_nona = ambig.dropna(subset=["behavior_dummy_forced"])
     behavior_labels = (ambig_nona["behavior_dummy_forced"] > 0).astype(int)
-    auc_behavior_on_ambig = roc_auc_score(behavior_labels, ambig_nona["decoder_proba"])
+    auc_behavior_on_ambig = roc_auc_score(behavior_labels, ambig_nona["hga_raw"])
 
     # Same on endpoints (sanity check: should be ~1.0 for good acoustic sites)
     ep_nona = endpoints.dropna(subset=["behavior_dummy_forced"])
-    # On endpoints behavior and acoustic cue are almost always aligned; use acoustic_cue
-    # via decoder_proba directly
     ep_behavior_labels = (ep_nona["behavior_dummy_forced"] > 0).astype(int)
     auc_behavior_on_endpoints = roc_auc_score(
-        ep_behavior_labels, ep_nona["decoder_proba"]
+        ep_behavior_labels, ep_nona["hga_raw"]
     )
 
     site_records.append(
@@ -360,7 +337,7 @@ ax_discrimination_df.head()
 trial_pd = trial_df.to_pandas()
 
 # %% [markdown]
-# ### Fig 1 — Decoder confidence by morph step
+# ### Fig 1 — HGA confidence by morph step
 
 # %%
 fig, ax = plt.subplots(figsize=(7, 4))
@@ -383,11 +360,11 @@ for patch, step in zip(bp["boxes"], steps):
     patch.set_edgecolor("black")
 
 ax.axhline(
-    0, color="gray", linestyle="--", linewidth=1, label="chance confidence (proba=0.5)"
+    0, color="gray", linestyle="--", linewidth=1, label="midpoint (hga_norm=0.5)"
 )
 ax.set_xlabel("Morph step (1 = clear /d/ endpoint, 6 = clear /n/ endpoint)")
-ax.set_ylabel("Decoder confidence  |proba − 0.5|")
-ax.set_title("Acoustic decoder confidence by morph step\n(across all acoustic sites)")
+ax.set_ylabel("HGA confidence  |hga_norm − 0.5|")
+ax.set_title("Acoustic HGA confidence by morph step\n(across all acoustic sites)")
 ax.legend(fontsize=9)
 plt.tight_layout()
 fig.savefig(outdir / "confidence_by_step.pdf")
@@ -431,7 +408,7 @@ fig.savefig(outdir / "confidence_scatter.pdf")
 plt.close(fig)
 
 # %% [markdown]
-# ### Fig 3 — Decoder-behavior agreement distribution
+# ### Fig 3 — HGA-behavior agreement distribution
 
 # %%
 fig, axes = plt.subplots(1, 2, figsize=(10, 4), sharey=False)
@@ -447,11 +424,11 @@ for ax, col, title in [
     )
     t, p = scipy.stats.ttest_1samp(vals, popmean=0.5)
     ax.set_title(f"{title}\nmean={vals.mean():.3f}, t={t:.2f}, p={p:.3g}")
-    ax.set_xlabel("Acoustic decoder ROC-AUC\n(predicting behavior_categorical_forced)")
+    ax.set_xlabel("HGA ROC-AUC\n(predicting behavior_categorical_forced)")
     ax.set_ylabel("Number of sites")
     ax.legend(fontsize=9)
 
-plt.suptitle("Does the acoustic decoder predict behavior?", fontsize=12)
+plt.suptitle("Does acoustic HGA predict behavior?", fontsize=12)
 plt.tight_layout()
 fig.savefig(outdir / "behavior_agreement.pdf")
 plt.close(fig)
@@ -476,7 +453,7 @@ labels = {0: "Heard /d/ (or /b/ or /p/)", 1: "Heard /n/ (or /m/ or /b/)"}
 for beh, grp in site_trials.groupby("behavior_dummy_forced"):
     ax.scatter(
         grp["resampled"] + np.random.uniform(-0.15, 0.15, len(grp)),
-        grp["decoder_proba_adjusted"],
+        grp["hga_norm"],
         c=colors.get(beh, "gray"),
         alpha=0.35,
         s=15,
@@ -485,7 +462,7 @@ for beh, grp in site_trials.groupby("behavior_dummy_forced"):
 
 ax.axhline(0.5, color="gray", linestyle="--", linewidth=1)
 ax.set_xlabel("Morph step")
-ax.set_ylabel("Acoustic decoder P(/d/)")
+ax.set_ylabel("Normalized HGA")
 ax.set_title(
     f"Example site: {exemplar['subject']} elec {exemplar['electrode_idx']}"
     f" {exemplar['phoneme_pair']}\n"
@@ -494,16 +471,15 @@ ax.set_title(
 )
 ax.legend(fontsize=9)
 ax.set_xlim(0.5, 6.5)
-ax.set_ylim(-0.05, 1.05)
 plt.tight_layout()
 fig.savefig(outdir / "site_example.pdf")
 plt.close(fig)
 
 # %% [markdown]
-# ### Fig 5 — Sample catplots: decoder output by morph step (individual electrodes)
+# ### Fig 5 — Sample catplots: HGA by morph step (individual electrodes)
 #
 # Select a set of sites spanning the phon_roc_auc range. For each site, plot
-# per-trial decoder_proba by morph step, colored by reported percept, with the
+# per-trial hga_norm by morph step, colored by reported percept, with the
 # mean neurometric function overlaid as a line.
 
 # %%
@@ -533,17 +509,6 @@ sample_trials["site_label"] = sample_trials.apply(
     lambda r: label_map[(r["subject"], r["electrode_idx"], r["phoneme_pair"])], axis=1
 )
 
-# Per-fold version: used for fold-level neurometric lines in Fig 5
-sample_trials_fold = trial_df_fold_pd[
-    trial_df_fold_pd.apply(
-        lambda r: (r["subject"], r["electrode_idx"], r["phoneme_pair"]) in label_map,
-        axis=1,
-    )
-].copy()
-sample_trials_fold["site_label"] = sample_trials_fold.apply(
-    lambda r: label_map[(r["subject"], r["electrode_idx"], r["phoneme_pair"])], axis=1
-)
-
 # %%
 rng = np.random.default_rng(0)
 n_cols = 4
@@ -556,19 +521,17 @@ beh_labels = {0: "heard cat-0", 1: "heard cat-1"}
 
 for ax_idx, (_, site_row) in enumerate(sample_sites.iterrows()):
     ax = axes_flat[ax_idx]
-    # Use per-fold trial data for both scatter and lines so they are on
-    # the same scale (all_outcomes has one row per trial × model).
-    site_fold_data = sample_trials_fold[
-        sample_trials_fold["site_label"] == site_row["site_label"]
-    ].dropna(subset=["resampled", "decoder_proba_adjusted", "fold"])
+    site_data = sample_trials[
+        sample_trials["site_label"] == site_row["site_label"]
+    ].dropna(subset=["resampled", "hga_norm"])
 
-    # Per-behavior jittered scatter (per-fold trial values)
+    # Per-behavior jittered scatter
     for beh, color in beh_colors.items():
-        mask = site_fold_data["behavior_dummy_forced"] == beh
-        xvals = site_fold_data.loc[mask, "resampled"] + rng.uniform(-0.2, 0.2, mask.sum())
+        mask = site_data["behavior_dummy_forced"] == beh
+        xvals = site_data.loc[mask, "resampled"] + rng.uniform(-0.2, 0.2, mask.sum())
         ax.scatter(
             xvals,
-            site_fold_data.loc[mask, "decoder_proba_adjusted"],
+            site_data.loc[mask, "hga_norm"],
             c=color,
             alpha=0.3,
             s=8,
@@ -576,21 +539,8 @@ for ax_idx, (_, site_row) in enumerate(sample_sites.iterrows()):
             label=beh_labels[beh],
         )
 
-    # Per-fold neurometric lines (thin, behind the mean)
-    for fold_id, fold_grp in site_fold_data.groupby("fold"):
-        fold_means = fold_grp.groupby("resampled")["decoder_proba_adjusted"].mean().sort_index()
-        ax.plot(
-            fold_means.index,
-            fold_means.values,
-            "-",
-            color="gray",
-            alpha=0.4,
-            linewidth=0.7,
-            zorder=3,
-        )
-
-    # Overall mean neurometric line (across all folds)
-    means = site_fold_data.groupby("resampled")["decoder_proba_adjusted"].mean().sort_index()
+    # Mean neurometric line
+    means = site_data.groupby("resampled")["hga_norm"].mean().sort_index()
     ax.plot(means.index, means.values, "k-o", linewidth=1.5, markersize=4, zorder=5)
 
     # AX discrimination curve on secondary y-axis
@@ -614,19 +564,17 @@ for ax_idx, (_, site_row) in enumerate(sample_sites.iterrows()):
     ax.axhline(0.5, color="gray", linestyle="--", linewidth=0.8)
     ax.set_xticks([1, 2, 3, 4, 5, 6])
     ax.set_xlim(0.5, 6.5)
-    # ax.set_ylim(-0.05, 1.05)
     ax.set_title(
         f"{site_row['site_label']}\nAUC={site_row['phon_roc_auc']:.2f}", fontsize=7.5
     )
     ax.set_xlabel("Morph step")
     if ax_idx % n_cols == 0:
-        ax.set_ylabel("Decoder P(cat-1)")
+        ax.set_ylabel("Normalized HGA")
 
 # Global legend using last axis
 handles = [
     plt.scatter([], [], c=beh_colors[0], alpha=0.6, s=20, label="heard cat-0"),
     plt.scatter([], [], c=beh_colors[1], alpha=0.6, s=20, label="heard cat-1"),
-    plt.Line2D([0], [0], color="gray", linewidth=0.8, label="per-fold mean"),
     plt.Line2D(
         [0],
         [0],
@@ -634,7 +582,7 @@ handles = [
         linewidth=1.5,
         marker="o",
         markersize=4,
-        label="overall mean",
+        label="mean",
     ),
     plt.Line2D(
         [0],
@@ -647,7 +595,7 @@ handles = [
         label="AX discrim. AUC",
     ),
 ]
-fig.legend(handles=handles, loc="lower right", fontsize=9, ncol=5)
+fig.legend(handles=handles, loc="lower right", fontsize=9, ncol=4)
 fig.suptitle(
     "Neurometric function at individual acoustic sites (sorted by AUC, low→high)",
     fontsize=11,
@@ -801,57 +749,27 @@ print("Saved hga_timecourse_sample.pdf")
 # %% [markdown]
 # ## HGA-based acoustic polarity per site
 #
-# Polarity = sign(mean HGA at step 1 − mean HGA at step 6) within each site's
-# peak acoustic window. Positive = electrode responds more strongly to cat-0 (step 1).
-# Computed from raw HGA, not decoder outputs (which are always oriented P(cat-1)).
-
-# %%
-site_polarity: dict[tuple, float] = {}
-trial_pd_by_subject = trial_pd.groupby("subject")
-
-for subject, subj_sites in acoustic_sites.select(
-    ["subject", "electrode_idx", "phoneme_pair", "smin", "smax"]
-).to_pandas().groupby("subject", observed=True):
-    data_arr = epoch_data_cache[subject]
-    subj_trials = trial_pd_by_subject.get_group(subject) if subject in trial_pd["subject"].values else None
-    if subj_trials is None:
-        continue
-    for _, site_row in subj_sites.iterrows():
-        ei = int(site_row["electrode_idx"])
-        pp = site_row["phoneme_pair"]
-        smin_w, smax_w = int(site_row["smin"]), int(site_row["smax"])
-        site_t = subj_trials[
-            (subj_trials["electrode_idx"] == ei) & (subj_trials["phoneme_pair"] == pp)
-        ]
-        idx1 = site_t[site_t["resampled"] == 1.0]["epoch_idx"].dropna().astype(int).values
-        idx6 = site_t[site_t["resampled"] == 6.0]["epoch_idx"].dropna().astype(int).values
-        if len(idx1) == 0 or len(idx6) == 0:
-            site_polarity[(subject, ei, pp)] = np.nan
-            continue
-        mean1 = data_arr[idx1, ei, smin_w:smax_w].mean()
-        mean6 = data_arr[idx6, ei, smin_w:smax_w].mean()
-        site_polarity[(subject, ei, pp)] = float(np.sign(mean1 - mean6))
-
-print(f"Polarity computed for {len(site_polarity)} sites")
+# Polarity was already computed during normalization (in endpoint_stats).
+# hga_norm is consistently oriented: 0→1 from step 1→6 for all sites,
+# regardless of which endpoint has higher raw HGA. No additional flipping
+# is needed for downstream analyses.
 
 
 # %% [markdown]
 # ## Neurometric sigmoid fits with free steepness
 #
 # For each acoustic site, fit a sigmoid to the neurometric function
-# (mapping from morph step to mean decoder_proba):
+# (mapping from morph step to mean hga_norm):
 #
 #   f(x; a, x0, k) = a / (1 + exp(-(x - x0) / k)) + (0.5 - a/2)
 #
 # Three free parameters: amplitude a, PSE x0, and steepness k.
 # The offset is constrained so that f(x0) = 0.5, making x0 the
-# true PSE (the morph step where decoder output crosses 0.5).
+# true PSE (the morph step where normalized HGA crosses 0.5,
+# i.e., the midpoint between endpoint responses).
 # The fitted k is the key descriptor:
 # - Small k (→ 0): step-function, categorical encoding
 # - Large k (→ ∞): nearly linear, graded tracking of acoustics
-#
-# Procedure: fit per CV fold to get stability estimates, then fit to
-# fold-averaged step means for final parameter estimates and plotting.
 
 # %%
 # sigmoid_model, fit_model, SIGMOID_P0_LIST, SIGMOID_BOUNDS imported from src.models.sigmoid
@@ -867,34 +785,21 @@ for _, site_row in tqdm(
     ei = site_row["electrode_idx"]
     pp = site_row["phoneme_pair"]
 
-    site_fold = trial_df_fold_pd[
-        (trial_df_fold_pd["subject"] == sub)
-        & (trial_df_fold_pd["electrode_idx"] == ei)
-        & (trial_df_fold_pd["phoneme_pair"] == pp)
-    ].dropna(subset=["resampled", "decoder_proba_adjusted", "fold"])
+    site_trials = trial_pd[
+        (trial_pd["subject"] == sub)
+        & (trial_pd["electrode_idx"] == ei)
+        & (trial_pd["phoneme_pair"] == pp)
+    ].dropna(subset=["resampled", "hga_norm"])
 
-    if len(site_fold) == 0:
+    if len(site_trials) == 0:
         continue
 
-    # Per-fold fits for stability estimates
-    fold_params = []  # list of (a, x0, k) per fold
-    for fold_id, fold_grp in site_fold.groupby("fold"):
-        means = fold_grp.groupby("resampled")["decoder_proba_adjusted"].mean().reindex(steps_all)
-        valid = means.dropna()
-        if len(valid) < 5:
-            continue
-
-        x = valid.index.values.astype(float)
-        y = valid.values
-        popt, _ = fit_model(sigmoid_model, x, y, SIGMOID_P0_LIST, SIGMOID_BOUNDS)
-        if popt is not None:
-            fold_params.append(popt)
-
-    # Fit to overall (fold-averaged) step means
-    overall_means = site_fold.groupby("resampled")["decoder_proba_adjusted"].mean().reindex(
-        steps_all
-    )
+    # Fit to per-step mean hga_norm
+    overall_means = site_trials.groupby("resampled")["hga_norm"].mean().reindex(steps_all)
     overall_valid = overall_means.dropna()
+    if len(overall_valid) < 5:
+        continue
+
     x_all = overall_valid.index.values.astype(float)
     y_all = overall_valid.values
 
@@ -925,27 +830,9 @@ for _, site_row in tqdm(
             "sigmoid_effectively_linear": np.nan,
         })
 
-    # Per-fold parameter stability
-    if fold_params:
-        fp = np.array(fold_params)
-        row["sigmoid_k_fold_mean"] = float(np.mean(fp[:, 2]))
-        row["sigmoid_k_fold_std"] = float(np.std(fp[:, 2]))
-        row["sigmoid_x0_fold_mean"] = float(np.mean(fp[:, 1]))
-        row["sigmoid_x0_fold_std"] = float(np.std(fp[:, 1]))
-        row["n_folds_fit"] = len(fold_params)
-    else:
-        row.update({
-            "sigmoid_k_fold_mean": np.nan, "sigmoid_k_fold_std": np.nan,
-            "sigmoid_x0_fold_mean": np.nan, "sigmoid_x0_fold_std": np.nan,
-            "n_folds_fit": 0,
-        })
-
-    # Normalized step probas for clustering
-    early_polarity = site_polarity.get((sub, ei, pp), np.nan)
+    # Per-step hga_norm means (already polarity-corrected, all go 0→1)
     for s in steps_all:
         val = overall_means.get(s, np.nan)
-        if not np.isnan(early_polarity) and early_polarity < 0 and not np.isnan(val):
-            val = 1.0 - val
         row[f"norm_proba_step{int(s)}"] = (
             float(val) if not np.isnan(val) else np.nan
         )
@@ -1045,6 +932,63 @@ plt.close(fig)
 print("Saved sigmoid_parameter_distributions.pdf")
 
 # %% [markdown]
+# ### Sigmoid Fig 2b — PSE distribution by subject and phoneme pair
+#
+# Shows that PSEs are well spread across subjects and phoneme pairs,
+# so graded population-level responses aren't an artifact of averaging
+# across sites with different categorical boundaries.
+
+# %%
+import seaborn as sns
+
+_valid_pse = model_comparison_df.dropna(subset=["sigmoid_x0"]).copy()
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+# Panel 1: PSE by subject (strip + box)
+ax = axes[0]
+sns.boxplot(
+    data=_valid_pse, x="subject", y="sigmoid_x0",
+    color="lightgray", fliersize=0, ax=ax,
+)
+sns.stripplot(
+    data=_valid_pse, x="subject", y="sigmoid_x0", hue="phoneme_pair",
+    dodge=True, alpha=0.7, size=5, ax=ax,
+)
+ax.axhline(3.5, color="gray", linestyle="--", linewidth=1, label="midpoint (3.5)")
+ax.set_xlabel("Subject")
+ax.set_ylabel("Fitted PSE (x0)")
+ax.set_title("PSE distribution by subject")
+ax.tick_params(axis="x", rotation=45)
+ax.legend(fontsize=7, title="Phoneme pair", loc="upper right")
+
+# Panel 2: PSE by phoneme pair (strip + violin)
+ax = axes[1]
+sns.violinplot(
+    data=_valid_pse, x="phoneme_pair", y="sigmoid_x0",
+    color="lightgray", inner=None, alpha=0.4, ax=ax,
+)
+sns.stripplot(
+    data=_valid_pse, x="phoneme_pair", y="sigmoid_x0", hue="subject",
+    dodge=True, alpha=0.7, size=4, ax=ax,
+)
+ax.axhline(3.5, color="gray", linestyle="--", linewidth=1)
+ax.set_xlabel("Phoneme pair")
+ax.set_ylabel("Fitted PSE (x0)")
+ax.set_title("PSE distribution by phoneme pair")
+ax.legend(fontsize=6, title="Subject", loc="upper right", ncol=2)
+
+fig.suptitle(
+    "PSE spread across subjects and phoneme pairs\n"
+    "(diverse PSEs → population gradedness is not an averaging artifact)",
+    fontsize=11,
+)
+plt.tight_layout()
+fig.savefig(outdir / "pse_by_subject_phoneme.pdf", bbox_inches="tight")
+plt.close(fig)
+print("Saved pse_by_subject_phoneme.pdf")
+
+# %% [markdown]
 # ### Sigmoid Fig 3 — Steepness vs. acoustic decoding quality
 #
 # Filtered to sites with well-centered PSE (x0 ∈ [2, 5]). Sites with
@@ -1087,20 +1031,6 @@ ax.scatter(
     marker="^",
     label=f"linear (k>{k_thresh:.0f}, n={is_linear.sum()})",
 )
-# # Clip error bars so they don't extend past the threshold
-# _k_vals = valid.loc[~is_linear, "sigmoid_k"]
-# _k_err = valid.loc[~is_linear, "sigmoid_k_fold_std"].fillna(0)
-# _err_lower = np.minimum(_k_err, _k_vals).clip(lower=0)
-# _err_upper = np.minimum(_k_err, k_thresh - _k_vals).clip(lower=0)
-# ax.errorbar(
-#     valid.loc[~is_linear, "phon_roc_auc"],
-#     _k_vals,
-#     yerr=[_err_lower, _err_upper],
-#     fmt="none",
-#     ecolor="gray",
-#     elinewidth=0.5,
-#     alpha=0.4,
-# )
 ax.axhline(k_thresh, color="gray", linestyle=":", linewidth=1, alpha=0.5)
 # Correlation computed on non-linear sites only
 valid_sig = valid[~is_linear]
@@ -1122,15 +1052,6 @@ sc = ax.scatter(
     edgecolors="k",
     linewidths=0.4,
     s=30,
-)
-ax.errorbar(
-    valid["phon_roc_auc"],
-    valid["sigmoid_x0"],
-    yerr=valid["sigmoid_x0_fold_std"].fillna(0),
-    fmt="none",
-    ecolor="gray",
-    elinewidth=0.5,
-    alpha=0.4,
 )
 ax.axhline(3.5, color="gray", linestyle="--", linewidth=1)
 r_x0, p_x0 = scipy.stats.pearsonr(valid["phon_roc_auc"], valid["sigmoid_x0"])
@@ -1175,11 +1096,11 @@ if n_extreme > 0:
         ax = axes_flat_ext[ax_idx]
         sub, ei, pp = erow["subject"], erow["electrode_idx"], erow["phoneme_pair"]
 
-        site_data = trial_df_fold_pd[
-            (trial_df_fold_pd["subject"] == sub)
-            & (trial_df_fold_pd["electrode_idx"] == ei)
-            & (trial_df_fold_pd["phoneme_pair"] == pp)
-        ].dropna(subset=["resampled", "decoder_proba_adjusted", "fold"])
+        site_data = trial_pd[
+            (trial_pd["subject"] == sub)
+            & (trial_pd["electrode_idx"] == ei)
+            & (trial_pd["phoneme_pair"] == pp)
+        ].dropna(subset=["resampled", "hga_norm"])
 
         # Per-behavior jittered scatter
         for beh, color in beh_colors.items():
@@ -1188,12 +1109,12 @@ if n_extreme > 0:
                 -0.2, 0.2, mask.sum()
             )
             ax.scatter(
-                xvals, site_data.loc[mask, "decoder_proba_adjusted"],
+                xvals, site_data.loc[mask, "hga_norm"],
                 c=color, alpha=0.3, s=8, linewidths=0,
             )
 
         # Mean neurometric
-        means = site_data.groupby("resampled")["decoder_proba_adjusted"].mean().sort_index()
+        means = site_data.groupby("resampled")["hga_norm"].mean().sort_index()
         ax.plot(means.index, means.values, "k-o", linewidth=1.5, markersize=4, zorder=3)
 
         # Sigmoid fit
@@ -1216,7 +1137,7 @@ if n_extreme > 0:
         )
         ax.set_xlabel("Morph step")
         if ax_idx % n_cols_ext == 0:
-            ax.set_ylabel("Decoder P(cat-1)")
+            ax.set_ylabel("Normalized HGA")
 
     # Hide unused axes
     for ax_idx in range(n_extreme, len(axes_flat_ext)):
@@ -1257,19 +1178,19 @@ axes_flat_mc = axes.flatten()
 for ax_idx, (_, site_row) in enumerate(sample_sites.iterrows()):
     ax = axes_flat_mc[ax_idx]
 
-    site_fold_data = sample_trials_fold[
-        sample_trials_fold["site_label"] == site_row["site_label"]
-    ].dropna(subset=["resampled", "decoder_proba_adjusted", "fold"])
+    site_data = sample_trials[
+        sample_trials["site_label"] == site_row["site_label"]
+    ].dropna(subset=["resampled", "hga_norm"])
 
     # Per-behavior jittered scatter
     for beh, color in beh_colors.items():
-        mask = site_fold_data["behavior_dummy_forced"] == beh
-        xvals = site_fold_data.loc[mask, "resampled"] + rng.uniform(
+        mask = site_data["behavior_dummy_forced"] == beh
+        xvals = site_data.loc[mask, "resampled"] + rng.uniform(
             -0.2, 0.2, mask.sum()
         )
         ax.scatter(
             xvals,
-            site_fold_data.loc[mask, "decoder_proba_adjusted"],
+            site_data.loc[mask, "hga_norm"],
             c=color,
             alpha=0.3,
             s=8,
@@ -1278,7 +1199,7 @@ for ax_idx, (_, site_row) in enumerate(sample_sites.iterrows()):
 
     # Overall mean neurometric line
     means = (
-        site_fold_data.groupby("resampled")["decoder_proba_adjusted"].mean().sort_index()
+        site_data.groupby("resampled")["hga_norm"].mean().sort_index()
     )
     ax.plot(means.index, means.values, "k-o", linewidth=1.5, markersize=4, zorder=3)
 
@@ -1315,7 +1236,7 @@ for ax_idx, (_, site_row) in enumerate(sample_sites.iterrows()):
     )
     ax.set_xlabel("Morph step")
     if ax_idx % n_cols_mc == 0:
-        ax.set_ylabel("Decoder P(cat-1)")
+        ax.set_ylabel("Normalized HGA")
 
 # Legend
 model_handles = [
@@ -1338,33 +1259,31 @@ print("Saved catplots_sigmoid_fits.pdf")
 # %% [markdown]
 # ## Electrode clustering by neurometric curve shape
 #
-# Cluster electrodes by the *shape* of their raw neurometric curve — mean
-# decoder_proba per morph step, computed directly from trial_pd with no polarity
-# correction. (Polarity correction is appropriate for sigmoid fitting but not
-# here: it would artificially invert some curves and create spurious clusters.)
+# Cluster electrodes by the *shape* of their neurometric curve — mean
+# hga_norm per morph step. Since hga_norm is already polarity-corrected
+# (all curves go 0→1 from step 1→6), the curves are directly comparable.
 #
 # Before clustering we subtract each site's curve minimum to remove y-intercept
-# differences (driven by overall HGA level or decoder calibration), leaving
-# only the trajectory shape. We then divide by the per-site range so that
-# amplitude differences don't dominate distance.
+# differences, leaving only the trajectory shape. We then divide by the per-site
+# range so that amplitude differences don't dominate distance.
 #
-# k is chosen via silhouette score over k=2..6.
+# k is chosen via silhouette score over k=3..9.
 
 # %%
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 
-# Raw mean decoder_proba_adjusted per (site, step) — no polarity correction
+# Mean hga_norm per (site, step)
 _raw_means = (
     trial_df.group_by(["subject", "electrode_idx", "phoneme_pair", "resampled"])
-    .agg(pl.col("decoder_proba_adjusted").mean())
+    .agg(pl.col("hga_norm").mean())
     .sort(["subject", "electrode_idx", "phoneme_pair", "resampled"])
     .to_pandas()
 )
 _raw_wide = _raw_means.pivot_table(
     index=["subject", "electrode_idx", "phoneme_pair"],
     columns="resampled",
-    values="decoder_proba_adjusted",
+    values="hga_norm",
 )
 _raw_wide.columns = [f"raw_proba_step{int(c)}" for c in _raw_wide.columns]
 _raw_wide = _raw_wide.reset_index()
@@ -1515,7 +1434,7 @@ for _cl in sorted(nm_clust["cluster"].unique()):
         f"Cluster {_cl}  (n={len(_members)}, AUC={_mean_auc:.2f})", fontsize=9
     )
     if _cl == 0:
-        ax.set_ylabel("Identification\n(normalized decoder output)")
+        ax.set_ylabel("Identification\n(normalized HGA)")
     ax.axhline(0, color="gray", linestyle="--", linewidth=0.5)
     ax.set_xticks([1, 2, 3, 4, 5, 6])
     ax.set_xlim(0.5, 6.5)
