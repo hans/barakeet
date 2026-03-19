@@ -1236,13 +1236,7 @@ def fit_train_test(
     # the minority class has at least num_folds training examples.
     min_label_count = np.min(np.unique(y, return_counts=True)[1])
     if (1 - test_fraction) * min_label_count < num_folds:
-        num_folds = int(np.floor((1 - test_fraction) * min_label_count))
-        if num_folds < 2:
-            L.warning(
-                f"Skipping: insufficient samples for cross-validation "
-                f"(min_label_count={min_label_count}, would need num_folds={num_folds})."
-            )
-            return None
+        num_folds = max(1, int(np.floor((1 - test_fraction) * min_label_count)))
         L.warning(
             f"Reducing num_folds to {num_folds} due to limited class samples per fold."
         )
@@ -1356,6 +1350,8 @@ def fit_train_test(
                 )
             else:
                 pipeline.append(("prep", make_pipeline(StandardScaler(), pca_m)))
+        else:
+            pipeline.append(("prep", StandardScaler()))
 
         solver = "liblinear" if num_classes == 2 else "saga"
         logreg_kwargs = dict(
