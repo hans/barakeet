@@ -334,6 +334,10 @@ rule ganong_decoding_inspect_population:
                 ganong_predictions_path=str(input.ganong_predictions),
                 behav_summary_paths=list(input.behav_summaries),
                 all_epochs=list(input.all_epochs),
+                epoch_tmin=config["analysis"]["epoch_tmin"],
+                epoch_sfreq=config["analysis"]["epoch_sfreq"],
+                window_size=config["analysis"]["decoding"]["window_size"],
+                behav_peak_post_offset_s=config["analysis"]["behav_peak_post_offset_s"],
                 outdir=outdir,
             ),
         )
