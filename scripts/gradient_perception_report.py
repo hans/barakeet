@@ -349,7 +349,7 @@ def build_permutation_nulls(data, pdf):
 
 
 def build_neural_vs_behavioral(data, pdf):
-    """Neural and behavioral psychometric functions on non-mismatch trials."""
+    """Neural and behavioral psychometric functions (within-completion average)."""
     reg_pred = data["reg_pred"]
     endpoint_pred = data["endpoint_pred"]
     all_md = data["all_md"]
@@ -361,33 +361,32 @@ def build_neural_vs_behavioral(data, pdf):
 
     conditions = stats[["subject", "phoneme_pair"]].values.tolist()
 
-    # Join mismatch info onto predictions
-    # For ambiguous trials
-    ambig_with_md = reg_pred.merge(
-        all_md[["subject", "epoch_idx", "mismatch"]].drop_duplicates(),
-        on=["subject", "epoch_idx"],
-        how="left",
-    )
-
     ncols = 4
     nrows = 3
     per_page = ncols * nrows
+
+    # Lexical evidence labels and ordering: left-biasing completion first
+    # phoneme_pair -> [(left_comp, label), (right_comp, label)]
+    _lex_order = {
+        "bm": [("bountiful", "/b/ (bountiful)"), ("mountains", "/m/ (mountains)")],
+        "dn": [("desolate", "/d/ (desolate)"), ("necessary", "/n/ (necessary)")],
+        "pb": [("penecillin", "/p/ (penicillin)"), ("beneficial", "/b/ (beneficial)")],
+    }
 
     for page_start in range(0, len(conditions), per_page):
         page_conds = conditions[page_start:page_start + per_page]
         fig, axes = plt.subplots(nrows, ncols, figsize=(11, 8.5),
                                  squeeze=False)
         fig.suptitle(
-            "Neural vs Behavioral Psychometric Functions (non-mismatch trials)",
+            "Neural vs Behavioral Psychometric Functions (by lexical context)",
             fontsize=12, fontweight="bold", y=0.98,
         )
 
         for idx, (subj, pp) in enumerate(page_conds):
             ax = axes[idx // ncols, idx % ncols]
 
-            # Filter to non-mismatch ambiguous trials
-            cond = ambig_with_md.query(
-                "subject == @subj and phoneme_pair == @pp and mismatch == -1"
+            cond = reg_pred.query(
+                "subject == @subj and phoneme_pair == @pp"
             )
 
             if len(cond) == 0:
@@ -400,50 +399,77 @@ def build_neural_vs_behavioral(data, pdf):
                 resampled=("resampled", "first"),
                 predicted_step=("predicted_step", "mean"),
                 behavior=("behavior_categorical_forced", "first"),
+                word_end=("word_end", "first"),
             ).reset_index()
 
             steps = sorted(trial_means.resampled.unique())
+            # Order completions by lexical evidence (left-biasing first)
+            lex_order = _lex_order.get(pp)
+            if lex_order:
+                completions = [c for c, _ in lex_order
+                               if c in trial_means.word_end.values]
+            else:
+                completions = sorted(trial_means.word_end.unique())
 
-            # Neural psychometric: normalize predicted step to [0, 1]
-            # using the full range of predictions
-            all_cond_pred = reg_pred.query(
-                "subject == @subj and phoneme_pair == @pp"
-            )
-            pred_all = all_cond_pred.groupby("epoch_idx")["predicted_step"].mean()
-
-            # Also get endpoint predictions for normalization
+            # Normalize to [0, 1] using mean endpoint predictions as anchors
+            # (matches acoustic_morphology_on_ambiguous normalization)
             if endpoint_pred is not None:
                 ep_cond = endpoint_pred.query(
                     "subject == @subj and phoneme_pair == @pp"
                 )
-                ep_trial = ep_cond.groupby("epoch_idx")["predicted_step"].mean()
-                all_preds = pd.concat([pred_all, ep_trial])
+                ep_trial = ep_cond.groupby("epoch_idx").agg(
+                    resampled=("resampled", "first"),
+                    predicted_step=("predicted_step", "mean"),
+                ).reset_index()
+                mean_at_1 = ep_trial.query("resampled == 1")["predicted_step"].mean()
+                mean_at_6 = ep_trial.query("resampled == 6")["predicted_step"].mean()
             else:
-                all_preds = pred_all
+                mean_at_1, mean_at_6 = 1.0, 6.0
+            p_low = min(mean_at_1, mean_at_6)
+            p_high = max(mean_at_1, mean_at_6)
+            p_range = p_high - p_low if (p_high - p_low) > 0 else 1
+            # Polarity: ensure curve goes 0→1 from step 1→6
+            flip = mean_at_1 > mean_at_6
 
-            p_min, p_max = all_preds.min(), all_preds.max()
-            p_range = p_max - p_min if (p_max - p_min) > 0 else 1
-
+            # Neural: within-completion averaged
             neural_by_step = []
-            behav_by_step = []
             for step in steps:
-                st = trial_means.query("resampled == @step")
-                # Neural: proportion of trials where prediction > midpoint
-                neural_prop = ((st.predicted_step - p_min) / p_range).mean()
-                neural_by_step.append(neural_prop)
-                # Behavioral: proportion reporting "right" phoneme (=1)
-                valid_behav = st.behavior.dropna()
-                if len(valid_behav) > 0:
-                    behav_prop = (valid_behav == 1).mean()
-                else:
-                    behav_prop = np.nan
-                behav_by_step.append(behav_prop)
+                neural_per_comp = []
+                for comp in completions:
+                    st = trial_means.query(
+                        "resampled == @step and word_end == @comp"
+                    )
+                    if len(st) == 0:
+                        continue
+                    normed = (st.predicted_step - p_low) / p_range
+                    if flip:
+                        normed = 1.0 - normed
+                    neural_per_comp.append(normed.mean())
+                neural_by_step.append(
+                    np.mean(neural_per_comp) if neural_per_comp else np.nan
+                )
 
             color = PAIR_COLORS.get(pp, "gray")
             ax.plot(steps, neural_by_step, "o-", color=color, ms=4, lw=1.5,
                     label="Neural")
-            ax.plot(steps, behav_by_step, "s--", color="gray", ms=4, lw=1.2,
-                    alpha=0.7, label="Behavioral")
+
+            # Behavioral: separate curve per completion (lexical context)
+            comp_styles = [("s-", 0.8), ("^--", 0.5)]
+            for ci, comp in enumerate(completions):
+                comp_trials = trial_means.query("word_end == @comp")
+                behav_by_step = []
+                for step in steps:
+                    st = comp_trials.query("resampled == @step")
+                    valid = st.behavior.dropna()
+                    if len(valid) > 0:
+                        behav_by_step.append((valid == 1).mean())
+                    else:
+                        behav_by_step.append(np.nan)
+                style, alpha = comp_styles[ci]
+                lex_dict = {c: l for c, l in _lex_order.get(pp, [])}
+                label = lex_dict.get(comp, comp)
+                ax.plot(steps, behav_by_step, style, color="gray", ms=4,
+                        lw=1.2, alpha=alpha, label=label)
 
             ax.set_title(f"{subj} {_phoneme_pair_label(pp)}", fontsize=8)
             ax.set_xlabel("Morph step", fontsize=7)

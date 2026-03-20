@@ -794,14 +794,16 @@ for _, site_row in tqdm(
     if len(site_trials) == 0:
         continue
 
-    # Fit to per-step mean hga_norm
-    overall_means = site_trials.groupby("resampled")["hga_norm"].mean().reindex(steps_all)
-    overall_valid = overall_means.dropna()
-    if len(overall_valid) < 5:
-        continue
+    # Fit sigmoid to trial-level data (not step means) for better constraints.
+    # Winsorize hga_norm per site to limit influence of outlier trials.
+    x_all = site_trials["resampled"].values.astype(float)
+    y_raw = site_trials["hga_norm"].values
+    lo, hi = np.percentile(y_raw, [2.5, 97.5])
+    y_all = np.clip(y_raw, lo, hi)
 
-    x_all = overall_valid.index.values.astype(float)
-    y_all = overall_valid.values
+    # Require at least 5 distinct steps represented
+    if len(np.unique(x_all)) < 5:
+        continue
 
     popt, rss = fit_model(sigmoid_model, x_all, y_all, SIGMOID_P0_LIST, SIGMOID_BOUNDS)
 
@@ -812,6 +814,7 @@ for _, site_row in tqdm(
         "phon_roc_auc": site_row["phon_roc_auc"],
         "smin": site_row["smin"],
         "smax": site_row["smax"],
+        "n_trials_fit": len(x_all),
     }
 
     if popt is not None:
@@ -831,6 +834,7 @@ for _, site_row in tqdm(
         })
 
     # Per-step hga_norm means (already polarity-corrected, all go 0→1)
+    overall_means = site_trials.groupby("resampled")["hga_norm"].mean().reindex(steps_all)
     for s in steps_all:
         val = overall_means.get(s, np.nan)
         row[f"norm_proba_step{int(s)}"] = (
