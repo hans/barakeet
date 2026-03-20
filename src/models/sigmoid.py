@@ -22,7 +22,8 @@ def sigmoid_model(x, a, x0, k):
         Point of subjective equality — morph step where output crosses 0.5.
     k : float
         Steepness parameter. Small k (→0) = categorical/step-function,
-        large k (→∞) = graded/linear. k > 10 is flagged as effectively linear.
+        large k (→∞) = graded/linear. k > 2 is flagged as effectively linear
+        (for a 6-step continuum, k=1 already spans most of the range).
     """
     return a / (1.0 + np.exp(-(x - x0) / k)) + (0.5 - a / 2.0)
 
@@ -52,10 +53,12 @@ SIGMOID_P0_LIST = [
     [1.0, 3.5, 5.0],
     [-1.0, 3.5, 5.0],
 ]
-SIGMOID_BOUNDS = ([-3, 0.5, 0.05], [3, 6.5, 1000.0])
+SIGMOID_BOUNDS = ([-3, 0.5, 0.05], [3, 6.5, 10.0])
 
-# Threshold above which k is considered "effectively linear"
-EFFECTIVELY_LINEAR_K = 10.0
+# Threshold above which k is considered "effectively linear".
+# For a 6-step continuum (x ∈ [1,6]), k=1 already produces a nearly
+# linear curve because the sigmoid argument (x-x0)/k spans only ~±2.5.
+EFFECTIVELY_LINEAR_K = 2.0
 
 
 def fit_sigmoid(x, y):

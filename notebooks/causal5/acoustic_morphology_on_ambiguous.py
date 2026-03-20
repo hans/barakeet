@@ -48,7 +48,7 @@ import numpy as np
 import pandas as pd
 import polars as pl
 import scipy.stats
-from src.models.sigmoid import sigmoid_model, fit_model, SIGMOID_P0_LIST, SIGMOID_BOUNDS
+from src.models.sigmoid import sigmoid_model, fit_model, SIGMOID_P0_LIST, SIGMOID_BOUNDS, EFFECTIVELY_LINEAR_K
 from sklearn.metrics import roc_auc_score
 from tqdm.auto import tqdm
 
@@ -196,10 +196,26 @@ endpoint_stats = (
     .rename({"1.0": "mean_hga_step1", "6.0": "mean_hga_step6"})
 )
 
-# Drop sites with zero range (no acoustic selectivity — shouldn't exist after AUC filter)
-endpoint_stats = endpoint_stats.filter(
-    pl.col("mean_hga_step1") != pl.col("mean_hga_step6")
+# Drop sites where endpoint mean difference is too small for meaningful normalization.
+# The acoustic decoder (phon_roc_auc) uses the full time-window pattern, so a site can
+# pass the AUC threshold while having near-identical mean HGA at the two endpoints.
+# Normalizing by a tiny denominator amplifies noise into extreme hga_norm values.
+# Threshold: require endpoint difference >= 10% of pooled within-endpoint std.
+_ep_trials = _trial_with_md.filter(pl.col("resampled").is_in([1, 6]))
+_ep_std = (
+    _ep_trials.group_by(["subject", "electrode_idx", "phoneme_pair"])
+    .agg(pl.col("hga_raw").std().alias("hga_endpoint_std"))
 )
+endpoint_stats = endpoint_stats.join(
+    _ep_std, on=["subject", "electrode_idx", "phoneme_pair"], how="left"
+)
+_n_before = len(endpoint_stats)
+endpoint_stats = endpoint_stats.filter(
+    (pl.col("mean_hga_step1") - pl.col("mean_hga_step6")).abs()
+    > 0.1 * pl.col("hga_endpoint_std").fill_null(0)
+).drop("hga_endpoint_std")
+print(f"Endpoint filter: {_n_before} → {len(endpoint_stats)} sites "
+      f"(dropped {_n_before - len(endpoint_stats)} with insufficient endpoint separation)")
 
 # Polarity: +1 if step6 > step1, −1 if step1 > step6
 # For normalization, always use (hga - low_endpoint) / (high_endpoint - low_endpoint)
@@ -564,6 +580,7 @@ for ax_idx, (_, site_row) in enumerate(sample_sites.iterrows()):
     ax.axhline(0.5, color="gray", linestyle="--", linewidth=0.8)
     ax.set_xticks([1, 2, 3, 4, 5, 6])
     ax.set_xlim(0.5, 6.5)
+    # ax.set_ylim(-1, 2)
     ax.set_title(
         f"{site_row['site_label']}\nAUC={site_row['phon_roc_auc']:.2f}", fontsize=7.5
     )
@@ -825,7 +842,7 @@ for _, site_row in tqdm(
         row["sigmoid_x0"] = float(popt[1])
         row["sigmoid_k"] = float(popt[2])
         row["sigmoid_r2"] = 1.0 - ss_res / ss_tot if ss_tot > 0 else np.nan
-        row["sigmoid_effectively_linear"] = float(popt[2]) > 10.0
+        row["sigmoid_effectively_linear"] = float(popt[2]) > EFFECTIVELY_LINEAR_K
     else:
         row.update({
             "sigmoid_a": np.nan,
@@ -858,7 +875,7 @@ model_comparison_df[["sigmoid_k", "sigmoid_x0", "sigmoid_r2"]].describe()
 fig, ax = plt.subplots(figsize=(6, 4))
 x_fine = np.linspace(1, 6, 200)
 
-k_examples = [0.2, 0.5, 1.0, 2.0, 5.0]
+k_examples = [0.1, 0.2, 0.5, 1.0, 2.0]
 cmap = plt.cm.Reds
 for i, k_val in enumerate(k_examples):
     color = cmap(0.4 + 0.5 * i / (len(k_examples) - 1))
@@ -894,7 +911,7 @@ valid = valid[valid["sigmoid_x0"].between(*PSE_RANGE)]
 
 # k distribution — bin "effectively linear" sites (k > 10) together
 ax = axes[0]
-k_thresh = 10.0
+k_thresh = EFFECTIVELY_LINEAR_K
 k_sigmoidal = valid.loc[valid["sigmoid_k"] <= k_thresh, "sigmoid_k"]
 n_linear = (valid["sigmoid_k"] > k_thresh).sum()
 bins_sig = np.linspace(0, k_thresh, 20)
@@ -1011,7 +1028,7 @@ print(f"PSE filter: keeping {len(valid)}/{len(valid_all)} sites "
 
 # k vs AUC — cap effectively-linear sites at threshold
 ax = axes[0]
-k_thresh = 10.0
+k_thresh = EFFECTIVELY_LINEAR_K
 k_display = valid["sigmoid_k"].clip(upper=k_thresh)
 is_linear = valid["sigmoid_k"] > k_thresh
 sc = ax.scatter(
@@ -1233,9 +1250,10 @@ for ax_idx, (_, site_row) in enumerate(sample_sites.iterrows()):
     ax.axhline(0.5, color="gray", linestyle="--", linewidth=0.8)
     ax.set_xticks([1, 2, 3, 4, 5, 6])
     ax.set_xlim(0.5, 6.5)
+    ax.set_ylim(-1, 2)
     ax.set_title(
         f"{site_row['site_label']}\n"
-        f"{site_row['site_label']}  AUC={site_row['phon_roc_auc']:.2f}\n{sig_label}",
+        f"AUC={site_row['phon_roc_auc']:.2f}\n{sig_label}",
         fontsize=7.5,
     )
     ax.set_xlabel("Morph step")
