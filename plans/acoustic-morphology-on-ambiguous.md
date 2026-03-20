@@ -1,30 +1,50 @@
 ## Acoustic response morphology on ambiguous inputs
-At acoustically selective electrodes (responding at amplitude X for /d/ and Y for /n/, X > Y), what happens on ambiguous trials? Three competing accounts: (1) responses are categorical — each trial elicits X or Y as if the input were unambiguous; (2) responses are intermediate — ambiguous items elicit something like (X+Y)/2, a fixed blend regardless of exact step; (3) responses are graded and track within-ambiguous acoustics — if steps 3 and 4 are both ambiguous, the response to step 3 is still larger than to step 4, reflecting the finer acoustic gradient.
 
-Adjudicate via model comparison on the acoustically selective sites. This is a question about how the auditory cortex encodes inputs that fall between learned categories — does it commit, hedge uniformly, or faithfully track sub-categorical acoustic detail?
+**Updated finding:** Most single-electrode acoustic responses are categorical — electrodes
+commit even on ambiguous input. The question is no longer "categorical vs. graded at single
+electrodes" but rather: can the system detect ambiguity, and at what level of organization?
+
+## Scientific questions
+
+### Q1: Single electrodes have limited continuum coverage
+A categorical single electrode can only discriminate adjacent steps that straddle its
+own PSE. Most electrode PSEs cluster at steps 3–4, so on average, single-electrode
+adjacent-step discrimination (AX) peaks at 3v4 and drops off at the edges (1v2, 5v6 —
+both steps fall on the same side of most electrodes' boundaries).
+
+This establishes the negative result: single electrodes cannot uniformly resolve
+fine-grained acoustic differences across the full continuum. The positive counterpart
+(multivariate decoder achieves uniform AX) belongs in the multivariate gradient
+perception analysis.
+
+### Q2: Gradient for graded perceptual resolution
+Even if single electrodes are categorical, does the population preserve enough
+within-ambiguous gradient to support graded perceptual resolution (e.g., more /d/
+choices at step 2 than step 3)? This connects to the multivariate gradient perception
+analysis: if the acoustic population code is graded (via heterogeneous categorical
+responses), that provides the input substrate for graded perceptual coding downstream.
 
 ## Implementation approach
 
-The primary analysis uses `all_outcomes.parquet` from `acoustic_decoding_single_electrode`,
-which applies the endpoint-trained acoustic decoder to ALL trials including ambiguous steps.
-Decoder confidence (`abs(decoder_proba - 0.5)`) on ambiguous trials distinguishes:
-- **Categorical**: confidence maintained on ambiguous steps (decoder commits)
-- **Intermediate or graded**: confidence collapses toward chance (decoder confused)
+### Adjacent-step discrimination (AX)
+Use `all_outcomes.parquet` from `acoustic_decoding_single_electrode` (endpoint-trained
+acoustic decoder applied to all trials). For each adjacent step pair (1v2, 2v3, ...,
+5v6), compute ROC-AUC of decoder_proba distinguishing the two steps:
 
-A secondary measure — ROC-AUC of acoustic decoder predicting `behavior_categorical_forced`
-on ambiguous trials — tests whether the representation aligns with or dissociates from percept.
+- **Single electrode:** AX per electrode, then average across electrodes per subject ×
+  phoneme pair. Expect peaked curve (best at 3v4, poor at edges).
 
-## Follow-up: graded vs. intermediate
+Report the average single-electrode AX curve (discrimination vs. continuum position).
 
-**Deprioritized.** The intermediate account (all ambiguous steps collapse equally to a fixed
-blend) is less of an important target right now. At the level of mean decoder_proba per step,
-intermediate and categorical can look similar — both predict a sharp transition. The key
-distinction is trial-level variance (bimodal vs. unimodal at ambiguous steps), which the
-confidence analysis already partially captures. The main model comparison (steep sigmoid vs.
-shallow sigmoid vs. linear) focuses on the more tractable categorical-vs-graded question.
+### Confidence analysis (secondary)
+Decoder confidence (`abs(decoder_proba - 0.5)`) on ambiguous trials at single-electrode
+level should remain high (categorical commitment). At the population level,
+inter-electrode disagreement (variance of decoder predictions across electrodes on the
+same trial) indexes ambiguity.
 
-Original note: The primary analysis does not distinguish graded from intermediate (both
-predict confidence collapse). To distinguish: inspect step-wise mean `decoder_proba`
-trajectory on ambiguous trials in the collapsed-confidence regime. Graded predicts a
-monotonic gradient (step 2 > 3 > 4 > 5 in confidence); intermediate predicts all ambiguous
-steps collapse equally.
+## Coordination with multivariate gradient perception
+
+These two analyses must be narrated together. If individual acoustic responses are
+categorical but the population is graded, that's an emergence story: categorical
+single-site responses + heterogeneous PSEs → graded population code. If individual
+responses were already graded, the population result would be less surprising.
