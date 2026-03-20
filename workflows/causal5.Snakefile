@@ -467,25 +467,22 @@ rule acoustic_ax_discrimination:
 rule acoustic_morphology_on_ambiguous:
     """Acoustic response morphology on ambiguous inputs at acoustically selective sites.
 
-    Applies the acoustic category decoder (trained on endpoints, steps 1 & 6) to
-    ambiguous trials (steps 2–5) and asks whether it remains confident (categorical
-    account) or collapses toward chance (intermediate/graded account).
+    Extracts raw HGA in each site's peak acoustic window and asks whether the
+    neural response remains categorically committed on ambiguous trials (steps 2–5)
+    or collapses toward the midpoint (graded account).
 
     Key measures per site:
-      - decoder_confidence on ambiguous vs. endpoint trials (abs(proba - 0.5))
-      - ROC-AUC of acoustic decoder predicting behavior on ambiguous trials
+      - HGA confidence on ambiguous vs. endpoint trials (|hga_norm - 0.5|)
+      - ROC-AUC of raw HGA predicting behavior on ambiguous trials
         (AUC ≈ 0.5 = dissociation; AUC >> 0.5 = acoustic drives percept)
+      - Sigmoid steepness k: small = categorical, large = graded
 
-    Runs after acoustic_decoding_peaks + acoustic_decoding_single_electrode;
-    does NOT require prepare_neurometrics.
+    Runs after acoustic_decoding_peaks + acoustic_ax_discrimination;
+    does NOT require acoustic_decoding_single_electrode or prepare_neurometrics.
     """
     input:
         all_epochs = expand(
             "outputs/epochs_preprocessed/{subject}_epo.fif",
-            subject=config["data"]["subjects"],
-        ),
-        all_outcomes = expand(
-            "outputs/causal5/acoustic_decoding_single_electrode/{subject}/all_outcomes.parquet",
             subject=config["data"]["subjects"],
         ),
         phon_peaks = "outputs/causal5/acoustic_decoding_peaks/phon_peaks_df.parquet",
@@ -505,7 +502,6 @@ rule acoustic_morphology_on_ambiguous:
             str(output.notebook),
             parameters=dict(
                 all_epochs=list(input.all_epochs),
-                all_outcomes_paths=list(input.all_outcomes),
                 phon_peaks_path=str(input.phon_peaks),
                 ax_discrimination_path=str(input.ax_discrimination_df),
                 outdir=str(outdir),
@@ -588,9 +584,11 @@ rule multivariate_gradient_perception:
         notebook   = "notebooks/causal5/multivariate_gradient_perception.py",
 
     output:
-        notebook              = "outputs/causal5/multivariate_gradient_perception/notebook.ipynb",
-        regression_predictions = "outputs/causal5/multivariate_gradient_perception/regression_predictions.parquet",
-        gradient_stats        = "outputs/causal5/multivariate_gradient_perception/gradient_stats.parquet",
+        notebook                = "outputs/causal5/multivariate_gradient_perception/notebook.ipynb",
+        regression_predictions  = "outputs/causal5/multivariate_gradient_perception/regression_predictions.parquet",
+        endpoint_predictions    = "outputs/causal5/multivariate_gradient_perception/endpoint_predictions.parquet",
+        gradient_stats          = "outputs/causal5/multivariate_gradient_perception/gradient_stats.parquet",
+        permutation_correlations = "outputs/causal5/multivariate_gradient_perception/permutation_correlations.parquet",
 
     run:
         outdir = Path(output.notebook).parent
@@ -610,6 +608,26 @@ rule multivariate_gradient_perception:
                 epoch_sfreq=config["analysis"]["epoch_sfreq"],
             ),
         )
+
+
+rule gradient_perception_report:
+    """PDF report for the multivariate gradient perception analysis."""
+    input:
+        regression_predictions = "outputs/causal5/multivariate_gradient_perception/regression_predictions.parquet",
+        endpoint_predictions   = "outputs/causal5/multivariate_gradient_perception/endpoint_predictions.parquet",
+        gradient_stats         = "outputs/causal5/multivariate_gradient_perception/gradient_stats.parquet",
+        permutation_correlations = "outputs/causal5/multivariate_gradient_perception/permutation_correlations.parquet",
+        all_md                 = "outputs/causal5/prepare_neurometrics/all_md.parquet",
+        script                 = "scripts/gradient_perception_report.py",
+
+    output:
+        report = "outputs/causal5/multivariate_gradient_perception/report.pdf",
+
+    shell:
+        "PYTHONPATH=. python {input.script} "
+        "--data-dir outputs/causal5/multivariate_gradient_perception "
+        "--all-md {input.all_md} "
+        "--output {output.report}"
 
 
 rule prepare_neurometrics:
