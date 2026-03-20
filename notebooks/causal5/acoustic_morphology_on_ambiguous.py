@@ -636,21 +636,26 @@ pair_labels = [f"{a}v{b}" for a, b in step_pairs]
 pair_midpoints = [(a + b) / 2.0 for a, b in step_pairs]
 
 # Mean ± SEM across sites for each step pair
+mean_aucs = []
+sem_aucs = []
 for i, (step_a, step_b) in enumerate(step_pairs):
     pair_data = ax_discrimination_df[
         (ax_discrimination_df["step_a"] == step_a)
         & (ax_discrimination_df["step_b"] == step_b)
     ]["roc_auc"]
-    mean_auc = pair_data.mean()
-    sem_auc = pair_data.std() / np.sqrt(len(pair_data))
-    ax.bar(
-        pair_midpoints[i], mean_auc - 0.5, bottom=0.5,
-        width=0.6, color="steelblue", edgecolor="k", alpha=0.8,
-    )
-    ax.errorbar(
-        pair_midpoints[i], mean_auc, yerr=sem_auc,
-        fmt="none", ecolor="k", capsize=4, linewidth=1.5,
-    )
+    mean_aucs.append(pair_data.mean())
+    sem_aucs.append(pair_data.std() / np.sqrt(len(pair_data)))
+
+mean_aucs = np.array(mean_aucs)
+sem_aucs = np.array(sem_aucs)
+ax.plot(
+    pair_midpoints, mean_aucs,
+    "D-", color="green", linewidth=1.2, markersize=5, zorder=5,
+)
+ax.fill_between(
+    pair_midpoints, mean_aucs - sem_aucs, mean_aucs + sem_aucs,
+    color="green", alpha=0.2,
+)
 
 ax.axhline(0.5, color="gray", linestyle="--", linewidth=1, label="chance")
 ax.set_xticks(pair_midpoints)
