@@ -18,10 +18,10 @@
 #
 # Ask whether graded acoustic information is recoverable from the population
 # of acoustically selective sites, even though individual electrodes appear
-# categorical. Train a ridge regression (with PCA preprocessing) on endpoint
-# trials to predict morph step, then apply to ambiguous trials. If predictions
-# track morph step continuously rather than snapping to endpoints, that's
-# evidence for graded acoustic population coding.
+# categorical. Train a logistic regression (with PCA preprocessing) on endpoint
+# trials to classify acoustic cue (/d/ vs /n/), then apply to ambiguous trials.
+# If the decoder probability tracks morph step continuously rather than snapping
+# to 0 or 1, that's evidence for graded acoustic population coding.
 
 # %%
 import os
@@ -50,7 +50,7 @@ import mne
 from src.data import add_metadata_features
 from src.models.decoding import (
     _prepare_decoding_population,
-    fit_train_test_regression,
+    fit_train_test,
 )
 from src.stimuli import POD_dict
 
@@ -126,21 +126,23 @@ for epochs_path in tqdm(epochs_paths, desc="Subjects"):
             windows=windows,
         )
 
-        for name, smin, smax, selection, X_window, _ in gen:
-            # Use continuous morph step as target instead of binary acoustic label
-            y_continuous = endpoint_epochs.metadata.resampled[selection].values.astype(float)
+        for name, smin, smax, selection, X_window, y_binary in gen:
+            # y_binary: categorical_acoustic_cue mapped to {0, 1}
+            # Also track continuous morph step for endpoint predictions
+            resampled_endpoint = endpoint_epochs.metadata.resampled[selection].values.astype(float)
 
-            fitted = fit_train_test_regression(
+            fitted = fit_train_test(
                 X_window,
-                y_continuous,
-                scoring=["r2", "neg_mean_squared_error"],
+                y_binary,
+                num_classes=2,
+                scoring=["roc_auc"],
                 pca_num_components=pca_num_components,
                 num_repeats=5,
                 n_jobs=n_jobs,
             )
 
             if fitted is None:
-                print(f"  {phoneme_pair}: regression failed (insufficient data)")
+                print(f"  {phoneme_pair}: classification failed (insufficient data)")
                 continue
 
             # --- Endpoint test-fold predictions (held-out) ---
@@ -149,15 +151,15 @@ for epochs_path in tqdm(epochs_paths, desc="Subjects"):
                 zip(fitted["estimator"], fitted["test_idxs"])
             ):
                 X_test = X_window[test_idx]
-                y_pred_endpoint = estimator.predict(X_test)
+                proba_endpoint = estimator.predict_proba(X_test)[:, 1]
                 all_endpoint_predictions.append(
                     pd.DataFrame({
                         "subject": subject,
                         "phoneme_pair": phoneme_pair,
                         "fold": fold_i,
                         "epoch_idx": endpoint_md_selected.index.values[test_idx],
-                        "resampled": y_continuous[test_idx],
-                        "predicted_step": y_pred_endpoint,
+                        "resampled": resampled_endpoint[test_idx],
+                        "decoder_proba": proba_endpoint,
                     })
                 )
 
@@ -181,7 +183,7 @@ for epochs_path in tqdm(epochs_paths, desc="Subjects"):
             ]
 
             for fold, estimator in enumerate(fitted["estimator"]):
-                y_pred = estimator.predict(X_ambig)
+                proba = estimator.predict_proba(X_ambig)[:, 1]
                 all_regression_predictions.append(
                     pd.DataFrame({
                         "subject": subject,
@@ -192,17 +194,17 @@ for epochs_path in tqdm(epochs_paths, desc="Subjects"):
                         "behavior_categorical_forced": ambig_md.behavior_categorical_forced.values
                         if "behavior_categorical_forced" in ambig_md.columns else np.nan,
                         "word_end": ambig_md.word_end.values,
-                        "predicted_step": y_pred,
+                        "decoder_proba": proba,
                     })
                 )
 
             # --- Gradient statistics ---
-            # Average predictions across folds, then correlate with morph step
+            # Average probabilities across folds, then correlate with morph step
             pred_df = pd.concat(all_regression_predictions[-len(fitted["estimator"]):])
-            mean_pred = pred_df.groupby("epoch_idx")["predicted_step"].mean()
+            mean_proba = pred_df.groupby("epoch_idx")["decoder_proba"].mean()
             morph_steps = pred_df.groupby("epoch_idx")["resampled"].first()
 
-            corr = np.corrcoef(morph_steps.values, mean_pred.values)[0, 1]
+            corr = np.corrcoef(morph_steps.values, mean_proba.values)[0, 1]
 
             all_gradient_stats.append({
                 "subject": subject,
@@ -210,13 +212,13 @@ for epochs_path in tqdm(epochs_paths, desc="Subjects"):
                 "n_electrodes": len(electrode_idxs),
                 "acoustic_smin": acoustic_smin,
                 "acoustic_smax": acoustic_smax,
-                "mean_test_r2": fitted["test_r2"].mean(),
+                "mean_test_roc_auc": fitted["test_roc_auc"].mean(),
                 "ambiguous_step_correlation": corr,
                 "n_ambiguous_trials": len(ambig_md),
                 "n_endpoint_trials": len(endpoint_epochs.metadata.query("phoneme_pair == @phoneme_pair")),
             })
 
-            print(f"  {phoneme_pair}: test R²={fitted['test_r2'].mean():.3f}, "
+            print(f"  {phoneme_pair}: test ROC-AUC={fitted['test_roc_auc'].mean():.3f}, "
                   f"ambiguous correlation={corr:.3f}")
 
 # %% [markdown]
@@ -314,17 +316,17 @@ for epochs_path in tqdm(epochs_paths, desc="Subjects (permutation)"):
             windows=windows,
         )
 
-        for name, smin, smax, selection, X_window, _ in gen:
-            y_continuous = endpoint_epochs.metadata.resampled[selection].values.astype(float)
+        for name, smin, smax, selection, X_window, y_binary in gen:
 
             rng = np.random.RandomState(42)
             for perm_i in tqdm(range(n_permutations), desc=f"{subject}/{phoneme_pair} perms", leave=False):
-                y_perm = rng.permutation(y_continuous)
+                y_perm = rng.permutation(y_binary)
 
-                fitted = fit_train_test_regression(
+                fitted = fit_train_test(
                     X_window,
                     y_perm,
-                    scoring=["r2"],
+                    num_classes=2,
+                    scoring=["roc_auc"],
                     pca_num_components=pca_num_components,
                     num_repeats=1,
                     n_jobs=n_jobs,
@@ -334,7 +336,7 @@ for epochs_path in tqdm(epochs_paths, desc="Subjects (permutation)"):
                 if fitted is None:
                     continue
 
-                y_pred = fitted["estimator"][0].predict(X_ambig)
+                y_pred = fitted["estimator"][0].predict_proba(X_ambig)[:, 1]
                 corr = np.corrcoef(ambig_md.resampled.values.astype(float), y_pred)[0, 1]
                 perm_correlations.append({
                     "subject": subject,

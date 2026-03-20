@@ -7,7 +7,7 @@ Loads precomputed parquets and produces a multi-page PDF with:
   3. Correlation summary (ambiguous-trial step correlations)
   4. Permutation null distributions
   5. Neural vs behavioral psychometric overlay (non-mismatch trials)
-  6. R-squared vs population size
+  6. ROC-AUC vs population size
 
 Usage:
     python scripts/gradient_perception_report.py \\
@@ -113,18 +113,15 @@ def build_neurometric_curves(data, pdf):
     # Compute mean predicted step per (subject, phoneme_pair, resampled)
     # across folds, for ambiguous trials
     ambig_means = (
-        reg_pred.groupby(["subject", "phoneme_pair", "resampled"])["predicted_step"]
+        reg_pred.groupby(["subject", "phoneme_pair", "resampled"])["decoder_proba"]
         .mean().reset_index()
     )
 
     # For endpoints, average across folds
-    if endpoint_pred is not None:
-        ep_means = (
-            endpoint_pred.groupby(["subject", "phoneme_pair", "resampled"])["predicted_step"]
-            .mean().reset_index()
-        )
-    else:
-        ep_means = None
+    ep_means = (
+        endpoint_pred.groupby(["subject", "phoneme_pair", "resampled"])["decoder_proba"]
+        .mean().reset_index()
+    )
 
     sigmoid_results = []
     ncols = 4
@@ -149,16 +146,15 @@ def build_neurometric_curves(data, pdf):
 
             steps, preds = [], []
             # Endpoints
-            if ep_means is not None:
-                ep = ep_means.query(
-                    "subject == @subj and phoneme_pair == @pp"
-                ).sort_values("resampled")
-                if len(ep) > 0:
-                    steps.extend(ep.resampled.values)
-                    preds.extend(ep.predicted_step.values)
+            ep = ep_means.query(
+                "subject == @subj and phoneme_pair == @pp"
+            ).sort_values("resampled")
+            if len(ep) > 0:
+                steps.extend(ep.resampled.values)
+                preds.extend(ep.decoder_proba.values)
 
             steps.extend(am.resampled.values)
-            preds.extend(am.predicted_step.values)
+            preds.extend(am.decoder_proba.values)
 
             steps = np.array(steps)
             preds = np.array(preds)
@@ -167,22 +163,13 @@ def build_neurometric_curves(data, pdf):
 
             ax.plot(steps, preds, "o-", color=color, ms=5, lw=1.5)
 
-            # Sigmoid fit
-            # Normalize predictions to [0, 1] for sigmoid fitting
-            pred_min, pred_max = preds.min(), preds.max()
-            pred_range = pred_max - pred_min
-            if pred_range > 0:
-                preds_norm = (preds - pred_min) / pred_range
-                sig = fit_sigmoid(steps, preds_norm)
-            else:
-                sig = None
+            # Sigmoid fit — decoder_proba is already in [0, 1]
+            sig = fit_sigmoid(steps, preds)
 
             if sig is not None:
                 x_fine = np.linspace(steps.min(), steps.max(), 100)
                 y_fine = sigmoid_model(x_fine, *sig["params"])
-                # Rescale back
-                y_fine_rescaled = y_fine * pred_range + pred_min
-                ax.plot(x_fine, y_fine_rescaled, "--", color="tomato",
+                ax.plot(x_fine, y_fine, "--", color="tomato",
                         lw=1.2, alpha=0.8)
                 k_str = f"k={sig['k']:.2f}"
                 if sig["effectively_linear"]:
@@ -197,12 +184,13 @@ def build_neurometric_curves(data, pdf):
                              fontsize=8)
 
             ax.set_xlabel("Morph step", fontsize=7)
-            ax.set_ylabel("Predicted step", fontsize=7)
+            ax.set_ylabel("P(step 6)", fontsize=7)
             ax.tick_params(labelsize=6)
             ax.set_xticks(range(1, 7))
+            ax.set_ylim(-0.05, 1.05)
 
-            # Reference line: identity
-            ax.plot([1, 6], [1, 6], ":", color="gray", lw=0.8, alpha=0.5)
+            # Reference line: chance
+            ax.axhline(0.5, ls=":", color="gray", lw=0.8, alpha=0.5)
 
         # Hide unused axes
         for idx in range(len(page_conds), nrows * ncols):
@@ -397,7 +385,7 @@ def build_neural_vs_behavioral(data, pdf):
             # Average predicted step across folds per trial
             trial_means = cond.groupby("epoch_idx").agg(
                 resampled=("resampled", "first"),
-                predicted_step=("predicted_step", "mean"),
+                decoder_proba=("decoder_proba", "mean"),
                 behavior=("behavior_categorical_forced", "first"),
                 word_end=("word_end", "first"),
             ).reset_index()
@@ -413,18 +401,15 @@ def build_neural_vs_behavioral(data, pdf):
 
             # Normalize to [0, 1] using mean endpoint predictions as anchors
             # (matches acoustic_morphology_on_ambiguous normalization)
-            if endpoint_pred is not None:
-                ep_cond = endpoint_pred.query(
-                    "subject == @subj and phoneme_pair == @pp"
-                )
-                ep_trial = ep_cond.groupby("epoch_idx").agg(
-                    resampled=("resampled", "first"),
-                    predicted_step=("predicted_step", "mean"),
-                ).reset_index()
-                mean_at_1 = ep_trial.query("resampled == 1")["predicted_step"].mean()
-                mean_at_6 = ep_trial.query("resampled == 6")["predicted_step"].mean()
-            else:
-                mean_at_1, mean_at_6 = 1.0, 6.0
+            ep_cond = endpoint_pred.query(
+                "subject == @subj and phoneme_pair == @pp"
+            )
+            ep_trial = ep_cond.groupby("epoch_idx").agg(
+                resampled=("resampled", "first"),
+                decoder_proba=("decoder_proba", "mean"),
+            ).reset_index()
+            mean_at_1 = ep_trial.query("resampled == 1")["decoder_proba"].mean()
+            mean_at_6 = ep_trial.query("resampled == 6")["decoder_proba"].mean()
             p_low = min(mean_at_1, mean_at_6)
             p_high = max(mean_at_1, mean_at_6)
             p_range = p_high - p_low if (p_high - p_low) > 0 else 1
@@ -441,7 +426,7 @@ def build_neural_vs_behavioral(data, pdf):
                     )
                     if len(st) == 0:
                         continue
-                    normed = (st.predicted_step - p_low) / p_range
+                    normed = (st.decoder_proba - p_low) / p_range
                     if flip:
                         normed = 1.0 - normed
                     neural_per_comp.append(normed.mean())
@@ -466,7 +451,7 @@ def build_neural_vs_behavioral(data, pdf):
                     else:
                         behav_by_step.append(np.nan)
                 style, alpha = comp_styles[ci]
-                lex_dict = {c: l for c, l in _lex_order.get(pp, [])}
+                lex_dict = dict(_lex_order.get(pp, []))
                 label = lex_dict.get(comp, comp)
                 ax.plot(steps, behav_by_step, style, color="gray", ms=4,
                         lw=1.2, alpha=alpha, label=label)
@@ -487,32 +472,141 @@ def build_neural_vs_behavioral(data, pdf):
         plt.close(fig)
 
 
+def build_neural_behavioral_alignment(data, sigmoid_df, pdf):
+    """Cross-subject alignment of neural and behavioral sigmoid parameters.
+
+    Fits sigmoids to each subject's behavioral psychometric function (averaged
+    across completions) and compares PSE (x0) and slope (k) to the neural
+    sigmoid fits.  Reports rank correlations (robust to unknown readout
+    transform) and scatter plots.
+    """
+    all_md = data["all_md"]
+
+    if all_md is None or sigmoid_df.empty:
+        return pd.DataFrame()
+
+    conditions = sigmoid_df[["subject", "phoneme_pair"]].values.tolist()
+
+    behav_fits = []
+    for subj, pp in conditions:
+        md = all_md.query("subject == @subj and phoneme_pair == @pp")
+        if len(md) == 0:
+            continue
+        # Behavioral psychometric: P(response==1) per step, averaged across
+        # completions (within-completion average to match neural curve)
+        behav_valid = md.dropna(subset=["behavior_categorical_forced"])
+        if len(behav_valid) == 0:
+            continue
+        steps = sorted(behav_valid.resampled.unique())
+        behav_by_step = []
+        for step in steps:
+            st = behav_valid.query("resampled == @step")
+            behav_by_step.append((st.behavior_categorical_forced == 1).mean())
+        steps = np.array(steps)
+        behav_by_step = np.array(behav_by_step)
+
+        bsig = fit_sigmoid(steps, behav_by_step)
+        if bsig is not None:
+            behav_fits.append({
+                "subject": subj, "phoneme_pair": pp,
+                "behav_x0": bsig["x0"], "behav_k": bsig["k"],
+                "behav_r2": bsig["r2"],
+            })
+
+    if not behav_fits:
+        return pd.DataFrame()
+
+    behav_df = pd.DataFrame(behav_fits)
+    merged = sigmoid_df.merge(behav_df, on=["subject", "phoneme_pair"], how="inner")
+    if len(merged) < 4:
+        return merged  # too few points for meaningful correlation
+
+    # --- Scatter plots ---
+    fig, axes = plt.subplots(1, 2, figsize=(11, 5))
+    fig.suptitle("Neural–Behavioral Sigmoid Alignment (cross-subject)",
+                 fontsize=13, fontweight="bold")
+
+    # PSE (x0) alignment
+    ax = axes[0]
+    for pp in ["bm", "dn", "pb"]:
+        sub = merged.query("phoneme_pair == @pp")
+        if len(sub) == 0:
+            continue
+        ax.scatter(sub.behav_x0, sub.x0, color=PAIR_COLORS[pp], s=50,
+                   alpha=0.8, edgecolors="white", lw=0.5,
+                   label=_phoneme_pair_label(pp))
+        for _, row in sub.iterrows():
+            ax.annotate(row.subject, (row.behav_x0 + 0.05, row.x0 + 0.05),
+                        fontsize=5.5, alpha=0.6)
+
+    rho_x0, p_x0 = scipy.stats.spearmanr(merged.behav_x0, merged.x0)
+    lims = [min(merged.behav_x0.min(), merged.x0.min()) - 0.3,
+            max(merged.behav_x0.max(), merged.x0.max()) + 0.3]
+    ax.plot(lims, lims, ":", color="gray", lw=0.8)
+    ax.set_xlim(lims)
+    ax.set_ylim(lims)
+    ax.set_xlabel("Behavioral PSE (x0)")
+    ax.set_ylabel("Neural PSE (x0)")
+    ax.set_title(f"PSE: ρ = {rho_x0:.3f}, p = {p_x0:.3f}", fontsize=10)
+    ax.legend(fontsize=8)
+
+    # Slope (k) alignment
+    ax = axes[1]
+    for pp in ["bm", "dn", "pb"]:
+        sub = merged.query("phoneme_pair == @pp")
+        if len(sub) == 0:
+            continue
+        ax.scatter(sub.behav_k, sub.k, color=PAIR_COLORS[pp], s=50,
+                   alpha=0.8, edgecolors="white", lw=0.5,
+                   label=_phoneme_pair_label(pp))
+        for _, row in sub.iterrows():
+            ax.annotate(row.subject, (row.behav_k + 0.02, row.k + 0.02),
+                        fontsize=5.5, alpha=0.6)
+
+    rho_k, p_k = scipy.stats.spearmanr(merged.behav_k, merged.k)
+    ax.set_xlabel("Behavioral slope (k)")
+    ax.set_ylabel("Neural slope (k)")
+    ax.set_title(f"Slope: ρ = {rho_k:.3f}, p = {p_k:.3f}", fontsize=10)
+    ax.legend(fontsize=8)
+
+    fig.tight_layout()
+    pdf.savefig(fig)
+    plt.close(fig)
+
+    # Store stats on the merged df for the summary page
+    merged.attrs["rho_x0"] = rho_x0
+    merged.attrs["p_x0"] = p_x0
+    merged.attrs["rho_k"] = rho_k
+    merged.attrs["p_k"] = p_k
+    return merged
+
+
 def build_r2_vs_population(stats, pdf):
-    """Scatter: test R-squared vs number of electrodes."""
+    """Scatter: test ROC-AUC vs number of electrodes."""
     fig, ax = plt.subplots(figsize=(7, 5))
-    fig.suptitle("Cross-Validated R\u00b2 vs Population Size",
+    fig.suptitle("Cross-Validated ROC-AUC vs Population Size",
                  fontsize=13, fontweight="bold")
 
     for pp in ["bm", "dn", "pb"]:
         sub = stats.query("phoneme_pair == @pp")
         if len(sub) == 0:
             continue
-        ax.scatter(sub.n_electrodes, sub.mean_test_r2,
+        ax.scatter(sub.n_electrodes, sub.mean_test_roc_auc,
                    color=PAIR_COLORS[pp], s=50, alpha=0.8,
                    edgecolors="white", lw=0.5,
                    label=_phoneme_pair_label(pp))
         for _, row in sub.iterrows():
             ax.annotate(row.subject,
-                        (row.n_electrodes + 0.2, row.mean_test_r2),
+                        (row.n_electrodes + 0.2, row.mean_test_roc_auc),
                         fontsize=5.5, alpha=0.6)
 
     # Correlation
-    r, p = scipy.stats.pearsonr(stats.n_electrodes, stats.mean_test_r2)
+    r, p = scipy.stats.pearsonr(stats.n_electrodes, stats.mean_test_roc_auc)
     ax.set_xlabel("Number of acoustically selective electrodes")
-    ax.set_ylabel("Mean test R\u00b2")
+    ax.set_ylabel("Mean test ROC-AUC")
     ax.set_title(f"r = {r:.3f}, p = {p:.3f}", fontsize=10)
     ax.legend(fontsize=9)
-    ax.axhline(0, color="gray", ls=":", lw=0.8)
+    ax.axhline(0.5, color="gray", ls=":", lw=0.8)
     fig.tight_layout()
     pdf.savefig(fig)
     plt.close(fig)
@@ -559,8 +653,8 @@ def main():
             f"Significant (p<0.05, permutation): {n_sig}/{len(stats)} ({100*n_sig/len(stats):.0f}%)",
             f"Mean ambiguous-trial correlation: {stats.ambiguous_step_correlation.mean():.3f}",
             "",
-            "Ridge regression with PCA trained on endpoint trials (steps 1, 6)",
-            "to predict morph step. Applied to ambiguous trials (steps 2-5).",
+            "Logistic regression with PCA trained on endpoint trials (steps 1, 6)",
+            "to classify acoustic cue. Applied to ambiguous trials (steps 2-5).",
             "Sigmoid fits characterize whether neurometric curves are categorical",
             "(small k) or graded (large k).",
         ], title="Multivariate Gradient Perception Report")
@@ -576,15 +670,15 @@ def main():
             "  is concatenated across electrodes to form a spatiotemporal feature vector",
             "  (n_electrodes x n_timepoints).",
             "",
-            "Regression model:",
-            "  Ridge regression with PCA preprocessing (auto component selection: 25%, 50%, 90%).",
+            "Classification model:",
+            "  Logistic regression with PCA preprocessing (auto component selection: 25%, 50%, 90%).",
             "  5 repeated train/test splits (80/20) with inner cross-validation for",
-            "  hyperparameter tuning (alpha, PCA components). Trained on endpoint trials",
-            "  (steps 1 and 6) with continuous morph step as target.",
+            "  hyperparameter tuning (C, PCA components). Trained on endpoint trials",
+            "  (steps 1 and 6) with binary acoustic cue as target.",
             "",
             "Evaluation:",
-            "  - Cross-validated R-squared on held-out endpoint trials",
-            "  - Pearson correlation between predicted and actual morph step on ambiguous trials",
+            "  - Cross-validated ROC-AUC on held-out endpoint trials",
+            "  - Pearson correlation between decoder probability and morph step on ambiguous trials",
             "  - Permutation test (100 shuffles) for significance of ambiguous-trial correlation",
             "",
             "Sigmoid fitting:",
@@ -610,6 +704,9 @@ def main():
         # --- Neural vs behavioral ---
         build_neural_vs_behavioral(data, pdf)
 
+        # --- Neural-behavioral sigmoid alignment ---
+        alignment_df = build_neural_behavioral_alignment(data, sigmoid_df, pdf)
+
         # --- R2 vs population size ---
         build_r2_vs_population(stats, pdf)
 
@@ -621,7 +718,7 @@ def main():
             f"Mean ambiguous-trial correlation: {stats.ambiguous_step_correlation.mean():.3f} "
             f"(range {stats.ambiguous_step_correlation.min():.3f} - "
             f"{stats.ambiguous_step_correlation.max():.3f})",
-            f"Mean test R-squared: {stats.mean_test_r2.mean():.3f}",
+            f"Mean test ROC-AUC: {stats.mean_test_roc_auc.mean():.3f}",
             "",
         ]
         if not sigmoid_df.empty:
@@ -636,6 +733,19 @@ def main():
                 f"  Median k: {sigmoid_df.k.median():.2f}",
                 "",
             ])
+        if len(alignment_df) > 0 and hasattr(alignment_df, "attrs"):
+            rho_x0 = alignment_df.attrs.get("rho_x0")
+            p_x0 = alignment_df.attrs.get("p_x0")
+            rho_k = alignment_df.attrs.get("rho_k")
+            p_k = alignment_df.attrs.get("p_k")
+            if rho_x0 is not None:
+                summary_lines.extend([
+                    "Neural-behavioral alignment (Spearman rank correlations):",
+                    f"  PSE (x0):  ρ = {rho_x0:.3f}, p = {p_x0:.3f}  (n = {len(alignment_df)})",
+                    f"  Slope (k): ρ = {rho_k:.3f}, p = {p_k:.3f}",
+                    "",
+                ])
+
         summary_lines.extend([
             "Interpretation:",
             "  The majority of population decoders show significant graded tracking",
