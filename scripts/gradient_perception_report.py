@@ -134,6 +134,7 @@ def build_neurometric_curves(data, pdf):
     stats = data["gradient_stats"]
 
     conditions = stats[["subject", "phoneme_pair"]].values.tolist()
+    auc_lookup = stats.set_index(["subject", "phoneme_pair"])["mean_test_roc_auc"].to_dict()
 
     # Compute mean predicted step per (subject, phoneme_pair, resampled)
     # across folds, for ambiguous trials
@@ -189,7 +190,8 @@ def build_neurometric_curves(data, pdf):
             preds_norm, ok = _normalize_to_endpoints(steps, preds)
             if not ok:
                 ax.plot(steps, preds, "o-", color=color, ms=5, lw=1.5)
-                ax.set_title(f"{subj} {_phoneme_pair_label(pp)}\nendpoints too close",
+                auc_val = auc_lookup.get((subj, pp), float("nan"))
+                ax.set_title(f"{subj} {_phoneme_pair_label(pp)}  AUC={auc_val:.2f}\nendpoints too close",
                              fontsize=8)
                 ax.set_xlabel("Morph step", fontsize=7)
                 ax.set_ylabel("Normalized P(step 6)", fontsize=7)
@@ -203,6 +205,7 @@ def build_neurometric_curves(data, pdf):
 
             sig = fit_sigmoid(steps, preds_norm)
 
+            auc_val = auc_lookup.get((subj, pp), float("nan"))
             if sig is not None:
                 x_fine = np.linspace(steps.min(), steps.max(), 100)
                 y_fine = sigmoid_model_2p(x_fine, *sig["params"])
@@ -211,13 +214,13 @@ def build_neurometric_curves(data, pdf):
                 k_str = f"k={sig['k']:.2f}"
                 if sig["effectively_linear"]:
                     k_str += " (linear)"
-                ax.set_title(f"{subj} {_phoneme_pair_label(pp)}\n{k_str}",
+                ax.set_title(f"{subj} {_phoneme_pair_label(pp)}  AUC={auc_val:.2f}\n{k_str}",
                              fontsize=8)
                 sigmoid_results.append({
                     "subject": subj, "phoneme_pair": pp, **sig,
                 })
             else:
-                ax.set_title(f"{subj} {_phoneme_pair_label(pp)}\nfit failed",
+                ax.set_title(f"{subj} {_phoneme_pair_label(pp)}  AUC={auc_val:.2f}\nfit failed",
                              fontsize=8)
 
             ax.set_xlabel("Morph step", fontsize=7)
@@ -299,6 +302,7 @@ def build_neural_vs_behavioral(data, pdf):
         return
 
     conditions = stats[["subject", "phoneme_pair"]].values.tolist()
+    auc_lookup = stats.set_index(["subject", "phoneme_pair"])["mean_test_roc_auc"].to_dict()
 
     ncols = 4
     nrows = 3
@@ -328,8 +332,9 @@ def build_neural_vs_behavioral(data, pdf):
                 "subject == @subj and phoneme_pair == @pp"
             )
 
+            auc_val = auc_lookup.get((subj, pp), float("nan"))
             if len(cond) == 0:
-                ax.set_title(f"{subj} {_phoneme_pair_label(pp)}\nno data",
+                ax.set_title(f"{subj} {_phoneme_pair_label(pp)}  AUC={auc_val:.2f}\nno data",
                              fontsize=8)
                 continue
 
@@ -392,7 +397,7 @@ def build_neural_vs_behavioral(data, pdf):
                 ax.plot(steps, behav_by_step, style, color="gray", ms=4,
                         lw=1.2, alpha=alpha, label=label)
 
-            ax.set_title(f"{subj} {_phoneme_pair_label(pp)}", fontsize=8)
+            ax.set_title(f"{subj} {_phoneme_pair_label(pp)}  AUC={auc_val:.2f}", fontsize=8)
             ax.set_xlabel("Morph step", fontsize=7)
             ax.set_ylabel("P(second phoneme)", fontsize=7)
             ax.tick_params(labelsize=6)
