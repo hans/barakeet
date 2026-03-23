@@ -258,87 +258,50 @@ def build_neurometric_curves(data, pdf):
     return pd.DataFrame(sigmoid_results) if sigmoid_results else pd.DataFrame()
 
 
-def build_k_distribution(sigmoid_df, pdf):
-    """Histogram of sigmoid k values."""
+def build_sigmoid_parameter_distributions(sigmoid_df, pdf):
+    """Histograms of sigmoid k, x0, and R² — matching univariate style."""
     if sigmoid_df.empty:
         return
 
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
-    fig.suptitle("Sigmoid Steepness (k) Distribution", fontsize=13,
+    fig, axes = plt.subplots(1, 3, figsize=(14, 4))
+    fig.suptitle("Sigmoid Parameter Distributions", fontsize=13,
                  fontweight="bold")
 
-    k_vals = sigmoid_df["k"].values
-    is_linear = k_vals > EFFECTIVELY_LINEAR_K
-
-    # Left: histogram of k
+    # --- k distribution ---
     ax = axes[0]
-    ax.hist(k_vals[~is_linear], bins=15, color="steelblue", edgecolor="white",
-            alpha=0.8, label=f"Sigmoidal (n={np.sum(~is_linear)})")
-    if np.any(is_linear):
-        ax.axvline(EFFECTIVELY_LINEAR_K, color="tomato", ls="--", lw=1.2)
-        ax.text(EFFECTIVELY_LINEAR_K + 0.3, ax.get_ylim()[1] * 0.9,
-                f"Linear (n={np.sum(is_linear)})",
-                color="tomato", fontsize=9)
-    ax.set_xlabel("k (steepness)")
+    k_thresh = EFFECTIVELY_LINEAR_K
+    k_sigmoidal = sigmoid_df.loc[sigmoid_df["k"] <= k_thresh, "k"]
+    n_linear = (sigmoid_df["k"] > k_thresh).sum()
+    bins_sig = np.linspace(0, k_thresh, 20)
+    ax.hist(k_sigmoidal, bins=bins_sig, color="tomato", edgecolor="k", alpha=0.8)
+    if n_linear > 0:
+        bar_width = bins_sig[1] - bins_sig[0]
+        ax.bar(k_thresh + bar_width / 2, n_linear, width=bar_width,
+               color="gray", edgecolor="k", alpha=0.8,
+               label=f"linear (k>{k_thresh:.0f}, n={n_linear})")
+        ax.legend(fontsize=8)
+    ax.set_xlabel("Fitted sigmoid k (steepness)")
     ax.set_ylabel("Count")
+    ax.set_title(f"Steepness distribution (n={len(sigmoid_df)})\nsmall k = categorical")
+
+    # --- PSE (x0) distribution ---
+    ax = axes[1]
+    ax.hist(sigmoid_df["x0"], bins=25, color="mediumpurple", edgecolor="k", alpha=0.8)
+    ax.axvline(3.5, color="gray", ls="--", lw=1, label="midpoint (3.5)")
+    ax.set_xlabel("Fitted PSE (x0)")
+    ax.set_ylabel("Count")
+    ax.set_title("PSE distribution")
     ax.legend(fontsize=8)
-    ax.set_title("Small k = categorical, large k = graded")
 
-    # Right: k by phoneme pair
-    ax = axes[1]
-    for pp in ["bm", "dn", "pb"]:
-        sub = sigmoid_df.query("phoneme_pair == @pp")
-        if len(sub) == 0:
-            continue
-        jitter = np.random.default_rng(42).uniform(-0.1, 0.1, len(sub))
-        pp_x = {"bm": 0, "dn": 1, "pb": 2}[pp]
-        ax.scatter(pp_x + jitter, sub["k"], color=PAIR_COLORS[pp],
-                   s=40, alpha=0.7, edgecolors="white", lw=0.5)
-    ax.set_xticks([0, 1, 2])
-    ax.set_xticklabels([_phoneme_pair_label(p) for p in ["bm", "dn", "pb"]])
-    ax.set_ylabel("k (steepness)")
-    ax.axhline(EFFECTIVELY_LINEAR_K, color="tomato", ls="--", lw=1, alpha=0.6)
-    ax.set_title("k by phoneme pair")
-
-    fig.tight_layout()
-    pdf.savefig(fig)
-    plt.close(fig)
-
-
-def build_pse_distribution(sigmoid_df, pdf):
-    """Histogram and strip plot of PSE (x0) values."""
-    if sigmoid_df.empty:
-        return
-
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
-    fig.suptitle("Point of Subjective Equality (x0) Distribution", fontsize=13,
-                 fontweight="bold")
-
-    x0_vals = sigmoid_df["x0"].values
-
-    # Left: histogram
-    ax = axes[0]
-    ax.hist(x0_vals, bins=15, color="steelblue", edgecolor="white", alpha=0.8)
-    ax.axvline(3.5, color="gray", ls="--", lw=1, alpha=0.6)
-    ax.set_xlabel("x0 (PSE, morph step)")
+    # --- R² distribution ---
+    ax = axes[2]
+    ax.hist(sigmoid_df["r2"], bins=25, color="steelblue", edgecolor="k", alpha=0.8)
+    ax.axvline(sigmoid_df["r2"].median(), color="red", ls="--",
+               label=f"median={sigmoid_df['r2'].median():.2f}")
+    ax.set_xlabel("Sigmoid R²")
     ax.set_ylabel("Count")
-    ax.set_title(f"Median x0 = {np.median(x0_vals):.2f} (n={len(x0_vals)})")
-
-    # Right: x0 by phoneme pair
-    ax = axes[1]
-    for pp in ["bm", "dn", "pb"]:
-        sub = sigmoid_df.query("phoneme_pair == @pp")
-        if len(sub) == 0:
-            continue
-        jitter = np.random.default_rng(42).uniform(-0.1, 0.1, len(sub))
-        pp_x = {"bm": 0, "dn": 1, "pb": 2}[pp]
-        ax.scatter(pp_x + jitter, sub["x0"], color=PAIR_COLORS[pp],
-                   s=40, alpha=0.7, edgecolors="white", lw=0.5)
-    ax.set_xticks([0, 1, 2])
-    ax.set_xticklabels([_phoneme_pair_label(p) for p in ["bm", "dn", "pb"]])
-    ax.set_ylabel("x0 (PSE, morph step)")
-    ax.axhline(3.5, color="gray", ls="--", lw=1, alpha=0.6)
-    ax.set_title("PSE by phoneme pair")
+    ax.set_title("Goodness of fit")
+    ax.legend(fontsize=8)
 
     fig.tight_layout()
     pdf.savefig(fig)
@@ -776,11 +739,8 @@ def main():
         # --- Neurometric curves ---
         sigmoid_df = build_neurometric_curves(data, pdf)
 
-        # --- Sigmoid k distribution ---
-        build_k_distribution(sigmoid_df, pdf)
-
-        # --- PSE distribution ---
-        build_pse_distribution(sigmoid_df, pdf)
+        # --- Sigmoid parameter distributions (k, x0, R²) ---
+        build_sigmoid_parameter_distributions(sigmoid_df, pdf)
 
         # --- Neural vs behavioral ---
         build_neural_vs_behavioral(data, pdf)
