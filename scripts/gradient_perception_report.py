@@ -294,6 +294,7 @@ def build_k_distribution(sigmoid_df, pdf):
 def build_neural_vs_behavioral(data, pdf):
     """Neural and behavioral psychometric functions (within-completion average)."""
     reg_pred = data["reg_pred"]
+    endpoint_pred = data["endpoint_pred"]
     all_md = data["all_md"]
     stats = data["gradient_stats"]
 
@@ -315,6 +316,15 @@ def build_neural_vs_behavioral(data, pdf):
         "dn": [("desolate", "/d/ (desolate)"), ("necessary", "/n/ (necessary)")],
         "pb": [("penecillin", "/p/ (penicillin)"), ("beneficial", "/b/ (beneficial)")],
     }
+
+    # Pre-compute endpoint means per (subject, phoneme_pair, resampled)
+    if endpoint_pred is not None:
+        ep_means = (
+            endpoint_pred.groupby(["subject", "phoneme_pair", "resampled"])["decoder_proba"]
+            .mean().reset_index()
+        )
+    else:
+        ep_means = None
 
     for page_start in range(0, len(conditions), per_page):
         page_conds = conditions[page_start:page_start + per_page]
@@ -346,6 +356,15 @@ def build_neural_vs_behavioral(data, pdf):
                 word_end=("word_end", "first"),
             ).reset_index()
 
+            # Merge endpoint predictions so we have steps 1-6 for
+            # normalization and complete neurometric curve
+            if ep_means is not None:
+                ep_cond = ep_means.query(
+                    "subject == @subj and phoneme_pair == @pp"
+                )
+            else:
+                ep_cond = pd.DataFrame()
+
             steps = sorted(trial_means.resampled.unique())
             # Order completions by lexical evidence (left-biasing first)
             lex_order = _lex_order.get(pp)
@@ -356,8 +375,17 @@ def build_neural_vs_behavioral(data, pdf):
                 completions = sorted(trial_means.word_end.unique())
 
             # Neural: within-completion averaged, normalized to endpoint means
+            # Include endpoint steps from endpoint_pred
+            all_steps = sorted(set(steps) | (set(ep_cond.resampled) if len(ep_cond) > 0 else set()))
             neural_by_step = []
-            for step in steps:
+            for step in all_steps:
+                # For endpoint steps, use endpoint predictions
+                if len(ep_cond) > 0 and step in ep_cond.resampled.values:
+                    ep_val = ep_cond.query("resampled == @step").decoder_proba.values
+                    if len(ep_val) > 0:
+                        neural_by_step.append(float(ep_val[0]))
+                        continue
+                # For ambiguous steps, average within-completion
                 neural_per_comp = []
                 for comp in completions:
                     st = trial_means.query(
@@ -370,12 +398,12 @@ def build_neural_vs_behavioral(data, pdf):
                     np.mean(neural_per_comp) if neural_per_comp else np.nan
                 )
 
-            steps_arr = np.array(steps)
+            steps_arr = np.array(all_steps)
             neural_arr = np.array(neural_by_step)
             neural_norm, neural_ok = _normalize_to_endpoints(steps_arr, neural_arr)
 
             color = PAIR_COLORS.get(pp, "gray")
-            ax.plot(steps, neural_norm if neural_ok else neural_arr,
+            ax.plot(all_steps, neural_norm if neural_ok else neural_arr,
                     "o-", color=color, ms=4, lw=1.5,
                     label="Neural")
 
