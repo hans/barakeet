@@ -339,7 +339,6 @@ def build_permutation_nulls(data, pdf):
 def build_neural_vs_behavioral(data, pdf):
     """Neural and behavioral psychometric functions (within-completion average)."""
     reg_pred = data["reg_pred"]
-    endpoint_pred = data["endpoint_pred"]
     all_md = data["all_md"]
     stats = data["gradient_stats"]
 
@@ -399,24 +398,7 @@ def build_neural_vs_behavioral(data, pdf):
             else:
                 completions = sorted(trial_means.word_end.unique())
 
-            # Normalize to [0, 1] using mean endpoint predictions as anchors
-            # (matches acoustic_morphology_on_ambiguous normalization)
-            ep_cond = endpoint_pred.query(
-                "subject == @subj and phoneme_pair == @pp"
-            )
-            ep_trial = ep_cond.groupby("epoch_idx").agg(
-                resampled=("resampled", "first"),
-                decoder_proba=("decoder_proba", "mean"),
-            ).reset_index()
-            mean_at_1 = ep_trial.query("resampled == 1")["decoder_proba"].mean()
-            mean_at_6 = ep_trial.query("resampled == 6")["decoder_proba"].mean()
-            p_low = min(mean_at_1, mean_at_6)
-            p_high = max(mean_at_1, mean_at_6)
-            p_range = p_high - p_low if (p_high - p_low) > 0 else 1
-            # Polarity: ensure curve goes 0→1 from step 1→6
-            flip = mean_at_1 > mean_at_6
-
-            # Neural: within-completion averaged
+            # Neural: within-completion averaged (raw decoder proba)
             neural_by_step = []
             for step in steps:
                 neural_per_comp = []
@@ -426,10 +408,7 @@ def build_neural_vs_behavioral(data, pdf):
                     )
                     if len(st) == 0:
                         continue
-                    normed = (st.decoder_proba - p_low) / p_range
-                    if flip:
-                        normed = 1.0 - normed
-                    neural_per_comp.append(normed.mean())
+                    neural_per_comp.append(st.decoder_proba.mean())
                 neural_by_step.append(
                     np.mean(neural_per_comp) if neural_per_comp else np.nan
                 )
@@ -458,7 +437,7 @@ def build_neural_vs_behavioral(data, pdf):
 
             ax.set_title(f"{subj} {_phoneme_pair_label(pp)}", fontsize=8)
             ax.set_xlabel("Morph step", fontsize=7)
-            ax.set_ylabel("Proportion", fontsize=7)
+            ax.set_ylabel("P(second phoneme)", fontsize=7)
             ax.tick_params(labelsize=6)
             ax.set_ylim(-0.05, 1.05)
             if idx == 0:
