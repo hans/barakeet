@@ -147,6 +147,12 @@ for epochs_path in tqdm(epochs_paths, desc="Subjects"):
                 print(f"  {phoneme_pair}: classification failed (insufficient data)")
                 continue
 
+            mean_auc = fitted["test_roc_auc"].mean()
+            if mean_auc < phon_response_peak_threshold:
+                print(f"  {phoneme_pair}: population decoder AUC={mean_auc:.3f} "
+                      f"below threshold {phon_response_peak_threshold}, skipping")
+                continue
+
             # --- Endpoint test-fold predictions (held-out) ---
             endpoint_md_selected = endpoint_epochs.metadata[selection]
             for fold_i, (estimator, test_idx) in enumerate(
