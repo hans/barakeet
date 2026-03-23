@@ -88,7 +88,7 @@ for epochs_path in tqdm(epochs_paths, desc="Subjects"):
     subject_peaks = phon_peaks_df.query(
         "subject == @subject and phon_roc_auc >= @phon_response_peak_threshold"
     )
-    sites_by_pp = subject_peaks.groupby("phoneme_pair")["electrode_idx"].apply(list).to_dict()
+    sites_by_pp = subject_peaks.groupby("phoneme_pair", observed=True)["electrode_idx"].apply(list).to_dict()
     print(f"{subject}: acoustic sites per phoneme pair: { {k: len(v) for k, v in sites_by_pp.items()} }")
 
     for phoneme_pair, electrode_idxs in sites_by_pp.items():
@@ -124,7 +124,7 @@ for epochs_path in tqdm(epochs_paths, desc="Subjects"):
             epochs_i=endpoint_epochs,
             electrode_idxs=electrode_idxs,
             phoneme_pair=phoneme_pair,
-            target="acoustic",  # gives binary labels; we'll replace with continuous morph step
+            target="acoustic",
             windows=windows,
         )
 
@@ -200,14 +200,6 @@ for epochs_path in tqdm(epochs_paths, desc="Subjects"):
                     })
                 )
 
-            # --- Gradient statistics ---
-            # Average probabilities across folds, then correlate with morph step
-            pred_df = pd.concat(all_regression_predictions[-len(fitted["estimator"]):])
-            mean_proba = pred_df.groupby("epoch_idx")["decoder_proba"].mean()
-            morph_steps = pred_df.groupby("epoch_idx")["resampled"].first()
-
-            corr = np.corrcoef(morph_steps.values, mean_proba.values)[0, 1]
-
             all_gradient_stats.append({
                 "subject": subject,
                 "phoneme_pair": phoneme_pair,
@@ -215,13 +207,11 @@ for epochs_path in tqdm(epochs_paths, desc="Subjects"):
                 "acoustic_smin": acoustic_smin,
                 "acoustic_smax": acoustic_smax,
                 "mean_test_roc_auc": fitted["test_roc_auc"].mean(),
-                "ambiguous_step_correlation": corr,
                 "n_ambiguous_trials": len(ambig_md),
                 "n_endpoint_trials": len(endpoint_epochs.metadata.query("phoneme_pair == @phoneme_pair")),
             })
 
-            print(f"  {phoneme_pair}: test ROC-AUC={fitted['test_roc_auc'].mean():.3f}, "
-                  f"ambiguous correlation={corr:.3f}")
+            print(f"  {phoneme_pair}: test ROC-AUC={fitted['test_roc_auc'].mean():.3f}")
 
             # --- Multivariate AX discrimination: adjacent-step population decoders ---
             # Build full data matrix for this phoneme pair once
@@ -280,110 +270,3 @@ if all_ax_rows:
 else:
     print("No multivariate AX discrimination results to save")
 
-# %% [markdown]
-# ## Permutation test
-#
-# Shuffle morph-step labels and re-fit to build a null distribution for the
-# ambiguous-trial step correlation.
-
-# %%
-n_permutations = 100
-perm_correlations = []
-
-for epochs_path in tqdm(epochs_paths, desc="Subjects (permutation)"):
-    subject = Path(epochs_path).name.split("_")[0]
-
-    epochs = mne.read_epochs(epochs_path, preload=True, verbose=False)
-    epochs.metadata = add_metadata_features(epochs.metadata)
-
-    subject_peaks = phon_peaks_df.query(
-        "subject == @subject and phon_roc_auc >= @phon_response_peak_threshold"
-    )
-    sites_by_pp = subject_peaks.groupby("phoneme_pair")["electrode_idx"].apply(list).to_dict()
-
-    for phoneme_pair, electrode_idxs in sites_by_pp.items():
-        if len(electrode_idxs) < 2:
-            continue
-
-        pp_peaks = subject_peaks.query("phoneme_pair == @phoneme_pair")
-        acoustic_smin = int(pp_peaks["smin"].min())
-        acoustic_smax = int(pp_peaks["smax"].max())
-        onset_sample = int(round(-epoch_tmin * epoch_sfreq))
-        min_smax = onset_sample + int(round(0.3 * epoch_sfreq))
-        acoustic_smax = max(acoustic_smax, min_smax)
-
-        windows = np.array([[acoustic_smin, acoustic_smax]])
-
-        endpoint_epochs = epochs[
-            epochs.metadata[
-                (epochs.metadata.phoneme_pair == phoneme_pair)
-                & (epochs.metadata.resampled.isin((1, 6)))
-            ].index
-        ]
-
-        ambiguous_epochs = epochs[
-            epochs.metadata[
-                (epochs.metadata.phoneme_pair == phoneme_pair)
-                & (~epochs.metadata.resampled.isin((1, 6)))
-            ].index
-        ]
-        if len(ambiguous_epochs) == 0:
-            continue
-
-        ambig_md = ambiguous_epochs.metadata[
-            ambiguous_epochs.metadata.phoneme_pair == phoneme_pair
-        ]
-        X_ambig = ambiguous_epochs.get_data(picks=electrode_idxs)
-        X_ambig = X_ambig[:, :, acoustic_smin:acoustic_smax].reshape(X_ambig.shape[0], -1)
-
-        total, gen = _prepare_decoding_population(
-            epochs_i=endpoint_epochs,
-            electrode_idxs=electrode_idxs,
-            phoneme_pair=phoneme_pair,
-            target="acoustic",
-            windows=windows,
-        )
-
-        for name, smin, smax, selection, X_window, y_binary in gen:
-
-            rng = np.random.RandomState(42)
-            for perm_i in tqdm(range(n_permutations), desc=f"{subject}/{phoneme_pair} perms", leave=False):
-                y_perm = rng.permutation(y_binary)
-
-                fitted = fit_train_test(
-                    X_window,
-                    y_perm,
-                    num_classes=2,
-                    scoring=["roc_auc"],
-                    pca_num_components=pca_num_components,
-                    num_repeats=1,
-                    n_jobs=n_jobs,
-                    random_state=perm_i,
-                )
-
-                if fitted is None:
-                    continue
-
-                y_pred = fitted["estimator"][0].predict_proba(X_ambig)[:, 1]
-                corr = np.corrcoef(ambig_md.resampled.values.astype(float), y_pred)[0, 1]
-                perm_correlations.append({
-                    "subject": subject,
-                    "phoneme_pair": phoneme_pair,
-                    "permutation": perm_i,
-                    "correlation": corr,
-                })
-
-# %%
-if perm_correlations:
-    perm_df = pd.DataFrame(perm_correlations)
-    perm_df.to_parquet(outdir / "permutation_correlations.parquet")
-
-    # Compute p-values per (subject, phoneme_pair)
-    if all_gradient_stats:
-        for stat in all_gradient_stats:
-            mask = (perm_df.subject == stat["subject"]) & (perm_df.phoneme_pair == stat["phoneme_pair"])
-            null_dist = perm_df.loc[mask, "correlation"].values
-            observed = stat["ambiguous_step_correlation"]
-            p_value = (np.sum(np.abs(null_dist) >= np.abs(observed)) + 1) / (len(null_dist) + 1)
-            print(f"{stat['subject']}/{stat['phoneme_pair']}: observed r={observed:.3f}, "
-                  f"p={p_value:.4f} (two-sided)")

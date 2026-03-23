@@ -75,12 +75,6 @@ def load_data(data_dir, all_md_path):
     else:
         d["endpoint_pred"] = None
 
-    perm_path = data_dir / "permutation_correlations.parquet"
-    if perm_path.exists():
-        d["perm"] = pd.read_parquet(perm_path)
-    else:
-        d["perm"] = None
-
     ax_path = data_dir / "multivariate_ax_discrimination_df.parquet"
     if ax_path.exists():
         d["ax_discrimination"] = pd.read_parquet(ax_path)
@@ -255,91 +249,6 @@ def build_k_distribution(sigmoid_df, pdf):
     pdf.savefig(fig)
     plt.close(fig)
 
-
-def build_correlation_summary(stats, pdf):
-    """Strip plot of ambiguous-trial correlations."""
-    fig, ax = plt.subplots(figsize=(8, 5))
-    fig.suptitle("Ambiguous-Trial Step Correlation (Population Decoder)",
-                 fontsize=13, fontweight="bold")
-
-    for pp in ["bm", "dn", "pb"]:
-        sub = stats.query("phoneme_pair == @pp")
-        if len(sub) == 0:
-            continue
-        jitter = np.random.default_rng(0).uniform(-0.08, 0.08, len(sub))
-        pp_x = {"bm": 0, "dn": 1, "pb": 2}[pp]
-        ax.scatter(pp_x + jitter, sub["ambiguous_step_correlation"],
-                   color=PAIR_COLORS[pp], s=50, alpha=0.8,
-                   edgecolors="white", lw=0.5, zorder=3)
-        # Label each point with subject
-        for _, row in sub.iterrows():
-            ax.annotate(row.subject, (pp_x + 0.15, row.ambiguous_step_correlation),
-                        fontsize=5.5, alpha=0.6)
-
-    ax.axhline(0, color="gray", ls=":", lw=0.8)
-    ax.set_xticks([0, 1, 2])
-    ax.set_xticklabels([_phoneme_pair_label(p) for p in ["bm", "dn", "pb"]])
-    ax.set_ylabel("Pearson r (predicted vs actual morph step)")
-
-    mean_r = stats["ambiguous_step_correlation"].mean()
-    ax.set_title(f"Mean r = {mean_r:.3f} across {len(stats)} conditions",
-                 fontsize=10)
-    fig.tight_layout()
-    pdf.savefig(fig)
-    plt.close(fig)
-
-
-def build_permutation_nulls(data, pdf):
-    """Grid of null-distribution histograms."""
-    perm = data["perm"]
-    stats = data["gradient_stats"]
-    if perm is None:
-        return
-
-    conditions = stats[["subject", "phoneme_pair"]].values.tolist()
-    ncols = 4
-    nrows = 3
-    per_page = ncols * nrows
-
-    for page_start in range(0, len(conditions), per_page):
-        page_conds = conditions[page_start:page_start + per_page]
-        fig, axes = plt.subplots(nrows, ncols, figsize=(11, 8.5),
-                                 squeeze=False)
-        fig.suptitle("Permutation Test: Null Distributions",
-                     fontsize=13, fontweight="bold", y=0.98)
-
-        for idx, (subj, pp) in enumerate(page_conds):
-            ax = axes[idx // ncols, idx % ncols]
-
-            null = perm.query(
-                "subject == @subj and phoneme_pair == @pp"
-            )["correlation"].values
-
-            obs_row = stats.query(
-                "subject == @subj and phoneme_pair == @pp"
-            )
-            obs = obs_row["ambiguous_step_correlation"].values[0]
-
-            ax.hist(null, bins=20, color="lightgray", edgecolor="white")
-            ax.axvline(obs, color="tomato", lw=1.5)
-
-            # p-value
-            p = (np.sum(np.abs(null) >= np.abs(obs)) + 1) / (len(null) + 1)
-            sig_star = "*" if p < 0.05 else ""
-
-            ax.set_title(
-                f"{subj} {_phoneme_pair_label(pp)}\n"
-                f"r={obs:.3f}, p={p:.3f}{sig_star}",
-                fontsize=8,
-            )
-            ax.tick_params(labelsize=6)
-
-        for idx in range(len(page_conds), nrows * ncols):
-            axes[idx // ncols, idx % ncols].set_visible(False)
-
-        fig.tight_layout(rect=[0, 0, 1, 0.95])
-        pdf.savefig(fig)
-        plt.close(fig)
 
 
 def build_neural_vs_behavioral(data, pdf):
@@ -657,17 +566,6 @@ def main():
     data = load_data(args.data_dir, args.all_md)
     stats = data["gradient_stats"]
 
-    n_sig = 0
-    if data["perm"] is not None:
-        for _, row in stats.iterrows():
-            null = data["perm"].query(
-                "subject == @row.subject and phoneme_pair == @row.phoneme_pair"
-            )["correlation"].values
-            obs = row["ambiguous_step_correlation"]
-            p = (np.sum(np.abs(null) >= np.abs(obs)) + 1) / (len(null) + 1)
-            if p < 0.05:
-                n_sig += 1
-
     with PdfPages(args.output) as pdf:
         # --- Title page ---
         text_page(pdf, [
@@ -678,8 +576,7 @@ def main():
             "stimulus continuum information in a graded or categorical fashion?",
             "",
             f"Conditions: {len(stats)} (subject x phoneme pair)",
-            f"Significant (p<0.05, permutation): {n_sig}/{len(stats)} ({100*n_sig/len(stats):.0f}%)",
-            f"Mean ambiguous-trial correlation: {stats.ambiguous_step_correlation.mean():.3f}",
+            f"Mean test ROC-AUC: {stats.mean_test_roc_auc.mean():.3f}",
             "",
             "Logistic regression with PCA trained on endpoint trials (steps 1, 6)",
             "to classify acoustic cue. Applied to ambiguous trials (steps 2-5).",
@@ -706,8 +603,7 @@ def main():
             "",
             "Evaluation:",
             "  - Cross-validated ROC-AUC on held-out endpoint trials",
-            "  - Pearson correlation between decoder probability and morph step on ambiguous trials",
-            "  - Permutation test (100 shuffles) for significance of ambiguous-trial correlation",
+            "  - Sigmoid fits to neurometric curves (decoder P(step 6) vs morph step)",
             "",
             "Sigmoid fitting:",
             "  f(x) = a / (1 + exp(-(x - x0) / k)) + (0.5 - a/2)",
@@ -722,12 +618,6 @@ def main():
 
         # --- Sigmoid k distribution ---
         build_k_distribution(sigmoid_df, pdf)
-
-        # --- Correlation summary ---
-        build_correlation_summary(stats, pdf)
-
-        # --- Permutation nulls ---
-        build_permutation_nulls(data, pdf)
 
         # --- Neural vs behavioral ---
         build_neural_vs_behavioral(data, pdf)
@@ -745,10 +635,6 @@ def main():
         summary_lines = [
             "",
             f"Total conditions analyzed: {len(stats)}",
-            f"Significant at p<0.05: {n_sig}/{len(stats)} ({100*n_sig/len(stats):.0f}%)",
-            f"Mean ambiguous-trial correlation: {stats.ambiguous_step_correlation.mean():.3f} "
-            f"(range {stats.ambiguous_step_correlation.min():.3f} - "
-            f"{stats.ambiguous_step_correlation.max():.3f})",
             f"Mean test ROC-AUC: {stats.mean_test_roc_auc.mean():.3f}",
             "",
         ]
