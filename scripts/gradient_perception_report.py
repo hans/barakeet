@@ -27,7 +27,7 @@ import pandas as pd
 import scipy.stats
 
 from src.models.sigmoid import (
-    sigmoid_model,
+    sigmoid_model_2p,
     fit_sigmoid,
     EFFECTIVELY_LINEAR_K,
 )
@@ -161,14 +161,32 @@ def build_neurometric_curves(data, pdf):
             order = np.argsort(steps)
             steps, preds = steps[order], preds[order]
 
-            ax.plot(steps, preds, "o-", color=color, ms=5, lw=1.5)
+            # Normalize to endpoint means so k is directly interpretable
+            p_low = preds[steps == 1].mean() if np.any(steps == 1) else preds.min()
+            p_high = preds[steps == 6].mean() if np.any(steps == 6) else preds.max()
+            p_range = p_high - p_low
+            if abs(p_range) < 0.01:
+                # Decoder can't separate endpoints — skip sigmoid fit
+                ax.plot(steps, preds, "o-", color=color, ms=5, lw=1.5)
+                ax.set_title(f"{subj} {_phoneme_pair_label(pp)}\nendpoints too close",
+                             fontsize=8)
+                ax.set_xlabel("Morph step", fontsize=7)
+                ax.set_ylabel("Normalized P(step 6)", fontsize=7)
+                ax.tick_params(labelsize=6)
+                ax.set_xticks(range(1, 7))
+                ax.set_ylim(-0.05, 1.05)
+                ax.axhline(0.5, ls=":", color="gray", lw=0.8, alpha=0.5)
+                continue
 
-            # Sigmoid fit — decoder_proba is already in [0, 1]
-            sig = fit_sigmoid(steps, preds)
+            preds_norm = (preds - p_low) / p_range
+
+            ax.plot(steps, preds_norm, "o-", color=color, ms=5, lw=1.5)
+
+            sig = fit_sigmoid(steps, preds_norm)
 
             if sig is not None:
                 x_fine = np.linspace(steps.min(), steps.max(), 100)
-                y_fine = sigmoid_model(x_fine, *sig["params"])
+                y_fine = sigmoid_model_2p(x_fine, *sig["params"])
                 ax.plot(x_fine, y_fine, "--", color="tomato",
                         lw=1.2, alpha=0.8)
                 k_str = f"k={sig['k']:.2f}"
@@ -184,7 +202,7 @@ def build_neurometric_curves(data, pdf):
                              fontsize=8)
 
             ax.set_xlabel("Morph step", fontsize=7)
-            ax.set_ylabel("P(step 6)", fontsize=7)
+            ax.set_ylabel("Normalized P(step 6)", fontsize=7)
             ax.tick_params(labelsize=6)
             ax.set_xticks(range(1, 7))
             ax.set_ylim(-0.05, 1.05)

@@ -48,7 +48,7 @@ import numpy as np
 import pandas as pd
 import polars as pl
 import scipy.stats
-from src.models.sigmoid import sigmoid_model, fit_model, SIGMOID_P0_LIST, SIGMOID_BOUNDS, EFFECTIVELY_LINEAR_K
+from src.models.sigmoid import sigmoid_model_2p, fit_model, SIGMOID_2P_P0_LIST, SIGMOID_2P_BOUNDS, EFFECTIVELY_LINEAR_K
 from sklearn.metrics import roc_auc_score
 from tqdm.auto import tqdm
 
@@ -778,23 +778,22 @@ print("Saved hga_timecourse_sample.pdf")
 
 
 # %% [markdown]
-# ## Neurometric sigmoid fits with free steepness
+# ## Neurometric sigmoid fits
 #
-# For each acoustic site, fit a sigmoid to the neurometric function
-# (mapping from morph step to mean hga_norm):
+# For each acoustic site, fit a 2-parameter sigmoid to the neurometric function
+# (mapping from morph step to mean hga_norm, already normalized to endpoint means):
 #
-#   f(x; a, x0, k) = a / (1 + exp(-(x - x0) / k)) + (0.5 - a/2)
+#   f(x; x0, k) = 1 / (1 + exp(-(x - x0) / k))
 #
-# Three free parameters: amplitude a, PSE x0, and steepness k.
-# The offset is constrained so that f(x0) = 0.5, making x0 the
-# true PSE (the morph step where normalized HGA crosses 0.5,
-# i.e., the midpoint between endpoint responses).
-# The fitted k is the key descriptor:
+# Two free parameters: PSE x0 and steepness k.
+# f(x0) = 0.5 by construction, making x0 the true PSE.
+# Since hga_norm is already normalized (step 1 → 0, step 6 → 1),
+# no amplitude parameter is needed and k alone captures categoricality:
 # - Small k (→ 0): step-function, categorical encoding
 # - Large k (→ ∞): nearly linear, graded tracking of acoustics
 
 # %%
-# sigmoid_model, fit_model, SIGMOID_P0_LIST, SIGMOID_BOUNDS imported from src.models.sigmoid
+# sigmoid_model_2p, fit_model, SIGMOID_2P_P0_LIST, SIGMOID_2P_BOUNDS imported from src.models.sigmoid
 
 # %%
 steps_all = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
@@ -827,7 +826,7 @@ for _, site_row in tqdm(
     if len(np.unique(x_all)) < 5:
         continue
 
-    popt, rss = fit_model(sigmoid_model, x_all, y_all, SIGMOID_P0_LIST, SIGMOID_BOUNDS)
+    popt, rss = fit_model(sigmoid_model_2p, x_all, y_all, SIGMOID_2P_P0_LIST, SIGMOID_2P_BOUNDS)
 
     row = {
         "subject": sub,
@@ -840,17 +839,15 @@ for _, site_row in tqdm(
     }
 
     if popt is not None:
-        y_pred = sigmoid_model(x_all, *popt)
+        y_pred = sigmoid_model_2p(x_all, *popt)
         ss_res = np.sum((y_all - y_pred) ** 2)
         ss_tot = np.sum((y_all - y_all.mean()) ** 2)
-        row["sigmoid_a"] = float(popt[0])
-        row["sigmoid_x0"] = float(popt[1])
-        row["sigmoid_k"] = float(popt[2])
+        row["sigmoid_x0"] = float(popt[0])
+        row["sigmoid_k"] = float(popt[1])
         row["sigmoid_r2"] = 1.0 - ss_res / ss_tot if ss_tot > 0 else np.nan
-        row["sigmoid_effectively_linear"] = float(popt[2]) > EFFECTIVELY_LINEAR_K
+        row["sigmoid_effectively_linear"] = float(popt[1]) > EFFECTIVELY_LINEAR_K
     else:
         row.update({
-            "sigmoid_a": np.nan,
             "sigmoid_x0": np.nan, "sigmoid_k": np.nan, "sigmoid_r2": np.nan,
             "sigmoid_effectively_linear": np.nan,
         })
@@ -1144,11 +1141,11 @@ if n_extreme > 0:
         ax.plot(means.index, means.values, "k-o", linewidth=1.5, markersize=4, zorder=3)
 
         # Sigmoid fit
-        sig_params = [erow["sigmoid_a"], erow["sigmoid_x0"], erow["sigmoid_k"]]
+        sig_params = [erow["sigmoid_x0"], erow["sigmoid_k"]]
         if not any(np.isnan(p) for p in sig_params):
             x_curve = np.linspace(1, 6, 100)
             ax.plot(
-                x_curve, sigmoid_model(x_curve, *sig_params),
+                x_curve, sigmoid_model_2p(x_curve, *sig_params),
                 color="tomato", linewidth=2.0, zorder=4,
             )
 
@@ -1234,21 +1231,18 @@ for ax_idx, (_, site_row) in enumerate(sample_sites.iterrows()):
     mc_row = mc_lookup.get(key)
     sig_label = ""
     if mc_row is not None:
-        sig_params = [
-            mc_row["sigmoid_a"], mc_row["sigmoid_x0"], mc_row["sigmoid_k"],
-        ]
+        sig_params = [mc_row["sigmoid_x0"], mc_row["sigmoid_k"]]
         if not any(np.isnan(p) for p in sig_params):
             x_curve = np.linspace(1, 6, 100)
             ax.plot(
                 x_curve,
-                sigmoid_model(x_curve, *sig_params),
+                sigmoid_model_2p(x_curve, *sig_params),
                 color="tomato",
                 linewidth=2.0,
                 zorder=4,
             )
             sig_label = (
                 f"  PSE={mc_row['sigmoid_x0']:.2f}  k={mc_row['sigmoid_k']:.2f}\n"
-                f"a={mc_row['sigmoid_a']:.2f}  "
                 f"R²={mc_row['sigmoid_r2']:.2f}"
             )
 
