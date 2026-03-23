@@ -58,6 +58,31 @@ def _phoneme_pair_label(pp):
 
 PAIR_COLORS = {"bm": "#1b9e77", "dn": "#d95f02", "pb": "#7570b3"}
 
+# Minimum endpoint separation required for normalization.
+# Below this, the decoder (or behavior) can't meaningfully separate the
+# two categories, so normalization would amplify noise.
+MIN_ENDPOINT_RANGE = 0.05
+
+
+def _normalize_to_endpoints(steps, values):
+    """Normalize values so that mean at step 1 → 0 and mean at step 6 → 1.
+
+    Returns (normalized_values, success). If endpoint means are too close
+    (range < MIN_ENDPOINT_RANGE), returns (values, False) unchanged.
+    """
+    steps = np.asarray(steps)
+    values = np.asarray(values, dtype=float)
+    v_at_1 = values[steps == 1]
+    v_at_6 = values[steps == 6]
+    if len(v_at_1) == 0 or len(v_at_6) == 0:
+        return values, False
+    v_low = float(v_at_1.mean())
+    v_high = float(v_at_6.mean())
+    v_range = v_high - v_low
+    if abs(v_range) < MIN_ENDPOINT_RANGE:
+        return values, False
+    return (values - v_low) / v_range, True
+
 
 # ---------------------------------------------------------------------------
 # Data loading
@@ -161,12 +186,8 @@ def build_neurometric_curves(data, pdf):
             order = np.argsort(steps)
             steps, preds = steps[order], preds[order]
 
-            # Normalize to endpoint means so k is directly interpretable
-            p_low = preds[steps == 1].mean() if np.any(steps == 1) else preds.min()
-            p_high = preds[steps == 6].mean() if np.any(steps == 6) else preds.max()
-            p_range = p_high - p_low
-            if abs(p_range) < 0.01:
-                # Decoder can't separate endpoints — skip sigmoid fit
+            preds_norm, ok = _normalize_to_endpoints(steps, preds)
+            if not ok:
                 ax.plot(steps, preds, "o-", color=color, ms=5, lw=1.5)
                 ax.set_title(f"{subj} {_phoneme_pair_label(pp)}\nendpoints too close",
                              fontsize=8)
@@ -177,8 +198,6 @@ def build_neurometric_curves(data, pdf):
                 ax.set_ylim(-0.05, 1.05)
                 ax.axhline(0.5, ls=":", color="gray", lw=0.8, alpha=0.5)
                 continue
-
-            preds_norm = (preds - p_low) / p_range
 
             ax.plot(steps, preds_norm, "o-", color=color, ms=5, lw=1.5)
 
@@ -331,7 +350,7 @@ def build_neural_vs_behavioral(data, pdf):
             else:
                 completions = sorted(trial_means.word_end.unique())
 
-            # Neural: within-completion averaged (raw decoder proba)
+            # Neural: within-completion averaged, normalized to endpoint means
             neural_by_step = []
             for step in steps:
                 neural_per_comp = []
@@ -346,8 +365,13 @@ def build_neural_vs_behavioral(data, pdf):
                     np.mean(neural_per_comp) if neural_per_comp else np.nan
                 )
 
+            steps_arr = np.array(steps)
+            neural_arr = np.array(neural_by_step)
+            neural_norm, neural_ok = _normalize_to_endpoints(steps_arr, neural_arr)
+
             color = PAIR_COLORS.get(pp, "gray")
-            ax.plot(steps, neural_by_step, "o-", color=color, ms=4, lw=1.5,
+            ax.plot(steps, neural_norm if neural_ok else neural_arr,
+                    "o-", color=color, ms=4, lw=1.5,
                     label="Neural")
 
             # Behavioral: separate curve per completion (lexical context)
@@ -437,15 +461,9 @@ def build_neural_behavioral_alignment(data, sigmoid_df, pdf):
 
         # Normalize behavioral curve to endpoint means (0 at step 1, 1 at step 6)
         # so k is directly comparable to the neural sigmoid fit.
-        b_at_1 = behav_by_step[steps == 1]
-        b_at_6 = behav_by_step[steps == 6]
-        if len(b_at_1) == 0 or len(b_at_6) == 0:
+        behav_norm, ok = _normalize_to_endpoints(steps, behav_by_step)
+        if not ok:
             continue
-        b_low, b_high = float(b_at_1.mean()), float(b_at_6.mean())
-        b_range = b_high - b_low
-        if abs(b_range) < 0.05:
-            continue
-        behav_norm = (behav_by_step - b_low) / b_range
 
         bsig = fit_sigmoid(steps, behav_norm)
         if bsig is not None:
