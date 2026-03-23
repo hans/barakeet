@@ -1662,3 +1662,74 @@ def get_population_ensemble_predictions(
         )
 
     return pd.concat(outcomes)
+
+
+def run_ax_discrimination(
+    metadata: "pd.DataFrame",
+    get_X: "Callable[[np.ndarray], np.ndarray]",
+    phoneme_pair: str,
+    fit_kw: dict | None = None,
+) -> list[dict]:
+    """Run AX adjacent-step discrimination, returning one row per step pair.
+
+    Parameters
+    ----------
+    metadata : DataFrame
+        Must contain columns ``phoneme_pair`` and ``resampled``.
+    get_X : callable
+        ``get_X(indices) -> np.ndarray`` of shape ``(n_trials, n_features)``.
+        *indices* is an integer array of row positions into the
+        phoneme-pair-filtered metadata.
+    phoneme_pair : str
+        Which phoneme pair to filter metadata on.
+    fit_kw : dict, optional
+        Extra keyword arguments forwarded to :func:`fit_train_test`
+        (e.g. ``pca_num_components``, ``n_jobs``).
+
+    Returns
+    -------
+    list[dict]
+        One dict per step pair with keys ``step_a``, ``step_b``, ``n_a``,
+        ``n_b``, ``roc_auc``, ``roc_auc_std``.
+    """
+    if fit_kw is None:
+        fit_kw = {}
+
+    step_pairs = [(1, 2), (2, 3), (3, 4), (4, 5), (5, 6)]
+    pp_md = metadata[metadata.phoneme_pair == phoneme_pair]
+    rows: list[dict] = []
+
+    for step_a, step_b in step_pairs:
+        mask_a = pp_md["resampled"] == step_a
+        mask_b = pp_md["resampled"] == step_b
+        idx_a = np.where(mask_a)[0]
+        idx_b = np.where(mask_b)[0]
+
+        if len(idx_a) < 5 or len(idx_b) < 5:
+            continue
+
+        X = np.vstack([get_X(idx_a), get_X(idx_b)])
+        y = np.array([0] * len(idx_a) + [1] * len(idx_b))
+
+        fitted = fit_train_test(
+            X, y,
+            num_classes=2,
+            scoring=["roc_auc"],
+            stratify=y,
+            num_repeats=5,
+            **fit_kw,
+        )
+        if fitted is None:
+            continue
+
+        test_aucs = fitted["test_roc_auc"]
+        rows.append({
+            "step_a": step_a,
+            "step_b": step_b,
+            "n_a": len(idx_a),
+            "n_b": len(idx_b),
+            "roc_auc": float(np.mean(test_aucs)),
+            "roc_auc_std": float(np.std(test_aucs)),
+        })
+
+    return rows

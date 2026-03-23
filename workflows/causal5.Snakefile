@@ -589,6 +589,7 @@ rule multivariate_gradient_perception:
         endpoint_predictions    = "outputs/causal5/multivariate_gradient_perception/endpoint_predictions.parquet",
         gradient_stats          = "outputs/causal5/multivariate_gradient_perception/gradient_stats.parquet",
         permutation_correlations = "outputs/causal5/multivariate_gradient_perception/permutation_correlations.parquet",
+        multivariate_ax          = "outputs/causal5/multivariate_gradient_perception/multivariate_ax_discrimination_df.parquet",
 
     run:
         outdir = Path(output.notebook).parent

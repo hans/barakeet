@@ -51,6 +51,7 @@ from src.data import add_metadata_features
 from src.models.decoding import (
     _prepare_decoding_population,
     fit_train_test,
+    run_ax_discrimination,
 )
 from src.stimuli import POD_dict
 
@@ -74,6 +75,7 @@ phon_peaks_df = pd.read_parquet(phon_peaks_path)
 all_regression_predictions = []
 all_endpoint_predictions = []
 all_gradient_stats = []
+all_ax_rows = []
 
 # %%
 for epochs_path in tqdm(epochs_paths, desc="Subjects"):
@@ -221,6 +223,23 @@ for epochs_path in tqdm(epochs_paths, desc="Subjects"):
             print(f"  {phoneme_pair}: test ROC-AUC={fitted['test_roc_auc'].mean():.3f}, "
                   f"ambiguous correlation={corr:.3f}")
 
+            # --- Multivariate AX discrimination: adjacent-step population decoders ---
+            # Build full data matrix for this phoneme pair once
+            pp_mask = epochs.metadata.phoneme_pair == phoneme_pair
+            pp_data = epochs.get_data(picks=electrode_idxs)[pp_mask.values]
+            pp_data_windowed = pp_data[:, :, smin:smax].reshape(pp_data.shape[0], -1)
+
+            ax_rows = run_ax_discrimination(
+                metadata=epochs.metadata[pp_mask],
+                get_X=lambda idx: pp_data_windowed[idx],
+                phoneme_pair=phoneme_pair,
+                fit_kw=dict(pca_num_components=pca_num_components, n_jobs=n_jobs),
+            )
+            for row in ax_rows:
+                row.update(subject=subject, phoneme_pair=phoneme_pair,
+                           n_electrodes=len(electrode_idxs))
+            all_ax_rows.extend(ax_rows)
+
 # %% [markdown]
 # ## Save outputs
 
@@ -251,6 +270,15 @@ if all_gradient_stats:
     display(gradient_stats_df)
 else:
     print("No gradient stats to save")
+
+# %%
+if all_ax_rows:
+    ax_discrimination_df = pd.DataFrame(all_ax_rows)
+    ax_discrimination_df.to_parquet(outdir / "multivariate_ax_discrimination_df.parquet")
+    print(f"Multivariate AX discrimination: {len(ax_discrimination_df)} rows")
+    display(ax_discrimination_df)
+else:
+    print("No multivariate AX discrimination results to save")
 
 # %% [markdown]
 # ## Permutation test

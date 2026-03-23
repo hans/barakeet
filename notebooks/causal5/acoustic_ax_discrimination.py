@@ -41,7 +41,7 @@ from tqdm.auto import tqdm
 
 # %%
 from src.data import add_metadata_features
-from src.models.decoding import fit_train_test
+from src.models.decoding import run_ax_discrimination
 from src.viz_paper import phoneme_pair_enum, subject_enum
 
 # %% tags=["parameters"]
@@ -112,7 +112,6 @@ site_keys = acoustic_sites.select(
 ).to_pandas()
 
 ax_rows = []
-step_pairs = [(1, 2), (2, 3), (3, 4), (4, 5), (5, 6)]
 
 for _, site_row in tqdm(site_keys.iterrows(), total=len(site_keys), desc="AX discrimination"):
     sub = site_row["subject"]
@@ -127,45 +126,19 @@ for _, site_row in tqdm(site_keys.iterrows(), total=len(site_keys), desc="AX dis
         (pl.col("subject") == sub) & (pl.col("phoneme_pair") == pp)
     ).to_pandas()
 
-    for step_a, step_b in step_pairs:
-        mask_a = site_md["resampled"] == step_a
-        mask_b = site_md["resampled"] == step_b
-        idx_a = site_md.loc[mask_a, "epoch_idx"].values.astype(int)
-        idx_b = site_md.loc[mask_b, "epoch_idx"].values.astype(int)
+    # Extract windowed HGA for this single electrode
+    epoch_idxs = site_md["epoch_idx"].values.astype(int)
+    site_X = data_arr[epoch_idxs, ei, smin_w:smax_w]  # (n_trials, window_size)
 
-        if len(idx_a) < 5 or len(idx_b) < 5:
-            continue
-
-        # Extract windowed HGA for this electrode
-        X_a = data_arr[idx_a, ei, smin_w:smax_w]  # (n_a, window_size)
-        X_b = data_arr[idx_b, ei, smin_w:smax_w]  # (n_b, window_size)
-        X = np.vstack([X_a, X_b])
-        y = np.array([0] * len(idx_a) + [1] * len(idx_b))
-
-        fitted = fit_train_test(
-            X, y,
-            num_classes=2,
-            scoring=["roc_auc"],
-            stratify=y,
-            num_repeats=5,
-            n_jobs=1,
-        )
-
-        if fitted is None:
-            continue
-
-        test_aucs = fitted["test_roc_auc"]
-        ax_rows.append({
-            "subject": sub,
-            "electrode_idx": ei,
-            "phoneme_pair": pp,
-            "step_a": step_a,
-            "step_b": step_b,
-            "n_a": len(idx_a),
-            "n_b": len(idx_b),
-            "roc_auc": float(np.mean(test_aucs)),
-            "roc_auc_std": float(np.std(test_aucs)),
-        })
+    rows = run_ax_discrimination(
+        metadata=site_md,
+        get_X=lambda idx: site_X[idx],
+        phoneme_pair=pp,
+        fit_kw=dict(n_jobs=1),
+    )
+    for row in rows:
+        row.update(subject=sub, electrode_idx=ei, phoneme_pair=pp)
+    ax_rows.extend(rows)
 
 ax_discrimination_df = pd.DataFrame(ax_rows)
 ax_discrimination_df.to_parquet(outdir / "ax_discrimination_df.parquet", index=False)

@@ -81,6 +81,12 @@ def load_data(data_dir, all_md_path):
     else:
         d["perm"] = None
 
+    ax_path = data_dir / "multivariate_ax_discrimination_df.parquet"
+    if ax_path.exists():
+        d["ax_discrimination"] = pd.read_parquet(ax_path)
+    else:
+        d["ax_discrimination"] = None
+
     # all_md for mismatch / behavioral columns
     if Path(all_md_path).exists():
         d["all_md"] = pd.read_parquet(
@@ -591,6 +597,49 @@ def build_r2_vs_population(stats, pdf):
     plt.close(fig)
 
 
+def build_ax_discrimination(data, pdf):
+    """Population AX discrimination: adjacent-step population decoders."""
+    ax_df = data["ax_discrimination"]
+    if ax_df is None:
+        return
+
+    step_pairs = [(1, 2), (2, 3), (3, 4), (4, 5), (5, 6)]
+    pair_labels = [f"{a}v{b}" for a, b in step_pairs]
+    pair_midpoints = [(a + b) / 2.0 for a, b in step_pairs]
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    fig.suptitle(
+        "Population AX Discrimination:\n"
+        "Can the multi-electrode decoder distinguish adjacent morph steps?",
+        fontsize=12, fontweight="bold",
+    )
+
+    means, sems = [], []
+    for step_a, step_b in step_pairs:
+        pair_data = ax_df[
+            (ax_df["step_a"] == step_a) & (ax_df["step_b"] == step_b)
+        ]["roc_auc"]
+        means.append(pair_data.mean())
+        sems.append(pair_data.std() / np.sqrt(len(pair_data)) if len(pair_data) > 0 else 0)
+
+    ax.errorbar(
+        pair_midpoints, means, yerr=sems,
+        fmt="o-", color="steelblue", capsize=4, lw=2, ms=7,
+        label=f"Mean ± SEM (n={len(ax_df.groupby(['subject', 'phoneme_pair']))} conditions)",
+    )
+    ax.axhline(0.5, color="gray", ls="--", lw=0.8, label="Chance")
+    ax.set_xticks(pair_midpoints)
+    ax.set_xticklabels(pair_labels)
+    ax.set_xlabel("Adjacent step pair")
+    ax.set_ylabel("Mean ROC-AUC")
+    ax.set_ylim(0.4, 1.0)
+    ax.legend(fontsize=9)
+
+    fig.tight_layout()
+    pdf.savefig(fig)
+    plt.close(fig)
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -689,6 +738,9 @@ def main():
         # --- R2 vs population size ---
         build_r2_vs_population(stats, pdf)
 
+        # --- AX discrimination ---
+        build_ax_discrimination(data, pdf)
+
         # --- Summary page ---
         summary_lines = [
             "",
@@ -724,6 +776,22 @@ def main():
                     f"  Slope (k): ρ = {rho_k:.3f}, p = {p_k:.3f}",
                     "",
                 ])
+
+        ax_df = data["ax_discrimination"]
+        if ax_df is not None and len(ax_df) > 0:
+            boundary_auc = ax_df[
+                (ax_df.step_a == 3) & (ax_df.step_b == 4)
+            ]["roc_auc"].mean()
+            within_auc = ax_df[
+                ax_df.step_a.isin([1, 5]) & ax_df.step_b.isin([2, 6])
+            ]["roc_auc"].mean()
+            summary_lines.extend([
+                "Multivariate AX discrimination:",
+                f"  Boundary pair (3v4) mean AUC: {boundary_auc:.3f}",
+                f"  Within-category pairs (1v2, 5v6) mean AUC: {within_auc:.3f}",
+                f"  Total step-pair conditions: {len(ax_df)}",
+                "",
+            ])
 
         summary_lines.extend([
             "Interpretation:",
