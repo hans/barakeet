@@ -387,10 +387,28 @@ def build_neural_vs_behavioral(data, pdf):
 def build_neural_behavioral_alignment(data, sigmoid_df, pdf):
     """Cross-subject alignment of neural and behavioral sigmoid parameters.
 
-    Fits sigmoids to each subject's behavioral psychometric function (averaged
-    across completions) and compares PSE (x0) and slope (k) to the neural
-    sigmoid fits.  Reports rank correlations (robust to unknown readout
-    transform) and scatter plots.
+    Fits sigmoids to each subject's behavioral psychometric function and
+    compares PSE (x0) and slope (k) to the neural sigmoid fits.  Reports
+    Spearman rank correlations (robust to unknown readout transform) and
+    scatter plots.
+
+    Sigmoid fitting strategy
+    ------------------------
+    Both neural and behavioral curves are fit with the same 2-parameter
+    sigmoid (``fit_sigmoid`` / ``sigmoid_model_2p``), which requires data
+    normalized to [0, 1] at the endpoints.
+
+    - **Neural curves** are normalized in ``build_neurometric_curves``:
+      decoder P(step 6) is rescaled so that the mean at step 1 → 0 and the
+      mean at step 6 → 1.
+    - **Behavioral curves** are normalized here the same way: the raw
+      P(response==1) at each step is rescaled by the endpoint means.  This
+      puts k on the same scale for both modalities (small k = categorical,
+      large k = graded), making the cross-subject comparison meaningful.
+
+    Raw (un-normalized) behavioral curves are plotted separately in
+    ``build_neural_vs_behavioral``; this function only uses the normalized
+    version for fitting.
     """
     all_md = data["all_md"]
 
@@ -417,7 +435,19 @@ def build_neural_behavioral_alignment(data, sigmoid_df, pdf):
         steps = np.array(steps)
         behav_by_step = np.array(behav_by_step)
 
-        bsig = fit_sigmoid(steps, behav_by_step)
+        # Normalize behavioral curve to endpoint means (0 at step 1, 1 at step 6)
+        # so k is directly comparable to the neural sigmoid fit.
+        b_at_1 = behav_by_step[steps == 1]
+        b_at_6 = behav_by_step[steps == 6]
+        if len(b_at_1) == 0 or len(b_at_6) == 0:
+            continue
+        b_low, b_high = float(b_at_1.mean()), float(b_at_6.mean())
+        b_range = b_high - b_low
+        if abs(b_range) < 0.05:
+            continue
+        behav_norm = (behav_by_step - b_low) / b_range
+
+        bsig = fit_sigmoid(steps, behav_norm)
         if bsig is not None:
             behav_fits.append({
                 "subject": subj, "phoneme_pair": pp,
