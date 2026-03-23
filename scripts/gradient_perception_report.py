@@ -125,13 +125,14 @@ def load_data(data_dir, all_md_path):
 # ---------------------------------------------------------------------------
 
 def build_neurometric_curves(data, pdf):
-    """Per-condition neurometric curves with sigmoid fits.
+    """Per-condition neurometric curves with sigmoid fits and AX overlay.
 
     Returns sigmoid fit results for downstream use.
     """
     reg_pred = data["reg_pred"]
     endpoint_pred = data["endpoint_pred"]
     stats = data["gradient_stats"]
+    ax_df = data.get("ax_discrimination")
 
     conditions = stats[["subject", "phoneme_pair"]].values.tolist()
     auc_lookup = stats.set_index(["subject", "phoneme_pair"])["mean_test_roc_auc"].to_dict()
@@ -201,7 +202,7 @@ def build_neurometric_curves(data, pdf):
                 ax.axhline(0.5, ls=":", color="gray", lw=0.8, alpha=0.5)
                 continue
 
-            ax.plot(steps, preds_norm, "o-", color=color, ms=5, lw=1.5)
+            ax.plot(steps, preds_norm, "k-o", ms=4, lw=1.5, zorder=5)
 
             sig = fit_sigmoid(steps, preds_norm)
 
@@ -209,8 +210,8 @@ def build_neurometric_curves(data, pdf):
             if sig is not None:
                 x_fine = np.linspace(steps.min(), steps.max(), 100)
                 y_fine = sigmoid_model_2p(x_fine, *sig["params"])
-                ax.plot(x_fine, y_fine, "--", color="tomato",
-                        lw=1.2, alpha=0.8)
+                ax.plot(x_fine, y_fine, "-", color="tomato",
+                        lw=1.5, alpha=0.8, zorder=4)
                 k_str = f"k={sig['k']:.2f}"
                 if sig["effectively_linear"]:
                     k_str += " (linear)"
@@ -223,13 +224,27 @@ def build_neurometric_curves(data, pdf):
                 ax.set_title(f"{subj} {_phoneme_pair_label(pp)}  AUC={auc_val:.2f}\nfit failed",
                              fontsize=8)
 
+            # AX discrimination overlay on secondary y-axis
+            if ax_df is not None:
+                cond_ax = ax_df[
+                    (ax_df["subject"] == subj) & (ax_df["phoneme_pair"] == pp)
+                ]
+                if len(cond_ax) > 0:
+                    ax2 = ax.twinx()
+                    midpoints = (cond_ax["step_a"].values + cond_ax["step_b"].values) / 2.0
+                    ax2.plot(midpoints, cond_ax["roc_auc"].values,
+                             "D--", color="green", lw=1.2, ms=4, alpha=0.8, zorder=6)
+                    ax2.set_ylim(0.4, 1.0)
+                    ax2.tick_params(axis="y", labelcolor="green", labelsize=5)
+                    if idx % ncols == ncols - 1:
+                        ax2.set_ylabel("AX discrim. AUC", color="green", fontsize=6)
+
             ax.set_xlabel("Morph step", fontsize=7)
             ax.set_ylabel("Normalized P(step 6)", fontsize=7)
             ax.tick_params(labelsize=6)
             ax.set_xticks(range(1, 7))
             ax.set_ylim(-0.05, 1.05)
 
-            # Reference line: chance
             ax.axhline(0.5, ls=":", color="gray", lw=0.8, alpha=0.5)
 
         # Hide unused axes
@@ -284,6 +299,46 @@ def build_k_distribution(sigmoid_df, pdf):
     ax.set_ylabel("k (steepness)")
     ax.axhline(EFFECTIVELY_LINEAR_K, color="tomato", ls="--", lw=1, alpha=0.6)
     ax.set_title("k by phoneme pair")
+
+    fig.tight_layout()
+    pdf.savefig(fig)
+    plt.close(fig)
+
+
+def build_pse_distribution(sigmoid_df, pdf):
+    """Histogram and strip plot of PSE (x0) values."""
+    if sigmoid_df.empty:
+        return
+
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
+    fig.suptitle("Point of Subjective Equality (x0) Distribution", fontsize=13,
+                 fontweight="bold")
+
+    x0_vals = sigmoid_df["x0"].values
+
+    # Left: histogram
+    ax = axes[0]
+    ax.hist(x0_vals, bins=15, color="steelblue", edgecolor="white", alpha=0.8)
+    ax.axvline(3.5, color="gray", ls="--", lw=1, alpha=0.6)
+    ax.set_xlabel("x0 (PSE, morph step)")
+    ax.set_ylabel("Count")
+    ax.set_title(f"Median x0 = {np.median(x0_vals):.2f} (n={len(x0_vals)})")
+
+    # Right: x0 by phoneme pair
+    ax = axes[1]
+    for pp in ["bm", "dn", "pb"]:
+        sub = sigmoid_df.query("phoneme_pair == @pp")
+        if len(sub) == 0:
+            continue
+        jitter = np.random.default_rng(42).uniform(-0.1, 0.1, len(sub))
+        pp_x = {"bm": 0, "dn": 1, "pb": 2}[pp]
+        ax.scatter(pp_x + jitter, sub["x0"], color=PAIR_COLORS[pp],
+                   s=40, alpha=0.7, edgecolors="white", lw=0.5)
+    ax.set_xticks([0, 1, 2])
+    ax.set_xticklabels([_phoneme_pair_label(p) for p in ["bm", "dn", "pb"]])
+    ax.set_ylabel("x0 (PSE, morph step)")
+    ax.axhline(3.5, color="gray", ls="--", lw=1, alpha=0.6)
+    ax.set_title("PSE by phoneme pair")
 
     fig.tight_layout()
     pdf.savefig(fig)
@@ -634,18 +689,20 @@ def build_ax_discrimination(data, pdf):
         means.append(pair_data.mean())
         sems.append(pair_data.std() / np.sqrt(len(pair_data)) if len(pair_data) > 0 else 0)
 
-    ax.errorbar(
-        pair_midpoints, means, yerr=sems,
-        fmt="o-", color="steelblue", capsize=4, lw=2, ms=7,
-        label=f"Mean ± SEM (n={len(ax_df.groupby(['subject', 'phoneme_pair']))} conditions)",
-    )
-    ax.axhline(0.5, color="gray", ls="--", lw=0.8, label="Chance")
+    means = np.array(means)
+    sems = np.array(sems)
+    n_conds = len(ax_df.groupby(["subject", "phoneme_pair"]))
+
+    ax.plot(pair_midpoints, means, "D-", color="green", lw=1.2, ms=5, zorder=5)
+    ax.fill_between(pair_midpoints, means - sems, means + sems,
+                     color="green", alpha=0.2)
+    ax.axhline(0.5, color="gray", ls="--", lw=1, label="Chance")
     ax.set_xticks(pair_midpoints)
     ax.set_xticklabels(pair_labels)
     ax.set_xlabel("Adjacent step pair")
-    ax.set_ylabel("Mean ROC-AUC")
+    ax.set_ylabel("Mean AX discrimination AUC")
     ax.set_ylim(0.4, 1.0)
-    ax.legend(fontsize=9)
+    ax.legend([f"Mean ± SEM (n={n_conds})", "Chance"], fontsize=9)
 
     fig.tight_layout()
     pdf.savefig(fig)
@@ -722,6 +779,9 @@ def main():
         # --- Sigmoid k distribution ---
         build_k_distribution(sigmoid_df, pdf)
 
+        # --- PSE distribution ---
+        build_pse_distribution(sigmoid_df, pdf)
+
         # --- Neural vs behavioral ---
         build_neural_vs_behavioral(data, pdf)
 
@@ -751,6 +811,10 @@ def main():
                 f"  Intermediate (1 <= k <= 10): {n_graded}/{len(sigmoid_df)}",
                 f"  Effectively linear (k > 10): {n_linear}/{len(sigmoid_df)}",
                 f"  Median k: {sigmoid_df.k.median():.2f}",
+                "",
+                "PSE distribution:",
+                f"  Median x0: {sigmoid_df.x0.median():.2f}",
+                f"  Range: {sigmoid_df.x0.min():.2f} - {sigmoid_df.x0.max():.2f}",
                 "",
             ])
         if len(alignment_df) > 0 and hasattr(alignment_df, "attrs"):
