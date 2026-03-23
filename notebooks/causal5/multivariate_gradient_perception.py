@@ -223,7 +223,7 @@ for epochs_path in tqdm(epochs_paths, desc="Subjects"):
                 metadata=epochs.metadata[pp_mask],
                 get_X=lambda idx: pp_data_windowed[idx],
                 phoneme_pair=phoneme_pair,
-                fit_kw=dict(pca_num_components=pca_num_components, n_jobs=n_jobs),
+                fit_kw=dict(pca_num_components=None, n_jobs=n_jobs),
             )
             for row in ax_rows:
                 row.update(subject=subject, phoneme_pair=phoneme_pair,
