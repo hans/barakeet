@@ -570,10 +570,10 @@ rule multivariate_temporal_dissociation_all:
 rule multivariate_gradient_perception:
     """Population-level gradient perception from acoustically selective sites.
 
-    Trains ridge regression (with PCA) on endpoint trials to predict morph step,
-    then applies to ambiguous trials. If predictions track morph step continuously,
-    that's evidence for graded acoustic population coding despite individually
-    categorical electrodes. Includes permutation test for significance.
+    Trains logistic regression (with PCA) on endpoint trials to classify acoustic
+    cue, then applies to ambiguous trials. If decoder probability tracks morph step
+    continuously, that's evidence for graded acoustic population coding despite
+    individually categorical electrodes.
     """
     input:
         all_epochs = expand(
@@ -588,7 +588,6 @@ rule multivariate_gradient_perception:
         regression_predictions  = "outputs/causal5/multivariate_gradient_perception/regression_predictions.parquet",
         endpoint_predictions    = "outputs/causal5/multivariate_gradient_perception/endpoint_predictions.parquet",
         gradient_stats          = "outputs/causal5/multivariate_gradient_perception/gradient_stats.parquet",
-        permutation_correlations = "outputs/causal5/multivariate_gradient_perception/permutation_correlations.parquet",
         multivariate_ax          = "outputs/causal5/multivariate_gradient_perception/multivariate_ax_discrimination_df.parquet",
 
     run:
@@ -617,7 +616,6 @@ rule gradient_perception_report:
         regression_predictions = "outputs/causal5/multivariate_gradient_perception/regression_predictions.parquet",
         endpoint_predictions   = "outputs/causal5/multivariate_gradient_perception/endpoint_predictions.parquet",
         gradient_stats         = "outputs/causal5/multivariate_gradient_perception/gradient_stats.parquet",
-        permutation_correlations = "outputs/causal5/multivariate_gradient_perception/permutation_correlations.parquet",
         all_md                 = "outputs/causal5/prepare_neurometrics/all_md.parquet",
         script                 = "scripts/gradient_perception_report.py",
 
