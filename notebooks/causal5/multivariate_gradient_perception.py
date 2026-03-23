@@ -48,10 +48,11 @@ import mne
 # %autoreload 2
 # %%
 from src.data import add_metadata_features
+from sklearn.metrics import roc_auc_score
+
 from src.models.decoding import (
     _prepare_decoding_population,
     fit_train_test,
-    run_ax_discrimination,
 )
 from src.stimuli import POD_dict
 
@@ -219,22 +220,45 @@ for epochs_path in tqdm(epochs_paths, desc="Subjects"):
 
             print(f"  {phoneme_pair}: test ROC-AUC={fitted['test_roc_auc'].mean():.3f}")
 
-            # --- Multivariate AX discrimination: adjacent-step population decoders ---
-            # Build full data matrix for this phoneme pair once
+            # --- Multivariate AX discrimination ---
+            # Use the endpoint-trained decoder to predict on ALL trials for
+            # this phoneme pair, then compute ROC-AUC for each adjacent step
+            # pair. This tests whether the population representation already
+            # separates adjacent steps, without the small-sample problem of
+            # training a new classifier per pair.
             pp_mask = epochs.metadata.phoneme_pair == phoneme_pair
-            pp_data = epochs.get_data(picks=electrode_idxs)[pp_mask.values]
-            pp_data_windowed = pp_data[:, :, smin:smax].reshape(pp_data.shape[0], -1)
+            pp_md = epochs.metadata[pp_mask]
+            pp_X = epochs.get_data(picks=electrode_idxs)[pp_mask.values]
+            pp_X = pp_X[:, :, smin:smax].reshape(pp_X.shape[0], -1)
 
-            ax_rows = run_ax_discrimination(
-                metadata=epochs.metadata[pp_mask],
-                get_X=lambda idx: pp_data_windowed[idx],
-                phoneme_pair=phoneme_pair,
-                fit_kw=dict(pca_num_components=None, n_jobs=n_jobs),
-            )
-            for row in ax_rows:
-                row.update(subject=subject, phoneme_pair=phoneme_pair,
-                           n_electrodes=len(electrode_idxs))
-            all_ax_rows.extend(ax_rows)
+            ax_step_pairs = [(1, 2), (2, 3), (3, 4), (4, 5), (5, 6)]
+            for step_a, step_b in ax_step_pairs:
+                mask_a = pp_md.resampled == step_a
+                mask_b = pp_md.resampled == step_b
+                n_a, n_b = mask_a.sum(), mask_b.sum()
+                if n_a < 5 or n_b < 5:
+                    continue
+
+                mask_ab = mask_a | mask_b
+                X_ab = pp_X[mask_ab.values]
+                y_ab = (pp_md.resampled[mask_ab] == step_b).astype(int).values
+
+                fold_aucs = []
+                for estimator in fitted["estimator"]:
+                    proba = estimator.predict_proba(X_ab)[:, 1]
+                    fold_aucs.append(roc_auc_score(y_ab, proba))
+
+                all_ax_rows.append({
+                    "subject": subject,
+                    "phoneme_pair": phoneme_pair,
+                    "step_a": step_a,
+                    "step_b": step_b,
+                    "n_a": int(n_a),
+                    "n_b": int(n_b),
+                    "roc_auc": float(np.mean(fold_aucs)),
+                    "roc_auc_std": float(np.std(fold_aucs)),
+                    "n_electrodes": len(electrode_idxs),
+                })
 
 # %% [markdown]
 # ## Save outputs
