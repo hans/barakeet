@@ -408,13 +408,17 @@ def build_neural_vs_behavioral(data, pdf):
                     label="Neural")
 
             # Behavioral: separate curve per completion (lexical context)
+            # Use all_md to get behavior for ALL steps (including endpoints)
+            md_cond = all_md.query(
+                "subject == @subj and phoneme_pair == @pp"
+            )
             comp_styles = [("s-", 0.8), ("^--", 0.5)]
             for ci, comp in enumerate(completions):
-                comp_trials = trial_means.query("word_end == @comp")
+                comp_md = md_cond.query("word_end == @comp")
                 behav_by_step = []
-                for step in steps:
-                    st = comp_trials.query("resampled == @step")
-                    valid = st.behavior.dropna()
+                for step in all_steps:
+                    st = comp_md.query("resampled == @step")
+                    valid = st.behavior_categorical_forced.dropna()
                     if len(valid) > 0:
                         behav_by_step.append((valid == 1).mean())
                     else:
@@ -422,7 +426,7 @@ def build_neural_vs_behavioral(data, pdf):
                 style, alpha = comp_styles[ci]
                 lex_dict = dict(_lex_order.get(pp, []))
                 label = lex_dict.get(comp, comp)
-                ax.plot(steps, behav_by_step, style, color="gray", ms=4,
+                ax.plot(all_steps, behav_by_step, style, color="gray", ms=4,
                         lw=1.2, alpha=alpha, label=label)
 
             ax.set_title(f"{subj} {_phoneme_pair_label(pp)}  AUC={auc_val:.2f}", fontsize=8)
