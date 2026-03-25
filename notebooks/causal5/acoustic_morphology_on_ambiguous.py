@@ -42,6 +42,7 @@
 import re
 from pathlib import Path
 
+from matplotlib.lines import Line2D as _Line2D
 import matplotlib.pyplot as plt
 import mne
 import numpy as np
@@ -1010,6 +1011,141 @@ plt.tight_layout()
 fig.savefig(outdir / "pse_by_subject_phoneme.pdf", bbox_inches="tight")
 plt.close(fig)
 print("Saved pse_by_subject_phoneme.pdf")
+
+# %% [markdown]
+# ### Sigmoid Fig 2c — Multi-electrode PSE overlay
+#
+# For a single subject × phoneme pair, overlay neurometric curves from 3+
+# electrodes. All curves are categorical (steep) but shifted along the
+# stimulus axis — different PSEs. This makes the intuitive case that
+# heterogeneous categorical boundaries → population-level gradients,
+# before showing the formal multivariate analysis.
+
+# %%
+# --- Candidate search: find {subject, phoneme_pair} combos with 3+ categorical
+#     electrodes that have well-spread PSEs and good sigmoid fits.
+
+_R2_THRESH = 0.5
+_K_THRESH = EFFECTIVELY_LINEAR_K  # categorical = k < this
+_PSE_RANGE = (1.5, 5.5)
+_MIN_ELECTRODES = 3
+_MIN_PSE_SPREAD = 1.5
+
+_valid_sites = model_comparison_df.dropna(subset=["sigmoid_k", "sigmoid_x0", "sigmoid_r2"])
+_valid_sites = _valid_sites[
+    (_valid_sites["sigmoid_r2"] > _R2_THRESH)
+    & (_valid_sites["sigmoid_k"] < _K_THRESH)
+    & (_valid_sites["sigmoid_x0"].between(*_PSE_RANGE))
+]
+
+_candidates = []
+for (sub, pp), grp in _valid_sites.groupby(["subject", "phoneme_pair"]):
+    if len(grp) < _MIN_ELECTRODES:
+        continue
+    pse_spread = grp["sigmoid_x0"].max() - grp["sigmoid_x0"].min()
+    if pse_spread < _MIN_PSE_SPREAD:
+        continue
+    _candidates.append({
+        "subject": sub,
+        "phoneme_pair": pp,
+        "n_electrodes": len(grp),
+        "pse_spread": pse_spread,
+        "mean_r2": grp["sigmoid_r2"].mean(),
+        "mean_k": grp["sigmoid_k"].mean(),
+    })
+
+_candidates_df = pd.DataFrame(_candidates).sort_values(
+    ["n_electrodes", "pse_spread"], ascending=False
+).head(6).reset_index(drop=True)
+
+print(f"Found {len(_candidates_df)} candidate combos for PSE overlay:")
+print(_candidates_df.to_string(index=False))
+
+# %%
+# --- Generate overlay plots for each candidate
+
+_palette = plt.cm.tab10.colors
+_n_candidates = len(_candidates_df)
+_n_cols_ov = min(3, _n_candidates)
+_n_rows_ov = int(np.ceil(_n_candidates / _n_cols_ov)) if _n_candidates > 0 else 1
+
+fig, axes = plt.subplots(
+    _n_rows_ov, _n_cols_ov,
+    figsize=(5 * _n_cols_ov, 4.5 * _n_rows_ov),
+    squeeze=False,
+)
+axes_flat_ov = axes.flatten()
+
+for ci, (_, cand) in enumerate(_candidates_df.iterrows()):
+    ax = axes_flat_ov[ci]
+    sub, pp = cand["subject"], cand["phoneme_pair"]
+
+    # Get qualifying electrodes for this combo
+    combo_sites = _valid_sites[
+        (_valid_sites["subject"] == sub) & (_valid_sites["phoneme_pair"] == pp)
+    ].sort_values("sigmoid_x0")
+
+    x_fine = np.linspace(1, 6, 200)
+    legend_handles = []
+
+    for ei_idx, (_, site) in enumerate(combo_sites.iterrows()):
+        color = _palette[ei_idx % len(_palette)]
+        ei = site["electrode_idx"]
+        x0, k = site["sigmoid_x0"], site["sigmoid_k"]
+
+        # Trial-level scatter
+        site_trials = trial_pd[
+            (trial_pd["subject"] == sub)
+            & (trial_pd["electrode_idx"] == ei)
+            & (trial_pd["phoneme_pair"] == pp)
+        ].dropna(subset=["resampled", "hga_norm"])
+
+        if len(site_trials) > 0:
+            xvals = site_trials["resampled"].values + rng.uniform(
+                -0.2, 0.2, len(site_trials)
+            )
+            ax.scatter(
+                xvals, site_trials["hga_norm"].values,
+                c=[color], alpha=0.3, s=8, linewidths=0, zorder=1,
+            )
+
+        # Sigmoid curve
+        ax.plot(
+            x_fine, sigmoid_model_2p(x_fine, x0, k),
+            color=color, linewidth=2.0, zorder=3,
+        )
+
+        # PSE vertical line
+        ax.axvline(x0, color=color, linestyle=":", linewidth=1.0, alpha=0.6, zorder=2)
+
+        legend_handles.append(
+            _Line2D([0], [0], color=color, linewidth=2.0,
+                    label=f"e{ei} PSE={x0:.2f} k={k:.2f}")
+        )
+
+    ax.axhline(0.5, color="gray", linestyle="--", linewidth=0.8)
+    ax.set_xticks([1, 2, 3, 4, 5, 6])
+    ax.set_xlim(0.5, 6.5)
+    ax.set_ylim(-0.5, 1.5)
+    ax.set_xlabel("Morph step")
+    if ci % _n_cols_ov == 0:
+        ax.set_ylabel("Normalized HGA")
+    ax.set_title(f"{sub} / {pp} — {len(combo_sites)} electrodes", fontsize=9)
+    ax.legend(handles=legend_handles, fontsize=6, loc="upper left")
+
+# Hide unused axes
+for ai in range(_n_candidates, len(axes_flat_ov)):
+    axes_flat_ov[ai].set_visible(False)
+
+fig.suptitle(
+    "Multi-electrode PSE overlay: categorical curves with diverse PSEs\n"
+    "(each color = one electrode; dotted lines = PSE)",
+    fontsize=11,
+)
+plt.tight_layout()
+fig.savefig(outdir / "pse_overlay_candidates.pdf", bbox_inches="tight")
+plt.close(fig)
+print("Saved pse_overlay_candidates.pdf")
 
 # %% [markdown]
 # ### Sigmoid Fig 3 — Steepness vs. acoustic decoding quality
