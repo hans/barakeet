@@ -1025,11 +1025,11 @@ print("Saved pse_by_subject_phoneme.pdf")
 # --- Candidate search: find {subject, phoneme_pair} combos with 3+ categorical
 #     electrodes that have well-spread PSEs and good sigmoid fits.
 
-_R2_THRESH = 0.5
-_K_THRESH = EFFECTIVELY_LINEAR_K  # categorical = k < this
+_R2_THRESH = 0.05
+_K_THRESH = 1
 _PSE_RANGE = (1.5, 5.5)
 _MIN_ELECTRODES = 3
-_MIN_PSE_SPREAD = 1.5
+_MIN_PSE_SPREAD = 0.5
 
 _valid_sites = model_comparison_df.dropna(subset=["sigmoid_k", "sigmoid_x0", "sigmoid_r2"])
 _valid_sites = _valid_sites[
