@@ -544,6 +544,11 @@ both_fit = behav_ganong_df["fit_success_lex0"] & behav_ganong_df["fit_success_le
 print(f"Behavioral Ganong: {len(behav_ganong_df)} (subject × phoneme_pair)")
 print(f"  Both sigmoids fit successfully: {both_fit.sum()}")
 print(f"  At least one fit failed: {(~both_fit).sum()}")
+
+# Exclude cases with negative PSE shift (no valid Ganong effect)
+n_before = len(behav_ganong_df)
+behav_ganong_df = behav_ganong_df[behav_ganong_df["pse_shift"].isna() | (behav_ganong_df["pse_shift"] > 0)]
+print(f"  Excluded {n_before - len(behav_ganong_df)} with negative PSE shift")
 behav_ganong_df
 
 # %%
