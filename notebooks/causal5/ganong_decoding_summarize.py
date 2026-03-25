@@ -34,7 +34,7 @@ import joblib
 import pandas as pd
 from tqdm.auto import tqdm
 
-from src.stimuli import OFFSET_DICT, WORD_END_TO_PHONEME_PAIR
+from src.stimuli import OFFSET_DICT, POD_dict, WORD_END_TO_PHONEME_PAIR
 
 # %% tags=["parameters"]
 # List of paths to `results.joblib` files from ganong_decoding_single_electrode,
@@ -139,6 +139,11 @@ if all_results_dfs:
         + behav_peak_post_offset_s * epoch_sfreq
     )
     A_results_df = A_results_df[A_results_df["smax"] <= smax_limit]
+
+    # Lower bound: Ganong effect can only emerge after the POD
+    smin_limit = A_results_df["phoneme_pair"].map(POD_dict)
+    smin_limit = (smin_limit - epoch_tmin) * epoch_sfreq
+    A_results_df = A_results_df[A_results_df["smin"] >= smin_limit]
 
     # Group without word_end — Ganong decoder pools across completions
     A_summary = A_results_df.groupby(
