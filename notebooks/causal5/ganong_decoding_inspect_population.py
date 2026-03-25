@@ -675,8 +675,8 @@ print(f"Saved behavioral_ganong.parquet ({len(behav_ganong_df)} rows)")
 # %%
 # Per-electrode view: broadcast behavioral effect to all electrodes
 neural_behav = ganong_peaks.rename(columns={"diff": "ganong_diff"}).merge(
-    behav_ganong_df[["subject", "phoneme_pair", "pse_shift", "pse_shift_abs",
-                     "simple_ganong", "simple_ganong_abs"]],
+    behav_ganong_df[["subject", "phoneme_pair", "pse_shift",
+                     "simple_ganong"]],
     on=["subject", "phoneme_pair"],
     how="inner",
 )
@@ -684,28 +684,30 @@ print(f"Neural-behavioral merge (per-electrode): {len(neural_behav)} sites")
 
 fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
-# |PSE shift| vs ganong_diff
+# PSE shift vs ganong_diff
 ax = axes[0]
-valid_nb = neural_behav[["pse_shift_abs", "ganong_diff"]].dropna()
-for pp, grp in neural_behav.dropna(subset=["pse_shift_abs"]).groupby("phoneme_pair"):
-    ax.scatter(grp["pse_shift_abs"], grp["ganong_diff"], alpha=0.3, s=15, label=pp)
-r_nb = np.corrcoef(valid_nb["pse_shift_abs"], valid_nb["ganong_diff"])[0, 1]
-ax.set_xlabel("|PSE shift| (behavioral Ganong)")
+valid_nb = neural_behav[["pse_shift", "ganong_diff"]].dropna()
+for pp, grp in neural_behav.dropna(subset=["pse_shift"]).groupby("phoneme_pair"):
+    ax.scatter(grp["pse_shift"], grp["ganong_diff"], alpha=0.3, s=15, label=pp)
+r_nb = np.corrcoef(valid_nb["pse_shift"], valid_nb["ganong_diff"])[0, 1]
+ax.set_xlabel("PSE shift (behavioral Ganong)")
 ax.set_ylabel("Neural Ganong Δ ROC-AUC")
-ax.set_title(f"Per-electrode: |PSE shift| vs. neural Ganong\nr = {r_nb:.3f}, n = {len(valid_nb)}")
+ax.set_title(f"Per-electrode: PSE shift vs. neural Ganong\nr = {r_nb:.3f}, n = {len(valid_nb)}")
 ax.axhline(0, color="gray", linestyle="--", linewidth=0.5)
+ax.axvline(0, color="gray", linestyle="--", linewidth=0.5)
 ax.legend(title="phoneme_pair", fontsize=8)
 
-# |Simple Ganong| vs ganong_diff
+# Simple Ganong vs ganong_diff
 ax = axes[1]
-valid_ns = neural_behav[["simple_ganong_abs", "ganong_diff"]].dropna()
-for pp, grp in neural_behav.dropna(subset=["simple_ganong_abs"]).groupby("phoneme_pair"):
-    ax.scatter(grp["simple_ganong_abs"], grp["ganong_diff"], alpha=0.3, s=15, label=pp)
-r_ns = np.corrcoef(valid_ns["simple_ganong_abs"], valid_ns["ganong_diff"])[0, 1]
-ax.set_xlabel("|Simple Ganong| (behavioral)")
+valid_ns = neural_behav[["simple_ganong", "ganong_diff"]].dropna()
+for pp, grp in neural_behav.dropna(subset=["simple_ganong"]).groupby("phoneme_pair"):
+    ax.scatter(grp["simple_ganong"], grp["ganong_diff"], alpha=0.3, s=15, label=pp)
+r_ns = np.corrcoef(valid_ns["simple_ganong"], valid_ns["ganong_diff"])[0, 1]
+ax.set_xlabel("Simple Ganong (behavioral)")
 ax.set_ylabel("Neural Ganong Δ ROC-AUC")
-ax.set_title(f"Per-electrode: |simple Ganong| vs. neural Ganong\nr = {r_ns:.3f}, n = {len(valid_ns)}")
+ax.set_title(f"Per-electrode: simple Ganong vs. neural Ganong\nr = {r_ns:.3f}, n = {len(valid_ns)}")
 ax.axhline(0, color="gray", linestyle="--", linewidth=0.5)
+ax.axvline(0, color="gray", linestyle="--", linewidth=0.5)
 ax.legend(title="phoneme_pair", fontsize=8)
 
 plt.tight_layout()
@@ -722,8 +724,8 @@ neural_agg = (
 )
 
 neural_behav_agg = neural_agg.merge(
-    behav_ganong_df[["subject", "phoneme_pair", "pse_shift", "pse_shift_abs",
-                     "simple_ganong", "simple_ganong_abs"]],
+    behav_ganong_df[["subject", "phoneme_pair", "pse_shift",
+                     "simple_ganong"]],
     on=["subject", "phoneme_pair"],
     how="inner",
 )
@@ -732,10 +734,10 @@ print(f"Neural-behavioral merge (aggregated): {len(neural_behav_agg)} (subject �
 fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
 for ax, behav_col, neural_col, xlabel, ylabel in [
-    (axes[0], "pse_shift_abs", "ganong_diff_mean",
-     "|PSE shift| (behavioral Ganong)", "Mean neural Ganong Δ ROC-AUC"),
-    (axes[1], "simple_ganong_abs", "ganong_diff_mean",
-     "|Simple Ganong| (behavioral)", "Mean neural Ganong Δ ROC-AUC"),
+    (axes[0], "pse_shift", "ganong_diff_mean",
+     "PSE shift (behavioral Ganong)", "Mean neural Ganong Δ ROC-AUC"),
+    (axes[1], "simple_ganong", "ganong_diff_mean",
+     "Simple Ganong (behavioral)", "Mean neural Ganong Δ ROC-AUC"),
 ]:
     valid_agg = neural_behav_agg[[behav_col, neural_col]].dropna()
     for pp, grp in neural_behav_agg.dropna(subset=[behav_col]).groupby("phoneme_pair"):
@@ -745,6 +747,7 @@ for ax, behav_col, neural_col, xlabel, ylabel in [
     ax.set_ylabel(ylabel)
     ax.set_title(f"Aggregated: r = {r_agg:.3f}, n = {len(valid_agg)}")
     ax.axhline(0, color="gray", linestyle="--", linewidth=0.5)
+    ax.axvline(0, color="gray", linestyle="--", linewidth=0.5)
     ax.legend(title="phoneme_pair", fontsize=8)
 
 plt.tight_layout()
@@ -770,19 +773,19 @@ print(behav_ganong_df[["pse_shift", "simple_ganong"]].describe().round(4))
 print()
 print("=== Behavioral Ganong by phoneme pair ===")
 print(
-    behav_ganong_df.groupby("phoneme_pair")[["pse_shift", "pse_shift_abs", "simple_ganong"]]
+    behav_ganong_df.groupby("phoneme_pair")[["pse_shift", "simple_ganong"]]
     .describe()
     .round(4)
 )
 print()
 print("=== Neural-behavioral correlation (per-electrode) ===")
-valid_pse = neural_behav[["pse_shift_abs", "ganong_diff"]].dropna()
-print(f"  |PSE shift|:    r = {np.corrcoef(valid_pse['pse_shift_abs'], valid_pse['ganong_diff'])[0, 1]:.4f}, n = {len(valid_pse)}")
-valid_simple = neural_behav[["simple_ganong_abs", "ganong_diff"]].dropna()
-print(f"  |Simple Ganong|: r = {np.corrcoef(valid_simple['simple_ganong_abs'], valid_simple['ganong_diff'])[0, 1]:.4f}, n = {len(valid_simple)}")
+valid_pse = neural_behav[["pse_shift", "ganong_diff"]].dropna()
+print(f"  PSE shift:      r = {np.corrcoef(valid_pse['pse_shift'], valid_pse['ganong_diff'])[0, 1]:.4f}, n = {len(valid_pse)}")
+valid_simple = neural_behav[["simple_ganong", "ganong_diff"]].dropna()
+print(f"  Simple Ganong:  r = {np.corrcoef(valid_simple['simple_ganong'], valid_simple['ganong_diff'])[0, 1]:.4f}, n = {len(valid_simple)}")
 print()
 print("=== Neural-behavioral correlation (aggregated) ===")
-valid_agg_pse = neural_behav_agg[["pse_shift_abs", "ganong_diff_mean"]].dropna()
-print(f"  |PSE shift|:    r = {np.corrcoef(valid_agg_pse['pse_shift_abs'], valid_agg_pse['ganong_diff_mean'])[0, 1]:.4f}, n = {len(valid_agg_pse)}")
-valid_agg_simple = neural_behav_agg[["simple_ganong_abs", "ganong_diff_mean"]].dropna()
-print(f"  |Simple Ganong|: r = {np.corrcoef(valid_agg_simple['simple_ganong_abs'], valid_agg_simple['ganong_diff_mean'])[0, 1]:.4f}, n = {len(valid_agg_simple)}")
+valid_agg_pse = neural_behav_agg[["pse_shift", "ganong_diff_mean"]].dropna()
+print(f"  PSE shift:      r = {np.corrcoef(valid_agg_pse['pse_shift'], valid_agg_pse['ganong_diff_mean'])[0, 1]:.4f}, n = {len(valid_agg_pse)}")
+valid_agg_simple = neural_behav_agg[["simple_ganong", "ganong_diff_mean"]].dropna()
+print(f"  Simple Ganong:  r = {np.corrcoef(valid_agg_simple['simple_ganong'], valid_agg_simple['ganong_diff_mean'])[0, 1]:.4f}, n = {len(valid_agg_simple)}")
