@@ -49,9 +49,8 @@ from sklearn.metrics import roc_auc_score
 from tqdm.auto import tqdm
 
 # %%
-from scipy.optimize import curve_fit
-
 from src.data import add_metadata_features
+from src.models.sigmoid import fit_sigmoid, sigmoid_model_2p
 from src.stimuli import PHONEME_PAIR_TO_WORD_ENDS, POD_dict
 
 # %% tags=["parameters"]
@@ -438,39 +437,24 @@ plt.show()
 # difference at the most ambiguous steps (3–4).
 
 # %%
-# Sigmoid fitting utilities (from acoustic_morphology_on_ambiguous.py)
+# Endpoint normalization (matching gradient_perception_report.py)
+MIN_ENDPOINT_RANGE = 0.05
 
 
-def sigmoid_model(x, a, x0, k):
-    """Sigmoid constrained so f(x0) = 0.5 (x0 is the true PSE)."""
-    return a / (1.0 + np.exp(-(x - x0) / k)) + (0.5 - a / 2.0)
-
-
-def fit_model(func, x, y, p0_list, bounds, maxfev=5000):
-    """Try multiple initial guesses, return (best_params, best_rss)."""
-    best_rss = np.inf
-    best_popt = None
-    for p0 in p0_list:
-        try:
-            popt, _ = curve_fit(func, x, y, p0=p0, bounds=bounds, maxfev=maxfev)
-            rss = float(np.sum((y - func(x, *popt)) ** 2))
-            if rss < best_rss:
-                best_rss = rss
-                best_popt = popt
-        except Exception:
-            pass
-    return best_popt, best_rss
-
-
-SIGMOID_P0_LIST = [
-    [1.0, 3.5, 0.5],
-    [-1.0, 3.5, 0.5],
-    [1.0, 3.5, 1.5],
-    [-1.0, 3.5, 1.5],
-    [1.0, 3.5, 5.0],
-    [-1.0, 3.5, 5.0],
-]
-SIGMOID_BOUNDS = ([-3, 0.5, 0.05], [3, 6.5, 20.0])
+def _normalize_to_endpoints(steps, values):
+    """Normalize so that mean at step 1 → 0 and mean at step 6 → 1."""
+    steps = np.asarray(steps)
+    values = np.asarray(values, dtype=float)
+    v_at_1 = values[steps == 1]
+    v_at_6 = values[steps == 6]
+    if len(v_at_1) == 0 or len(v_at_6) == 0:
+        return values, False
+    v_low = float(v_at_1.mean())
+    v_high = float(v_at_6.mean())
+    v_range = v_high - v_low
+    if abs(v_range) < MIN_ENDPOINT_RANGE:
+        return values, False
+    return (values - v_low) / v_range, True
 
 # %%
 steps_all = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
@@ -482,7 +466,7 @@ for (subj, pp), grp in all_md.groupby(["subject", "phoneme_pair"]):
     # word_ends[0] = lex0 completion, word_ends[1] = lex1 completion
 
     pse_by_lex = {}
-    sigmoid_params_by_lex = {}
+    sigmoid_fit_by_lex = {}
     mean_ambig_by_lex = {}
     fit_success = {}
 
@@ -495,29 +479,36 @@ for (subj, pp), grp in all_md.groupby(["subject", "phoneme_pair"]):
             ambig["behavior_dummy_forced"].mean() if len(ambig) > 0 else np.nan
         )
 
-        # Sigmoid fit: compute mean behavior per step
+        # Sigmoid fit: compute mean behavior per step, normalize to endpoints
         step_means = subset.groupby("resampled")["behavior_dummy_forced"].mean()
         step_means = step_means.reindex(steps_all)
         valid = step_means.dropna()
 
         if len(valid) < 3:
             pse_by_lex[lex_val] = np.nan
-            sigmoid_params_by_lex[lex_val] = (np.nan, np.nan, np.nan)
+            sigmoid_fit_by_lex[lex_val] = None
             fit_success[lex_val] = False
             continue
 
         x = valid.index.values.astype(float)
         y = valid.values
 
-        popt, rss = fit_model(sigmoid_model, x, y, SIGMOID_P0_LIST, SIGMOID_BOUNDS)
+        y_norm, ok = _normalize_to_endpoints(x, y)
+        if not ok:
+            pse_by_lex[lex_val] = np.nan
+            sigmoid_fit_by_lex[lex_val] = None
+            fit_success[lex_val] = False
+            continue
 
-        if popt is not None:
-            pse_by_lex[lex_val] = float(popt[1])
-            sigmoid_params_by_lex[lex_val] = tuple(float(p) for p in popt)
+        sig = fit_sigmoid(x, y_norm)
+
+        if sig is not None:
+            pse_by_lex[lex_val] = sig["x0"]
+            sigmoid_fit_by_lex[lex_val] = sig
             fit_success[lex_val] = True
         else:
             pse_by_lex[lex_val] = np.nan
-            sigmoid_params_by_lex[lex_val] = (np.nan, np.nan, np.nan)
+            sigmoid_fit_by_lex[lex_val] = None
             fit_success[lex_val] = False
 
     # PSE shift: lex0 - lex1
@@ -526,6 +517,9 @@ for (subj, pp), grp in all_md.groupby(["subject", "phoneme_pair"]):
     # (positive = lex1 completion elicits more "right phoneme" responses)
     simple_ganong = mean_ambig_by_lex.get(1, np.nan) - mean_ambig_by_lex.get(0, np.nan)
 
+    _fit0 = sigmoid_fit_by_lex.get(0)
+    _fit1 = sigmoid_fit_by_lex.get(1)
+
     behav_ganong_records.append({
         "subject": subj,
         "phoneme_pair": pp,
@@ -533,10 +527,10 @@ for (subj, pp), grp in all_md.groupby(["subject", "phoneme_pair"]):
         "pse_lex1": pse_by_lex.get(1, np.nan),
         "pse_shift": pse_shift,
         "pse_shift_abs": abs(pse_shift) if not np.isnan(pse_shift) else np.nan,
-        "sigmoid_a_lex0": sigmoid_params_by_lex.get(0, (np.nan,))[0],
-        "sigmoid_k_lex0": sigmoid_params_by_lex.get(0, (np.nan, np.nan, np.nan))[2],
-        "sigmoid_a_lex1": sigmoid_params_by_lex.get(1, (np.nan,))[0],
-        "sigmoid_k_lex1": sigmoid_params_by_lex.get(1, (np.nan, np.nan, np.nan))[2],
+        "sigmoid_k_lex0": _fit0["k"] if _fit0 else np.nan,
+        "sigmoid_k_lex1": _fit1["k"] if _fit1 else np.nan,
+        "sigmoid_r2_lex0": _fit0["r2"] if _fit0 else np.nan,
+        "sigmoid_r2_lex1": _fit1["r2"] if _fit1 else np.nan,
         "fit_success_lex0": fit_success.get(0, False),
         "fit_success_lex1": fit_success.get(1, False),
         "simple_ganong": simple_ganong,
@@ -625,16 +619,22 @@ for ax_idx, (_, erow) in enumerate(examples.iterrows()):
             & (all_md["word_end"] == we)
         ]
         step_means = subset.groupby("resampled")["behavior_dummy_forced"].mean()
-        ax.plot(step_means.index, step_means.values, "o-", color=color, label=we,
-                linewidth=1.5, markersize=5, alpha=0.8)
+        x_pts = step_means.index.values.astype(float)
+        y_pts = step_means.values
+        y_norm, ok = _normalize_to_endpoints(x_pts, y_pts)
+        if ok:
+            ax.plot(x_pts, y_norm, "o-", color=color, label=we,
+                    linewidth=1.5, markersize=5, alpha=0.8)
+        else:
+            ax.plot(x_pts, y_pts, "o-", color=color, label=we,
+                    linewidth=1.5, markersize=5, alpha=0.4)
 
         # Overlay sigmoid fit
-        a_key = f"sigmoid_a_lex{lex_val}"
         k_key = f"sigmoid_k_lex{lex_val}"
         pse_key = f"pse_lex{lex_val}"
-        a_val, pse_val, k_val = erow[a_key], erow[pse_key], erow[k_key]
-        if not any(np.isnan(v) for v in [a_val, pse_val, k_val]):
-            ax.plot(x_curve, sigmoid_model(x_curve, a_val, pse_val, k_val),
+        pse_val, k_val = erow[pse_key], erow[k_key]
+        if not any(np.isnan(v) for v in [pse_val, k_val]):
+            ax.plot(x_curve, sigmoid_model_2p(x_curve, pse_val, k_val),
                     "--", color=color, linewidth=1.5, alpha=0.6)
 
     ax.axhline(0.5, color="gray", linestyle="--", linewidth=0.8)
@@ -648,7 +648,7 @@ for ax_idx, (_, erow) in enumerate(examples.iterrows()):
     )
     ax.set_xlabel("Morph step")
     if ax_idx % n_cols == 0:
-        ax.set_ylabel("P(right phoneme)")
+        ax.set_ylabel("Normalized P(right phoneme)")
     ax.legend(fontsize=7)
 
 for ax_idx in range(n_examples, len(list(np.atleast_1d(axes).flat))):
