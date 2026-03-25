@@ -42,7 +42,6 @@
 import re
 from pathlib import Path
 
-from matplotlib.lines import Line2D as _Line2D
 import matplotlib.pyplot as plt
 import mne
 import numpy as np
@@ -1086,14 +1085,18 @@ for ci, (_, cand) in enumerate(_candidates_df.iterrows()):
     ].sort_values("sigmoid_x0")
 
     x_fine = np.linspace(1, 6, 200)
-    legend_handles = []
+    n_elec = len(combo_sites)
+    # Dodge width: spread electrodes across a band at each step, no overlap
+    _dodge_total = 0.6  # total width of the dodge band per step
+    _dodge_positions = np.linspace(-_dodge_total / 2, _dodge_total / 2, n_elec)
+    _jitter_half = _dodge_total / n_elec / 2 * 0.8  # narrow jitter within each dodge slot
 
     for ei_idx, (_, site) in enumerate(combo_sites.iterrows()):
         color = _palette[ei_idx % len(_palette)]
         ei = site["electrode_idx"]
         x0, k = site["sigmoid_x0"], site["sigmoid_k"]
 
-        # Trial-level scatter
+        # Trial-level scatter — dodged by electrode, narrow jitter within slot
         site_trials = trial_pd[
             (trial_pd["subject"] == sub)
             & (trial_pd["electrode_idx"] == ei)
@@ -1101,8 +1104,10 @@ for ci, (_, cand) in enumerate(_candidates_df.iterrows()):
         ].dropna(subset=["resampled", "hga_norm"])
 
         if len(site_trials) > 0:
-            xvals = site_trials["resampled"].values + rng.uniform(
-                -0.2, 0.2, len(site_trials)
+            xvals = (
+                site_trials["resampled"].values
+                + _dodge_positions[ei_idx]
+                + rng.uniform(-_jitter_half, _jitter_half, len(site_trials))
             )
             ax.scatter(
                 xvals, site_trials["hga_norm"].values,
@@ -1118,11 +1123,6 @@ for ci, (_, cand) in enumerate(_candidates_df.iterrows()):
         # PSE vertical line
         ax.axvline(x0, color=color, linestyle=":", linewidth=1.0, alpha=0.6, zorder=2)
 
-        legend_handles.append(
-            _Line2D([0], [0], color=color, linewidth=2.0,
-                    label=f"e{ei} PSE={x0:.2f} k={k:.2f}")
-        )
-
     ax.axhline(0.5, color="gray", linestyle="--", linewidth=0.8)
     ax.set_xticks([1, 2, 3, 4, 5, 6])
     ax.set_xlim(0.5, 6.5)
@@ -1131,7 +1131,6 @@ for ci, (_, cand) in enumerate(_candidates_df.iterrows()):
     if ci % _n_cols_ov == 0:
         ax.set_ylabel("Normalized HGA")
     ax.set_title(f"{sub} / {pp} — {len(combo_sites)} electrodes", fontsize=9)
-    ax.legend(handles=legend_handles, fontsize=6, loc="upper left")
 
 # Hide unused axes
 for ai in range(_n_candidates, len(axes_flat_ov)):
