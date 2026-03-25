@@ -544,11 +544,7 @@ both_fit = behav_ganong_df["fit_success_lex0"] & behav_ganong_df["fit_success_le
 print(f"Behavioral Ganong: {len(behav_ganong_df)} (subject × phoneme_pair)")
 print(f"  Both sigmoids fit successfully: {both_fit.sum()}")
 print(f"  At least one fit failed: {(~both_fit).sum()}")
-
-# Exclude cases with negative PSE shift (no valid Ganong effect)
-n_before = len(behav_ganong_df)
-behav_ganong_df = behav_ganong_df[behav_ganong_df["pse_shift"].isna() | (behav_ganong_df["pse_shift"] > 0)]
-print(f"  Excluded {n_before - len(behav_ganong_df)} with negative PSE shift")
+print(f"  Negative PSE shift (anti-Ganong): {(behav_ganong_df['pse_shift'] < 0).sum()}")
 behav_ganong_df
 
 # %%
@@ -678,10 +674,17 @@ print(f"Saved behavioral_ganong.parquet ({len(behav_ganong_df)} rows)")
 # aggregated view (mean `ganong_diff` per subject × phoneme_pair).
 
 # %%
+# Exclude negative PSE shifts (anti-Ganong) from neural-behavioral analyses
+behav_ganong_positive = behav_ganong_df[
+    behav_ganong_df["pse_shift"].isna() | (behav_ganong_df["pse_shift"] > 0)
+]
+print(f"Behavioral Ganong for neural correlation: {len(behav_ganong_positive)} "
+      f"(excluded {len(behav_ganong_df) - len(behav_ganong_positive)} with negative PSE shift)")
+
 # Per-electrode view: broadcast behavioral effect to all electrodes
 neural_behav = ganong_peaks.rename(columns={"diff": "ganong_diff"}).merge(
-    behav_ganong_df[["subject", "phoneme_pair", "pse_shift",
-                     "simple_ganong"]],
+    behav_ganong_positive[["subject", "phoneme_pair", "pse_shift",
+                           "simple_ganong"]],
     on=["subject", "phoneme_pair"],
     how="inner",
 )
@@ -729,8 +732,8 @@ neural_agg = (
 )
 
 neural_behav_agg = neural_agg.merge(
-    behav_ganong_df[["subject", "phoneme_pair", "pse_shift",
-                     "simple_ganong"]],
+    behav_ganong_positive[["subject", "phoneme_pair", "pse_shift",
+                           "simple_ganong"]],
     on=["subject", "phoneme_pair"],
     how="inner",
 )
