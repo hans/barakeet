@@ -442,7 +442,12 @@ MIN_ENDPOINT_RANGE = 0.05
 
 
 def _normalize_to_endpoints(steps, values):
-    """Normalize so that mean at step 1 → 0 and mean at step 6 → 1."""
+    """Normalize so that mean at step 1 → 0 and mean at step 6 → 1.
+
+    Returns (normalized, True) on success.
+    Returns (values, False) if endpoints are missing, the range is too small,
+    or the function goes the wrong way (step 6 < step 1).
+    """
     steps = np.asarray(steps)
     values = np.asarray(values, dtype=float)
     v_at_1 = values[steps == 1]
@@ -452,7 +457,8 @@ def _normalize_to_endpoints(steps, values):
     v_low = float(v_at_1.mean())
     v_high = float(v_at_6.mean())
     v_range = v_high - v_low
-    if abs(v_range) < MIN_ENDPOINT_RANGE:
+    if v_range < MIN_ENDPOINT_RANGE:
+        # Flat or reversed psychometric function — don't normalize
         return values, False
     return (values - v_low) / v_range, True
 
