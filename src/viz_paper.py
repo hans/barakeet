@@ -706,6 +706,177 @@ def zoomin_hga(
     return fb
 
 
+def plot_congruency_compressed(
+    data: PaperData,
+    subject,
+    electrode_idx,
+    phoneme_pair,
+    word_end,
+    controlled_resampled_steps=(3,),
+    behav_tmin=None,
+    behav_tmax=None,
+    perceptual_pad=0.1,
+    highlight_windows=False,
+    phon_tmin=None,
+    phon_tmax=None,
+    resampled_palette=resampled_palette,
+    figsize=(8, 2.5),
+    break_mark_size=0.015,
+):
+    """
+    Compressed single-row plot with broken axis.
+
+    Left segment: acoustic response on unambiguous trials (word onset to POD).
+    Right segment: perceptual response on ambiguous trials (behavioral window ± pad).
+
+    Parameters
+    ----------
+    behav_tmin, behav_tmax : float or None
+        Behavioral window bounds in seconds. If None, extracted from
+        data.behav_peaks_df.
+    perceptual_pad : float
+        Seconds of padding on each side of the perceptual window.
+    highlight_windows : bool
+        If True, draw blue/orange axvspan on acoustic/perceptual windows.
+        Requires phon_tmin/phon_tmax for the acoustic highlight.
+
+    Returns
+    -------
+    fig, (ax_left, ax_right)
+    """
+    from matplotlib.gridspec import GridSpec
+
+    assert set(controlled_resampled_steps).isdisjoint({1, 6})
+
+    # --- Filter site data ---
+    site_filter = (
+        (pl.col("electrode_idx") == electrode_idx)
+        & (pl.col("subject") == subject)
+        & (pl.col("phoneme_pair") == phoneme_pair)
+        & (pl.col("word_end") == word_end)
+    )
+    subplot_df = data.plot_phon_phon_df.filter(site_filter)
+
+    # --- Extract epoch data ---
+    epochs_i = data.epochs[subject]
+    epoch_data = (
+        epochs_i.copy().apply_baseline().get_data(picks=electrode_idx).squeeze(1)
+    )
+
+    # --- POD time ---
+    pod_time = (
+        data.word_end_df.filter(pl.col("word_end") == word_end)
+        .select(pl.max("pod"))
+        .item()
+    )
+
+    # --- Resolve behavioral window ---
+    if behav_tmin is None or behav_tmax is None:
+        behav_row = data.behav_peaks_df.filter(
+            (pl.col("subject") == subject)
+            & (pl.col("electrode_idx") == electrode_idx)
+            & (pl.col("phoneme_pair") == phoneme_pair)
+            & (pl.col("word_end") == word_end)
+        )
+        behav_tmin = int(behav_row["smin"][0]) / epoch_sfreq + epoch_tmin
+        behav_tmax = int(behav_row["smax"][0]) / epoch_sfreq + epoch_tmin
+
+    # --- Time ranges ---
+    left_tmin, left_tmax = 0.0, pod_time
+    right_tmin = behav_tmin - perceptual_pad
+    right_tmax = behav_tmax + perceptual_pad
+
+    left_smin = int((left_tmin - epoch_tmin) * epoch_sfreq)
+    left_smax = int((left_tmax - epoch_tmin) * epoch_sfreq)
+    right_smin = int((right_tmin - epoch_tmin) * epoch_sfreq)
+    right_smax = int((right_tmax - epoch_tmin) * epoch_sfreq)
+
+    left_duration = left_tmax - left_tmin
+    right_duration = right_tmax - right_tmin
+
+    # --- Create figure with broken axis ---
+    fig = plt.figure(figsize=figsize)
+    gs = GridSpec(
+        1, 2, width_ratios=[left_duration, right_duration], wspace=0.05, figure=fig
+    )
+    ax_left = fig.add_subplot(gs[0, 0])
+    ax_right = fig.add_subplot(gs[0, 1], sharey=ax_left)
+
+    # --- Prepare trial metadata ---
+    trial_keys = (
+        subplot_df.select([
+            "epoch_idx", "resampled", "behavior_dummy_forced",
+            "label_behavior_forced", "word_end",
+        ])
+        .unique()
+        .to_pandas()
+    )
+    # Exclude mismatches on unambiguous steps
+    trial_keys = trial_keys[
+        ~((trial_keys.resampled == 1) & (trial_keys.behavior_dummy_forced == 1))
+        & ~((trial_keys.resampled == 6) & (trial_keys.behavior_dummy_forced == 0))
+    ]
+
+    linestyles = {0: "solid", 1: "dashed"}
+
+    # --- Helper to plot traces on an axis ---
+    def _plot_segment(ax, keys, smin, smax):
+        times = epochs_i.times[smin:smax]
+        for (behav, label_behav), rows in keys.groupby(
+            ["behavior_dummy_forced", "label_behavior_forced"]
+        ):
+            epoch_i = epoch_data[rows.epoch_idx.values, smin:smax]
+            mean = epoch_i.mean(axis=0)
+            sem = epoch_i.std(axis=0) / np.sqrt(epoch_i.shape[0])
+            most_common_resampled = int(rows.resampled.mode().iloc[0])
+            color = resampled_palette[most_common_resampled - 1]
+            label = f"Chose /{label_behav}/"
+            ax.plot(times, mean, label=label, color=color,
+                    ls=linestyles[behav], linewidth=3)
+            ax.fill_between(times, mean - sem, mean + sem,
+                            color=color, alpha=0.3, rasterized=True)
+
+    # --- Plot left segment (acoustic: steps 1 & 6) ---
+    left_keys = trial_keys[trial_keys.resampled.isin([1, 6])]
+    _plot_segment(ax_left, left_keys, left_smin, left_smax)
+
+    # --- Plot right segment (perceptual: ambiguous steps) ---
+    right_keys = trial_keys[
+        trial_keys.resampled.isin(list(controlled_resampled_steps))
+    ]
+    _plot_segment(ax_right, right_keys, right_smin, right_smax)
+
+    # --- POD line on left segment ---
+    ax_left.axvline(pod_time, linestyle="--", linewidth=2, alpha=0.5, color="red")
+
+    # --- Optional window highlighting ---
+    if highlight_windows:
+        if phon_tmin is not None and phon_tmax is not None:
+            ax_left.axvspan(phon_tmin, phon_tmax, color="blue", alpha=0.3)
+        ax_right.axvspan(behav_tmin, behav_tmax, color="orange", alpha=0.3)
+
+    # --- Broken-axis styling ---
+    sns.despine(ax=ax_left, top=True, right=True)
+    sns.despine(ax=ax_right, top=True, left=True, right=True)
+    ax_right.tick_params(labelleft=False, left=False)
+
+    # Diagonal break marks
+    d = break_mark_size
+    kwargs = dict(color="k", clip_on=False, linewidth=1)
+    kwargs_l = dict(transform=ax_left.transAxes, **kwargs)
+    ax_left.plot((1 - d, 1 + d), (-d, +d), **kwargs_l)
+    ax_left.plot((1 - d, 1 + d), (1 - d, 1 + d), **kwargs_l)
+    kwargs_r = dict(transform=ax_right.transAxes, **kwargs)
+    ax_right.plot((-d, +d), (-d, +d), **kwargs_r)
+    ax_right.plot((-d, +d), (1 - d, 1 + d), **kwargs_r)
+
+    # --- Labels ---
+    ax_left.set_ylabel("HGA ($z$)")
+    fig.supxlabel("Time from word onset (s)")
+
+    return fig, (ax_left, ax_right)
+
+
 def zoomin_search_hga(
     data: PaperData,
     subject,
