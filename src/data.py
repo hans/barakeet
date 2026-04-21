@@ -2,6 +2,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import polars as pl
 from scipy.io import loadmat
 
 from src.stimuli import POD_dict
@@ -236,3 +237,37 @@ def add_metadata_features(md: pd.DataFrame) -> pd.DataFrame:
     md["feat_behavior_mismatch_left_right"] = md.behavior_categorical * md.mismatch_left_right
 
     return md
+
+
+def get_ambiguous_resampled_steps(
+    all_md: pl.DataFrame,
+    *,
+    ambiguous_response_threshold: int = 2,
+) -> dict[tuple[str, str, str], list[int]]:
+    """
+    For each (subject, phoneme_pair, word_end), the set of resampled steps that elicited
+    variable responses across different repeats of the same stimulus (i.e. different
+    behavior_dummy_forced values for the same resampled value).
+
+    Params:
+        all_md: combined epoch metadata across subjects with columns
+            {subject, phoneme_pair, word_end, resampled, behavior_dummy_forced}.
+        ambiguous_response_threshold: minimum number of responses for the minority
+            response to consider the step ambiguous.
+    """
+    ret = (
+        all_md.group_by(["subject", "phoneme_pair", "word_end", "resampled"])
+        .agg(pl.col("behavior_dummy_forced").value_counts().struct.field("count"))
+        .filter(
+            ~pl.col("resampled").is_in([1, 6]),
+            pl.col("behavior_dummy_forced").list.len() == 2,
+            pl.col("behavior_dummy_forced").list.min()
+            > ambiguous_response_threshold,
+        )
+        .with_columns(pl.col("resampled").cast(int))
+        .sort(["resampled"])
+        .group_by(["subject", "phoneme_pair", "word_end"])
+        .agg(pl.col("resampled"))
+        .rows_by_key(["subject", "phoneme_pair", "word_end"], unique=True)
+    )
+    return {key: xs for key, (xs,) in ret.items()}

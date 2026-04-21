@@ -612,6 +612,7 @@ def _fit_comparison_window(
     md = metadata[selection]
     X_baseline = md[baseline_features].values
     X_full = np.concatenate([X_baseline, X_window], axis=1)
+    skip_baseline = len(baseline_features) == 0
 
     stratify_codes = None
     if stratify_cols is not None:
@@ -684,16 +685,19 @@ def _fit_comparison_window(
         else:
             raise ValueError("Unknown strategy: {}".format(strategy))
 
-    baseline_results = _fit(
-        X_baseline,
-        y,
-        num_classes,
-        stratify=stratify_codes,
-        reg_range=(-1, 1),
-        reg_grid_size=2,
-        random_state=seed,
-        fixed_params_list=baseline_fixed_params,
-    )
+    if skip_baseline:
+        baseline_results = None
+    else:
+        baseline_results = _fit(
+            X_baseline,
+            y,
+            num_classes,
+            stratify=stratify_codes,
+            reg_range=(-1, 1),
+            reg_grid_size=2,
+            random_state=seed,
+            fixed_params_list=baseline_fixed_params,
+        )
     full_results = _fit(
         X_full,
         y,
@@ -706,7 +710,7 @@ def _fit_comparison_window(
         fixed_params_list=full_fixed_params,
     )
 
-    if baseline_results is None or full_results is None:
+    if full_results is None or (not skip_baseline and baseline_results is None):
         L.warning(
             f"Skipping model comparison for {subject}, {population_name}, "
             f"{phoneme_pair}, {name}, {smin}-{smax} because fitting failed."
@@ -716,29 +720,37 @@ def _fit_comparison_window(
     results_list = []
     estimators_dict = {}
 
-    for fold, (baseline_test_idxs, baseline_estimator) in enumerate(
-        zip(baseline_results["test_idxs"], baseline_results["estimator"])
-    ):
+    for fold in range(len(full_results["test_idxs"])):
         full_test_idxs = full_results["test_idxs"][fold]
         full_estimator = full_results["estimator"][fold]
-
-        assert full_test_idxs.tolist() == baseline_test_idxs.tolist()
         test_idxs = full_test_idxs
 
-        baseline_proba = baseline_estimator.predict_proba(X_baseline[test_idxs])[:, 1]
-        full_proba = full_estimator.predict_proba(X_full[test_idxs])[:, 1]
+        if skip_baseline:
+            baseline_estimator = None
+            baseline_proba = np.full(len(test_idxs), np.nan)
+            baseline_prediction = np.full(len(test_idxs), np.nan)
+            baseline_precision = np.nan
+            baseline_recall = np.nan
+            baseline_log_loss = np.nan
+            baseline_roc_auc = np.nan
+        else:
+            baseline_test_idxs = baseline_results["test_idxs"][fold]
+            baseline_estimator = baseline_results["estimator"][fold]
+            assert full_test_idxs.tolist() == baseline_test_idxs.tolist()
+            baseline_proba = baseline_estimator.predict_proba(X_baseline[test_idxs])[:, 1]
+            baseline_prediction = baseline_estimator.predict(X_baseline[test_idxs])
+            baseline_precision, baseline_recall, _, _ = precision_recall_fscore_support(
+                y[test_idxs], baseline_prediction, average="binary", zero_division=0.0
+            )
+            baseline_log_loss = log_loss(y[test_idxs], baseline_proba)
+            baseline_roc_auc = roc_auc_score(y[test_idxs], baseline_proba)
 
-        baseline_prediction = baseline_estimator.predict(X_baseline[test_idxs])
+        full_proba = full_estimator.predict_proba(X_full[test_idxs])[:, 1]
         full_prediction = full_estimator.predict(X_full[test_idxs])
 
-        baseline_precision, baseline_recall, _, _ = precision_recall_fscore_support(
-            y[test_idxs], baseline_prediction, average="binary", zero_division=0.0
-        )
         full_precision, full_recall, _, _ = precision_recall_fscore_support(
             y[test_idxs], full_prediction, average="binary", zero_division=0.0
         )
-
-        baseline_log_loss = log_loss(y[test_idxs], baseline_proba)
         full_log_loss = log_loss(y[test_idxs], full_proba)
 
         result_i = {
@@ -748,7 +760,7 @@ def _fit_comparison_window(
             "smin": smin,
             "smax": smax,
             "fold": fold,
-            "baseline_roc_auc": roc_auc_score(y[test_idxs], baseline_proba),
+            "baseline_roc_auc": baseline_roc_auc,
             "full_roc_auc": roc_auc_score(y[test_idxs], full_proba),
             "baseline_precision": baseline_precision,
             "full_precision": full_precision,
@@ -760,8 +772,9 @@ def _fit_comparison_window(
         for groupby_variable, value in zip(groupby or [], name):
             result_i[groupby_variable] = value
 
-        for param, val in baseline_estimator.best_params_.items():
-            result_i["baseline_" + param] = val
+        if baseline_estimator is not None:
+            for param, val in baseline_estimator.best_params_.items():
+                result_i["baseline_" + param] = val
         for param, val in full_estimator.best_params_.items():
             result_i["full_" + param] = val
 

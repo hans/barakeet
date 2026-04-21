@@ -695,6 +695,73 @@ rule behavior_decoding_single_electrode_permutation_all:
                subject=config["data"]["subjects"])
 
 
+# Simple (HGA-only) behavioral decoder, fit at the peak windows selected by
+# prepare_neurometrics. Drops the stimulus-step control predictor so AUC is
+# comparable between ambiguous and unambiguous trials within an electrode.
+rule behavior_decoding_single_electrode_hga_only:
+    input:
+        epochs = "outputs/epochs_preprocessed/{subject}_epo.fif",
+        behav_peaks = "outputs/causal4/prepare_neurometrics/behav_peaks_df.parquet",
+        notebook = "notebooks/causal4/behavior_decoding_single_electrode_hga_only.py"
+
+    output:
+        notebook = "outputs/causal4/behavior_decoding_single_electrode_hga_only/{subject}/notebook.ipynb",
+        predictions = "outputs/causal4/behavior_decoding_single_electrode_hga_only/{subject}/predictions.parquet",
+        results = "outputs/causal4/behavior_decoding_single_electrode_hga_only/{subject}/results.csv",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(epochs_path=input.epochs,
+                            behav_peaks_path=input.behav_peaks,
+                            outdir=str(outdir)),
+        )
+
+
+rule behavior_decoding_single_electrode_hga_only_all:
+    input:
+        expand("outputs/causal4/behavior_decoding_single_electrode_hga_only/{subject}/predictions.parquet",
+               subject=config["data"]["subjects"])
+
+
+# Per-site AUC split by trial ambiguity, using the HGA-only decoder's predictions.
+rule A_ambiguity_selective_decoding:
+    input:
+        all_predictions = expand(
+            "outputs/causal4/behavior_decoding_single_electrode_hga_only/{subject}/predictions.parquet",
+            subject=config["data"]["subjects"]
+        ),
+        all_md = "outputs/causal4/prepare_neurometrics/all_md.parquet",
+        behav_peaks = "outputs/causal4/prepare_neurometrics/behav_peaks_df.parquet",
+        behav_searchlight = "outputs/causal4/prepare_neurometrics/behav_roc_auc_searchlight_df.parquet",
+        notebook = "notebooks/causal4/A_ambiguity_selective_decoding.py"
+
+    output:
+        notebook = "outputs/causal4/A_ambiguity_selective_decoding/notebook.ipynb",
+        per_site = "outputs/causal4/A_ambiguity_selective_decoding/per_site.parquet",
+        per_fold = "outputs/causal4/A_ambiguity_selective_decoding/per_fold.parquet",
+        scatter_pdf = "outputs/causal4/A_ambiguity_selective_decoding/scatter.pdf",
+        hist_pdf = "outputs/causal4/A_ambiguity_selective_decoding/diff_histogram.pdf",
+        sanity = "outputs/causal4/A_ambiguity_selective_decoding/sanity_controlled_vs_simple.csv",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                all_predictions=list(input.all_predictions),
+                all_md_path=str(input.all_md),
+                behav_peaks_path=str(input.behav_peaks),
+                behav_searchlight_path=str(input.behav_searchlight),
+                ambiguous_response_threshold=config["analysis"]["ambiguous_response_threshold"],
+                outdir=str(outdir),
+            ),
+        )
+
+
 # NHST across all subjects: compare true vs permuted Δ ROC-AUC per decoder,
 # apply Benjamini-Hochberg FDR correction.
 rule behavior_decoding_single_electrode_permutation_test:

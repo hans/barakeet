@@ -22,6 +22,7 @@ from matplotlib.patches import Patch, Rectangle
 from scipy.stats import ttest_1samp, ttest_ind
 from tqdm.auto import tqdm
 
+from src.data import get_ambiguous_resampled_steps as _get_ambiguous_resampled_steps
 from src.figure_builder import FigureBuilder
 from src.stimuli import OFFSET_DICT
 
@@ -176,32 +177,13 @@ class PaperData:
         ambiguous_response_threshold: int = 2,
     ) -> dict[tuple[Subject, PhonemePair, WordEnd], set[int]]:
         """
-        For each (subject, phoneme_pair, word_end), the set of resampled steps that elicited
-        variable responses across different repeats of the same stimulus (i.e. different
-        behavior_dummy_forced values for the same resampled value).
-
-        Params:
-            ambiguous_response_threshold: minimum number of responses for the minority
-                response to consider the step ambiguous
+        Thin wrapper around `src.data.get_ambiguous_resampled_steps`; see that function
+        for the full docstring.
         """
-        ret = (
-            self.all_md.group_by(["subject", "phoneme_pair", "word_end", "resampled"])
-            .agg(pl.col("behavior_dummy_forced").value_counts().struct.field("count"))
-            .filter(
-                ~pl.col("resampled").is_in([1, 6]),
-                pl.col("behavior_dummy_forced").list.len() == 2,
-                pl.col("behavior_dummy_forced").list.min()
-                > ambiguous_response_threshold,
-            )
-            .with_columns(pl.col("resampled").cast(int))
-            .sort(["resampled"])
-            .group_by(["subject", "phoneme_pair", "word_end"])
-            .agg(pl.col("resampled"))
-            .rows_by_key(["subject", "phoneme_pair", "word_end"], unique=True)
+        return _get_ambiguous_resampled_steps(
+            self.all_md,
+            ambiguous_response_threshold=ambiguous_response_threshold,
         )
-        # fix structure
-        ret = {key: xs for key, (xs,) in ret.items()}
-        return ret
 
 
 epoch_tmin = -0.4
