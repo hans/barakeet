@@ -343,6 +343,166 @@ rule ganong_decoding_inspect_population:
         )
 
 
+# --------------------------------------------------------------------------- #
+# HGA-only variants of the behavior and ganong decoders.
+#
+# These mirror the paired-comparison pipelines above but drop `resampled` as a
+# control predictor (`baseline_features=[]`). Outputs live under `_hga_only`
+# suffixed directories so the originals stay intact.
+# --------------------------------------------------------------------------- #
+
+
+rule behavior_decoding_single_electrode_hga_only:
+    """Behavioral decoding — HGA-only variant (no stimulus-step control).
+
+    Single-decoder version of `behavior_decoding_single_electrode`: trained on
+    windowed HGA alone. Used downstream for ambig-vs-unambig AUC comparisons
+    where the full decoder's stimulus-step prior would saturate at ceiling.
+    """
+    input:
+        epochs    = "outputs/epochs_preprocessed/{subject}_epo.fif",
+        electrodes = "outputs/causal5/find_speech_responsive/{subject}_results.csv",
+        notebook  = "notebooks/causal5/behavior_decoding_single_electrode_hga_only.py",
+
+    output:
+        notebook = "outputs/causal5/behavior_decoding_single_electrode_hga_only/{subject}/notebook.ipynb",
+        results  = "outputs/causal5/behavior_decoding_single_electrode_hga_only/{subject}/results.joblib",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                epochs_path=str(input.epochs),
+                electrodes_path=str(input.electrodes),
+                outdir=str(outdir),
+
+                min_sample=config["analysis"]["decoding"]["min_sample"],
+                window_size=config["analysis"]["decoding"]["window_size"],
+                stride=config["analysis"]["decoding"]["stride"],
+                n_jobs=config["analysis"]["decoding"]["n_jobs"],
+            ),
+        )
+
+
+rule behavior_decoding_single_electrode_hga_only_summarize:
+    """Summarise HGA-only behavior decoding results for one subject.
+
+    Peak-finding uses max `full_roc_auc` (no baseline). Emits a clean-schema
+    predictions parquet (`decoder_proba`/`decoder_prediction`) and an
+    `A_final_summary.csv` consumed by the HGA-only ganong decoder as the site
+    filter.
+    """
+    input:
+        epochs    = "outputs/epochs_preprocessed/{subject}_epo.fif",
+        electrodes = "outputs/causal5/find_speech_responsive/{subject}_results.csv",
+        result    = "outputs/causal5/behavior_decoding_single_electrode_hga_only/{subject}/results.joblib",
+        notebook  = "notebooks/causal5/behavior_decoding_single_electrode_hga_only_summarize.py",
+
+    output:
+        notebook        = "outputs/causal5/behavior_decoding_single_electrode_hga_only_summarize/{subject}/notebook.ipynb",
+        A_results       = "outputs/causal5/behavior_decoding_single_electrode_hga_only_summarize/{subject}/A_results.csv",
+        A_final_summary = "outputs/causal5/behavior_decoding_single_electrode_hga_only_summarize/{subject}/A_final_summary.csv",
+        A_predictions   = "outputs/causal5/behavior_decoding_single_electrode_hga_only_summarize/{subject}/A-predictions.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                epochs_path=str(input.epochs),
+                electrodes_path=str(input.electrodes),
+                result_path=str(input.result),
+                outdir=str(outdir),
+                groupby=["word_end"],
+
+                min_decoding_sample=0,
+                max_decoding_sample=290,
+                epoch_tmin=config["analysis"]["epoch_tmin"],
+                epoch_sfreq=config["analysis"]["epoch_sfreq"],
+                behav_peak_post_offset_s=config["analysis"]["behav_peak_post_offset_s"],
+            ),
+        )
+
+
+rule ganong_decoding_hga_only:
+    """Ganong-effect decoding — HGA-only variant (no stimulus-step control).
+
+    Pools trials across both lexical completions (`groupby=None`). Filters sites
+    using the HGA-only behavior summary (not the full-comparison one), keeping
+    the HGA-only chain internally consistent.
+    """
+    input:
+        epochs           = "outputs/epochs_preprocessed/{subject}_epo.fif",
+        electrodes       = "outputs/causal5/find_speech_responsive/{subject}_results.csv",
+        behav_summary    = "outputs/causal5/behavior_decoding_single_electrode_hga_only_summarize/{subject}/A_final_summary.csv",
+        notebook         = "notebooks/causal5/ganong_decoding_single_electrode_hga_only.py",
+
+    output:
+        notebook = "outputs/causal5/ganong_decoding_hga_only/{subject}/notebook.ipynb",
+        results  = "outputs/causal5/ganong_decoding_hga_only/{subject}/results.joblib",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                epochs_path=str(input.epochs),
+                electrodes_path=str(input.electrodes),
+                behav_summary_path=str(input.behav_summary),
+                outdir=str(outdir),
+
+                min_sample=config["analysis"]["decoding"]["min_sample"],
+                window_size=config["analysis"]["decoding"]["window_size"],
+                stride=config["analysis"]["decoding"]["stride"],
+                n_jobs=config["analysis"]["decoding"]["n_jobs"],
+                behav_peak_threshold=config["analysis"]["behav_response_peak_threshold"],
+            ),
+        )
+
+
+rule ganong_decoding_hga_only_summarize:
+    """Summarise HGA-only Ganong decoding results across all subjects.
+
+    Peak-finding uses max `full_roc_auc` (no baseline). Emits clean-schema
+    `ganong_predictions.parquet` and `ganong_peaks.parquet`.
+    """
+    input:
+        notebook     = "notebooks/causal5/ganong_decoding_hga_only_summarize.py",
+        result_paths = expand(
+            "outputs/causal5/ganong_decoding_hga_only/{subject}/results.joblib",
+            subject=config["data"]["subjects"],
+        ),
+
+    output:
+        notebook           = "outputs/causal5/ganong_decoding_hga_only/notebook.ipynb",
+        ganong_peaks       = "outputs/causal5/ganong_decoding_hga_only/ganong_peaks.parquet",
+        ganong_predictions = "outputs/causal5/ganong_decoding_hga_only/ganong_predictions.parquet",
+
+    run:
+        outdir = "outputs/causal5/ganong_decoding_hga_only"
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                result_paths=list(input.result_paths),
+                epoch_tmin=config["analysis"]["epoch_tmin"],
+                epoch_sfreq=config["analysis"]["epoch_sfreq"],
+                behav_peak_post_offset_s=config["analysis"]["behav_peak_post_offset_s"],
+                outdir=outdir,
+            ),
+        )
+
+
+rule ganong_decoding_hga_only_all:
+    """Run HGA-only Ganong decoding + summarise for all subjects."""
+    input:
+        "outputs/causal5/ganong_decoding_hga_only/ganong_peaks.parquet",
+
+
 rule acoustic_decoding_single_electrode:
     """Acoustic-category searchlight decoding on all speech-responsive electrodes.
 
