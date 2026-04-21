@@ -326,6 +326,7 @@ def _prepare_decoding_population(
         "mismatch_left_right",
         "behavior_categorical",
         "behavior_categorical_forced",
+        "is_ambiguous",
     ] = "lexical_evidence",
     groupby: Optional[list[str]] = None,
     filter: Optional[str] = None,
@@ -359,6 +360,7 @@ def _prepare_decoding_population(
         "mismatch_left_right",
         "behavior_categorical",
         "behavior_categorical_forced",
+        "is_ambiguous",
     ]:
         raise ValueError(f"Invalid target {target}")
     assert epochs_i.metadata is not None
@@ -438,6 +440,8 @@ def _prepare_decoding_population(
                     y = y[y != 0]
                 elif target in ("behavior_categorical", "behavior_categorical_forced"):
                     y = md.behavior_dummy_forced[selection_i].values
+                elif target == "is_ambiguous":
+                    y = md.is_ambiguous[selection_i].astype(int).values
 
                 # stratify_class = epochs_ij.metadata.stratify_class[selection_i].values
 

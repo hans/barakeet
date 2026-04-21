@@ -567,6 +567,108 @@ rule multivariate_temporal_dissociation_all:
         ),
 
 
+rule multivariate_ambiguity_decoding:
+    """Sliding-window multivariate ambiguity decoder for one subject.
+
+    Decodes trial-level ambiguity (behaviorally ambiguous vs. unambiguous) from
+    acoustically-selective STG sites per phoneme pair. Stratifies CV on the
+    (resampled, word_end) composite so step identity and completion are balanced
+    across folds. See plans/multivariate-ambiguity-decoding.md.
+    """
+    input:
+        epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
+        phon_peaks = "outputs/causal5/acoustic_decoding_peaks/phon_peaks_df.parquet",
+        all_md     = "outputs/causal5/prepare_neurometrics/all_md.parquet",
+        notebook   = "notebooks/causal5/multivariate_ambiguity_decoding.py",
+
+    output:
+        notebook         = "outputs/causal5/multivariate_ambiguity_decoding/{subject}/notebook.ipynb",
+        scores           = "outputs/causal5/multivariate_ambiguity_decoding/{subject}/scores.parquet",
+        outcomes         = "outputs/causal5/multivariate_ambiguity_decoding/{subject}/outcomes.parquet",
+        fold_balance     = "outputs/causal5/multivariate_ambiguity_decoding/{subject}/fold_balance.parquet",
+        ambiguity_labels = "outputs/causal5/multivariate_ambiguity_decoding/{subject}/ambiguity_labels.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                epochs_path=str(input.epochs),
+                phon_peaks_path=str(input.phon_peaks),
+                all_md_path=str(input.all_md),
+                outdir=str(outdir),
+
+                window_sizes=config["analysis"]["multivariate"]["window_sizes"],
+                stride=config["analysis"]["multivariate"]["stride"],
+                pca_num_components=config["analysis"]["multivariate"]["pca_num_components"],
+                n_jobs=config["analysis"]["multivariate"]["n_jobs"],
+
+                phon_response_peak_threshold=config["analysis"]["phon_response_peak_threshold"],
+                ambiguous_response_threshold=config["analysis"]["ambiguous_response_threshold"],
+                stratum_min_trials=config["analysis"]["multivariate_ambiguity"]["stratum_min_trials"],
+
+                epoch_tmin=config["analysis"]["epoch_tmin"],
+                epoch_sfreq=config["analysis"]["epoch_sfreq"],
+            ),
+        )
+
+
+rule multivariate_ambiguity_decoding_all:
+    """Run ambiguity decoder for all subjects."""
+    input:
+        expand(
+            "outputs/causal5/multivariate_ambiguity_decoding/{subject}/notebook.ipynb",
+            subject=config["data"]["subjects"],
+        ),
+
+
+rule multivariate_ambiguity_decoding_group:
+    """Group-level aggregation: subject-averaged AUC, FDR-windowed significance,
+    temporal measurements, fold-balance report, two-panel figure. No cluster perm."""
+    input:
+        scores           = expand(
+            "outputs/causal5/multivariate_ambiguity_decoding/{subject}/scores.parquet",
+            subject=config["data"]["subjects"],
+        ),
+        fold_balance     = expand(
+            "outputs/causal5/multivariate_ambiguity_decoding/{subject}/fold_balance.parquet",
+            subject=config["data"]["subjects"],
+        ),
+        ambiguity_labels = expand(
+            "outputs/causal5/multivariate_ambiguity_decoding/{subject}/ambiguity_labels.parquet",
+            subject=config["data"]["subjects"],
+        ),
+        hga_df   = "outputs/causal5/prepare_neurometrics/hga_df.parquet",
+        notebook = "notebooks/causal5/multivariate_ambiguity_decoding_group.py",
+
+    output:
+        notebook              = "outputs/causal5/multivariate_ambiguity_decoding_group/notebook.ipynb",
+        group_auc             = "outputs/causal5/multivariate_ambiguity_decoding_group/group_auc.parquet",
+        temporal_measurements = "outputs/causal5/multivariate_ambiguity_decoding_group/temporal_measurements.csv",
+        fold_balance_report   = "outputs/causal5/multivariate_ambiguity_decoding_group/fold_balance_report.csv",
+        figure                = "outputs/causal5/multivariate_ambiguity_decoding_group/figure_ambiguity_decoding.pdf",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                scores_paths=list(input.scores),
+                fold_balance_paths=list(input.fold_balance),
+                ambiguity_labels_paths=list(input.ambiguity_labels),
+                hga_df_path=str(input.hga_df),
+                outdir=str(outdir),
+
+                behavior_imbalance_threshold=config["analysis"]["multivariate_ambiguity"]["behavior_imbalance_threshold"],
+                fdr_alpha=config["analysis"]["fdr_alpha"],
+                epoch_tmin=config["analysis"]["epoch_tmin"],
+                epoch_sfreq=config["analysis"]["epoch_sfreq"],
+            ),
+        )
+
+
 rule multivariate_gradient_perception:
     """Population-level gradient perception from acoustically selective sites.
 

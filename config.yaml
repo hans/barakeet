@@ -42,6 +42,10 @@ analysis:
     pca_num_components: "auto"  # GridSearchCV over [0.25, 0.5, 0.9]
     n_jobs: 4
 
+  multivariate_ambiguity:
+    stratum_min_trials: 5           # drop strata smaller than this before CV
+    behavior_imbalance_threshold: 0.2  # flag cell for follow-up if stratum-count CV exceeds this
+
   sweep:
     phon_response_peak_thresholds: [0.55, 0.60, 0.65]
     behav_response_peak_thresholds: [0.005, 0.010, 0.020]
