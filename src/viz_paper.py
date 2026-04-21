@@ -698,7 +698,8 @@ def plot_congruency_compressed(
     behav_tmin=None,
     behav_tmax=None,
     perceptual_pad=0.1,
-    highlight_windows=False,
+    highlight_phon_window=False,
+    highlight_behav_window=False,
     phon_tmin=None,
     phon_tmax=None,
     resampled_palette=resampled_palette,
@@ -718,9 +719,10 @@ def plot_congruency_compressed(
         data.behav_peaks_df.
     perceptual_pad : float
         Seconds of padding on each side of the perceptual window.
-    highlight_windows : bool
-        If True, draw blue/orange axvspan on acoustic/perceptual windows.
-        Requires phon_tmin/phon_tmax for the acoustic highlight.
+    highlight_phon_window : bool
+        If True, draw blue axvspan on acoustic window.
+    highlight_behav_window : bool
+        If True, draw orange axvspan on perceptual window.
 
     Returns
     -------
@@ -758,14 +760,17 @@ def plot_congruency_compressed(
         .item()
     )
 
-    # --- Resolve behavioral window ---
-    if behav_tmin is None or behav_tmax is None:
-        behav_row = data.behav_peaks_df.filter(
-            (pl.col("subject") == subject)
-            & (pl.col("electrode_idx") == electrode_idx)
-            & (pl.col("phoneme_pair") == phoneme_pair)
-            & (pl.col("word_end") == word_end)
+    # --- Resolve acoustic and behavioral window ---
+    if phon_tmin is None or phon_tmax is None:
+        phon_row = data.phon_peaks_df.filter(
+            pl.col("electrode_idx") == electrode_idx,
+            pl.col("subject") == subject,
+            pl.col("phoneme_pair") == phoneme_pair,
         )
+        phon_tmin = int(phon_row["smin"][0]) / epoch_sfreq + epoch_tmin
+        phon_tmax = int(phon_row["smax"][0]) / epoch_sfreq + epoch_tmin
+    if behav_tmin is None or behav_tmax is None:
+        behav_row = data.behav_peaks_df.filter(site_filter)
         behav_tmin = int(behav_row["smin"][0]) / epoch_sfreq + epoch_tmin
         behav_tmax = int(behav_row["smax"][0]) / epoch_sfreq + epoch_tmin
 
@@ -800,10 +805,10 @@ def plot_congruency_compressed(
         .to_pandas()
     )
     # Exclude mismatches on unambiguous steps
-    trial_keys = trial_keys[
-        ~((trial_keys.resampled == 1) & (trial_keys.behavior_dummy_forced == 1))
-        & ~((trial_keys.resampled == 6) & (trial_keys.behavior_dummy_forced == 0))
-    ]
+    # trial_keys = trial_keys[
+    #     ~((trial_keys.resampled == 1) & (trial_keys.behavior_dummy_forced == 1))
+    #     & ~((trial_keys.resampled == 6) & (trial_keys.behavior_dummy_forced == 0))
+    # ]
 
     linestyles = {0: "solid", 1: "dashed"}
 
@@ -838,9 +843,9 @@ def plot_congruency_compressed(
     ax_left.axvline(pod_time, linestyle="--", linewidth=2, alpha=0.5, color="red")
 
     # --- Optional window highlighting ---
-    if highlight_windows:
-        if phon_tmin is not None and phon_tmax is not None:
-            ax_left.axvspan(phon_tmin, phon_tmax, color="blue", alpha=0.3)
+    if highlight_phon_window and phon_tmin is not None and phon_tmax is not None:
+        ax_left.axvspan(phon_tmin, phon_tmax, color="blue", alpha=0.3)
+    if highlight_behav_window and behav_tmin is not None and behav_tmax is not None:
         ax_right.axvspan(behav_tmin, behav_tmax, color="orange", alpha=0.3)
 
     # --- Broken-axis styling ---
@@ -853,14 +858,17 @@ def plot_congruency_compressed(
     kwargs = dict(color="k", clip_on=False, linewidth=1)
     kwargs_l = dict(transform=ax_left.transAxes, **kwargs)
     ax_left.plot((1 - d, 1 + d), (-d, +d), **kwargs_l)
-    ax_left.plot((1 - d, 1 + d), (1 - d, 1 + d), **kwargs_l)
+    # ax_left.plot((1 - d, 1 + d), (1 - d, 1 + d), **kwargs_l)
     kwargs_r = dict(transform=ax_right.transAxes, **kwargs)
     ax_right.plot((-d, +d), (-d, +d), **kwargs_r)
-    ax_right.plot((-d, +d), (1 - d, 1 + d), **kwargs_r)
+    # ax_right.plot((-d, +d), (1 - d, 1 + d), **kwargs_r)
 
     # --- Labels ---
     ax_left.set_ylabel("HGA ($z$)")
-    fig.supxlabel("Time from word onset (s)")
+
+    # make a supxlabel that is the same fontsize as the ylabel
+    fig.supxlabel("Time from word onset (s)", y=-0.2,
+                  fontsize=ax_left.yaxis.label.get_size())
 
     return fig, (ax_left, ax_right)
 
