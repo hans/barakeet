@@ -694,7 +694,7 @@ def plot_congruency_compressed(
     electrode_idx,
     phoneme_pair,
     word_end,
-    controlled_resampled_steps=(3,),
+    controlled_resampled_steps=None,
     behav_tmin=None,
     behav_tmax=None,
     perceptual_pad=0.1,
@@ -727,6 +727,12 @@ def plot_congruency_compressed(
     fig, (ax_left, ax_right)
     """
     from matplotlib.gridspec import GridSpec
+
+    if controlled_resampled_steps is None:
+        ambig_steps = data.get_ambiguous_resampled_steps()
+        controlled_resampled_steps = ambig_steps.get(
+            (subject, phoneme_pair, word_end), (3,)
+        )
 
     assert set(controlled_resampled_steps).isdisjoint({1, 6})
 
