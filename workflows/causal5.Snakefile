@@ -503,6 +503,75 @@ rule ganong_decoding_hga_only_all:
         "outputs/causal5/ganong_decoding_hga_only/ganong_peaks.parquet",
 
 
+rule behavior_decoding_single_electrode_hga_only_significance:
+    """Per-subject significance test for HGA-only behavior decoding.
+
+    Score-shuffle permutation: under each permutation, trial labels are shuffled
+    against the already-fitted OOF `full_decoder_proba` (no refitting), fold-mean
+    AUC is recomputed at every searchlight window, and the max across windows is
+    recorded. p-value per site = one-tailed `(#{T_k >= T_obs} + 1) / (K + 1)`.
+    Max-statistic correction absorbs the peak-window selection bias.
+
+    Emits `significance.parquet` with one row per (electrode, phoneme_pair,
+    word_end). BH-FDR across subjects is applied downstream in
+    `behavior_decoding_single_electrode_hga_only_significance_aggregate`.
+    """
+    input:
+        result          = "outputs/causal5/behavior_decoding_single_electrode_hga_only/{subject}/results.joblib",
+        final_summary   = "outputs/causal5/behavior_decoding_single_electrode_hga_only_summarize/{subject}/A_final_summary.csv",
+        notebook        = "notebooks/causal5/behavior_decoding_single_electrode_hga_only_significance.py",
+
+    output:
+        notebook     = "outputs/causal5/behavior_decoding_single_electrode_hga_only_significance/{subject}/notebook.ipynb",
+        significance = "outputs/causal5/behavior_decoding_single_electrode_hga_only_significance/{subject}/significance.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                result_path=str(input.result),
+                final_summary_path=str(input.final_summary),
+                outdir=str(outdir),
+                n_permutations=10000,
+                seed=42,
+            ),
+        )
+
+
+rule behavior_decoding_single_electrode_hga_only_significance_aggregate:
+    """Concatenate per-subject significance parquets and apply BH-FDR globally."""
+    input:
+        notebook     = "notebooks/causal5/behavior_decoding_single_electrode_hga_only_significance_aggregate.py",
+        result_paths = expand(
+            "outputs/causal5/behavior_decoding_single_electrode_hga_only_significance/{subject}/significance.parquet",
+            subject=config["data"]["subjects"],
+        ),
+
+    output:
+        notebook         = "outputs/causal5/behavior_decoding_single_electrode_hga_only_significance/notebook.ipynb",
+        significance_all = "outputs/causal5/behavior_decoding_single_electrode_hga_only_significance/significance_all.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                result_paths=list(input.result_paths),
+                outdir=str(outdir),
+                fdr_alpha=0.05,
+            ),
+        )
+
+
+rule behavior_decoding_single_electrode_hga_only_significance_all:
+    """Run the HGA-only behavior-decoding significance test across all subjects."""
+    input:
+        "outputs/causal5/behavior_decoding_single_electrode_hga_only_significance/significance_all.parquet",
+
+
 rule acoustic_decoding_single_electrode:
     """Acoustic-category searchlight decoding on all speech-responsive electrodes.
 
