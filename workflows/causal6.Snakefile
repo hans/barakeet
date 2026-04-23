@@ -433,6 +433,7 @@ rule acoustic_decoding_peaks:
             parameters=dict(
                 scores_path=str(input.scores),
                 outdir=str(outdir),
+                target="categorical_acoustic_cue",
                 peak_search_smin=config["analysis"]["decoding"]["peak_search_smin"],
                 peak_search_smax=config["analysis"]["decoding"]["peak_search_smax"],
             ),

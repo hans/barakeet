@@ -15,11 +15,6 @@
 
 # %% [markdown]
 # causal6: per-subject acoustic-decoding peak finding.
-#
-# Mirrors causal5's `acoustic_decoding_peaks` rule but reads the causal6 parquet
-# outputs. Restricts to `target == "categorical_acoustic_cue"` (matching causal5's
-# `measure == "categorical_acoustic_cue"` peak convention) and finds the peak
-# window per (electrode, phoneme_pair) by max mean test AUC.
 
 # %%
 from pathlib import Path
