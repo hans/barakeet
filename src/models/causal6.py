@@ -270,6 +270,7 @@ def run_acoustic_searchlight(
     reg_lambda: float,
     target: Literal["categorical_acoustic_cue", "subject_specific_acoustics"]
         = "categorical_acoustic_cue",
+    resampled_steps: tuple[int, ...] = (1, 6),
     n_folds: int = 5,
     cv_random_state: int = 42,
     device: str = "cuda",
@@ -280,6 +281,16 @@ def run_acoustic_searchlight(
     """
     Acoustic single-electrode searchlight — causal6 replacement for
     src/models/decoding.py:run_decoding_searchlight_single_electrode.
+
+    By convention (see CLAUDE.md), the acoustic response is measured on
+    **unambiguous trials only** — stimulus steps where the acoustic cue is
+    clean. Defaults to resampled_steps=(1, 6), the two endpoints of the
+    continuum, matching causal5's filter at
+    notebooks/causal5/acoustic_decoding_single_electrode.py:83.
+
+    Pass `resampled_steps=tuple(range(1, 7))` to include all steps
+    (e.g. for the `subject_specific_acoustics` target where the label is
+    per-trial acoustics rather than stimulus-step identity).
 
     Returns (scores, predictions, coefficients) as polars DataFrames.
     """
@@ -293,6 +304,9 @@ def run_acoustic_searchlight(
     win_size = int(windows[0, 1] - windows[0, 0])
     assert (windows[:, 1] - windows[:, 0] == win_size).all()
 
+    # Restrict to unambiguous stimulus steps by default (project convention).
+    resampled_mask = md.resampled.isin(resampled_steps).values
+
     scores_all, preds_all, coefs_all = [], [], []
 
     pbar = tqdm(
@@ -301,7 +315,7 @@ def run_acoustic_searchlight(
         unit="pp", leave=False,
     )
     for phoneme_pair in pbar:
-        selection = (md.phoneme_pair == phoneme_pair).values
+        selection = (md.phoneme_pair == phoneme_pair).values & resampled_mask
         if selection.sum() == 0:
             continue
 

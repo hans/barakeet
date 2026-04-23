@@ -37,7 +37,7 @@ from src.models.causal6 import (
 
 def _make_fake_epochs(
     *,
-    n_trials_per_class: int = 120,
+    n_trials_per_step: int = 40,
     n_electrodes: int = 4,
     n_samples: int = 60,
     sfreq: float = 100.0,
@@ -52,29 +52,28 @@ def _make_fake_epochs(
     seed: int = 0,
 ) -> mne.EpochsArray:
     """
-    Build a small synthetic epochs object with metadata columns required by the
-    causal6 decoders and a planted acoustic signal on `signal_electrodes`
-    during `signal_window` (in samples).
+    Build a small synthetic epochs object mirroring the real causal5/causal6
+    pipeline's metadata contract and a planted acoustic signal on
+    `signal_electrodes` during `signal_window`.
 
     Layout:
-      - n_trials = 2 * n_trials_per_class, split 50/50 on categorical_acoustic_cue
-      - word_end alternates between the two listed completions (independent of cue)
-      - resampled is 1 where cue=-1, 6 where cue=+1 (clean endpoints only)
+      - resampled is uniform over {1, 2, 3, 4, 5, 6} — 6 stimulus steps,
+        matching the real 6-step /d/-to-/n/ continuum
+      - categorical_acoustic_cue = -1 where resampled <= 3, +1 where resampled >= 4
+        (matches src/data.py:add_metadata_features)
+      - word_end alternates between the two listed completions
       - behavior_dummy_forced either follows the cue exactly or is random
 
-    The "signal" is a step-function added to `signal_electrodes` at samples
-    `[signal_window[0]:signal_window[1]]`, signed by categorical_acoustic_cue.
+    The acoustic decoder filters to resampled ∈ {1, 6} by default
+    (2 * n_trials_per_step trials after filter), so the signal must survive
+    that subset.
     """
     rng = np.random.default_rng(seed)
 
-    n_trials = 2 * n_trials_per_class
-    cue = np.concatenate([
-        -np.ones(n_trials_per_class, dtype=np.int64),
-        +np.ones(n_trials_per_class, dtype=np.int64),
-    ])
-    # Shuffle so positive and negative cues interleave
-    order = rng.permutation(n_trials)
-    cue = cue[order]
+    steps = np.tile(np.arange(1, 7, dtype=np.int64), n_trials_per_step)
+    rng.shuffle(steps)
+    n_trials = len(steps)
+    cue = np.where(steps > 3, 1, -1).astype(np.int64)
 
     data = rng.standard_normal((n_trials, n_electrodes, n_samples))
     smin, smax = signal_window
@@ -84,14 +83,13 @@ def _make_fake_epochs(
     word_end = np.array([word_ends[i % len(word_ends)] for i in range(n_trials)])
     rng.shuffle(word_end)
 
-    resampled = np.where(cue > 0, 6, 1)
     behavior = cue.copy() if behavior_follows_acoustic else rng.choice([-1, 1], size=n_trials)
 
     md = pd.DataFrame({
         "phoneme_pair": [phoneme_pair] * n_trials,
         "categorical_acoustic_cue": cue.astype(float),
         "word_end": word_end,
-        "resampled": resampled,
+        "resampled": steps.astype(float),
         "behavior_categorical_forced": behavior.astype(float),
         "behavior_dummy_forced": (behavior > 0).astype(int),
     })
@@ -190,13 +188,16 @@ def test_acoustic_searchlight_schema_and_shapes():
     assert len(any_coef) == 10
 
     # predictions: every (electrode × window × fold) produces n_test rows,
-    # and n_test over all folds sums to n_trials.
-    n_trials = epochs.metadata.shape[0]
+    # and n_test over all folds sums to n_trials_after_acoustic_filter.
+    # Acoustic searchlight filters to resampled ∈ {1, 6} by default.
+    n_trials_filtered = (
+        epochs.metadata["resampled"].isin([1, 6]).sum()
+    )
     total_preds_per_key = (
         preds.group_by(["electrode_idx", "smin", "smax"])
         .agg(pl.len().alias("n_test_rows"))
     )
-    assert (total_preds_per_key["n_test_rows"] == n_trials).all()
+    assert (total_preds_per_key["n_test_rows"] == n_trials_filtered).all()
 
 
 def test_acoustic_searchlight_cv_partition_is_disjoint():
