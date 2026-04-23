@@ -138,8 +138,11 @@ def fit_batched_l2_logreg(
         converged = converged | newly_converged
         active = active & ~newly_converged
 
-        if not active.any():
-            break
+        # No `if not active.any(): break` here — that forces a CPU↔GPU sync
+        # every iter. With strictly convex L2 objectives gradient ~0 at the
+        # optimum so extra iters on converged problems are cheap no-ops
+        # (direction is zeroed via torch.where below), and skipping the sync
+        # is worth more than the handful of extra Newton steps.
 
         # Hessian: X^T diag(mask_sw * p * (1-p)) X + lambda * I
         W_diag = mask_sw * p * (1.0 - p)  # (B, n)
@@ -155,11 +158,12 @@ def fit_batched_l2_logreg(
         gd = (g * direction).sum(dim=1)  # (B,) directional derivative, <= 0
         loss0 = _penalised_loss(X, y, mask_sw, beta, reg_lambda_t)  # (B,)
         step = torch.ones(B, device=device, dtype=dtype)
-        # Mark inactive problems as "step accepted" so the loop can exit early.
+        # Mark inactive problems as "step accepted" so the loop is a no-op for them.
         accepted = ~active
+        # Run a fixed number of halvings — no `if accepted.all(): break` because
+        # that forces a sync each iter. Already-accepted steps are preserved via
+        # torch.where(ok, step, step * 0.5), so extra halvings are no-ops.
         for _ in range(ls_max_halvings):
-            if accepted.all():
-                break
             cand = beta + step.unsqueeze(-1) * direction
             loss_c = _penalised_loss(X, y, mask_sw, cand, reg_lambda_t)
             ok = accepted | (loss_c <= loss0 + armijo_c * step * gd)
