@@ -1,0 +1,268 @@
+"""
+Batched L2-regularized binary logistic regression on GPU.
+
+Core kernel for the causal6 decoding pipeline. Solves B independent
+L2-regularized binary logistic regression problems in parallel via
+damped Newton-IRLS with Armijo backtracking line search.
+
+Objective (per problem b):
+    minimize_{beta in R^d}
+        sum_i  w_i * log(1 + exp(-y_i_signed * (X_i @ beta)))
+        + 0.5 * reg_lambda_b * ||beta||^2
+where y_i_signed = 2*y_i - 1 in {-1, +1} and w_i = mask_i * sample_weight_i.
+
+The `reg_lambda` here scales the PENALTY term. sklearn's `LogisticRegression`
+`C` parameter scales the LOSS term, giving the inverse correspondence:
+
+    C_sklearn == 1 / reg_lambda
+
+So reg_lambda in {0.01, 0.1, 1.0, 10.0} corresponds to sklearn C in {100, 10, 1, 0.1}.
+
+This is NOT the same algorithm as sklearn's liblinear solver (which uses Trust
+Region Newton via conjugate gradient). It is an exact-Hessian damped Newton
+method. Both solvers minimize the same strictly convex objective and converge
+to the same unique optimum; only the iterates differ.
+
+No intercept is fit (matches causal5 convention of StandardScaler + fit_intercept=False).
+Callers are responsible for feature standardisation per training fold.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Union
+
+import numpy as np
+import torch
+from torch import Tensor
+
+
+# ---------------------------------------------------------------------------
+# Core kernel
+# ---------------------------------------------------------------------------
+
+
+def _penalised_loss(
+    X: Tensor,              # (B, n, d)
+    y: Tensor,              # (B, n)   in {0, 1}
+    mask_sw: Tensor,        # (B, n)   = mask * sample_weight
+    beta: Tensor,           # (B, d)
+    reg_lambda: Tensor,     # (B,)
+) -> Tensor:                # (B,)
+    """Weighted binary cross-entropy + 0.5 * lambda * ||beta||^2, per batch element."""
+    z = torch.einsum("bnd,bd->bn", X, beta)  # (B, n)
+    # Stable: log(1 + exp(-y_signed * z)) = softplus(-y_signed * z)
+    y_signed = 2.0 * y - 1.0
+    per_sample = torch.nn.functional.softplus(-y_signed * z)  # (B, n)
+    data = (mask_sw * per_sample).sum(dim=1)
+    reg = 0.5 * reg_lambda * (beta * beta).sum(dim=1)
+    return data + reg
+
+
+def fit_batched_l2_logreg(
+    X: Tensor,                       # (B, n, d)
+    y: Tensor,                       # (B, n), values in {0, 1}
+    mask: Tensor,                    # (B, n), 1 = real row, 0 = padding
+    sample_weight: Tensor,           # (B, n), >= 0
+    reg_lambda: Union[float, Tensor],  # scalar or (B,)
+    *,
+    max_iter: int = 50,
+    tol: float = 1e-6,
+    ls_max_halvings: int = 10,
+    armijo_c: float = 1e-4,
+) -> tuple[Tensor, Tensor, Tensor]:
+    """
+    Fit B independent L2-regularised binary logistic regressions.
+
+    Args:
+        X: (B, n, d) padded feature matrices.
+        y: (B, n) binary labels in {0, 1}.
+        mask: (B, n) valid-row mask; 0 for padding.
+        sample_weight: (B, n) non-negative sample weights (use class-balanced
+            weights for parity with sklearn's class_weight='balanced').
+        reg_lambda: scalar or (B,) L2 penalty coefficient (see module docstring
+            on sklearn C correspondence).
+        max_iter: max Newton iterations.
+        tol: relative gradient-infinity-norm tolerance for convergence.
+        ls_max_halvings: max step halvings in the Armijo backtracking line
+            search. In practice 0-2 halvings suffice.
+        armijo_c: Armijo sufficient-decrease constant.
+
+    Returns:
+        beta: (B, d) fitted coefficients.
+        n_iter: (B,) int32 number of Newton iterations taken.
+        converged: (B,) bool whether relative gradient tolerance was reached.
+    """
+    assert X.dim() == 3, f"X must be (B, n, d), got {X.shape}"
+    assert y.shape == X.shape[:2], f"y must be (B, n), got {y.shape}"
+    assert mask.shape == y.shape
+    assert sample_weight.shape == y.shape
+    B, n, d = X.shape
+    device, dtype = X.device, X.dtype
+
+    if not torch.is_tensor(reg_lambda):
+        reg_lambda_t = torch.full((B,), float(reg_lambda), device=device, dtype=dtype)
+    else:
+        reg_lambda_t = reg_lambda.to(device=device, dtype=dtype)
+        if reg_lambda_t.shape == ():
+            reg_lambda_t = reg_lambda_t.expand(B).contiguous()
+    assert reg_lambda_t.shape == (B,)
+
+    mask_sw = mask * sample_weight  # (B, n); contributions from padded rows are 0
+
+    beta = torch.zeros(B, d, device=device, dtype=dtype)
+    I_d = torch.eye(d, device=device, dtype=dtype).expand(B, d, d).contiguous()
+
+    # Baseline gradient norm (at beta=0) for relative-tolerance convergence check.
+    # At beta=0, p = 0.5 for all rows, so residual = 0.5 - y ∈ {-0.5, +0.5}.
+    p0 = torch.full_like(y, 0.5)
+    g0 = torch.einsum("bnd,bn->bd", X, mask_sw * (p0 - y))  # (B, d)
+    g0_norm = g0.abs().amax(dim=1).clamp(min=1e-12)  # (B,)
+
+    n_iter = torch.zeros(B, dtype=torch.int32, device=device)
+    converged = torch.zeros(B, dtype=torch.bool, device=device)
+    # Per-batch "still-active" mask: stops updating once converged.
+    active = torch.ones(B, dtype=torch.bool, device=device)
+
+    for it in range(max_iter):
+        # Forward
+        z = torch.einsum("bnd,bd->bn", X, beta)
+        p = torch.sigmoid(z)
+
+        # Gradient: sum_i mask_sw_i * (p_i - y_i) * X_i + lambda * beta
+        resid = mask_sw * (p - y)
+        g = torch.einsum("bnd,bn->bd", X, resid) + reg_lambda_t.unsqueeze(-1) * beta
+
+        g_inf = g.abs().amax(dim=1)
+        newly_converged = active & (g_inf < tol * g0_norm)
+        converged = converged | newly_converged
+        active = active & ~newly_converged
+
+        if not active.any():
+            break
+
+        # Hessian: X^T diag(mask_sw * p * (1-p)) X + lambda * I
+        W_diag = mask_sw * p * (1.0 - p)  # (B, n)
+        XW = X * W_diag.unsqueeze(-1)      # (B, n, d)
+        H = torch.einsum("bnd,bne->bde", X, XW) + reg_lambda_t.view(B, 1, 1) * I_d
+
+        # Newton direction: d = -H^{-1} g
+        # Zero out direction for already-converged problems (avoid wasted work + NaNs).
+        direction = -torch.linalg.solve(H, g.unsqueeze(-1)).squeeze(-1)  # (B, d)
+        direction = torch.where(active.unsqueeze(-1), direction, torch.zeros_like(direction))
+
+        # Armijo backtracking with per-batch independent step sizes.
+        gd = (g * direction).sum(dim=1)  # (B,) directional derivative, <= 0
+        loss0 = _penalised_loss(X, y, mask_sw, beta, reg_lambda_t)  # (B,)
+        step = torch.ones(B, device=device, dtype=dtype)
+        # Mark inactive problems as "step accepted" so the loop can exit early.
+        accepted = ~active
+        for _ in range(ls_max_halvings):
+            if accepted.all():
+                break
+            cand = beta + step.unsqueeze(-1) * direction
+            loss_c = _penalised_loss(X, y, mask_sw, cand, reg_lambda_t)
+            ok = accepted | (loss_c <= loss0 + armijo_c * step * gd)
+            step = torch.where(ok, step, step * 0.5)
+            accepted = ok
+
+        beta = beta + step.unsqueeze(-1) * direction
+
+        n_iter = torch.where(active, n_iter + 1, n_iter)
+
+    return beta, n_iter, converged
+
+
+# ---------------------------------------------------------------------------
+# Standardisation helpers
+# ---------------------------------------------------------------------------
+
+
+def standardise_per_batch(
+    X_train: Tensor,        # (B, n_tr, d)
+    mask_train: Tensor,     # (B, n_tr)
+    X_test: Tensor,         # (B, n_te, d)
+    *,
+    eps: float = 1e-8,
+) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    """
+    Compute per-batch StandardScaler stats on (masked) training data, apply to both.
+
+    Returns (X_train_std, X_test_std, mean, scale).
+
+    Stats are computed only over mask==1 rows per batch element. Matches
+    sklearn.preprocessing.StandardScaler fit on train, transform on train/test.
+    """
+    # mean: sum(mask * X) / sum(mask)
+    m = mask_train.unsqueeze(-1)  # (B, n_tr, 1)
+    n_valid = mask_train.sum(dim=1, keepdim=True).clamp(min=1.0)  # (B, 1)
+    mean = (m * X_train).sum(dim=1) / n_valid  # (B, d)
+    # var: sum(mask * (X - mean)^2) / sum(mask)
+    centred = X_train - mean.unsqueeze(1)
+    var = (m * centred * centred).sum(dim=1) / n_valid  # (B, d)
+    scale = torch.sqrt(var).clamp(min=eps)
+
+    X_train_std = (X_train - mean.unsqueeze(1)) / scale.unsqueeze(1)
+    X_test_std = (X_test - mean.unsqueeze(1)) / scale.unsqueeze(1)
+    return X_train_std, X_test_std, mean, scale
+
+
+def compute_balanced_sample_weight(
+    y: Tensor,       # (B, n) in {0, 1}
+    mask: Tensor,    # (B, n)
+) -> Tensor:
+    """
+    Per-batch 'balanced' sample weights: w_i = n_valid / (K * count_k) for y_i in class k.
+
+    Matches sklearn.utils.class_weight.compute_sample_weight('balanced', y) when
+    applied to the masked rows of each batch element. Padded rows get weight 0.
+    """
+    n_valid = mask.sum(dim=1, keepdim=True).clamp(min=1.0)  # (B, 1)
+    pos = (mask * y).sum(dim=1, keepdim=True).clamp(min=1.0)           # (B, 1)
+    neg = (mask * (1.0 - y)).sum(dim=1, keepdim=True).clamp(min=1.0)   # (B, 1)
+    # K = 2 classes
+    w_pos = n_valid / (2.0 * pos)
+    w_neg = n_valid / (2.0 * neg)
+    sw = torch.where(y > 0.5, w_pos, w_neg) * mask
+    return sw
+
+
+# ---------------------------------------------------------------------------
+# sklearn-compatible wrapper
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class BatchedLogRegEstimator:
+    """
+    Lightweight container for one fitted binary L2 LogReg model.
+
+    Exposes a subset of sklearn's LogisticRegression API so downstream code
+    that calls `.predict_proba(X)` / `.predict(X)` / reads `.coef_` / `.classes_`
+    works unchanged.
+
+    Stores the per-training-fold standardisation stats so that prediction on
+    new (unstandardised) features applies the correct transform.
+    """
+    coef_: np.ndarray          # (d,) fitted coefficients in the standardised space
+    mean_: np.ndarray          # (d,) feature means from training fold
+    scale_: np.ndarray         # (d,) feature stds from training fold
+    classes_: np.ndarray       # shape (2,) = np.array([0, 1])
+    reg_lambda: float
+    n_iter_: int
+    converged_: bool
+
+    def _standardise(self, X: np.ndarray) -> np.ndarray:
+        return (X - self.mean_) / self.scale_
+
+    def decision_function(self, X: np.ndarray) -> np.ndarray:
+        return self._standardise(X) @ self.coef_
+
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        z = self.decision_function(X)
+        p1 = 1.0 / (1.0 + np.exp(-z))
+        return np.stack([1.0 - p1, p1], axis=1)
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        z = self.decision_function(X)
+        return (z > 0).astype(self.classes_.dtype)
