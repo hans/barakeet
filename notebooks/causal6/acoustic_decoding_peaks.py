@@ -32,14 +32,14 @@ scores_path = f"outputs/causal6/acoustic_decoding_single_electrode/{subject}/sco
 outdir = "."
 
 target = "categorical_acoustic_cue"
-min_decoding_sample = 0
-max_decoding_sample = 290  # same as causal5 default
+peak_search_smin = 0
+peak_search_smax = 290  # same as causal5 default
 
 # %%
 scores = pl.read_parquet(scores_path).filter(pl.col("target") == target)
 
 scores = scores.filter(
-    (pl.col("smin") >= min_decoding_sample) & (pl.col("smax") <= max_decoding_sample)
+    (pl.col("smin") >= peak_search_smin) & (pl.col("smax") <= peak_search_smax)
 )
 
 # %%

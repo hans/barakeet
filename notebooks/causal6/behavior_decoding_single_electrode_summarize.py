@@ -40,8 +40,8 @@ outdir = "."
 epoch_tmin = -0.4
 epoch_sfreq = 100
 behav_peak_post_offset_s = 0.2
-min_decoding_sample = 0
-max_decoding_sample = 290
+peak_search_smin = 0
+peak_search_smax = 290
 
 # %%
 scores = pl.read_parquet(scores_path)
@@ -71,9 +71,9 @@ offset_samples = {
 paired = paired.with_columns(
     pl.col("word_end").replace_strict(offset_samples, default=None).alias("_smax_limit")
 ).filter(
-    (pl.col("smin") >= min_decoding_sample)
+    (pl.col("smin") >= peak_search_smin)
     & (pl.col("smax") <= pl.col("_smax_limit"))
-    & (pl.col("smax") <= max_decoding_sample)
+    & (pl.col("smax") <= peak_search_smax)
 ).drop("_smax_limit")
 
 # %%

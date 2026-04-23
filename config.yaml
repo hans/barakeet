@@ -35,6 +35,10 @@ analysis:
     window_size: 15
     stride: 2
     n_jobs: 4
+    # Post-hoc peak-finding bounds: summarize/peaks rules restrict peak
+    # selection to windows with smin >= peak_search_smin and smax <= peak_search_smax.
+    peak_search_smin: 0
+    peak_search_smax: 290
 
   multivariate:
     window_sizes: [10]          # 100ms at 100Hz; robustness: [5, 10, 15]

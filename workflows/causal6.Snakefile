@@ -377,6 +377,8 @@ rule behavior_decoding_single_electrode_summarize:
                 epoch_tmin=config["analysis"]["epoch_tmin"],
                 epoch_sfreq=config["analysis"]["epoch_sfreq"],
                 behav_peak_post_offset_s=config["analysis"]["behav_peak_post_offset_s"],
+                peak_search_smin=config["analysis"]["decoding"]["peak_search_smin"],
+                peak_search_smax=config["analysis"]["decoding"]["peak_search_smax"],
             ),
         )
 
@@ -406,6 +408,8 @@ rule behavior_decoding_single_electrode_hga_only_summarize:
                 epoch_tmin=config["analysis"]["epoch_tmin"],
                 epoch_sfreq=config["analysis"]["epoch_sfreq"],
                 behav_peak_post_offset_s=config["analysis"]["behav_peak_post_offset_s"],
+                peak_search_smin=config["analysis"]["decoding"]["peak_search_smin"],
+                peak_search_smax=config["analysis"]["decoding"]["peak_search_smax"],
             ),
         )
 
@@ -429,5 +433,7 @@ rule acoustic_decoding_peaks:
             parameters=dict(
                 scores_path=str(input.scores),
                 outdir=str(outdir),
+                peak_search_smin=config["analysis"]["decoding"]["peak_search_smin"],
+                peak_search_smax=config["analysis"]["decoding"]["peak_search_smax"],
             ),
         )
