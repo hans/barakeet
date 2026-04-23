@@ -64,7 +64,7 @@ cv_random_state = 42
 # Additional CV seeds to re-sweep at, for diagnosing λ-winner stability.
 # Empty = no stability check; canonical winners always use `cv_random_state`.
 # Rerunning at N extra seeds ≈ Nx more GPU time; 1-2 extras is usually enough.
-compare_cv_seeds: list[int] = []
+compare_cv_seeds = []  # list[int]; annotation stripped for ploomber static_analysis
 device = "cuda"
 tol = 1e-6
 max_iter = 50

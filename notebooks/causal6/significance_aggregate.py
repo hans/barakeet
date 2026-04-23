@@ -27,7 +27,7 @@ import pandas as pd
 from statsmodels.stats.multitest import multipletests
 
 # %% tags=["parameters"]
-result_paths: list[str] = []
+result_paths = []  # list[str]; annotation stripped for ploomber static_analysis
 outdir = "."
 fdr_alpha = 0.05
 
