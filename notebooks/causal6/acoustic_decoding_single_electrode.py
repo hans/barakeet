@@ -78,15 +78,12 @@ max_sample = epochs.times.shape[0]
 windows = make_windows(min_sample, max_sample, window_size, stride)
 
 # %% [markdown]
-# Fit both acoustic targets (if available): `categorical_acoustic_cue` and
-# `subject_specific_acoustics`. The per-target parquets are concatenated; a
+# The per-target parquets are concatenated; a
 # `target` column distinguishes them, matching the causal5 `all_outcomes.parquet`
 # `measure` convention.
 
 # %%
 targets = ["categorical_acoustic_cue"]
-if "subject_specific_acoustics" in epochs.metadata.columns:
-    targets.append("subject_specific_acoustics")
 
 all_scores, all_preds, all_coefs = [], [], []
 for target in targets:
