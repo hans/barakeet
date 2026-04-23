@@ -154,6 +154,10 @@ rule reg_lambda_sweep:
 
     Note: rule input reads the tuning subject from the output of select_tuning_subject,
     so this rule automatically reruns if the ranking shifts.
+
+    Runs the notebook under cProfile (temporary) to diagnose Python-side
+    overhead. The profile is dumped next to the notebook output and the top
+    cumulative-time functions are printed to Snakemake's stdout.
     """
     input:
         epochs_glob = expand(
@@ -171,30 +175,50 @@ rule reg_lambda_sweep:
         notebook = "outputs/causal6/reg_lambda_sweep/notebook.ipynb",
         sweep    = "outputs/causal6/reg_lambda_sweep/sweep_results.parquet",
         winners  = "outputs/causal6/reg_lambda_sweep/reg_lambda_winners.json",
+        profile  = "outputs/causal6/reg_lambda_sweep/sweep.prof",
 
     run:
+        import cProfile
+        import pstats
+
         outdir = Path(output.notebook).parent
         tuning_subject = Path(input.winner).read_text().strip()
-        run_notebook(
-            str(input.notebook),
-            str(output.notebook),
-            parameters=dict(
-                epochs_path=f"outputs/epochs_preprocessed/{tuning_subject}_epo.fif",
-                electrodes_path=f"outputs/causal5/find_speech_responsive/{tuning_subject}_results.csv",
-                outdir=str(outdir),
 
-                min_sample=config["analysis"]["decoding"]["min_sample"],
-                window_size=config["analysis"]["decoding"]["window_size"],
-                stride=config["analysis"]["decoding"]["stride"],
+        profiler = cProfile.Profile()
+        profiler.enable()
+        try:
+            run_notebook(
+                str(input.notebook),
+                str(output.notebook),
+                parameters=dict(
+                    epochs_path=f"outputs/epochs_preprocessed/{tuning_subject}_epo.fif",
+                    electrodes_path=f"outputs/causal5/find_speech_responsive/{tuning_subject}_results.csv",
+                    outdir=str(outdir),
 
-                reg_lambda_grid=C6["tuning_reg_lambda_grid"],
-                n_folds=C6["n_folds"],
-                cv_random_state=C6["cv_random_state"],
-                device=C6["device"],
-                tol=C6["tol"],
-                max_iter=C6["max_iter"],
-            ),
-        )
+                    min_sample=config["analysis"]["decoding"]["min_sample"],
+                    window_size=config["analysis"]["decoding"]["window_size"],
+                    stride=config["analysis"]["decoding"]["stride"],
+
+                    reg_lambda_grid=C6["tuning_reg_lambda_grid"],
+                    n_folds=C6["n_folds"],
+                    cv_random_state=C6["cv_random_state"],
+                    device=C6["device"],
+                    tol=C6["tol"],
+                    max_iter=C6["max_iter"],
+                ),
+            )
+        finally:
+            profiler.disable()
+            profiler.dump_stats(str(output.profile))
+            stats = pstats.Stats(profiler).sort_stats("cumulative")
+            print("\n=== reg_lambda_sweep cProfile — top 30 by cumulative time ===")
+            stats.print_stats(30)
+            print("\n=== top 30 by total self time ===")
+            stats.sort_stats("tottime").print_stats(30)
+            print(f"\nFull profile written to {output.profile}")
+            print("Inspect interactively with:")
+            print(f"    python -m pstats {output.profile}")
+            print(f"    snakeviz {output.profile}   # GUI, pip install snakeviz")
 
 
 def _load_reg_lambda(winners_path: str, task: str) -> float:
