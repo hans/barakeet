@@ -149,6 +149,13 @@ def _fit_batched_cv(
 
     skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=cv_random_state)
     y_gpu = torch.tensor(y.astype(np.float64), dtype=dtype, device=device)
+    # Upload the whole feature tensor to GPU once, already transposed so the
+    # problem dim is first. Each fold then slices rows via torch.index_select
+    # on-GPU instead of numpy-fancy-index-copy + transpose.copy() + upload per
+    # fold (~65s across the sweep: 37s numpy copy + 28s torch.tensor upload).
+    X_gpu = torch.tensor(
+        X.transpose(1, 0, 2).copy(), dtype=dtype, device=device
+    )  # (B, n_trials, d)
 
     scores_frames: list[pl.DataFrame] = []
     predictions_frames: list[pl.DataFrame] = []
@@ -162,16 +169,15 @@ def _fit_batched_cv(
     for fold, (train_idx, test_idx) in enumerate(skf.split(np.zeros(n_trials), y)):
         n_tr, n_te = len(train_idx), len(test_idx)
 
-        X_train = X[train_idx]   # (n_tr, B, d)
-        X_test = X[test_idx]     # (n_te, B, d)
-        # move problem dim to front for batched ops
-        X_train_t = torch.tensor(
-            X_train.transpose(1, 0, 2).copy(), dtype=dtype, device=device
+        train_idx_t = torch.as_tensor(train_idx, dtype=torch.long, device=device)
+        test_idx_t = torch.as_tensor(test_idx, dtype=torch.long, device=device)
+
+        X_train_t = X_gpu.index_select(1, train_idx_t)  # (B, n_tr, d)
+        X_test_t = X_gpu.index_select(1, test_idx_t)    # (B, n_te, d)
+        y_train = (
+            y_gpu.index_select(0, train_idx_t)
+            .unsqueeze(0).expand(B, -1).contiguous()
         )
-        X_test_t = torch.tensor(
-            X_test.transpose(1, 0, 2).copy(), dtype=dtype, device=device
-        )
-        y_train = y_gpu[train_idx].unsqueeze(0).expand(B, -1).contiguous()
         mask_tr = torch.ones(B, n_tr, dtype=dtype, device=device)
 
         X_tr_std, X_te_std, mean, scale = standardise_per_batch(X_train_t, mask_tr, X_test_t)
@@ -186,8 +192,8 @@ def _fit_batched_cv(
         proba_te_gpu = torch.sigmoid(z_te)  # (B, n_te)
 
         # Vectorised per-problem AUCs on GPU; NaN when only one class is present.
-        y_te = y[test_idx]
-        y_te_gpu = torch.tensor(y_te.astype(np.float64), dtype=dtype, device=device)
+        y_te = y[test_idx]  # numpy slice — still needed for the predictions frame
+        y_te_gpu = y_gpu.index_select(0, test_idx_t)
         aucs_gpu = batched_roc_auc(proba_te_gpu, y_te_gpu)
 
         proba_te = proba_te_gpu.cpu().numpy()
