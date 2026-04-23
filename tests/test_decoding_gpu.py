@@ -11,6 +11,8 @@ Run with:
 
 from __future__ import annotations
 
+from typing import Literal
+
 import numpy as np
 import pytest
 import torch
@@ -30,11 +32,14 @@ from src.models.decoding_gpu import (
 TORCH_DTYPE = torch.float64  # use double precision for tight tolerance matching
 
 
-def _sklearn_fit(X, y, C, sample_weight=None, class_weight=None):
+def _sklearn_fit(
+    X, y, C, sample_weight=None, class_weight=None,
+    solver: Literal["lbfgs", "liblinear"] = "lbfgs",
+):
     model = LogisticRegression(
         penalty="l2",
         C=C,
-        solver="lbfgs",
+        solver=solver,
         fit_intercept=False,
         class_weight=class_weight,
         max_iter=10000,
@@ -74,6 +79,77 @@ def test_kernel_matches_sklearn_lbfgs(reg_lambda, n, d):
     np.testing.assert_allclose(
         beta.squeeze(0).numpy(), sk_coef, atol=1e-4, rtol=1e-4,
         err_msg=f"reg_lambda={reg_lambda}, n={n}, d={d}",
+    )
+
+
+@pytest.mark.parametrize("reg_lambda", [0.01, 0.1, 1.0, 10.0])
+@pytest.mark.parametrize("n,d", [(200, 15), (100, 5), (50, 16), (500, 3)])
+def test_kernel_matches_sklearn_liblinear(reg_lambda, n, d):
+    """
+    Single-problem kernel fit matches sklearn's liblinear solver at convergence.
+
+    Liblinear uses Trust Region Newton (TRON, primal formulation) — a different
+    optimisation algorithm from the kernel's exact-Hessian damped Newton. Both
+    minimise the same strictly-convex L2 binary logreg objective and converge
+    to the same unique optimum.
+
+    Liblinear's L2 objective scales slightly differently internally: it rescales
+    the loss relative to `sum(sample_weight)` in some paths, but with
+    fit_intercept=False, penalty='l2', unweighted samples, and dense input,
+    the coefficient should match lbfgs to ~1e-4.
+    """
+    rng = np.random.default_rng(seed=42)
+    X = rng.standard_normal((n, d))
+    true_w = rng.standard_normal(d)
+    logits = X @ true_w
+    y = (rng.random(n) < 1.0 / (1.0 + np.exp(-logits))).astype(np.int64)
+
+    sk_coef = _sklearn_fit(X, y, C=1.0 / reg_lambda, solver="liblinear")
+
+    X_t = torch.tensor(X[None, :, :], dtype=TORCH_DTYPE)
+    y_t = torch.tensor(y[None, :].astype(np.float64), dtype=TORCH_DTYPE)
+    mask = torch.ones(1, n, dtype=TORCH_DTYPE)
+    sw = torch.ones(1, n, dtype=TORCH_DTYPE)
+
+    beta, n_iter, converged = fit_batched_l2_logreg(
+        X_t, y_t, mask, sw, reg_lambda=reg_lambda, tol=1e-10, max_iter=100,
+    )
+    assert converged.item(), f"did not converge in {n_iter.item()} iters"
+
+    np.testing.assert_allclose(
+        beta.squeeze(0).numpy(), sk_coef, atol=1e-4, rtol=1e-4,
+        err_msg=f"reg_lambda={reg_lambda}, n={n}, d={d}",
+    )
+
+
+def test_kernel_matches_liblinear_with_balanced_weights():
+    """
+    Liblinear agreement under class_weight='balanced' — the production setting
+    used by causal5's behavior decoders.
+    """
+    rng = np.random.default_rng(seed=13)
+    n, d = 300, 15
+    X = rng.standard_normal((n, d))
+    # Imbalanced labels to exercise the class-weight path
+    y = np.concatenate([np.ones(70), np.zeros(230)]).astype(np.int64)
+    rng.shuffle(y)
+
+    sk_coef = _sklearn_fit(
+        X, y, C=1.0, solver="liblinear", class_weight="balanced",
+    )
+
+    X_t = torch.tensor(X[None, :, :], dtype=TORCH_DTYPE)
+    y_t = torch.tensor(y[None, :].astype(np.float64), dtype=TORCH_DTYPE)
+    mask = torch.ones(1, n, dtype=TORCH_DTYPE)
+    sw = compute_balanced_sample_weight(y_t, mask)
+
+    beta, _, conv = fit_batched_l2_logreg(
+        X_t, y_t, mask, sw, reg_lambda=1.0, tol=1e-10, max_iter=100,
+    )
+    assert conv.item()
+
+    np.testing.assert_allclose(
+        beta.squeeze(0).numpy(), sk_coef, atol=1e-4, rtol=1e-4,
     )
 
 
