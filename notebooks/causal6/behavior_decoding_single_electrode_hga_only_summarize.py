@@ -14,22 +14,29 @@
 # ---
 
 # %% [markdown]
-# causal6 summarize: behavior decoding HGA-only variant.
+# causal6 summarize: behavior decoding HGA-only, null-standardized peak.
 #
-# Peak-finding uses max `test_roc_auc` directly (no baseline comparison).
+# Inputs:
+#   scores.parquet         — real per-fold AUC (single model, no baseline)
+#   predictions.parquet    — real per-trial held-out predictions
+#   null_scores.parquet    — permutation null per (site, window, perm)
+#
+# Peak-finding uses null-standardized pointwise p of fold-mean AUC (see
+# src/models/significance.py for rationale).
 
 # %%
 from pathlib import Path
 
 import polars as pl
 
-# %%
+from src.models.significance import null_standardized_peak_test
 from src.stimuli import OFFSET_DICT
 
 # %% tags=["parameters"]
 subject = "EC282"
 scores_path = f"outputs/causal6/behavior_decoding_single_electrode_hga_only/{subject}/scores.parquet"
 predictions_path = f"outputs/causal6/behavior_decoding_single_electrode_hga_only/{subject}/predictions.parquet"
+null_scores_path = f"outputs/causal6/behavior_decoding_single_electrode_hga_only_null/{subject}/null_scores.parquet"
 outdir = "."
 
 epoch_tmin = -0.4
@@ -39,50 +46,79 @@ peak_search_smin = 0
 peak_search_smax = 290
 
 # %%
-scores = pl.read_parquet(scores_path)
-predictions = pl.read_parquet(predictions_path)
+site_keys = ["subject", "electrode_idx", "phoneme_pair", "word_end"]
+window_keys = site_keys + ["smin", "smax"]
 
-# %%
 offset_samples = {
     we: int((offset_s - epoch_tmin) * epoch_sfreq + behav_peak_post_offset_s * epoch_sfreq)
     for we, offset_s in OFFSET_DICT.items()
 }
-scores = scores.with_columns(
-    pl.col("word_end").replace_strict(offset_samples, default=None).alias("_smax_limit")
-).filter(
-    (pl.col("smin") >= peak_search_smin)
-    & (pl.col("smax") <= pl.col("_smax_limit"))
-    & (pl.col("smax") <= peak_search_smax)
-).drop("_smax_limit")
+
+
+def _window_filter(df: pl.DataFrame) -> pl.DataFrame:
+    return (
+        df.with_columns(
+            pl.col("word_end").replace_strict(offset_samples, default=None).alias("_smax_limit")
+        )
+        .filter(
+            (pl.col("smin") >= peak_search_smin)
+            & (pl.col("smax") <= pl.col("_smax_limit"))
+            & (pl.col("smax") <= peak_search_smax)
+        )
+        .drop("_smax_limit")
+    )
+
 
 # %%
-site_keys = ["subject", "electrode_idx", "phoneme_pair", "word_end"]
-window_keys = site_keys + ["smin", "smax"]
+real_scores = pl.read_parquet(scores_path).pipe(_window_filter)
+predictions = pl.read_parquet(predictions_path)
+null_scores = pl.read_parquet(null_scores_path).pipe(_window_filter)
 
-window_mean = (
-    scores.group_by(window_keys)
-    .agg(pl.col("test_roc_auc").mean())
+# %% [markdown]
+# ## Aggregate to fold-mean per (site, window[, perm])
+
+# %%
+real_window_mean = real_scores.group_by(window_keys).agg(
+    pl.col("test_roc_auc").mean().alias("test_roc_auc")
 )
 
-peak_summary = (
-    window_mean.sort("test_roc_auc", descending=True)
-    .group_by(site_keys, maintain_order=True)
-    .agg(pl.all().first())
+null_window_mean = null_scores.group_by(window_keys + ["permutation_idx"]).agg(
+    pl.col("test_roc_auc").mean().alias("test_roc_auc")
 )
 
-print(f"{peak_summary.height} sites with peak windows identified")
+# %% [markdown]
+# ## Null-standardized peak test
+
+# %%
+peak_summary_std, _window_stats_std = null_standardized_peak_test(
+    real_window_mean,
+    null_window_mean,
+    site_keys=site_keys,
+    window_keys=["smin", "smax"],
+    stat_col="test_roc_auc",
+)
+
+peak_summary = peak_summary_std.rename({
+    "peak_smin": "smin",
+    "peak_smax": "smax",
+    "real_statistic": "test_roc_auc",
+})
+print(
+    f"{peak_summary.height} sites: "
+    f"{(peak_summary['p_value'] < 0.05).sum()} with p<0.05 (uncorrected)"
+)
 
 # %%
 peak_keys = peak_summary.select(site_keys + ["smin", "smax"])
-peak_predictions = predictions.join(
-    peak_keys, on=site_keys + ["smin", "smax"], how="inner",
-)
+peak_predictions = predictions.join(peak_keys, on=site_keys + ["smin", "smax"], how="inner")
 
 # %%
 outdir = Path(outdir)
 peak_summary.write_parquet(outdir / "peak_summary.parquet")
 peak_predictions.write_parquet(outdir / "peak_predictions.parquet")
-window_mean.write_parquet(outdir / "window_mean_scores.parquet")
-print(f"Wrote peak_summary.parquet ({peak_summary.height} rows), "
-      f"peak_predictions.parquet ({peak_predictions.height} rows), "
-      f"window_mean_scores.parquet ({window_mean.height} rows) to {outdir}")
+real_window_mean.write_parquet(outdir / "window_mean_scores.parquet")
+print(
+    f"Wrote peak_summary.parquet ({peak_summary.height} rows), "
+    f"peak_predictions.parquet ({peak_predictions.height} rows), "
+    f"window_mean_scores.parquet ({real_window_mean.height} rows) to {outdir}"
+)

@@ -14,11 +14,12 @@
 # ---
 
 # %% [markdown]
-# causal6: aggregate per-subject significance parquets and apply BH-FDR.
+# causal6: aggregate per-subject peak/significance parquets and apply BH-FDR.
 #
-# Shared by all three decoders (acoustic / behavior_full / behavior_hga_only);
-# parametrized on `result_paths` + `outdir` + `fdr_alpha`. Mirrors
-# notebooks/causal5/behavior_decoding_single_electrode_hga_only_significance_aggregate.py.
+# Shared by all three decoders (acoustic / behavior_full / behavior_hga_only)
+# and any future decoder whose per-subject parquet contains a `p_value`
+# column (as produced by src/models/significance.py:null_standardized_peak_test).
+# Parametrized on `result_paths` + `outdir` + `output_name` + `fdr_alpha`.
 
 # %%
 from pathlib import Path
@@ -29,6 +30,7 @@ from statsmodels.stats.multitest import multipletests
 # %% tags=["parameters"]
 result_paths = []  # list[str]; annotation stripped for ploomber static_analysis
 outdir = "."
+output_name = "significance_all.parquet"
 fdr_alpha = 0.05
 
 # %%
@@ -57,4 +59,4 @@ print(
 )
 
 # %%
-combined.to_parquet(outdir / "significance_all.parquet")
+combined.to_parquet(outdir / output_name)

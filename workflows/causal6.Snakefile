@@ -155,23 +155,11 @@ C6 = config["causal6"]  # shorthand — rules below fail early if this block is 
 
 
 rule causal6_all:
-    """Default target: run all three causal6 decoders + summarize + significance."""
+    """Default target: run all three causal6 decoders + null-standardized peaks + FDR."""
     input:
-        expand(
-            "outputs/causal6/acoustic_decoding_peaks/{subject}/phon_peaks.parquet",
-            subject=config["data"]["subjects"],
-        ),
-        expand(
-            "outputs/causal6/behavior_decoding_single_electrode_summarize/{subject}/peak_summary.parquet",
-            subject=config["data"]["subjects"],
-        ),
-        expand(
-            "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/{subject}/peak_summary.parquet",
-            subject=config["data"]["subjects"],
-        ),
-        "outputs/causal6/acoustic_decoding_single_electrode_significance/significance_all.parquet",
-        "outputs/causal6/behavior_decoding_single_electrode_significance/significance_all.parquet",
-        "outputs/causal6/behavior_decoding_single_electrode_hga_only_significance/significance_all.parquet",
+        "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet",
+        "outputs/causal6/behavior_decoding_single_electrode_summarize/peak_summary_all.parquet",
+        "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/peak_summary_all.parquet",
 
 
 rule select_tuning_subject:
@@ -394,116 +382,27 @@ rule behavior_decoding_single_electrode_hga_only:
         )
 
 
-rule behavior_decoding_single_electrode_summarize:
-    """Peak-finding over causal6 behavior (with-control) parquets."""
-    input:
-        scores       = "outputs/causal6/behavior_decoding_single_electrode/{subject}/scores.parquet",
-        predictions  = "outputs/causal6/behavior_decoding_single_electrode/{subject}/predictions.parquet",
-        notebook     = "notebooks/causal6/behavior_decoding_single_electrode_summarize.py",
-
-    output:
-        notebook         = "outputs/causal6/behavior_decoding_single_electrode_summarize/{subject}/notebook.ipynb",
-        peak_summary     = "outputs/causal6/behavior_decoding_single_electrode_summarize/{subject}/peak_summary.parquet",
-        peak_predictions = "outputs/causal6/behavior_decoding_single_electrode_summarize/{subject}/peak_predictions.parquet",
-
-    run:
-        outdir = Path(output.notebook).parent
-        run_notebook(
-            str(input.notebook),
-            str(output.notebook),
-            parameters=dict(
-                scores_path=str(input.scores),
-                predictions_path=str(input.predictions),
-                outdir=str(outdir),
-
-                epoch_tmin=config["analysis"]["epoch_tmin"],
-                epoch_sfreq=config["analysis"]["epoch_sfreq"],
-                behav_peak_post_offset_s=config["analysis"]["behav_peak_post_offset_s"],
-                peak_search_smin=config["analysis"]["decoding"]["peak_search_smin"],
-                peak_search_smax=config["analysis"]["decoding"]["peak_search_smax"],
-            ),
-        )
-
-
-rule behavior_decoding_single_electrode_hga_only_summarize:
-    """Peak-finding over causal6 behavior HGA-only parquets."""
-    input:
-        scores       = "outputs/causal6/behavior_decoding_single_electrode_hga_only/{subject}/scores.parquet",
-        predictions  = "outputs/causal6/behavior_decoding_single_electrode_hga_only/{subject}/predictions.parquet",
-        notebook     = "notebooks/causal6/behavior_decoding_single_electrode_hga_only_summarize.py",
-
-    output:
-        notebook         = "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/{subject}/notebook.ipynb",
-        peak_summary     = "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/{subject}/peak_summary.parquet",
-        peak_predictions = "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/{subject}/peak_predictions.parquet",
-
-    run:
-        outdir = Path(output.notebook).parent
-        run_notebook(
-            str(input.notebook),
-            str(output.notebook),
-            parameters=dict(
-                scores_path=str(input.scores),
-                predictions_path=str(input.predictions),
-                outdir=str(outdir),
-
-                epoch_tmin=config["analysis"]["epoch_tmin"],
-                epoch_sfreq=config["analysis"]["epoch_sfreq"],
-                behav_peak_post_offset_s=config["analysis"]["behav_peak_post_offset_s"],
-                peak_search_smin=config["analysis"]["decoding"]["peak_search_smin"],
-                peak_search_smax=config["analysis"]["decoding"]["peak_search_smax"],
-            ),
-        )
-
-
-rule acoustic_decoding_peaks:
-    """Per-subject acoustic-decoding peak finding from causal6 parquets."""
-    input:
-        scores   = "outputs/causal6/acoustic_decoding_single_electrode/{subject}/scores.parquet",
-        notebook = "notebooks/causal6/acoustic_decoding_peaks.py",
-
-    output:
-        notebook = "outputs/causal6/acoustic_decoding_peaks/{subject}/notebook.ipynb",
-        peaks    = "outputs/causal6/acoustic_decoding_peaks/{subject}/phon_peaks.parquet",
-        roc_auc  = "outputs/causal6/acoustic_decoding_peaks/{subject}/phon_roc_auc_searchlight.parquet",
-
-    run:
-        outdir = Path(output.notebook).parent
-        run_notebook(
-            str(input.notebook),
-            str(output.notebook),
-            parameters=dict(
-                scores_path=str(input.scores),
-                outdir=str(outdir),
-                target="categorical_acoustic_cue",
-                peak_search_smin=config["analysis"]["decoding"]["peak_search_smin"],
-                peak_search_smax=config["analysis"]["decoding"]["peak_search_smax"],
-            ),
-        )
-
-
 # =============================================================================
-# Significance testing (refit-based permutation test)
+# Null refits — GPU-heavy, one rule per decoder.
 #
-# Per-subject rules run K permutation refits of each decoder and write a
-# `significance.parquet` of per-site p-values (max-statistic corrected across
-# windows). Aggregate rules concatenate subjects and apply BH-FDR globally.
+# Each rule runs K label-shuffled refits of its decoder and writes
+# `null_scores.parquet`. Downstream peak-finding rules consume these
+# nulls to produce null-standardized peaks + per-site p-values in a
+# single CPU pass (see src/models/significance.py).
 # =============================================================================
 
 
-rule acoustic_decoding_single_electrode_significance:
-    """Per-subject acoustic-decoding significance: refit-based permutation null."""
+rule acoustic_decoding_null:
+    """Per-subject acoustic permutation-null refits."""
     input:
-        epochs       = "outputs/epochs_preprocessed/{subject}_epo.fif",
-        electrodes   = "outputs/causal5/find_speech_responsive/{subject}_results.csv",
-        winners      = REG_LAMBDA_WINNERS,
-        real_scores  = "outputs/causal6/acoustic_decoding_single_electrode/{subject}/scores.parquet",
-        notebook     = "notebooks/causal6/acoustic_decoding_single_electrode_significance.py",
+        epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
+        electrodes = "outputs/causal5/find_speech_responsive/{subject}_results.csv",
+        winners    = REG_LAMBDA_WINNERS,
+        notebook   = "notebooks/causal6/acoustic_decoding_null.py",
 
     output:
-        notebook          = "outputs/causal6/acoustic_decoding_single_electrode_significance/{subject}/notebook.ipynb",
-        significance      = "outputs/causal6/acoustic_decoding_single_electrode_significance/{subject}/significance.parquet",
-        null_distribution = "outputs/causal6/acoustic_decoding_single_electrode_significance/{subject}/null_distribution.parquet",
+        notebook    = "outputs/causal6/acoustic_decoding_null/{subject}/notebook.ipynb",
+        null_scores = "outputs/causal6/acoustic_decoding_null/{subject}/null_scores.parquet",
 
     resources:
         gpu = 1
@@ -517,7 +416,6 @@ rule acoustic_decoding_single_electrode_significance:
             parameters=dict(
                 epochs_path=str(input.epochs),
                 electrodes_path=str(input.electrodes),
-                real_scores_path=str(input.real_scores),
                 outdir=str(outdir),
 
                 min_sample=config["analysis"]["decoding"]["min_sample"],
@@ -525,8 +423,6 @@ rule acoustic_decoding_single_electrode_significance:
                 stride=config["analysis"]["decoding"]["stride"],
 
                 target="categorical_acoustic_cue",
-                peak_search_smin=config["analysis"]["decoding"]["peak_search_smin"],
-                peak_search_smax=config["analysis"]["decoding"]["peak_search_smax"],
 
                 reg_lambda=_load_reg_lambda(input.winners, "acoustic"),
                 n_folds=C6["n_folds"],
@@ -543,51 +439,17 @@ rule acoustic_decoding_single_electrode_significance:
         )
 
 
-rule acoustic_decoding_single_electrode_significance_aggregate:
-    """Concatenate per-subject acoustic significance parquets + BH-FDR globally."""
+rule behavior_decoding_single_electrode_null:
+    """Per-subject behavior-with-control permutation-null refits."""
     input:
-        notebook     = "notebooks/causal6/significance_aggregate.py",
-        result_paths = expand(
-            "outputs/causal6/acoustic_decoding_single_electrode_significance/{subject}/significance.parquet",
-            subject=config["data"]["subjects"],
-        ),
+        epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
+        electrodes = "outputs/causal5/find_speech_responsive/{subject}_results.csv",
+        winners    = REG_LAMBDA_WINNERS,
+        notebook   = "notebooks/causal6/behavior_decoding_single_electrode_null.py",
 
     output:
-        notebook         = "outputs/causal6/acoustic_decoding_single_electrode_significance/notebook.ipynb",
-        significance_all = "outputs/causal6/acoustic_decoding_single_electrode_significance/significance_all.parquet",
-
-    run:
-        outdir = Path(output.notebook).parent
-        run_notebook(
-            str(input.notebook),
-            str(output.notebook),
-            parameters=dict(
-                result_paths=list(input.result_paths),
-                outdir=str(outdir),
-                fdr_alpha=config["analysis"]["fdr_alpha"],
-            ),
-        )
-
-
-rule acoustic_decoding_single_electrode_significance_all:
-    """Run acoustic significance + aggregate across all subjects."""
-    input:
-        "outputs/causal6/acoustic_decoding_single_electrode_significance/significance_all.parquet",
-
-
-rule behavior_decoding_single_electrode_significance:
-    """Per-subject behavior-with-control significance: refit-based permutation null."""
-    input:
-        epochs       = "outputs/epochs_preprocessed/{subject}_epo.fif",
-        electrodes   = "outputs/causal5/find_speech_responsive/{subject}_results.csv",
-        winners      = REG_LAMBDA_WINNERS,
-        real_scores  = "outputs/causal6/behavior_decoding_single_electrode/{subject}/scores.parquet",
-        notebook     = "notebooks/causal6/behavior_decoding_single_electrode_significance.py",
-
-    output:
-        notebook          = "outputs/causal6/behavior_decoding_single_electrode_significance/{subject}/notebook.ipynb",
-        significance      = "outputs/causal6/behavior_decoding_single_electrode_significance/{subject}/significance.parquet",
-        null_distribution = "outputs/causal6/behavior_decoding_single_electrode_significance/{subject}/null_distribution.parquet",
+        notebook    = "outputs/causal6/behavior_decoding_single_electrode_null/{subject}/notebook.ipynb",
+        null_scores = "outputs/causal6/behavior_decoding_single_electrode_null/{subject}/null_scores.parquet",
 
     resources:
         gpu = 1
@@ -601,18 +463,11 @@ rule behavior_decoding_single_electrode_significance:
             parameters=dict(
                 epochs_path=str(input.epochs),
                 electrodes_path=str(input.electrodes),
-                real_scores_path=str(input.real_scores),
                 outdir=str(outdir),
 
                 min_sample=config["analysis"]["decoding"]["min_sample"],
                 window_size=config["analysis"]["decoding"]["window_size"],
                 stride=config["analysis"]["decoding"]["stride"],
-
-                epoch_tmin=config["analysis"]["epoch_tmin"],
-                epoch_sfreq=config["analysis"]["epoch_sfreq"],
-                behav_peak_post_offset_s=config["analysis"]["behav_peak_post_offset_s"],
-                peak_search_smin=config["analysis"]["decoding"]["peak_search_smin"],
-                peak_search_smax=config["analysis"]["decoding"]["peak_search_smax"],
 
                 reg_lambda=_load_reg_lambda(input.winners, "behavior_full"),
                 reg_lambda_baseline=None,
@@ -630,51 +485,17 @@ rule behavior_decoding_single_electrode_significance:
         )
 
 
-rule behavior_decoding_single_electrode_significance_aggregate:
-    """Concatenate per-subject behavior-with-control significance parquets + BH-FDR."""
+rule behavior_decoding_single_electrode_hga_only_null:
+    """Per-subject behavior-HGA-only permutation-null refits."""
     input:
-        notebook     = "notebooks/causal6/significance_aggregate.py",
-        result_paths = expand(
-            "outputs/causal6/behavior_decoding_single_electrode_significance/{subject}/significance.parquet",
-            subject=config["data"]["subjects"],
-        ),
+        epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
+        electrodes = "outputs/causal5/find_speech_responsive/{subject}_results.csv",
+        winners    = REG_LAMBDA_WINNERS,
+        notebook   = "notebooks/causal6/behavior_decoding_single_electrode_hga_only_null.py",
 
     output:
-        notebook         = "outputs/causal6/behavior_decoding_single_electrode_significance/notebook.ipynb",
-        significance_all = "outputs/causal6/behavior_decoding_single_electrode_significance/significance_all.parquet",
-
-    run:
-        outdir = Path(output.notebook).parent
-        run_notebook(
-            str(input.notebook),
-            str(output.notebook),
-            parameters=dict(
-                result_paths=list(input.result_paths),
-                outdir=str(outdir),
-                fdr_alpha=config["analysis"]["fdr_alpha"],
-            ),
-        )
-
-
-rule behavior_decoding_single_electrode_significance_all:
-    """Run behavior-with-control significance + aggregate across all subjects."""
-    input:
-        "outputs/causal6/behavior_decoding_single_electrode_significance/significance_all.parquet",
-
-
-rule behavior_decoding_single_electrode_hga_only_significance:
-    """Per-subject behavior-HGA-only significance: refit-based permutation null."""
-    input:
-        epochs       = "outputs/epochs_preprocessed/{subject}_epo.fif",
-        electrodes   = "outputs/causal5/find_speech_responsive/{subject}_results.csv",
-        winners      = REG_LAMBDA_WINNERS,
-        real_scores  = "outputs/causal6/behavior_decoding_single_electrode_hga_only/{subject}/scores.parquet",
-        notebook     = "notebooks/causal6/behavior_decoding_single_electrode_hga_only_significance.py",
-
-    output:
-        notebook          = "outputs/causal6/behavior_decoding_single_electrode_hga_only_significance/{subject}/notebook.ipynb",
-        significance      = "outputs/causal6/behavior_decoding_single_electrode_hga_only_significance/{subject}/significance.parquet",
-        null_distribution = "outputs/causal6/behavior_decoding_single_electrode_hga_only_significance/{subject}/null_distribution.parquet",
+        notebook    = "outputs/causal6/behavior_decoding_single_electrode_hga_only_null/{subject}/notebook.ipynb",
+        null_scores = "outputs/causal6/behavior_decoding_single_electrode_hga_only_null/{subject}/null_scores.parquet",
 
     resources:
         gpu = 1
@@ -688,18 +509,11 @@ rule behavior_decoding_single_electrode_hga_only_significance:
             parameters=dict(
                 epochs_path=str(input.epochs),
                 electrodes_path=str(input.electrodes),
-                real_scores_path=str(input.real_scores),
                 outdir=str(outdir),
 
                 min_sample=config["analysis"]["decoding"]["min_sample"],
                 window_size=config["analysis"]["decoding"]["window_size"],
                 stride=config["analysis"]["decoding"]["stride"],
-
-                epoch_tmin=config["analysis"]["epoch_tmin"],
-                epoch_sfreq=config["analysis"]["epoch_sfreq"],
-                behav_peak_post_offset_s=config["analysis"]["behav_peak_post_offset_s"],
-                peak_search_smin=config["analysis"]["decoding"]["peak_search_smin"],
-                peak_search_smax=config["analysis"]["decoding"]["peak_search_smax"],
 
                 reg_lambda=_load_reg_lambda(input.winners, "behavior_hga_only"),
                 n_folds=C6["n_folds"],
@@ -716,18 +530,122 @@ rule behavior_decoding_single_electrode_hga_only_significance:
         )
 
 
-rule behavior_decoding_single_electrode_hga_only_significance_aggregate:
-    """Concatenate per-subject behavior-HGA-only significance parquets + BH-FDR."""
+# =============================================================================
+# Peak-finding + per-site significance (CPU, consumes real + null scores).
+# =============================================================================
+
+
+rule behavior_decoding_single_electrode_summarize:
+    """Null-standardized peak-finding + p-values for behavior-with-control."""
+    input:
+        scores       = "outputs/causal6/behavior_decoding_single_electrode/{subject}/scores.parquet",
+        predictions  = "outputs/causal6/behavior_decoding_single_electrode/{subject}/predictions.parquet",
+        null_scores  = "outputs/causal6/behavior_decoding_single_electrode_null/{subject}/null_scores.parquet",
+        notebook     = "notebooks/causal6/behavior_decoding_single_electrode_summarize.py",
+
+    output:
+        notebook         = "outputs/causal6/behavior_decoding_single_electrode_summarize/{subject}/notebook.ipynb",
+        peak_summary     = "outputs/causal6/behavior_decoding_single_electrode_summarize/{subject}/peak_summary.parquet",
+        peak_predictions = "outputs/causal6/behavior_decoding_single_electrode_summarize/{subject}/peak_predictions.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                scores_path=str(input.scores),
+                predictions_path=str(input.predictions),
+                null_scores_path=str(input.null_scores),
+                outdir=str(outdir),
+
+                epoch_tmin=config["analysis"]["epoch_tmin"],
+                epoch_sfreq=config["analysis"]["epoch_sfreq"],
+                behav_peak_post_offset_s=config["analysis"]["behav_peak_post_offset_s"],
+                peak_search_smin=config["analysis"]["decoding"]["peak_search_smin"],
+                peak_search_smax=config["analysis"]["decoding"]["peak_search_smax"],
+            ),
+        )
+
+
+rule behavior_decoding_single_electrode_hga_only_summarize:
+    """Null-standardized peak-finding + p-values for behavior-HGA-only."""
+    input:
+        scores       = "outputs/causal6/behavior_decoding_single_electrode_hga_only/{subject}/scores.parquet",
+        predictions  = "outputs/causal6/behavior_decoding_single_electrode_hga_only/{subject}/predictions.parquet",
+        null_scores  = "outputs/causal6/behavior_decoding_single_electrode_hga_only_null/{subject}/null_scores.parquet",
+        notebook     = "notebooks/causal6/behavior_decoding_single_electrode_hga_only_summarize.py",
+
+    output:
+        notebook         = "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/{subject}/notebook.ipynb",
+        peak_summary     = "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/{subject}/peak_summary.parquet",
+        peak_predictions = "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/{subject}/peak_predictions.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                scores_path=str(input.scores),
+                predictions_path=str(input.predictions),
+                null_scores_path=str(input.null_scores),
+                outdir=str(outdir),
+
+                epoch_tmin=config["analysis"]["epoch_tmin"],
+                epoch_sfreq=config["analysis"]["epoch_sfreq"],
+                behav_peak_post_offset_s=config["analysis"]["behav_peak_post_offset_s"],
+                peak_search_smin=config["analysis"]["decoding"]["peak_search_smin"],
+                peak_search_smax=config["analysis"]["decoding"]["peak_search_smax"],
+            ),
+        )
+
+
+rule acoustic_decoding_peaks:
+    """Null-standardized peak-finding + p-values for acoustic decoder."""
+    input:
+        scores       = "outputs/causal6/acoustic_decoding_single_electrode/{subject}/scores.parquet",
+        null_scores  = "outputs/causal6/acoustic_decoding_null/{subject}/null_scores.parquet",
+        notebook     = "notebooks/causal6/acoustic_decoding_peaks.py",
+
+    output:
+        notebook = "outputs/causal6/acoustic_decoding_peaks/{subject}/notebook.ipynb",
+        peaks    = "outputs/causal6/acoustic_decoding_peaks/{subject}/phon_peaks.parquet",
+        roc_auc  = "outputs/causal6/acoustic_decoding_peaks/{subject}/phon_roc_auc_searchlight.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                scores_path=str(input.scores),
+                null_scores_path=str(input.null_scores),
+                outdir=str(outdir),
+                target="categorical_acoustic_cue",
+                peak_search_smin=config["analysis"]["decoding"]["peak_search_smin"],
+                peak_search_smax=config["analysis"]["decoding"]["peak_search_smax"],
+            ),
+        )
+
+
+# =============================================================================
+# Aggregate per-subject peaks + BH-FDR across subjects.
+# =============================================================================
+
+
+rule acoustic_decoding_peaks_aggregate:
+    """Concatenate per-subject phon_peaks.parquet + BH-FDR on p_value."""
     input:
         notebook     = "notebooks/causal6/significance_aggregate.py",
         result_paths = expand(
-            "outputs/causal6/behavior_decoding_single_electrode_hga_only_significance/{subject}/significance.parquet",
+            "outputs/causal6/acoustic_decoding_peaks/{subject}/phon_peaks.parquet",
             subject=config["data"]["subjects"],
         ),
 
     output:
-        notebook         = "outputs/causal6/behavior_decoding_single_electrode_hga_only_significance/notebook.ipynb",
-        significance_all = "outputs/causal6/behavior_decoding_single_electrode_hga_only_significance/significance_all.parquet",
+        notebook = "outputs/causal6/acoustic_decoding_peaks/aggregate_notebook.ipynb",
+        all      = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet",
 
     run:
         outdir = Path(output.notebook).parent
@@ -737,12 +655,61 @@ rule behavior_decoding_single_electrode_hga_only_significance_aggregate:
             parameters=dict(
                 result_paths=list(input.result_paths),
                 outdir=str(outdir),
+                output_name="phon_peaks_all.parquet",
                 fdr_alpha=config["analysis"]["fdr_alpha"],
             ),
         )
 
 
-rule behavior_decoding_single_electrode_hga_only_significance_all:
-    """Run behavior-HGA-only significance + aggregate across all subjects."""
+rule behavior_decoding_single_electrode_summarize_aggregate:
+    """Concatenate per-subject peak_summary.parquet + BH-FDR on p_value."""
     input:
-        "outputs/causal6/behavior_decoding_single_electrode_hga_only_significance/significance_all.parquet",
+        notebook     = "notebooks/causal6/significance_aggregate.py",
+        result_paths = expand(
+            "outputs/causal6/behavior_decoding_single_electrode_summarize/{subject}/peak_summary.parquet",
+            subject=config["data"]["subjects"],
+        ),
+
+    output:
+        notebook = "outputs/causal6/behavior_decoding_single_electrode_summarize/aggregate_notebook.ipynb",
+        all      = "outputs/causal6/behavior_decoding_single_electrode_summarize/peak_summary_all.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                result_paths=list(input.result_paths),
+                outdir=str(outdir),
+                output_name="peak_summary_all.parquet",
+                fdr_alpha=config["analysis"]["fdr_alpha"],
+            ),
+        )
+
+
+rule behavior_decoding_single_electrode_hga_only_summarize_aggregate:
+    """Concatenate per-subject HGA-only peak_summary.parquet + BH-FDR on p_value."""
+    input:
+        notebook     = "notebooks/causal6/significance_aggregate.py",
+        result_paths = expand(
+            "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/{subject}/peak_summary.parquet",
+            subject=config["data"]["subjects"],
+        ),
+
+    output:
+        notebook = "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/aggregate_notebook.ipynb",
+        all      = "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/peak_summary_all.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                result_paths=list(input.result_paths),
+                outdir=str(outdir),
+                output_name="peak_summary_all.parquet",
+                fdr_alpha=config["analysis"]["fdr_alpha"],
+            ),
+        )
