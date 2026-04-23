@@ -99,6 +99,24 @@ for target in targets:
         dtype=torch.float32,
         tol=tol, max_iter=max_iter,
     )
+
+    # Invariant: for categorical_acoustic_cue, every phoneme_pair the subject
+    # has trials for should get decoded. The searchlight filters to resampled
+    # ∈ {1, 6} and those endpoints are deterministically labeled ∓1 / +1, so
+    # imbalance = one endpoint missing from the subject's data. Fail loudly so
+    # we notice before the skip propagates to the peaks summary. (Skips are
+    # expected for subject_specific_acoustics — behaviorally-set zero-crossings
+    # can push all trials into one class — so the check is target-scoped.)
+    if target == "categorical_acoustic_cue":
+        expected_pairs = set(epochs.metadata.phoneme_pair.dropna().unique())
+        fit_pairs = set(scores.get_column("phoneme_pair").unique().to_list())
+        missing = expected_pairs - fit_pairs
+        assert not missing, (
+            f"[{subject}] acoustic({target}) skipped phoneme_pairs {sorted(missing)}; "
+            "check preceding class-balance warnings — a resampled endpoint (1 or 6) "
+            "is likely missing for those pairs in this subject's data."
+        )
+
     all_scores.append(scores)
     all_preds.append(preds)
     all_coefs.append(coefs)
