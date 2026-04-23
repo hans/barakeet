@@ -196,14 +196,18 @@ print(sweep)
 # direct read on how noisy the per-λ AUCs that drive winner selection are. If
 # the winner's `mean_peak_auc` lead over runners-up is smaller than
 # `mean_site_fold_sd`, the pick is inside the noise floor.
+#
+# nulls_equal=True: acoustic scores have `word_end = null` after the diagonal
+# concat. Default polars join semantics drop null-keyed rows, which would
+# silently skip acoustic from the whole summary.
 peak_windows = (
-    per_site_peak.join(per_site_per_window, on=site_cols, how="left")
+    per_site_peak.join(per_site_per_window, on=site_cols, how="left", nulls_equal=True)
     .filter(pl.col("auc_cv_mean") == pl.col("peak_auc"))
     .select(window_cols)
     .unique()
 )
 fold_variance = (
-    winner_input.join(peak_windows, on=window_cols, how="inner")
+    winner_input.join(peak_windows, on=window_cols, how="inner", nulls_equal=True)
     .group_by(window_cols)
     .agg(pl.col("test_roc_auc").std().alias("auc_fold_sd"))
     .group_by(["decoder", "reg_lambda"])
@@ -230,6 +234,7 @@ L.info(f"Winners: {winners}")
 # %%
 sweep.write_parquet(outdir / "sweep_results.parquet")
 all_scores_df.write_parquet(outdir / "sweep_all_scores.parquet")
+fold_variance.write_parquet(outdir / "sweep_fold_variance.parquet")
 (outdir / "reg_lambda_winners.json").write_text(json.dumps({
     "subject": subject,
     "reg_lambda_acoustic": winners["acoustic"],
