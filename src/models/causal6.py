@@ -38,6 +38,7 @@ import numpy as np
 import pandas as pd
 import polars as pl
 import torch
+from loguru import logger as L
 from sklearn.model_selection import StratifiedKFold
 from tqdm.auto import tqdm
 
@@ -69,6 +70,16 @@ def make_windows(
 # ---------------------------------------------------------------------------
 # Target resolution
 # ---------------------------------------------------------------------------
+
+
+def _has_enough_per_class(y: np.ndarray, n_folds: int) -> bool:
+    """
+    StratifiedKFold(n_splits=n_folds) requires at least `n_folds` samples in
+    the minority class. Also catches the degenerate single-class case.
+    """
+    if len(np.unique(y)) != 2:
+        return False
+    return int(np.bincount(y.astype(np.int64)).min()) >= n_folds
 
 
 def _resolve_target(
@@ -320,7 +331,13 @@ def run_acoustic_searchlight(
             continue
 
         y = _resolve_target(md, target, phoneme_pair, selection)
-        if len(np.unique(y)) != 2:
+        if not _has_enough_per_class(y, n_folds):
+            counts = np.bincount(y.astype(np.int64)) if len(np.unique(y)) > 0 else []
+            L.warning(
+                f"[acoustic][{subject}/{phoneme_pair}] skipping: insufficient "
+                f"class balance for StratifiedKFold(n_splits={n_folds}); "
+                f"class counts = {list(counts)}"
+            )
             continue
 
         epoch_idxs_sel = md.index[selection].to_numpy()
@@ -433,10 +450,13 @@ def _run_behavior_core(
         pp_mask = (md.phoneme_pair == phoneme_pair).values
         sel = pp_mask & (md.word_end == word_end).values
         y = _resolve_target(md, "behavior_categorical_forced", phoneme_pair, sel)
-        if len(np.unique(y)) != 2:
-            continue
-        counts = np.bincount(y)
-        if counts.min() < n_folds:
+        if not _has_enough_per_class(y, n_folds):
+            counts = np.bincount(y.astype(np.int64)) if len(np.unique(y)) > 0 else []
+            L.warning(
+                f"[{decoder_label}][{subject}/{phoneme_pair}/{word_end}] "
+                f"skipping: insufficient class balance for "
+                f"StratifiedKFold(n_splits={n_folds}); class counts = {list(counts)}"
+            )
             continue
 
         epoch_idxs_sel = md.index[sel].to_numpy()
