@@ -136,27 +136,49 @@ for rl in reg_lambda_grid:
 
 all_scores_df = pl.concat(all_scores, how="diagonal_relaxed")
 
-# For winner selection: mean AUC per (decoder, reg_lambda). For behavior_full
-# the mean is over the full model only (baseline rows excluded).
+# For winner selection: match how λ will actually be USED downstream — each
+# site picks its own peak window — so the tuning metric is:
+#   1. mean test AUC across folds per (site, window)
+#   2. max across windows per site  (= the "peak" window for that site)
+#   3. mean across sites per (decoder, reg_lambda)
+# A plain mean over every (site × window × fold) cell is dominated by the many
+# windows on many electrodes with no signal; stronger λ shrinks those toward
+# 0.5 more tightly, which spuriously raises the mean.
+#
+# A "site" = (phoneme_pair, electrode_idx, word_end). word_end only exists for
+# the behavior decoders — it is null for acoustic rows and forms its own
+# (single-valued) group there, which gives the right grouping for both.
 winner_input = all_scores_df.filter(
     (pl.col("decoder") != "behavior_full") | (pl.col("model") == "full")
 )
+
+site_cols = ["decoder", "reg_lambda", "phoneme_pair", "electrode_idx", "word_end"]
+window_cols = site_cols + ["smin", "smax"]
+
+per_site_per_window = (
+    winner_input.group_by(window_cols)
+    .agg(pl.col("test_roc_auc").mean().alias("auc_cv_mean"))
+)
+per_site_peak = (
+    per_site_per_window.group_by(site_cols)
+    .agg(pl.col("auc_cv_mean").max().alias("peak_auc"))
+)
 sweep = (
-    winner_input.group_by(["decoder", "reg_lambda"])
-    .agg(pl.col("test_roc_auc").mean().alias("mean_test_auc"))
+    per_site_peak.group_by(["decoder", "reg_lambda"])
+    .agg(pl.col("peak_auc").mean().alias("mean_peak_auc"))
     .sort(["decoder", "reg_lambda"])
 )
 print(sweep)
 
 # %% [markdown]
-# Pick winners: argmax mean_test_auc per decoder.
+# Pick winners: argmax mean_peak_auc per decoder.
 
 # %%
 winners = {
     row["decoder"]: float(row["reg_lambda"])
     for row in (
         sweep.group_by("decoder")
-        .agg(pl.all().sort_by("mean_test_auc", descending=True).first())
+        .agg(pl.all().sort_by("mean_peak_auc", descending=True).first())
         .to_dicts()
     )
 }
