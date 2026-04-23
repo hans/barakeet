@@ -88,6 +88,64 @@ def run_notebook(input_path: str, output_path: str, parameters, **kwargs):
             tmp_path.unlink(missing_ok=True)
 
 
+def select_gpu_device(wildcards, resources):
+    """Pick `resources.gpu` free GPU IDs at random via nvidia-ml.
+
+    Returns a comma-separated string suitable for CUDA_VISIBLE_DEVICES,
+    or None if `resources.gpu == 0`. Raises if no GPU is free.
+    """
+    if resources.gpu == 0:
+        return None
+    import sys
+
+    import GPUtil
+    available = GPUtil.getAvailable(
+        order="random", limit=resources.gpu,
+        maxLoad=0.01, maxMemory=0.49, includeNan=False,
+        excludeID=[], excludeUUID=[],
+    )
+    if not available:
+        raise RuntimeError("select_gpu_device: no free GPU")
+    if len(available) < resources.gpu:
+        sys.stderr.write(
+            f"[WARN] select_gpu_device got {len(available)} GPU(s), "
+            f"requested {resources.gpu}\n"
+        )
+    available_str = ",".join(str(x) for x in available)
+    print(f"Assigning {resources.gpu} GPU device(s): {available_str}")
+    return available_str
+
+
+def run_notebook_gpu(input_path, output_path, parameters, gpu_device):
+    """Run a notebook in a subprocess with CUDA_VISIBLE_DEVICES pinned.
+
+    Use this in place of `run_notebook` for any rule that imports torch
+    and needs its own GPU. Mutating `os.environ` from inside a Snakemake
+    `run:` block does NOT reach torch once torch is already imported in
+    the Snakemake process, so subprocess isolation is mandatory.
+    """
+    import json
+    import os
+    import subprocess
+    import sys
+    import tempfile
+
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+        json.dump(parameters, f)
+        params_path = f.name
+
+    try:
+        env = os.environ.copy()
+        env["CUDA_VISIBLE_DEVICES"] = str(gpu_device)
+        helper = Path(workflow.basedir) / "_gpu_notebook_runner.py"
+        subprocess.run(
+            [sys.executable, str(helper), str(input_path), str(output_path), params_path],
+            env=env, check=True,
+        )
+    finally:
+        Path(params_path).unlink(missing_ok=True)
+
+
 C6 = config["causal6"]  # shorthand — rules below fail early if this block is missing
 
 
@@ -466,9 +524,13 @@ rule acoustic_decoding_single_electrode_significance:
         significance      = "outputs/causal6/acoustic_decoding_single_electrode_significance/{subject}/significance.parquet",
         null_distribution = "outputs/causal6/acoustic_decoding_single_electrode_significance/{subject}/null_distribution.parquet",
 
+    resources:
+        gpu = 1
+
     run:
         outdir = Path(output.notebook).parent
-        run_notebook(
+        gpu_device = select_gpu_device(wildcards, resources)
+        run_notebook_gpu(
             str(input.notebook),
             str(output.notebook),
             parameters=dict(
@@ -496,6 +558,7 @@ rule acoustic_decoding_single_electrode_significance:
                 permutation_seed=C6["permutation_seed"],
                 permutation_chunk_size=C6["permutation_chunk_size"],
             ),
+            gpu_device=gpu_device,
         )
 
 
@@ -545,9 +608,13 @@ rule behavior_decoding_single_electrode_significance:
         significance      = "outputs/causal6/behavior_decoding_single_electrode_significance/{subject}/significance.parquet",
         null_distribution = "outputs/causal6/behavior_decoding_single_electrode_significance/{subject}/null_distribution.parquet",
 
+    resources:
+        gpu = 1
+
     run:
         outdir = Path(output.notebook).parent
-        run_notebook(
+        gpu_device = select_gpu_device(wildcards, resources)
+        run_notebook_gpu(
             str(input.notebook),
             str(output.notebook),
             parameters=dict(
@@ -578,6 +645,7 @@ rule behavior_decoding_single_electrode_significance:
                 permutation_seed=C6["permutation_seed"],
                 permutation_chunk_size=C6["permutation_chunk_size"],
             ),
+            gpu_device=gpu_device,
         )
 
 
@@ -627,9 +695,13 @@ rule behavior_decoding_single_electrode_hga_only_significance:
         significance      = "outputs/causal6/behavior_decoding_single_electrode_hga_only_significance/{subject}/significance.parquet",
         null_distribution = "outputs/causal6/behavior_decoding_single_electrode_hga_only_significance/{subject}/null_distribution.parquet",
 
+    resources:
+        gpu = 1
+
     run:
         outdir = Path(output.notebook).parent
-        run_notebook(
+        gpu_device = select_gpu_device(wildcards, resources)
+        run_notebook_gpu(
             str(input.notebook),
             str(output.notebook),
             parameters=dict(
@@ -659,6 +731,7 @@ rule behavior_decoding_single_electrode_hga_only_significance:
                 permutation_seed=C6["permutation_seed"],
                 permutation_chunk_size=C6["permutation_chunk_size"],
             ),
+            gpu_device=gpu_device,
         )
 
 
