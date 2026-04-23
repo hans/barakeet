@@ -20,7 +20,8 @@
 # at every reg_lambda in `reg_lambda_grid`. Picks the argmax mean test AUC per
 # decoder and writes the winners to `reg_lambda_winners.json`.
 #
-# Update `config.yaml` with the winners to lock them in for all-subject runs.
+# Decoder rules in the Snakefile read `reg_lambda_winners.json` directly as a
+# Snakemake input — no config edit required.
 
 # %%
 import os
@@ -158,4 +159,3 @@ sweep.write_parquet(outdir / "sweep_results.parquet")
     "reg_lambda_behavior_hga_only": winners["behavior_hga_only"],
 }, indent=2))
 L.info(f"Wrote sweep_results.parquet + reg_lambda_winners.json to {outdir}")
-L.info("Update config.yaml causal6.reg_lambda_* values with the winners above.")

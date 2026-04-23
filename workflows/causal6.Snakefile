@@ -198,24 +198,28 @@ rule reg_lambda_sweep:
         )
 
 
-def _reg_lambda(task: str):
-    """Return the frozen per-task reg_lambda from config, or fall back to 1.0.
-
-    Rules referencing this function work without the sweep having been run
-    (1.0 is a usable default); once the sweep runs and config.yaml is updated,
-    runs pick up the tuned values.
-    """
+def _load_reg_lambda(winners_path: str, task: str) -> float:
+    """Read the tuned reg_lambda for `task` from the sweep's winners JSON."""
+    import json
+    winners = json.loads(Path(winners_path).read_text())
     key = f"reg_lambda_{task}"
-    val = C6.get(key)
-    return 1.0 if val is None else val
+    if key not in winners:
+        raise KeyError(
+            f"{key} missing from {winners_path}; rerun reg_lambda_sweep."
+        )
+    return float(winners[key])
+
+
+REG_LAMBDA_WINNERS = "outputs/causal6/reg_lambda_sweep/reg_lambda_winners.json"
 
 
 rule acoustic_decoding_single_electrode:
     """Acoustic searchlight — GPU-batched replacement for causal5's rule."""
     input:
-        epochs    = "outputs/epochs_preprocessed/{subject}_epo.fif",
+        epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
         electrodes = "outputs/causal5/find_speech_responsive/{subject}_results.csv",
-        notebook  = "notebooks/causal6/acoustic_decoding_single_electrode.py",
+        winners    = REG_LAMBDA_WINNERS,
+        notebook   = "notebooks/causal6/acoustic_decoding_single_electrode.py",
 
     output:
         notebook     = "outputs/causal6/acoustic_decoding_single_electrode/{subject}/notebook.ipynb",
@@ -237,7 +241,7 @@ rule acoustic_decoding_single_electrode:
                 window_size=config["analysis"]["decoding"]["window_size"],
                 stride=config["analysis"]["decoding"]["stride"],
 
-                reg_lambda=_reg_lambda("acoustic"),
+                reg_lambda=_load_reg_lambda(input.winners, "acoustic"),
                 n_folds=C6["n_folds"],
                 cv_random_state=C6["cv_random_state"],
                 device=C6["device"],
@@ -250,9 +254,10 @@ rule acoustic_decoding_single_electrode:
 rule behavior_decoding_single_electrode:
     """Behavior decoding with resampled control — GPU-batched replacement."""
     input:
-        epochs    = "outputs/epochs_preprocessed/{subject}_epo.fif",
+        epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
         electrodes = "outputs/causal5/find_speech_responsive/{subject}_results.csv",
-        notebook  = "notebooks/causal6/behavior_decoding_single_electrode.py",
+        winners    = REG_LAMBDA_WINNERS,
+        notebook   = "notebooks/causal6/behavior_decoding_single_electrode.py",
 
     output:
         notebook     = "outputs/causal6/behavior_decoding_single_electrode/{subject}/notebook.ipynb",
@@ -274,7 +279,7 @@ rule behavior_decoding_single_electrode:
                 window_size=config["analysis"]["decoding"]["window_size"],
                 stride=config["analysis"]["decoding"]["stride"],
 
-                reg_lambda=_reg_lambda("behavior_full"),
+                reg_lambda=_load_reg_lambda(input.winners, "behavior_full"),
                 reg_lambda_baseline=None,
                 n_folds=C6["n_folds"],
                 cv_random_state=C6["cv_random_state"],
@@ -288,9 +293,10 @@ rule behavior_decoding_single_electrode:
 rule behavior_decoding_single_electrode_hga_only:
     """Behavior decoding, HGA only — GPU-batched replacement."""
     input:
-        epochs    = "outputs/epochs_preprocessed/{subject}_epo.fif",
+        epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
         electrodes = "outputs/causal5/find_speech_responsive/{subject}_results.csv",
-        notebook  = "notebooks/causal6/behavior_decoding_single_electrode_hga_only.py",
+        winners    = REG_LAMBDA_WINNERS,
+        notebook   = "notebooks/causal6/behavior_decoding_single_electrode_hga_only.py",
 
     output:
         notebook     = "outputs/causal6/behavior_decoding_single_electrode_hga_only/{subject}/notebook.ipynb",
@@ -312,7 +318,7 @@ rule behavior_decoding_single_electrode_hga_only:
                 window_size=config["analysis"]["decoding"]["window_size"],
                 stride=config["analysis"]["decoding"]["stride"],
 
-                reg_lambda=_reg_lambda("behavior_hga_only"),
+                reg_lambda=_load_reg_lambda(input.winners, "behavior_hga_only"),
                 n_folds=C6["n_folds"],
                 cv_random_state=C6["cv_random_state"],
                 device=C6["device"],

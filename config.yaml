@@ -53,14 +53,13 @@ analysis:
 
 
 causal6:
-  # Per-task L2 penalty strengths for the GPU-batched decoders.
+  # Per-task L2 penalty strengths are NOT stored here — they live in
+  # outputs/causal6/reg_lambda_sweep/reg_lambda_winners.json, written by the
+  # reg_lambda_sweep rule and read back by each decoder rule as a Snakemake
+  # input. This keeps the tuned values version-controlled with the sweep
+  # artifacts rather than requiring a manual copy-paste step.
   # My convention: reg_lambda scales the PENALTY term. sklearn's C scales the
   # LOSS term, giving the inverse correspondence: C_sklearn == 1 / reg_lambda.
-  # Null values fall back to 1.0 until reg_lambda_sweep has been run; after the
-  # sweep, update these in place with the winners.
-  reg_lambda_acoustic: null
-  reg_lambda_behavior_full: null
-  reg_lambda_behavior_hga_only: null
 
   # Solver
   max_iter: 50
