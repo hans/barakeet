@@ -205,21 +205,19 @@ def _fit_batched_cv(
         }))
 
         # --- coefficients ---
+        # Use fixed-width pl.Array columns so polars can ingest the 2D numpy
+        # arrays wholesale. pl.List + .tolist() would force element-by-element
+        # type inference over B*d floats (~55s across the sweep).
         beta_np = beta.cpu().numpy().astype(np.float32)
         mean_np = mean.cpu().numpy().astype(np.float32)
         scale_np = scale.cpu().numpy().astype(np.float32)
-        coefficients_frames.append(pl.DataFrame({
-            "_problem_idx": problem_idx,
-            "fold": np.full(B, fold, dtype=np.int32),
-            "coef": beta_np.tolist(),
-            "mean": mean_np.tolist(),
-            "scale": scale_np.tolist(),
-        }, schema={
-            "_problem_idx": pl.Int64, "fold": pl.Int32,
-            "coef": pl.List(pl.Float32),
-            "mean": pl.List(pl.Float32),
-            "scale": pl.List(pl.Float32),
-        }))
+        coefficients_frames.append(pl.DataFrame([
+            pl.Series("_problem_idx", problem_idx, dtype=pl.Int64),
+            pl.Series("fold", np.full(B, fold, dtype=np.int32), dtype=pl.Int32),
+            pl.Series("coef", beta_np, dtype=pl.Array(pl.Float32, d)),
+            pl.Series("mean", mean_np, dtype=pl.Array(pl.Float32, d)),
+            pl.Series("scale", scale_np, dtype=pl.Array(pl.Float32, d)),
+        ]))
 
         # --- predictions ---
         # Long format: (B × n_te) rows per fold
@@ -241,6 +239,14 @@ def _fit_batched_cv(
     coefficients = pl.concat(coefficients_frames).join(
         problem_meta_with_idx, on="_problem_idx", how="left"
     ).drop("_problem_idx")
+    # Cast the fixed-width Array cols back to List so callers can vstack
+    # results across problems with different feature counts (e.g. full vs
+    # baseline model in _run_behavior_core).
+    coefficients = coefficients.with_columns(
+        pl.col("coef").cast(pl.List(pl.Float32)),
+        pl.col("mean").cast(pl.List(pl.Float32)),
+        pl.col("scale").cast(pl.List(pl.Float32)),
+    )
     return scores, predictions, coefficients
 
 
