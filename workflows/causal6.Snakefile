@@ -172,10 +172,11 @@ rule reg_lambda_sweep:
         notebook = "notebooks/causal6/reg_lambda_sweep.py",
 
     output:
-        notebook = "outputs/causal6/reg_lambda_sweep/notebook.ipynb",
-        sweep    = "outputs/causal6/reg_lambda_sweep/sweep_results.parquet",
-        winners  = "outputs/causal6/reg_lambda_sweep/reg_lambda_winners.json",
-        profile  = "outputs/causal6/reg_lambda_sweep/sweep.prof",
+        notebook   = "outputs/causal6/reg_lambda_sweep/notebook.ipynb",
+        sweep      = "outputs/causal6/reg_lambda_sweep/sweep_results.parquet",
+        all_scores = "outputs/causal6/reg_lambda_sweep/sweep_all_scores.parquet",
+        winners    = "outputs/causal6/reg_lambda_sweep/reg_lambda_winners.json",
+        profile    = "outputs/causal6/reg_lambda_sweep/sweep.prof",
 
     run:
         import cProfile

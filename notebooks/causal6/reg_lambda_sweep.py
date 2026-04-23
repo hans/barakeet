@@ -85,12 +85,15 @@ windows = make_windows(min_sample, max_sample, window_size, stride)
 # Sweep each decoder independently.
 
 # %%
-def _mean_auc(scores: pl.DataFrame) -> float:
-    """Mean test AUC across all (problem × fold) rows, skipping NaN."""
-    return scores.select(pl.col("test_roc_auc").mean()).item()
+def _tag(scores: pl.DataFrame, decoder: str, rl: float) -> pl.DataFrame:
+    """Add decoder name + reg_lambda columns for later aggregation."""
+    return scores.with_columns(
+        pl.lit(decoder).alias("decoder"),
+        pl.lit(rl).alias("reg_lambda"),
+    )
 
 
-sweep_rows = []
+all_scores: list[pl.DataFrame] = []
 
 for rl in reg_lambda_grid:
     L.info(f"[acoustic] reg_lambda={rl}")
@@ -104,7 +107,7 @@ for rl in reg_lambda_grid:
         device=device, dtype=torch.float32,
         tol=tol, max_iter=max_iter,
     )
-    sweep_rows.append(dict(decoder="acoustic", reg_lambda=rl, mean_test_auc=_mean_auc(s)))
+    all_scores.append(_tag(s, "acoustic", rl))
 
     L.info(f"[behavior_full] reg_lambda={rl}")
     s, _, _ = run_behavior_with_control(
@@ -116,9 +119,8 @@ for rl in reg_lambda_grid:
         device=device, dtype=torch.float32,
         tol=tol, max_iter=max_iter,
     )
-    # Only score the full model (not baseline) when ranking reg_lambda for the full-model AUC
-    full_auc = _mean_auc(s.filter(pl.col("model") == "full"))
-    sweep_rows.append(dict(decoder="behavior_full", reg_lambda=rl, mean_test_auc=full_auc))
+    # Keep both full + baseline rows; use the `model` column to filter downstream.
+    all_scores.append(_tag(s, "behavior_full", rl))
 
     L.info(f"[behavior_hga_only] reg_lambda={rl}")
     s, _, _ = run_behavior_hga_only(
@@ -130,10 +132,21 @@ for rl in reg_lambda_grid:
         device=device, dtype=torch.float32,
         tol=tol, max_iter=max_iter,
     )
-    sweep_rows.append(dict(decoder="behavior_hga_only", reg_lambda=rl, mean_test_auc=_mean_auc(s)))
+    all_scores.append(_tag(s, "behavior_hga_only", rl))
 
-sweep = pl.DataFrame(sweep_rows)
-print(sweep.sort(["decoder", "reg_lambda"]))
+all_scores_df = pl.concat(all_scores, how="diagonal_relaxed")
+
+# For winner selection: mean AUC per (decoder, reg_lambda). For behavior_full
+# the mean is over the full model only (baseline rows excluded).
+winner_input = all_scores_df.filter(
+    (pl.col("decoder") != "behavior_full") | (pl.col("model") == "full")
+)
+sweep = (
+    winner_input.group_by(["decoder", "reg_lambda"])
+    .agg(pl.col("test_roc_auc").mean().alias("mean_test_auc"))
+    .sort(["decoder", "reg_lambda"])
+)
+print(sweep)
 
 # %% [markdown]
 # Pick winners: argmax mean_test_auc per decoder.
@@ -152,10 +165,15 @@ L.info(f"Winners: {winners}")
 # %%
 outdir = Path(outdir)
 sweep.write_parquet(outdir / "sweep_results.parquet")
+all_scores_df.write_parquet(outdir / "sweep_all_scores.parquet")
 (outdir / "reg_lambda_winners.json").write_text(json.dumps({
     "subject": subject,
     "reg_lambda_acoustic": winners["acoustic"],
     "reg_lambda_behavior_full": winners["behavior_full"],
     "reg_lambda_behavior_hga_only": winners["behavior_hga_only"],
 }, indent=2))
-L.info(f"Wrote sweep_results.parquet + reg_lambda_winners.json to {outdir}")
+L.info(
+    f"Wrote sweep_results.parquet ({sweep.height} rows), "
+    f"sweep_all_scores.parquet ({all_scores_df.height} rows), "
+    f"reg_lambda_winners.json to {outdir}"
+)
