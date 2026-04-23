@@ -40,6 +40,7 @@ import polars as pl
 import torch
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import StratifiedKFold
+from tqdm.auto import tqdm
 
 from src.models.decoding_gpu import (
     compute_balanced_sample_weight,
@@ -284,7 +285,12 @@ def run_acoustic_searchlight(
 
     scores_all, preds_all, coefs_all = [], [], []
 
-    for phoneme_pair in phoneme_pairs:
+    pbar = tqdm(
+        phoneme_pairs,
+        desc=f"acoustic[{subject}] λ={reg_lambda:g} {target}",
+        unit="pp", leave=False,
+    )
+    for phoneme_pair in pbar:
         selection = (md.phoneme_pair == phoneme_pair).values
         if selection.sum() == 0:
             continue
@@ -384,87 +390,97 @@ def _run_behavior_core(
     full_scores, full_preds, full_coefs = [], [], []
     base_scores, base_preds, base_coefs = [], [], []
 
+    # Enumerate (phoneme_pair, word_end) groups up front so tqdm has a total.
+    groups: list[tuple[str, str]] = []
     for phoneme_pair in phoneme_pairs:
         pp_mask = (md.phoneme_pair == phoneme_pair).values
         if pp_mask.sum() == 0:
             continue
-        word_ends = sorted(md.word_end[pp_mask].dropna().unique())
+        for word_end in sorted(md.word_end[pp_mask].dropna().unique()):
+            groups.append((phoneme_pair, word_end))
 
-        for word_end in word_ends:
-            sel = pp_mask & (md.word_end == word_end).values
-            y = _resolve_target(md, "behavior_categorical_forced", phoneme_pair, sel)
-            if len(np.unique(y)) != 2:
-                continue
-            counts = np.bincount(y)
-            if counts.min() < n_folds:
-                continue
+    decoder_label = "behavior_full" if with_control else "behavior_hga_only"
+    pbar = tqdm(
+        groups,
+        desc=f"{decoder_label}[{subject}] λ={reg_lambda:g}",
+        unit="group", leave=False,
+    )
+    for phoneme_pair, word_end in pbar:
+        pp_mask = (md.phoneme_pair == phoneme_pair).values
+        sel = pp_mask & (md.word_end == word_end).values
+        y = _resolve_target(md, "behavior_categorical_forced", phoneme_pair, sel)
+        if len(np.unique(y)) != 2:
+            continue
+        counts = np.bincount(y)
+        if counts.min() < n_folds:
+            continue
 
-            epoch_idxs_sel = md.index[sel].to_numpy()
-            X_sel = X_full[sel]
-            n_trials = X_sel.shape[0]
-            resampled_feat = md.resampled[sel].to_numpy().astype(np.float64).reshape(-1, 1)
+        epoch_idxs_sel = md.index[sel].to_numpy()
+        X_sel = X_full[sel]
+        n_trials = X_sel.shape[0]
+        resampled_feat = md.resampled[sel].to_numpy().astype(np.float64).reshape(-1, 1)
 
-            # Full-model batch
-            full_d = (1 + win_size) if with_control else win_size
-            B_full = n_electrodes * n_windows
-            X_full_batch = np.empty((n_trials, B_full, full_d), dtype=np.float64)
-            elec_per = np.empty(B_full, dtype=np.int64)
-            smin_per = np.empty(B_full, dtype=np.int64)
-            smax_per = np.empty(B_full, dtype=np.int64)
-            b = 0
-            for e_idx, electrode_idx in enumerate(electrode_idxs):
-                for smin, smax in windows:
-                    hga = X_sel[:, e_idx, smin:smax]
-                    if with_control:
-                        X_full_batch[:, b, 0:1] = resampled_feat
-                        X_full_batch[:, b, 1:] = hga
-                    else:
-                        X_full_batch[:, b, :] = hga
-                    elec_per[b] = int(electrode_idx)
-                    smin_per[b] = int(smin)
-                    smax_per[b] = int(smax)
-                    b += 1
+        # Full-model batch
+        full_d = (1 + win_size) if with_control else win_size
+        B_full = n_electrodes * n_windows
+        X_full_batch = np.empty((n_trials, B_full, full_d), dtype=np.float64)
+        elec_per = np.empty(B_full, dtype=np.int64)
+        smin_per = np.empty(B_full, dtype=np.int64)
+        smax_per = np.empty(B_full, dtype=np.int64)
+        b = 0
+        for e_idx, electrode_idx in enumerate(electrode_idxs):
+            for smin, smax in windows:
+                hga = X_sel[:, e_idx, smin:smax]
+                if with_control:
+                    X_full_batch[:, b, 0:1] = resampled_feat
+                    X_full_batch[:, b, 1:] = hga
+                else:
+                    X_full_batch[:, b, :] = hga
+                elec_per[b] = int(electrode_idx)
+                smin_per[b] = int(smin)
+                smax_per[b] = int(smax)
+                b += 1
 
-            full_meta = pl.DataFrame({
-                "subject": [subject] * B_full,
-                "phoneme_pair": [phoneme_pair] * B_full,
-                "word_end": [word_end] * B_full,
-                "electrode_idx": elec_per,
-                "smin": smin_per,
-                "smax": smax_per,
-                "model": ["full"] * B_full,
+        full_meta = pl.DataFrame({
+            "subject": [subject] * B_full,
+            "phoneme_pair": [phoneme_pair] * B_full,
+            "word_end": [word_end] * B_full,
+            "electrode_idx": elec_per,
+            "smin": smin_per,
+            "smax": smax_per,
+            "model": ["full"] * B_full,
+        })
+        fs, fp, fc = _fit_batched_cv(
+            X_full_batch, y, epoch_idxs_sel, full_meta,
+            reg_lambda=reg_lambda,
+            n_folds=n_folds, cv_random_state=cv_random_state,
+            device=device, dtype=dtype, tol=tol, max_iter=max_iter,
+        )
+        full_scores.append(fs)
+        full_preds.append(fp)
+        full_coefs.append(fc)
+
+        # Baseline model: one problem (resampled only), shared across electrodes/windows
+        if with_control:
+            X_base = resampled_feat.reshape(n_trials, 1, 1)
+            base_meta = pl.DataFrame({
+                "subject": [subject],
+                "phoneme_pair": [phoneme_pair],
+                "word_end": [word_end],
+                "electrode_idx": [-1],     # sentinel: not electrode-specific
+                "smin": [-1], "smax": [-1],
+                "model": ["baseline"],
             })
-            fs, fp, fc = _fit_batched_cv(
-                X_full_batch, y, epoch_idxs_sel, full_meta,
-                reg_lambda=reg_lambda,
+            bs, bp, bc = _fit_batched_cv(
+                X_base, y, epoch_idxs_sel, base_meta,
+                reg_lambda=(reg_lambda_baseline if reg_lambda_baseline is not None
+                            else reg_lambda),
                 n_folds=n_folds, cv_random_state=cv_random_state,
                 device=device, dtype=dtype, tol=tol, max_iter=max_iter,
             )
-            full_scores.append(fs)
-            full_preds.append(fp)
-            full_coefs.append(fc)
-
-            # Baseline model: one problem (resampled only), shared across electrodes/windows
-            if with_control:
-                X_base = resampled_feat.reshape(n_trials, 1, 1)
-                base_meta = pl.DataFrame({
-                    "subject": [subject],
-                    "phoneme_pair": [phoneme_pair],
-                    "word_end": [word_end],
-                    "electrode_idx": [-1],     # sentinel: not electrode-specific
-                    "smin": [-1], "smax": [-1],
-                    "model": ["baseline"],
-                })
-                bs, bp, bc = _fit_batched_cv(
-                    X_base, y, epoch_idxs_sel, base_meta,
-                    reg_lambda=(reg_lambda_baseline if reg_lambda_baseline is not None
-                                else reg_lambda),
-                    n_folds=n_folds, cv_random_state=cv_random_state,
-                    device=device, dtype=dtype, tol=tol, max_iter=max_iter,
-                )
-                base_scores.append(bs)
-                base_preds.append(bp)
-                base_coefs.append(bc)
+            base_scores.append(bs)
+            base_preds.append(bp)
+            base_coefs.append(bc)
 
     # Combine full + baseline
     scores_parts = full_scores + base_scores
