@@ -207,6 +207,46 @@ def standardise_per_batch(
     return X_train_std, X_test_std, mean, scale
 
 
+def batched_roc_auc(
+    proba: Tensor,   # (B, n) predicted probabilities for class 1
+    y: Tensor,       # (B, n) or (n,) binary labels in {0, 1}
+) -> Tensor:         # (B,) AUCs, NaN when either class is absent
+    """
+    Batched binary ROC-AUC via the Mann-Whitney U / rank-sum formula.
+
+        AUC = (rank_sum_of_positives - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg)
+
+    Rank ties are not averaged — tied values get arbitrary but stable ranks.
+    For continuous logistic-regression probabilities this is numerically
+    negligible (exact ties require identical feature rows). If bit-exact
+    sklearn agreement is needed, use `sklearn.metrics.roc_auc_score`; the
+    two agree to ~1e-12 on tie-free inputs.
+
+    All-one-class rows return NaN.
+    """
+    assert proba.dim() == 2, f"proba must be (B, n), got {proba.shape}"
+    B, n = proba.shape
+    if y.dim() == 1:
+        y = y.unsqueeze(0).expand(B, n)
+    assert y.shape == proba.shape
+
+    # 1-indexed ranks in proba-ascending order (stable sort for determinism)
+    sort_idx = proba.argsort(dim=1, stable=True)
+    ranks = torch.empty_like(proba)
+    arange_n = torch.arange(1, n + 1, device=proba.device, dtype=proba.dtype)
+    ranks.scatter_(1, sort_idx, arange_n.expand(B, n))
+
+    pos = y.to(proba.dtype)
+    n_pos = pos.sum(dim=1)
+    n_neg = (1.0 - pos).sum(dim=1)
+    rank_sum_pos = (ranks * pos).sum(dim=1)
+    u = rank_sum_pos - n_pos * (n_pos + 1.0) * 0.5
+    auc = u / (n_pos * n_neg).clamp(min=1.0)
+    return torch.where(
+        (n_pos > 0) & (n_neg > 0), auc, torch.full_like(auc, float("nan"))
+    )
+
+
 def compute_balanced_sample_weight(
     y: Tensor,       # (B, n) in {0, 1}
     mask: Tensor,    # (B, n)

@@ -38,11 +38,11 @@ import numpy as np
 import pandas as pd
 import polars as pl
 import torch
-from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import StratifiedKFold
 from tqdm.auto import tqdm
 
 from src.models.decoding_gpu import (
+    batched_roc_auc,
     compute_balanced_sample_weight,
     fit_batched_l2_logreg,
     standardise_per_batch,
@@ -183,17 +183,15 @@ def _fit_batched_cv(
         )
 
         z_te = torch.einsum("bnd,bd->bn", X_te_std, beta)
-        proba_te = torch.sigmoid(z_te).cpu().numpy()  # (B, n_te)
-        y_te = y[test_idx]
+        proba_te_gpu = torch.sigmoid(z_te)  # (B, n_te)
 
-        # Per-problem AUCs (NaN when test fold has only one class)
-        aucs = np.full(B, np.nan, dtype=np.float64)
-        if len(np.unique(y_te)) == 2:
-            for b in range(B):
-                try:
-                    aucs[b] = roc_auc_score(y_te, proba_te[b])
-                except ValueError:
-                    pass
+        # Vectorised per-problem AUCs on GPU; NaN when only one class is present.
+        y_te = y[test_idx]
+        y_te_gpu = torch.tensor(y_te.astype(np.float64), dtype=dtype, device=device)
+        aucs_gpu = batched_roc_auc(proba_te_gpu, y_te_gpu)
+
+        proba_te = proba_te_gpu.cpu().numpy()
+        aucs = aucs_gpu.cpu().numpy()
 
         # --- scores ---
         scores_frames.append(pl.DataFrame({

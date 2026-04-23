@@ -15,10 +15,12 @@ import numpy as np
 import pytest
 import torch
 from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import roc_auc_score
 from sklearn.utils.class_weight import compute_sample_weight
 
 from src.models.decoding_gpu import (
     BatchedLogRegEstimator,
+    batched_roc_auc,
     compute_balanced_sample_weight,
     fit_batched_l2_logreg,
     standardise_per_batch,
@@ -329,6 +331,64 @@ def test_estimator_predict_proba_matches_sklearn():
     gpu_proba = est.predict_proba(X_te)[:, 1]
 
     np.testing.assert_allclose(gpu_proba, sk_proba, atol=1e-5, rtol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# Vectorised AUC
+# ---------------------------------------------------------------------------
+
+
+def test_batched_roc_auc_matches_sklearn_no_ties():
+    """Batched rank-sum AUC matches sklearn to ~1e-12 on tie-free inputs."""
+    rng = np.random.default_rng(seed=101)
+    B, n = 500, 80
+    proba = rng.random((B, n))             # all distinct → no ties
+    y = rng.integers(0, 2, size=(B, n))
+
+    sk_aucs = np.full(B, np.nan)
+    for b in range(B):
+        if len(np.unique(y[b])) == 2:
+            sk_aucs[b] = roc_auc_score(y[b], proba[b])
+
+    gpu_aucs = batched_roc_auc(
+        torch.tensor(proba, dtype=TORCH_DTYPE),
+        torch.tensor(y, dtype=TORCH_DTYPE),
+    ).numpy()
+
+    # Check finite entries match closely; NaN positions match
+    finite = np.isfinite(sk_aucs) & np.isfinite(gpu_aucs)
+    np.testing.assert_allclose(gpu_aucs[finite], sk_aucs[finite], atol=1e-10)
+    np.testing.assert_array_equal(
+        np.isfinite(sk_aucs), np.isfinite(gpu_aucs),
+        err_msg="NaN-pattern differs from sklearn",
+    )
+
+
+def test_batched_roc_auc_nan_on_degenerate_labels():
+    """All-one-class rows return NaN."""
+    proba = torch.rand(4, 50, dtype=TORCH_DTYPE)
+    y = torch.zeros(4, 50, dtype=TORCH_DTYPE)
+    y[1, :] = 1.0     # all positives
+    y[2, 0] = 1.0     # one positive — valid
+    y[3, :25] = 1.0   # mixed — valid
+
+    aucs = batched_roc_auc(proba, y)
+    assert torch.isnan(aucs[0])   # all negatives
+    assert torch.isnan(aucs[1])   # all positives
+    assert torch.isfinite(aucs[2])
+    assert torch.isfinite(aucs[3])
+
+
+def test_batched_roc_auc_broadcasts_1d_y():
+    """Passing a (n,) y vector broadcasts to all B rows."""
+    rng = np.random.default_rng(seed=102)
+    B, n = 20, 60
+    proba = torch.tensor(rng.random((B, n)), dtype=TORCH_DTYPE)
+    y_1d = torch.tensor(rng.integers(0, 2, size=n), dtype=TORCH_DTYPE)
+
+    aucs_broadcast = batched_roc_auc(proba, y_1d)
+    aucs_explicit = batched_roc_auc(proba, y_1d.unsqueeze(0).expand(B, n))
+    torch.testing.assert_close(aucs_broadcast, aucs_explicit)
 
 
 # ---------------------------------------------------------------------------
