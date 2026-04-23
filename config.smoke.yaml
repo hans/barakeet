@@ -1,0 +1,75 @@
+# Smoke-test config for causal6 on a MacBook (no CUDA).
+#
+# snakemake --configfile in v9 does a shallow dict merge, so this file is a
+# FULL replacement for config.yaml — pass it alone, not stacked:
+#
+#   snakemake --snakefile workflows/causal6.Snakefile \
+#             --configfile config.smoke.yaml \
+#             -j 1 <target>
+#
+# Deltas vs config.yaml:
+#   - data.subjects: single subject (EC248, the only one with local epochs)
+#   - causal6.device: cpu (no CUDA/MPS)
+#   - causal6.tuning_reg_lambda_grid: single lambda so reg_lambda_sweep is cheap
+#   - causal6.n_permutations: 10 (cuts significance-rule runtime; GPU-only anyway)
+#   - analysis.decoding.stride: 20 (wider stride → fewer windows → faster CPU run)
+
+data:
+  subjects:
+    - EC248
+
+
+analysis:
+  epoch_sfreq: 100
+  epoch_tmin: -0.4
+
+  phon_response_peak_threshold: 0.65
+  behav_response_peak_threshold: 0.01
+  ambiguous_response_threshold: 2
+
+  fdr_alpha: 0.05
+
+  behav_ttest_pvalue_threshold: 0.001
+
+  behav_peak_post_offset_s: 0.2
+
+  hga_window_source: "decoder"
+
+  decoding:
+    min_sample: 1
+    window_size: 15
+    stride: 20          # smoke-test: was 2; wider stride keeps CPU runtime bounded
+    n_jobs: 4
+    peak_search_smin: 0
+    peak_search_smax: 290
+
+  multivariate:
+    window_sizes: [10]
+    stride: 2
+    pca_num_components: "auto"
+    n_jobs: 4
+
+  multivariate_ambiguity:
+    stratum_min_trials: 5
+    behavior_imbalance_threshold: 0.2
+
+  sweep:
+    phon_response_peak_thresholds: [0.55, 0.60, 0.65]
+    behav_response_peak_thresholds: [0.005, 0.010, 0.020]
+    ambiguous_response_thresholds: [1, 2, 3]
+
+
+causal6:
+  max_iter: 50
+  tol: 1.0e-6
+
+  n_folds: 5
+  cv_random_state: 42
+
+  device: cpu                       # smoke-test: was cuda
+
+  tuning_reg_lambda_grid: [1.0]     # smoke-test: single lambda (was 7-point grid)
+
+  n_permutations: 10                # smoke-test: was 500 (significance rules only)
+  permutation_seed: 0
+  permutation_chunk_size: 6
