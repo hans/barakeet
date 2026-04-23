@@ -270,6 +270,123 @@ def test_padding_does_not_contaminate():
     np.testing.assert_allclose(beta.squeeze(0).numpy(), sk_coef, atol=1e-4, rtol=1e-4)
 
 
+def test_tiled_X_with_identical_y_matches_singleton():
+    """
+    Caller pattern used by `_fit_batched_cv_permutations`: tile the same X
+    across the batch dim, stack per-problem y's into (B, n). If all y's are
+    identical, every problem's fitted beta must match the singleton fit.
+    """
+    rng = np.random.default_rng(seed=11)
+    n, d = 200, 10
+    K = 5
+
+    X_single = rng.standard_normal((n, d))
+    y_single = (rng.random(n) < 0.5).astype(np.int64)
+
+    sk_coef = _sklearn_fit(X_single, y_single, C=1.0)
+
+    # Tile X across K batch slots, broadcast y to (K, n)
+    X_tiled = np.broadcast_to(X_single, (K, n, d)).copy()
+    y_tiled = np.broadcast_to(y_single, (K, n)).astype(np.float64)
+
+    X_t = torch.tensor(X_tiled, dtype=TORCH_DTYPE)
+    y_t = torch.tensor(y_tiled, dtype=TORCH_DTYPE)
+    mask = torch.ones(K, n, dtype=TORCH_DTYPE)
+    sw = torch.ones(K, n, dtype=TORCH_DTYPE)
+
+    beta, _, conv = fit_batched_l2_logreg(
+        X_t, y_t, mask, sw, reg_lambda=1.0, tol=1e-10, max_iter=100,
+    )
+    assert conv.all().item()
+    for k in range(K):
+        np.testing.assert_allclose(
+            beta[k].numpy(), sk_coef, atol=1e-4, rtol=1e-4,
+            err_msg=f"tiled slot {k} disagrees with sklearn singleton",
+        )
+
+
+def test_tiled_X_with_different_y_matches_independent_fits():
+    """
+    Caller pattern: same X tiled across K slots, K different (shuffled) y's.
+    Each problem's beta must match an independent sklearn fit on (X, y_k).
+
+    This is the core permutation-test correctness guarantee: one GPU call
+    fits K permutations as K independent logreg problems that happen to share X.
+    """
+    rng = np.random.default_rng(seed=12)
+    n, d = 200, 8
+    K = 4
+
+    X_single = rng.standard_normal((n, d))
+    y_real = (rng.random(n) < 1.0 / (1.0 + np.exp(-(X_single @ rng.standard_normal(d))))).astype(np.int64)
+    # K distinct shuffled labels (permutation preserves class counts)
+    ys = [
+        np.random.default_rng(seed=100 + k).permutation(y_real)
+        for k in range(K)
+    ]
+
+    sk_coefs = np.stack([_sklearn_fit(X_single, ys[k], C=1.0) for k in range(K)])
+
+    X_tiled = np.broadcast_to(X_single, (K, n, d)).copy()
+    y_stacked = np.stack(ys, axis=0).astype(np.float64)
+
+    X_t = torch.tensor(X_tiled, dtype=TORCH_DTYPE)
+    y_t = torch.tensor(y_stacked, dtype=TORCH_DTYPE)
+    mask = torch.ones(K, n, dtype=TORCH_DTYPE)
+    sw = torch.ones(K, n, dtype=TORCH_DTYPE)
+
+    beta, _, conv = fit_batched_l2_logreg(
+        X_t, y_t, mask, sw, reg_lambda=1.0, tol=1e-10, max_iter=100,
+    )
+    assert conv.all().item()
+    np.testing.assert_allclose(beta.numpy(), sk_coefs, atol=1e-4, rtol=1e-4)
+
+
+def test_tiled_X_flipping_one_y_leaves_other_betas_unchanged():
+    """
+    With tiled X and per-problem y's, flipping y for one batch element must
+    not affect any other element's beta. Guards against accidental coupling
+    across the batch dim inside the kernel.
+    """
+    rng = np.random.default_rng(seed=13)
+    n, d = 150, 6
+    K = 4
+
+    X_single = rng.standard_normal((n, d))
+    base_y = (rng.random(n) < 0.5).astype(np.int64)
+
+    def _fit(ys_list):
+        y_arr = np.stack(ys_list, axis=0).astype(np.float64)
+        X_t = torch.tensor(
+            np.broadcast_to(X_single, (K, n, d)).copy(), dtype=TORCH_DTYPE,
+        )
+        y_t = torch.tensor(y_arr, dtype=TORCH_DTYPE)
+        mask = torch.ones(K, n, dtype=TORCH_DTYPE)
+        sw = torch.ones(K, n, dtype=TORCH_DTYPE)
+        beta, _, conv = fit_batched_l2_logreg(
+            X_t, y_t, mask, sw, reg_lambda=1.0, tol=1e-10, max_iter=100,
+        )
+        assert conv.all().item()
+        return beta.numpy()
+
+    ys = [base_y.copy(), base_y.copy(), base_y.copy(), base_y.copy()]
+    beta_ref = _fit(ys)
+
+    # Flip slot 2's labels.
+    ys_mutated = [base_y.copy(), base_y.copy(), 1 - base_y, base_y.copy()]
+    beta_mut = _fit(ys_mutated)
+
+    # Slots 0, 1, 3 should be byte-identical; slot 2 should differ.
+    for k in (0, 1, 3):
+        np.testing.assert_allclose(
+            beta_ref[k], beta_mut[k], atol=1e-12,
+            err_msg=f"slot {k} changed after flipping slot 2's y",
+        )
+    assert not np.allclose(beta_ref[2], beta_mut[2], atol=1e-6), (
+        "slot 2 should have changed under its own flipped y"
+    )
+
+
 def test_different_n_per_batch_via_padding():
     """
     Batch problems with different true n values, padded to max. Each element's

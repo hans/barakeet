@@ -23,10 +23,14 @@ import polars as pl
 import torch
 
 from src.models.causal6 import (
+    _fit_batched_cv,
+    _fit_batched_cv_permutations,
     make_windows,
     run_acoustic_searchlight,
+    run_acoustic_searchlight_permutations,
     run_behavior_hga_only,
     run_behavior_with_control,
+    run_behavior_with_control_permutations,
 )
 
 
@@ -315,3 +319,239 @@ def test_behavior_with_control_detects_planted_signal():
         peak_full.filter(pl.col("electrode_idx") == signal_e)["peak_auc"].item()
     )
     assert signal_peak > 0.9, f"signal electrode peak full AUC {signal_peak:.3f} too low"
+
+
+# ---------------------------------------------------------------------------
+# Permutation-test helpers: _fit_batched_cv_permutations
+# ---------------------------------------------------------------------------
+
+
+def _small_cv_problem(seed: int = 0, B: int = 3, n: int = 80, d: int = 5):
+    """Synthetic (X, y, problem_meta) for _fit_batched_cv_permutations tests."""
+    rng = np.random.default_rng(seed)
+    X = rng.standard_normal((n, B, d))
+    y = np.concatenate([np.zeros(n // 2), np.ones(n - n // 2)]).astype(np.int64)
+    rng.shuffle(y)
+    problem_meta = pl.DataFrame({
+        "subject": ["SYN"] * B,
+        "phoneme_pair": ["dn"] * B,
+        "electrode_idx": np.arange(B, dtype=np.int64),
+    })
+    return X, y, problem_meta
+
+
+def test_fit_batched_cv_permutations_reproducibility():
+    """Same seeds → identical scores. Different seeds → different scores."""
+    X, y, pm = _small_cv_problem(seed=0)
+
+    kwargs = dict(
+        reg_lambda=1.0, n_folds=5, cv_random_state=0,
+        device="cpu", dtype=torch.float64, tol=1e-6, max_iter=50,
+        permutation_chunk_size=2,
+    )
+
+    s0 = _fit_batched_cv_permutations(X, y, pm, permute_seeds=[7, 7, 9], **kwargs)
+
+    # Duplicate seeds → duplicate scores (join on (permutation_idx, electrode_idx, fold))
+    join_keys = ["electrode_idx", "fold"]
+    s_seed7a = s0.filter(pl.col("permutation_idx") == 0).sort(join_keys)
+    s_seed7b = s0.filter(pl.col("permutation_idx") == 1).sort(join_keys)
+    s_seed9 = s0.filter(pl.col("permutation_idx") == 2).sort(join_keys)
+
+    np.testing.assert_array_equal(
+        s_seed7a["test_roc_auc"].to_numpy(),
+        s_seed7b["test_roc_auc"].to_numpy(),
+    )
+    # Different seed should give different AUCs on at least one row.
+    assert not np.array_equal(
+        s_seed7a["test_roc_auc"].to_numpy(),
+        s_seed9["test_roc_auc"].to_numpy(),
+    )
+
+
+def test_fit_batched_cv_permutations_chunk_invariance():
+    """chunk_size doesn't affect the per-(permutation, problem, fold) AUC."""
+    X, y, pm = _small_cv_problem(seed=1)
+
+    seeds = [5, 11, 13, 17, 19]
+    common = dict(
+        permute_seeds=seeds,
+        reg_lambda=1.0, n_folds=5, cv_random_state=0,
+        device="cpu", dtype=torch.float64, tol=1e-6, max_iter=50,
+    )
+
+    s_c1 = _fit_batched_cv_permutations(X, y, pm, permutation_chunk_size=1, **common)
+    s_c3 = _fit_batched_cv_permutations(X, y, pm, permutation_chunk_size=3, **common)
+    s_call = _fit_batched_cv_permutations(X, y, pm, permutation_chunk_size=len(seeds), **common)
+
+    sort_keys = ["permutation_idx", "electrode_idx", "fold"]
+    a1 = s_c1.sort(sort_keys)["test_roc_auc"].to_numpy()
+    a3 = s_c3.sort(sort_keys)["test_roc_auc"].to_numpy()
+    aall = s_call.sort(sort_keys)["test_roc_auc"].to_numpy()
+
+    np.testing.assert_array_equal(a1, a3)
+    np.testing.assert_array_equal(a1, aall)
+
+
+def test_fit_batched_cv_permutations_matches_manual_reference():
+    """
+    Reference: split on REAL y, then for each fold manually fit on
+    (X, shuffled-y)[train_idx] and score on (X, shuffled-y)[test_idx].
+    `_fit_batched_cv_permutations` should match.
+    """
+    from sklearn.model_selection import StratifiedKFold
+
+    from src.models.decoding_gpu import (
+        batched_roc_auc,
+        compute_balanced_sample_weight,
+        fit_batched_l2_logreg,
+        standardise_per_batch,
+    )
+
+    X, y, pm = _small_cv_problem(seed=2, B=2, n=60, d=4)
+    seed = 42
+    y_perm = np.random.default_rng(seed).permutation(y.astype(np.int64))
+
+    # Gold: direct kernel call per fold on shuffled labels with REAL-y splits.
+    B = X.shape[1]
+    n_tr_trials = X.shape[0]
+    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=0)
+    gold_aucs = {}  # (fold, b) -> auc
+    X_b = torch.tensor(X.transpose(1, 0, 2).copy(), dtype=torch.float64)
+    for fold, (tr, te) in enumerate(skf.split(np.zeros(n_tr_trials), y)):
+        X_tr = X_b[:, tr]
+        X_te = X_b[:, te]
+        mask = torch.ones(B, len(tr), dtype=torch.float64)
+        X_tr_std, X_te_std, _, _ = standardise_per_batch(X_tr, mask, X_te)
+        y_tr = torch.tensor(
+            np.broadcast_to(y_perm[tr], (B, len(tr))).astype(np.float64),
+            dtype=torch.float64,
+        )
+        sw = compute_balanced_sample_weight(y_tr, mask)
+        beta, _, _ = fit_batched_l2_logreg(
+            X_tr_std, y_tr, mask, sw,
+            reg_lambda=1.0, tol=1e-6, max_iter=50,
+        )
+        z = torch.einsum("bnd,bd->bn", X_te_std, beta)
+        proba = torch.sigmoid(z)
+        y_te = torch.tensor(
+            np.broadcast_to(y_perm[te], (B, len(te))).astype(np.float64),
+            dtype=torch.float64,
+        )
+        aucs = batched_roc_auc(proba, y_te).numpy()
+        for b in range(B):
+            gold_aucs[(fold, b)] = aucs[b]
+
+    result = _fit_batched_cv_permutations(
+        X, y, pm,
+        permute_seeds=[seed],
+        permutation_chunk_size=1,
+        reg_lambda=1.0, n_folds=5, cv_random_state=0,
+        device="cpu", dtype=torch.float64, tol=1e-6, max_iter=50,
+    )
+    assert result["permutation_idx"].unique().to_list() == [0]
+    for row in result.iter_rows(named=True):
+        expected = gold_aucs[(row["fold"], row["electrode_idx"])]
+        got = row["test_roc_auc"]
+        if np.isnan(expected):
+            assert np.isnan(got)
+        else:
+            np.testing.assert_allclose(got, expected, atol=1e-10)
+
+
+# ---------------------------------------------------------------------------
+# Permutation-test entry points
+# ---------------------------------------------------------------------------
+
+
+def test_run_acoustic_searchlight_permutations_null_is_chance():
+    """Null AUC on the signal electrode averages to ~0.5 across permutations."""
+    signal_e = 0
+    epochs = _make_fake_epochs(
+        n_electrodes=3,
+        signal_electrodes=(signal_e,),
+        signal_window=(15, 30),
+        signal_amp=3.0,
+        seed=20,
+    )
+    windows = make_windows(0, epochs.times.shape[0], window_size=10, stride=5)
+
+    real_scores, _, _ = run_acoustic_searchlight(
+        epochs, subject="SYN",
+        electrode_idxs=[0, 1, 2],
+        windows=windows,
+        reg_lambda=1.0, target="categorical_acoustic_cue",
+        n_folds=5, cv_random_state=0,
+        device="cpu", dtype=torch.float64,
+        tol=1e-6, max_iter=50,
+    )
+    real_peak = (
+        real_scores.group_by(["electrode_idx", "smin", "smax"])
+        .agg(pl.col("test_roc_auc").mean())
+        .group_by("electrode_idx")
+        .agg(pl.col("test_roc_auc").max().alias("peak_auc"))
+    )
+    signal_real = real_peak.filter(pl.col("electrode_idx") == signal_e)["peak_auc"].item()
+    assert signal_real > 0.9, f"sanity: real signal AUC too low ({signal_real:.3f})"
+
+    null_scores = run_acoustic_searchlight_permutations(
+        epochs, subject="SYN",
+        electrode_idxs=[0, 1, 2],
+        windows=windows,
+        reg_lambda=1.0,
+        permute_seeds=list(range(30)),
+        permutation_chunk_size=5,
+        target="categorical_acoustic_cue",
+        n_folds=5, cv_random_state=0,
+        device="cpu", dtype=torch.float64,
+        tol=1e-6, max_iter=50,
+    )
+
+    assert null_scores["permutation_idx"].n_unique() == 30
+
+    # Mean fold-mean AUC on the signal electrode across permutations — near 0.5.
+    signal_null = (
+        null_scores.filter(pl.col("electrode_idx") == signal_e)
+        .group_by(["permutation_idx", "smin", "smax"])
+        .agg(pl.col("test_roc_auc").mean())
+    )
+    mean_null = signal_null["test_roc_auc"].mean()
+    assert 0.40 < mean_null < 0.60, (
+        f"null AUC should center near 0.5, got {mean_null:.3f}"
+    )
+    assert mean_null < signal_real - 0.3, (
+        f"null AUC {mean_null:.3f} too close to real signal AUC {signal_real:.3f}"
+    )
+
+
+def test_run_behavior_with_control_permutations_has_paired_full_and_baseline():
+    """behavior-with-control null returns both model='full' and 'baseline' per permutation."""
+    epochs = _make_fake_epochs(n_electrodes=2, seed=21)
+    windows = make_windows(0, epochs.times.shape[0], window_size=10, stride=5)
+
+    null_scores = run_behavior_with_control_permutations(
+        epochs, subject="SYN",
+        electrode_idxs=[0, 1],
+        windows=windows,
+        reg_lambda=1.0,
+        permute_seeds=[1, 2, 3],
+        permutation_chunk_size=2,
+        n_folds=5, cv_random_state=0,
+        device="cpu", dtype=torch.float64,
+        tol=1e-6, max_iter=50,
+    )
+
+    assert set(null_scores["model"].unique().to_list()) == {"full", "baseline"}
+    assert set(null_scores["permutation_idx"].unique().to_list()) == {0, 1, 2}
+
+    # Baseline rows: one "electrode" slot (-1) per (phoneme_pair, word_end)
+    base = null_scores.filter(pl.col("model") == "baseline")
+    assert (base["electrode_idx"] == -1).all()
+    # Baseline must be refit per permutation — perms 0 and 2 should give
+    # different AUCs on at least one (fold, word_end) row.
+    base0 = base.filter(pl.col("permutation_idx") == 0).sort(["word_end", "fold"])
+    base2 = base.filter(pl.col("permutation_idx") == 2).sort(["word_end", "fold"])
+    assert not np.array_equal(
+        base0["test_roc_auc"].to_numpy(),
+        base2["test_roc_auc"].to_numpy(),
+    ), "baseline rows do not vary across permutations — is baseline actually refitting?"

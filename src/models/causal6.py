@@ -267,6 +267,139 @@ def _fit_batched_cv(
     return scores, predictions, coefficients
 
 
+def _fit_batched_cv_permutations(
+    X: np.ndarray,               # (n_trials, B, d)
+    y: np.ndarray,                # (n_trials,) real labels (used for splits only)
+    problem_meta: pl.DataFrame,   # (B rows)
+    *,
+    permute_seeds: Sequence[int],
+    permutation_chunk_size: int,
+    reg_lambda: float,
+    n_folds: int,
+    cv_random_state: int,
+    device: str,
+    dtype: torch.dtype,
+    tol: float,
+    max_iter: int,
+) -> pl.DataFrame:
+    """
+    Batched CV fit under label permutations — proper refit-based null.
+
+    For each of B problems and K = len(permute_seeds) permutations, fits a
+    fresh L2 LogReg on (X, shuffled y) using StratifiedKFold splits taken
+    from the *real* labels. Returns test ROC-AUC per (problem × fold ×
+    permutation). Predictions/coefficients are dropped (nulls only need AUC).
+
+    K permutations are fit in chunks of `permutation_chunk_size` per GPU
+    call; within each chunk the feature tensor X is tiled along the problem
+    dimension (same X, K_chunk different y's) so a single `fit_batched_l2_logreg`
+    call handles K_chunk permutations at once.
+
+    Splits use the real y (stratification guarantees balanced fold sizes
+    that match the real run's convention). Under permuted labels a fold's
+    test set may happen to have zero class variance — those AUCs are NaN
+    and get `nanmean`'d out by downstream aggregation.
+    """
+    n_trials, B, d = X.shape
+    K = len(permute_seeds)
+    assert y.shape == (n_trials,)
+    assert problem_meta.height == B, (
+        f"problem_meta has {problem_meta.height} rows, expected B={B}"
+    )
+    if K == 0:
+        return pl.DataFrame()
+
+    skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=cv_random_state)
+
+    # Pre-shuffle labels deterministically per permutation.
+    y_perms = np.empty((K, n_trials), dtype=np.int64)
+    y_int = y.astype(np.int64)
+    for k, seed in enumerate(permute_seeds):
+        y_perms[k] = np.random.default_rng(int(seed)).permutation(y_int)
+
+    X_gpu = torch.tensor(
+        X.transpose(1, 0, 2).copy(), dtype=dtype, device=device
+    )  # (B, n_trials, d)
+    y_perms_gpu = torch.tensor(y_perms.astype(np.float64), dtype=dtype, device=device)
+
+    scores_frames: list[pl.DataFrame] = []
+    problem_idx = np.arange(B, dtype=np.int64)
+    problem_meta_with_idx = problem_meta.with_row_index("_problem_idx").with_columns(
+        pl.col("_problem_idx").cast(pl.Int64)
+    )
+
+    for fold, (train_idx, test_idx) in enumerate(skf.split(np.zeros(n_trials), y)):
+        n_tr, n_te = len(train_idx), len(test_idx)
+
+        train_idx_t = torch.as_tensor(train_idx, dtype=torch.long, device=device)
+        test_idx_t = torch.as_tensor(test_idx, dtype=torch.long, device=device)
+
+        X_train_t = X_gpu.index_select(1, train_idx_t)  # (B, n_tr, d)
+        X_test_t = X_gpu.index_select(1, test_idx_t)    # (B, n_te, d)
+        mask_tr_b = torch.ones(B, n_tr, dtype=dtype, device=device)
+
+        # Standardisation is label-independent — compute once per fold, reuse
+        # across every permutation chunk below.
+        X_tr_std_b, X_te_std_b, _, _ = standardise_per_batch(
+            X_train_t, mask_tr_b, X_test_t
+        )
+
+        for chunk_start in range(0, K, permutation_chunk_size):
+            chunk_end = min(chunk_start + permutation_chunk_size, K)
+            Kc = chunk_end - chunk_start
+
+            # Tile X along the problem dimension: (Kc * B, n_tr, d).
+            # .expand is a zero-stride view; .reshape materialises a contiguous copy.
+            X_tr_chunk = (
+                X_tr_std_b.unsqueeze(0).expand(Kc, B, n_tr, d).reshape(Kc * B, n_tr, d)
+            )
+            X_te_chunk = (
+                X_te_std_b.unsqueeze(0).expand(Kc, B, n_te, d).reshape(Kc * B, n_te, d)
+            )
+
+            # Pull the Kc permutations' label rows for train & test, then
+            # tile each row across the B problems: (Kc * B, n_tr/n_te).
+            y_perm_chunk = y_perms_gpu[chunk_start:chunk_end]  # (Kc, n_trials)
+            y_train_chunk = (
+                y_perm_chunk.index_select(1, train_idx_t)
+                .unsqueeze(1).expand(Kc, B, n_tr).reshape(Kc * B, n_tr).contiguous()
+            )
+            y_test_chunk = (
+                y_perm_chunk.index_select(1, test_idx_t)
+                .unsqueeze(1).expand(Kc, B, n_te).reshape(Kc * B, n_te).contiguous()
+            )
+
+            mask_tr_chunk = torch.ones(Kc * B, n_tr, dtype=dtype, device=device)
+            sw_tr_chunk = compute_balanced_sample_weight(y_train_chunk, mask_tr_chunk)
+
+            beta, _, _ = fit_batched_l2_logreg(
+                X_tr_chunk, y_train_chunk, mask_tr_chunk, sw_tr_chunk,
+                reg_lambda=reg_lambda, tol=tol, max_iter=max_iter,
+            )
+
+            z_te = torch.einsum("bnd,bd->bn", X_te_chunk, beta)
+            proba_te = torch.sigmoid(z_te)  # (Kc * B, n_te)
+            aucs = batched_roc_auc(proba_te, y_test_chunk).cpu().numpy()
+
+            perm_ids = np.repeat(
+                np.arange(chunk_start, chunk_end, dtype=np.int64), B
+            )
+            prob_ids = np.tile(problem_idx, Kc)
+            scores_frames.append(pl.DataFrame({
+                "_problem_idx": prob_ids,
+                "fold": np.full(Kc * B, fold, dtype=np.int32),
+                "permutation_idx": perm_ids,
+                "test_roc_auc": aucs,
+                "n_train": np.full(Kc * B, n_tr, dtype=np.int64),
+                "n_test": np.full(Kc * B, n_te, dtype=np.int64),
+            }))
+
+    scores = pl.concat(scores_frames).join(
+        problem_meta_with_idx, on="_problem_idx", how="left"
+    ).drop("_problem_idx")
+    return scores
+
+
 # ---------------------------------------------------------------------------
 # Acoustic searchlight
 # ---------------------------------------------------------------------------
@@ -594,6 +727,316 @@ def run_behavior_hga_only(
         epochs, subject, electrode_idxs, windows,
         with_control=False,
         reg_lambda=reg_lambda, reg_lambda_baseline=None,
+        n_folds=n_folds, cv_random_state=cv_random_state,
+        device=device, dtype=dtype, tol=tol, max_iter=max_iter,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Permutation-test variants
+# ---------------------------------------------------------------------------
+
+
+def run_acoustic_searchlight_permutations(
+    epochs: mne.Epochs,
+    subject: str,
+    electrode_idxs: Sequence[int],
+    windows: np.ndarray,
+    *,
+    reg_lambda: float,
+    permute_seeds: Sequence[int],
+    permutation_chunk_size: int,
+    target: Literal["categorical_acoustic_cue", "subject_specific_acoustics"]
+        = "categorical_acoustic_cue",
+    resampled_steps: tuple[int, ...] = (1, 6),
+    n_folds: int = 5,
+    cv_random_state: int = 42,
+    device: str = "cuda",
+    dtype: torch.dtype = torch.float32,
+    tol: float = 1e-6,
+    max_iter: int = 50,
+) -> pl.DataFrame:
+    """
+    Permutation-test twin of `run_acoustic_searchlight`.
+
+    For each seed in `permute_seeds`, shuffle trial labels globally and
+    refit the full searchlight. Fold splits are drawn from the *real*
+    labels (stratification guarantees balanced fold sizes matching the
+    real run). Only test ROC-AUC is returned — predictions/coefficients
+    are dropped.
+
+    Returns a single scores DataFrame with one row per
+    (problem × fold × permutation). Columns:
+        subject, phoneme_pair, electrode_idx, smin, smax,
+        fold, permutation_idx, test_roc_auc, n_train, n_test, target.
+    """
+    assert epochs.metadata is not None
+    md = epochs.metadata
+    phoneme_pairs = sorted(md.phoneme_pair.dropna().unique())
+
+    X_full = epochs.get_data(picks=list(electrode_idxs))
+    n_electrodes = len(electrode_idxs)
+    n_windows = windows.shape[0]
+    win_size = int(windows[0, 1] - windows[0, 0])
+    assert (windows[:, 1] - windows[:, 0] == win_size).all()
+
+    resampled_mask = md.resampled.isin(resampled_steps).values
+
+    scores_all: list[pl.DataFrame] = []
+
+    pbar = tqdm(
+        phoneme_pairs,
+        desc=f"acoustic-null[{subject}] λ={reg_lambda:g} K={len(permute_seeds)} {target}",
+        unit="pp", leave=False,
+    )
+    for phoneme_pair in pbar:
+        selection = (md.phoneme_pair == phoneme_pair).values & resampled_mask
+        if selection.sum() == 0:
+            continue
+
+        y = _resolve_target(md, target, phoneme_pair, selection)
+        if not _has_enough_per_class(y, n_folds):
+            counts = np.bincount(y.astype(np.int64)) if len(np.unique(y)) > 0 else []
+            L.warning(
+                f"[acoustic-null][{subject}/{phoneme_pair}] skipping: insufficient "
+                f"class balance for StratifiedKFold(n_splits={n_folds}); "
+                f"class counts = {list(counts)}"
+            )
+            continue
+
+        X_sel = X_full[selection]
+        n_trials = X_sel.shape[0]
+
+        B = n_electrodes * n_windows
+        X_batch = np.empty((n_trials, B, win_size), dtype=np.float64)
+        elec_per = np.empty(B, dtype=np.int64)
+        smin_per = np.empty(B, dtype=np.int64)
+        smax_per = np.empty(B, dtype=np.int64)
+        b = 0
+        for e_idx, electrode_idx in enumerate(electrode_idxs):
+            for smin, smax in windows:
+                X_batch[:, b, :] = X_sel[:, e_idx, smin:smax]
+                elec_per[b] = int(electrode_idx)
+                smin_per[b] = int(smin)
+                smax_per[b] = int(smax)
+                b += 1
+
+        problem_meta = pl.DataFrame({
+            "subject": [subject] * B,
+            "phoneme_pair": [phoneme_pair] * B,
+            "electrode_idx": elec_per,
+            "smin": smin_per,
+            "smax": smax_per,
+        })
+
+        scores = _fit_batched_cv_permutations(
+            X_batch, y, problem_meta,
+            permute_seeds=permute_seeds,
+            permutation_chunk_size=permutation_chunk_size,
+            reg_lambda=reg_lambda,
+            n_folds=n_folds, cv_random_state=cv_random_state,
+            device=device, dtype=dtype, tol=tol, max_iter=max_iter,
+        )
+        scores_all.append(scores)
+
+    if not scores_all:
+        return pl.DataFrame()
+
+    return pl.concat(scores_all).with_columns(pl.lit(target).alias("target"))
+
+
+def _run_behavior_core_permutations(
+    epochs: mne.Epochs,
+    subject: str,
+    electrode_idxs: Sequence[int],
+    windows: np.ndarray,
+    *,
+    with_control: bool,
+    reg_lambda: float,
+    reg_lambda_baseline: Optional[float],
+    permute_seeds: Sequence[int],
+    permutation_chunk_size: int,
+    n_folds: int,
+    cv_random_state: int,
+    device: str,
+    dtype: torch.dtype,
+    tol: float,
+    max_iter: int,
+) -> pl.DataFrame:
+    """
+    Permutation-test twin of `_run_behavior_core`.
+
+    For each (phoneme_pair, word_end), for each seed in `permute_seeds`:
+      - Shuffle labels with that seed.
+      - Refit the full searchlight batch (all electrode × window problems).
+      - If `with_control`, also refit the baseline (resampled-only) model.
+
+    Because `_fit_batched_cv_permutations` seeds its RNG deterministically
+    from each `permute_seeds[k]`, the full and baseline calls see the same
+    shuffled labels per permutation — pairing `full - baseline` works the
+    same as in the real run.
+    """
+    assert epochs.metadata is not None
+    md = epochs.metadata
+    phoneme_pairs = sorted(md.phoneme_pair.dropna().unique())
+
+    X_full = epochs.get_data(picks=list(electrode_idxs))
+    n_electrodes = len(electrode_idxs)
+    n_windows = windows.shape[0]
+    win_size = int(windows[0, 1] - windows[0, 0])
+    assert (windows[:, 1] - windows[:, 0] == win_size).all()
+
+    full_parts: list[pl.DataFrame] = []
+    base_parts: list[pl.DataFrame] = []
+
+    groups: list[tuple[str, str]] = []
+    for phoneme_pair in phoneme_pairs:
+        pp_mask = (md.phoneme_pair == phoneme_pair).values
+        if pp_mask.sum() == 0:
+            continue
+        for word_end in sorted(md.word_end[pp_mask].dropna().unique()):
+            groups.append((phoneme_pair, word_end))
+
+    decoder_label = "behavior_full-null" if with_control else "behavior_hga_only-null"
+    pbar = tqdm(
+        groups,
+        desc=f"{decoder_label}[{subject}] λ={reg_lambda:g} K={len(permute_seeds)}",
+        unit="group", leave=False,
+    )
+    for phoneme_pair, word_end in pbar:
+        pp_mask = (md.phoneme_pair == phoneme_pair).values
+        sel = pp_mask & (md.word_end == word_end).values
+        y = _resolve_target(md, "behavior_categorical_forced", phoneme_pair, sel)
+        if not _has_enough_per_class(y, n_folds):
+            counts = np.bincount(y.astype(np.int64)) if len(np.unique(y)) > 0 else []
+            L.warning(
+                f"[{decoder_label}][{subject}/{phoneme_pair}/{word_end}] "
+                f"skipping: insufficient class balance for "
+                f"StratifiedKFold(n_splits={n_folds}); class counts = {list(counts)}"
+            )
+            continue
+
+        X_sel = X_full[sel]
+        n_trials = X_sel.shape[0]
+        resampled_feat = md.resampled[sel].to_numpy().astype(np.float64).reshape(-1, 1)
+
+        # Full-model batch
+        full_d = (1 + win_size) if with_control else win_size
+        B_full = n_electrodes * n_windows
+        X_full_batch = np.empty((n_trials, B_full, full_d), dtype=np.float64)
+        elec_per = np.empty(B_full, dtype=np.int64)
+        smin_per = np.empty(B_full, dtype=np.int64)
+        smax_per = np.empty(B_full, dtype=np.int64)
+        b = 0
+        for e_idx, electrode_idx in enumerate(electrode_idxs):
+            for smin, smax in windows:
+                hga = X_sel[:, e_idx, smin:smax]
+                if with_control:
+                    X_full_batch[:, b, 0:1] = resampled_feat
+                    X_full_batch[:, b, 1:] = hga
+                else:
+                    X_full_batch[:, b, :] = hga
+                elec_per[b] = int(electrode_idx)
+                smin_per[b] = int(smin)
+                smax_per[b] = int(smax)
+                b += 1
+
+        full_meta = pl.DataFrame({
+            "subject": [subject] * B_full,
+            "phoneme_pair": [phoneme_pair] * B_full,
+            "word_end": [word_end] * B_full,
+            "electrode_idx": elec_per,
+            "smin": smin_per,
+            "smax": smax_per,
+            "model": ["full"] * B_full,
+        })
+        full_parts.append(_fit_batched_cv_permutations(
+            X_full_batch, y, full_meta,
+            permute_seeds=permute_seeds,
+            permutation_chunk_size=permutation_chunk_size,
+            reg_lambda=reg_lambda,
+            n_folds=n_folds, cv_random_state=cv_random_state,
+            device=device, dtype=dtype, tol=tol, max_iter=max_iter,
+        ))
+
+        if with_control:
+            X_base = resampled_feat.reshape(n_trials, 1, 1)
+            base_meta = pl.DataFrame({
+                "subject": [subject],
+                "phoneme_pair": [phoneme_pair],
+                "word_end": [word_end],
+                "electrode_idx": [-1],
+                "smin": [-1], "smax": [-1],
+                "model": ["baseline"],
+            })
+            base_parts.append(_fit_batched_cv_permutations(
+                X_base, y, base_meta,
+                permute_seeds=permute_seeds,
+                permutation_chunk_size=permutation_chunk_size,
+                reg_lambda=(reg_lambda_baseline if reg_lambda_baseline is not None
+                            else reg_lambda),
+                n_folds=n_folds, cv_random_state=cv_random_state,
+                device=device, dtype=dtype, tol=tol, max_iter=max_iter,
+            ))
+
+    parts = full_parts + base_parts
+    if not parts:
+        return pl.DataFrame()
+    return pl.concat(parts)
+
+
+def run_behavior_with_control_permutations(
+    epochs: mne.Epochs,
+    subject: str,
+    electrode_idxs: Sequence[int],
+    windows: np.ndarray,
+    *,
+    reg_lambda: float,
+    permute_seeds: Sequence[int],
+    permutation_chunk_size: int,
+    reg_lambda_baseline: Optional[float] = None,
+    n_folds: int = 5,
+    cv_random_state: int = 42,
+    device: str = "cuda",
+    dtype: torch.dtype = torch.float32,
+    tol: float = 1e-6,
+    max_iter: int = 50,
+) -> pl.DataFrame:
+    """Permutation-test twin of `run_behavior_with_control` (full + baseline)."""
+    return _run_behavior_core_permutations(
+        epochs, subject, electrode_idxs, windows,
+        with_control=True,
+        reg_lambda=reg_lambda, reg_lambda_baseline=reg_lambda_baseline,
+        permute_seeds=permute_seeds,
+        permutation_chunk_size=permutation_chunk_size,
+        n_folds=n_folds, cv_random_state=cv_random_state,
+        device=device, dtype=dtype, tol=tol, max_iter=max_iter,
+    )
+
+
+def run_behavior_hga_only_permutations(
+    epochs: mne.Epochs,
+    subject: str,
+    electrode_idxs: Sequence[int],
+    windows: np.ndarray,
+    *,
+    reg_lambda: float,
+    permute_seeds: Sequence[int],
+    permutation_chunk_size: int,
+    n_folds: int = 5,
+    cv_random_state: int = 42,
+    device: str = "cuda",
+    dtype: torch.dtype = torch.float32,
+    tol: float = 1e-6,
+    max_iter: int = 50,
+) -> pl.DataFrame:
+    """Permutation-test twin of `run_behavior_hga_only` (full only)."""
+    return _run_behavior_core_permutations(
+        epochs, subject, electrode_idxs, windows,
+        with_control=False,
+        reg_lambda=reg_lambda, reg_lambda_baseline=None,
+        permute_seeds=permute_seeds,
+        permutation_chunk_size=permutation_chunk_size,
         n_folds=n_folds, cv_random_state=cv_random_state,
         device=device, dtype=dtype, tol=tol, max_iter=max_iter,
     )
