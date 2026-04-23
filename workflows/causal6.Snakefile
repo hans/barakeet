@@ -233,13 +233,14 @@ rule reg_lambda_sweep:
         notebook = "notebooks/causal6/reg_lambda_sweep.py",
 
     output:
-        notebook      = "outputs/causal6/reg_lambda_sweep/notebook.ipynb",
-        sweep         = "outputs/causal6/reg_lambda_sweep/sweep_results.parquet",
-        all_scores    = "outputs/causal6/reg_lambda_sweep/sweep_all_scores.parquet",
-        winners       = "outputs/causal6/reg_lambda_sweep/reg_lambda_winners.json",
-        audit         = "outputs/causal6/reg_lambda_sweep/class_balance_audit.parquet",
-        fold_variance = "outputs/causal6/reg_lambda_sweep/sweep_fold_variance.parquet",
-        profile       = "outputs/causal6/reg_lambda_sweep/sweep.prof",
+        notebook        = "outputs/causal6/reg_lambda_sweep/notebook.ipynb",
+        sweep           = "outputs/causal6/reg_lambda_sweep/sweep_results.parquet",
+        all_scores      = "outputs/causal6/reg_lambda_sweep/sweep_all_scores.parquet",
+        winners         = "outputs/causal6/reg_lambda_sweep/reg_lambda_winners.json",
+        audit           = "outputs/causal6/reg_lambda_sweep/class_balance_audit.parquet",
+        fold_variance   = "outputs/causal6/reg_lambda_sweep/sweep_fold_variance.parquet",
+        seed_comparison = "outputs/causal6/reg_lambda_sweep/sweep_seed_comparison.parquet",
+        profile         = "outputs/causal6/reg_lambda_sweep/sweep.prof",
 
     run:
         import cProfile
@@ -266,6 +267,7 @@ rule reg_lambda_sweep:
                     reg_lambda_grid=C6["tuning_reg_lambda_grid"],
                     n_folds=C6["n_folds"],
                     cv_random_state=C6["cv_random_state"],
+                    compare_cv_seeds=C6.get("compare_cv_seeds", []),
                     device=C6["device"],
                     tol=C6["tol"],
                     max_iter=C6["max_iter"],

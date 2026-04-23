@@ -72,6 +72,11 @@ causal6:
   # Outer CV
   n_folds: 5
   cv_random_state: 42
+  # Extra CV seeds to re-sweep at for λ-winner stability check (reg_lambda_sweep
+  # only). Empty = no stability check. Canonical winners always come from
+  # `cv_random_state` above; extras go into sweep_seed_comparison.parquet.
+  # Rerunning at N extras ~= Nx more GPU time; 1-2 is usually sufficient.
+  compare_cv_seeds: []
 
   # Target device for torch (cuda | mps | cpu)
   device: cuda
