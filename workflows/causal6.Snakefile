@@ -237,6 +237,7 @@ rule reg_lambda_sweep:
         sweep      = "outputs/causal6/reg_lambda_sweep/sweep_results.parquet",
         all_scores = "outputs/causal6/reg_lambda_sweep/sweep_all_scores.parquet",
         winners    = "outputs/causal6/reg_lambda_sweep/reg_lambda_winners.json",
+        audit      = "outputs/causal6/reg_lambda_sweep/class_balance_audit.parquet",
         profile    = "outputs/causal6/reg_lambda_sweep/sweep.prof",
 
     run:

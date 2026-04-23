@@ -82,6 +82,152 @@ def _has_enough_per_class(y: np.ndarray, n_folds: int) -> bool:
     return int(np.bincount(y.astype(np.int64)).min()) >= n_folds
 
 
+def audit_class_balance(
+    epochs: mne.Epochs,
+    subject: str,
+    *,
+    n_folds: int = 5,
+    cv_random_state: int = 42,
+    resampled_steps: tuple[int, ...] = (1, 6),
+) -> pl.DataFrame:
+    """
+    Summarize post-stratification per-fold binary-class counts for every
+    (decoder × group) the three causal6 decoders will fit on this subject.
+
+    Uses the same `StratifiedKFold(n_splits=n_folds, shuffle=True,
+    random_state=cv_random_state)` splitter as `_fit_batched_cv`, so the
+    per-fold minority counts reported here are exactly the ones the fit will
+    see. Emits `L.warning(...)` for every "low" and "skipped" row.
+
+    Columns:
+        subject, decoder ∈ {"acoustic", "behavior_full", "behavior_hga_only"},
+        phoneme_pair, word_end (null for acoustic rows),
+        n_total, n_class_0, n_class_1, min_class,
+        will_skip,                       # mirrors _has_enough_per_class(y, n_folds)
+        min_test_minority_per_fold,      # null when will_skip
+        min_train_minority_per_fold,     # null when will_skip
+        status ∈ {"ok", "low", "skipped"}
+            "skipped": will_skip (decoder drops the group)
+            "low":     min_test_minority_per_fold < 2
+                       or min_train_minority_per_fold < 2 * n_folds
+            "ok":      otherwise
+    """
+    assert epochs.metadata is not None
+    md = epochs.metadata
+
+    def _summarize(decoder: str, phoneme_pair: str, word_end, y: np.ndarray) -> dict:
+        n_total = int(y.size)
+        counts = (
+            np.bincount(y.astype(np.int64), minlength=2)
+            if n_total > 0 else np.zeros(2, dtype=np.int64)
+        )
+        n_class_0, n_class_1 = int(counts[0]), int(counts[1])
+        min_class = int(min(n_class_0, n_class_1))
+        will_skip = (n_total == 0) or (not _has_enough_per_class(y, n_folds))
+
+        if will_skip:
+            min_test_min: Optional[int] = None
+            min_train_min: Optional[int] = None
+            status = "skipped"
+        else:
+            minority_label = int(np.argmin(counts))
+            skf = StratifiedKFold(
+                n_splits=n_folds, shuffle=True, random_state=cv_random_state,
+            )
+            test_mins: list[int] = []
+            train_mins: list[int] = []
+            for train_idx, test_idx in skf.split(np.zeros(n_total), y):
+                test_mins.append(int((y[test_idx] == minority_label).sum()))
+                train_mins.append(int((y[train_idx] == minority_label).sum()))
+            min_test_min = min(test_mins)
+            min_train_min = min(train_mins)
+            if min_test_min < 2 or min_train_min < 2 * n_folds:
+                status = "low"
+            else:
+                status = "ok"
+
+        return {
+            "subject": subject,
+            "decoder": decoder,
+            "phoneme_pair": phoneme_pair,
+            "word_end": word_end,
+            "n_total": n_total,
+            "n_class_0": n_class_0,
+            "n_class_1": n_class_1,
+            "min_class": min_class,
+            "will_skip": will_skip,
+            "min_test_minority_per_fold": min_test_min,
+            "min_train_minority_per_fold": min_train_min,
+            "status": status,
+        }
+
+    phoneme_pairs = sorted(md.phoneme_pair.dropna().unique())
+    resampled_mask = md.resampled.isin(resampled_steps).values
+
+    rows: list[dict] = []
+
+    # Acoustic: one row per phoneme_pair (unambiguous-step filter).
+    for pp in phoneme_pairs:
+        sel = (md.phoneme_pair == pp).values & resampled_mask
+        if sel.sum() == 0:
+            rows.append(_summarize("acoustic", pp, None, np.zeros(0, dtype=np.int64)))
+            continue
+        y = _resolve_target(md, "categorical_acoustic_cue", pp, sel)
+        rows.append(_summarize("acoustic", pp, None, y))
+
+    # Behavior: identical y over (pp, word_end) for both behavior decoders. Emit
+    # two rows per group, one per decoder, so the table is readable alongside
+    # the per-decoder sweep logs.
+    for pp in phoneme_pairs:
+        pp_mask = (md.phoneme_pair == pp).values
+        if pp_mask.sum() == 0:
+            continue
+        for we in sorted(md.word_end[pp_mask].dropna().unique()):
+            sel = pp_mask & (md.word_end == we).values
+            if sel.sum() == 0:
+                continue
+            y = _resolve_target(md, "behavior_categorical_forced", pp, sel)
+            for decoder in ("behavior_full", "behavior_hga_only"):
+                rows.append(_summarize(decoder, pp, we, y))
+
+    schema = {
+        "subject": pl.Utf8,
+        "decoder": pl.Utf8,
+        "phoneme_pair": pl.Utf8,
+        "word_end": pl.Utf8,
+        "n_total": pl.Int64,
+        "n_class_0": pl.Int64,
+        "n_class_1": pl.Int64,
+        "min_class": pl.Int64,
+        "will_skip": pl.Boolean,
+        "min_test_minority_per_fold": pl.Int64,
+        "min_train_minority_per_fold": pl.Int64,
+        "status": pl.Utf8,
+    }
+    df = pl.DataFrame(rows, schema=schema).sort(["decoder", "phoneme_pair", "word_end"])
+
+    for row in df.iter_rows(named=True):
+        group = row["phoneme_pair"]
+        if row["word_end"] is not None:
+            group = f"{group}/{row['word_end']}"
+        if row["status"] == "skipped":
+            L.warning(
+                f"[audit][{subject}][{row['decoder']}][{group}] skipped: "
+                f"n_total={row['n_total']} class counts = "
+                f"[{row['n_class_0']}, {row['n_class_1']}]"
+            )
+        elif row["status"] == "low":
+            L.warning(
+                f"[audit][{subject}][{row['decoder']}][{group}] low: "
+                f"class counts = [{row['n_class_0']}, {row['n_class_1']}], "
+                f"min test/train minority per fold = "
+                f"{row['min_test_minority_per_fold']}/"
+                f"{row['min_train_minority_per_fold']}"
+            )
+
+    return df
+
+
 def _resolve_target(
     metadata: pd.DataFrame,
     target: str,

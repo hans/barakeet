@@ -41,6 +41,7 @@ from loguru import logger as L
 # %%
 from src.data import add_metadata_features
 from src.models.causal6 import (
+    audit_class_balance,
     make_windows,
     run_acoustic_searchlight,
     run_behavior_hga_only,
@@ -80,6 +81,27 @@ assert epochs.metadata is not None
 epochs.metadata = add_metadata_features(epochs.metadata)
 max_sample = epochs.times.shape[0]
 windows = make_windows(min_sample, max_sample, window_size, stride)
+
+# %% [markdown]
+# Audit class balance on this tuning subject before running the sweep. Uses the
+# same StratifiedKFold seed/config as the fits, so per-fold minority counts
+# reported here are exactly what the decoder will see. Any "low" or "skipped"
+# group here contributes noisy per-fold AUCs to λ-winner selection.
+
+# %%
+outdir = Path(outdir)
+audit = audit_class_balance(
+    epochs, subject=subject,
+    n_folds=n_folds, cv_random_state=cv_random_state,
+)
+L.info(f"Class-balance audit for tuning subject {subject}:\n{audit}")
+
+status_counts = (
+    audit.group_by(["decoder", "status"]).len().sort(["decoder", "status"])
+)
+L.info(f"Per-decoder status counts:\n{status_counts}")
+
+audit.write_parquet(outdir / "class_balance_audit.parquet")
 
 # %% [markdown]
 # Sweep each decoder independently.
@@ -170,6 +192,27 @@ sweep = (
 )
 print(sweep)
 
+# Fold-level AUC SD at each site's peak window, averaged across sites — a
+# direct read on how noisy the per-λ AUCs that drive winner selection are. If
+# the winner's `mean_peak_auc` lead over runners-up is smaller than
+# `mean_site_fold_sd`, the pick is inside the noise floor.
+peak_windows = (
+    per_site_peak.join(per_site_per_window, on=site_cols, how="left")
+    .filter(pl.col("auc_cv_mean") == pl.col("peak_auc"))
+    .select(window_cols)
+    .unique()
+)
+fold_variance = (
+    winner_input.join(peak_windows, on=window_cols, how="inner")
+    .group_by(window_cols)
+    .agg(pl.col("test_roc_auc").std().alias("auc_fold_sd"))
+    .group_by(["decoder", "reg_lambda"])
+    .agg(pl.col("auc_fold_sd").mean().alias("mean_site_fold_sd"))
+    .sort(["decoder", "reg_lambda"])
+)
+print(fold_variance)
+L.info(f"Mean across-fold AUC SD at peak window per (decoder, λ):\n{fold_variance}")
+
 # %% [markdown]
 # Pick winners: argmax mean_peak_auc per decoder.
 
@@ -185,7 +228,6 @@ winners = {
 L.info(f"Winners: {winners}")
 
 # %%
-outdir = Path(outdir)
 sweep.write_parquet(outdir / "sweep_results.parquet")
 all_scores_df.write_parquet(outdir / "sweep_all_scores.parquet")
 (outdir / "reg_lambda_winners.json").write_text(json.dumps({

@@ -25,6 +25,7 @@ import torch
 from src.models.causal6 import (
     _fit_batched_cv,
     _fit_batched_cv_permutations,
+    audit_class_balance,
     make_windows,
     run_acoustic_searchlight,
     run_acoustic_searchlight_permutations,
@@ -555,3 +556,39 @@ def test_run_behavior_with_control_permutations_has_paired_full_and_baseline():
         base0["test_roc_auc"].to_numpy(),
         base2["test_roc_auc"].to_numpy(),
     ), "baseline rows do not vary across permutations — is baseline actually refitting?"
+
+
+# ---------------------------------------------------------------------------
+# audit_class_balance
+# ---------------------------------------------------------------------------
+
+
+def test_audit_class_balance_flags_low_and_ok():
+    """Healthy fixture → all 'ok'; tiny fixture → at least one 'low'/'skipped'.
+
+    Determinism: re-running with the same seed must give bit-identical output
+    (guards against accidentally reseeding the splitter from global RNG state).
+    """
+    epochs = _make_fake_epochs(n_trials_per_step=40)
+    audit = audit_class_balance(epochs, subject="EC_fake", n_folds=5)
+
+    assert set(audit["decoder"].unique().to_list()) == {
+        "acoustic", "behavior_full", "behavior_hga_only",
+    }
+    assert (audit["status"] == "ok").all(), audit
+    assert audit["min_test_minority_per_fold"].is_not_null().all()
+    assert audit["min_train_minority_per_fold"].is_not_null().all()
+    # Acoustic rows have no word_end; behavior rows do.
+    acoustic = audit.filter(pl.col("decoder") == "acoustic")
+    behavior = audit.filter(pl.col("decoder") != "acoustic")
+    assert acoustic["word_end"].is_null().all()
+    assert behavior["word_end"].is_not_null().all()
+
+    tiny = _make_fake_epochs(n_trials_per_step=5, seed=11)
+    audit_tiny = audit_class_balance(tiny, subject="EC_small", n_folds=5)
+    # At n_trials_per_step=5, behavior (pp, word_end) cells have ~5 trials
+    # total → min_class is below 2*n_folds, should flag as "low" or "skipped".
+    assert (audit_tiny["status"] != "ok").any(), audit_tiny
+
+    audit2 = audit_class_balance(epochs, subject="EC_fake", n_folds=5)
+    assert audit.equals(audit2)
