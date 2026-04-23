@@ -179,7 +179,6 @@ rule reg_lambda_sweep:
             str(input.notebook),
             str(output.notebook),
             parameters=dict(
-                subject=tuning_subject,
                 epochs_path=f"outputs/epochs_preprocessed/{tuning_subject}_epo.fif",
                 electrodes_path=f"outputs/causal5/find_speech_responsive/{tuning_subject}_results.csv",
                 outdir=str(outdir),
@@ -346,7 +345,6 @@ rule behavior_decoding_single_electrode_summarize:
             str(input.notebook),
             str(output.notebook),
             parameters=dict(
-                subject=wildcards.subject,
                 scores_path=str(input.scores),
                 predictions_path=str(input.predictions),
                 outdir=str(outdir),
@@ -376,7 +374,6 @@ rule behavior_decoding_single_electrode_hga_only_summarize:
             str(input.notebook),
             str(output.notebook),
             parameters=dict(
-                subject=wildcards.subject,
                 scores_path=str(input.scores),
                 predictions_path=str(input.predictions),
                 outdir=str(outdir),
@@ -405,7 +402,6 @@ rule acoustic_decoding_peaks:
             str(input.notebook),
             str(output.notebook),
             parameters=dict(
-                subject=wildcards.subject,
                 scores_path=str(input.scores),
                 outdir=str(outdir),
             ),
