@@ -48,3 +48,9 @@ include = ["src*"]
 
 [tool.marimo.runtime]
 pythonpath = ["."]
+
+[tool.pytest.ini_options]
+addopts = "-m 'not integration'"
+markers = [
+    "integration: requires preprocessed EC248 epochs on disk; slow; skipped by default",
+]
