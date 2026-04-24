@@ -144,8 +144,12 @@ def null_standardized_peak_test(
     )
 
     # --- peak window per site: argmin pointwise_p_real ---
+    # Ties on pointwise_p are common at the finite-sample floor (any two
+    # windows where real > max(null) both hit 1 / (K + 1)). Break ties by
+    # larger real_statistic so the peak falls back to the raw argmax when
+    # the plug-in p can't distinguish further.
     peak_per_site = (
-        real_p_per_window.sort("pointwise_p")
+        real_p_per_window.sort(["pointwise_p", "real_statistic"], descending=[False, True])
         .group_by(site_keys, maintain_order=True)
         .agg(pl.all().first())
         .with_columns((-pl.col("pointwise_p").log10()).alias("T_obs"))
