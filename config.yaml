@@ -92,7 +92,7 @@ causal6:
   # only). Empty = no stability check. Canonical winners always come from
   # `cv_random_state` above; extras go into sweep_seed_comparison.parquet.
   # Rerunning at N extras ~= Nx more GPU time; 1-2 is usually sufficient.
-  compare_cv_seeds: []
+  compare_cv_seeds: [0, 1]
 
   # Target device for torch (cuda | mps | cpu)
   device: cuda
@@ -103,4 +103,4 @@ causal6:
   # Permutation significance testing (refit-based null per decoder)
   n_permutations: 500          # K; bump to 1000-10000 once per-subject run is timed
   permutation_seed: 0          # base RNG seed; each permutation uses seed+k
-  permutation_chunk_size: 6    # permutations fit per GPU call (~1.5GB each; 12GB budget)
+  permutation_chunk_size: 10   # permutations fit per GPU call
