@@ -102,8 +102,10 @@ def audit_class_balance(
     see. Emits `L.warning(...)` for every "low" and "skipped" row.
 
     Columns:
-        subject, decoder ∈ {"acoustic", "behavior_full", "behavior_hga_only"},
-        phoneme_pair, word_end (null for acoustic rows),
+        subject, decoder ∈ {"acoustic", "behavior_full", "behavior_hga_only",
+            "ganong_full", "ganong_hga_only"},
+        phoneme_pair, word_end (null for acoustic and ganong rows — both pool
+            across completions; populated for behavior rows),
         n_total, n_class_0, n_class_1, min_class,
         will_skip,                       # mirrors _has_enough_per_class(y, n_folds)
         min_test_minority_per_fold,      # null when will_skip

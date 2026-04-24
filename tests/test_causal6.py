@@ -573,15 +573,22 @@ def test_audit_class_balance_flags_low_and_ok():
     audit = audit_class_balance(epochs, subject="EC_fake", n_folds=5)
 
     assert set(audit["decoder"].unique().to_list()) == {
-        "acoustic", "behavior_full", "behavior_hga_only",
+        "acoustic",
+        "behavior_full", "behavior_hga_only",
+        "ganong_full", "ganong_hga_only",
     }
     assert (audit["status"] == "ok").all(), audit
     assert audit["min_test_minority_per_fold"].is_not_null().all()
     assert audit["min_train_minority_per_fold"].is_not_null().all()
-    # Acoustic rows have no word_end; behavior rows do.
-    acoustic = audit.filter(pl.col("decoder") == "acoustic")
-    behavior = audit.filter(pl.col("decoder") != "acoustic")
-    assert acoustic["word_end"].is_null().all()
+    # Acoustic and ganong rows pool across completions (word_end null);
+    # behavior rows split by word_end.
+    pooled = audit.filter(pl.col("decoder").is_in(
+        ["acoustic", "ganong_full", "ganong_hga_only"]
+    ))
+    behavior = audit.filter(pl.col("decoder").is_in(
+        ["behavior_full", "behavior_hga_only"]
+    ))
+    assert pooled["word_end"].is_null().all()
     assert behavior["word_end"].is_not_null().all()
 
     tiny = _make_fake_epochs(n_trials_per_step=5, seed=11)
