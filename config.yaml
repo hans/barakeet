@@ -37,8 +37,24 @@ analysis:
     n_jobs: 4
     # Post-hoc peak-finding bounds: summarize/peaks rules restrict peak
     # selection to windows with smin >= peak_search_smin and smax <= peak_search_smax.
+    # These defaults are used by the behavior decoders (peak-search spans
+    # most of the epoch, further constrained per-word_end by the offset
+    # cap in the summarize notebooks).
     peak_search_smin: 0
     peak_search_smax: 290
+    # Acoustic-specific override: the STG acoustic response is known to be
+    # transient and peaks ~150-250ms post word onset (CLAUDE.md / project
+    # prior). Restricting peak-search to 100-350ms is a pre-registered
+    # range that drops W_effective from ~21 to ~3-4, which is what makes
+    # BH-FDR across all tested sites achievable at K=500 permutations.
+    # Claims about later re-expression of the acoustic code are tested
+    # elsewhere (cross-window transfer / late-window direct tests) — NOT
+    # via this peak search.
+    # In samples with epoch_tmin=-0.4, sfreq=100:
+    #   smin >= 50 → window starts >= 100ms post onset
+    #   smax <= 75 → window ends <= 350ms post onset
+    acoustic_peak_search_smin: 50
+    acoustic_peak_search_smax: 75
 
   multivariate:
     window_sizes: [10]          # 100ms at 100Hz; robustness: [5, 10, 15]

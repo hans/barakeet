@@ -609,7 +609,14 @@ rule behavior_decoding_single_electrode_hga_only_summarize:
 
 
 rule acoustic_decoding_peaks:
-    """Null-standardized peak-finding + p-values for acoustic decoder."""
+    """Null-standardized peak-finding + p-values for acoustic decoder.
+
+    Peak-search is restricted to the pre-registered acoustic response
+    window (~100-350ms post word onset) — see
+    config.yaml:analysis.decoding.acoustic_peak_search_{smin,smax} for
+    the rationale. This keeps W_effective small so BH-FDR across tested
+    sites is achievable at K=500 permutations.
+    """
     input:
         scores       = "outputs/causal6/acoustic_decoding_single_electrode/{subject}/scores.parquet",
         null_scores  = "outputs/causal6/acoustic_decoding_null/{subject}/null_scores.parquet",
@@ -630,8 +637,8 @@ rule acoustic_decoding_peaks:
                 null_scores_path=str(input.null_scores),
                 outdir=str(outdir),
                 target="categorical_acoustic_cue",
-                peak_search_smin=config["analysis"]["decoding"]["peak_search_smin"],
-                peak_search_smax=config["analysis"]["decoding"]["peak_search_smax"],
+                peak_search_smin=config["analysis"]["decoding"]["acoustic_peak_search_smin"],
+                peak_search_smax=config["analysis"]["decoding"]["acoustic_peak_search_smax"],
             ),
         )
 
