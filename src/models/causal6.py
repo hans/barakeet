@@ -439,6 +439,7 @@ def _fit_batched_cv_permutations(
     dtype: torch.dtype,
     tol: float,
     max_iter: int,
+    pbar: Optional[tqdm] = None,
 ) -> pl.DataFrame:
     """
     Batched CV fit under label permutations — proper refit-based null.
@@ -551,6 +552,9 @@ def _fit_batched_cv_permutations(
                 "n_train": np.full(Kc * B, n_tr, dtype=np.int64),
                 "n_test": np.full(Kc * B, n_te, dtype=np.int64),
             }))
+
+            if pbar is not None:
+                pbar.update(Kc)
 
     scores = pl.concat(scores_frames).join(
         problem_meta_with_idx, on="_problem_idx", how="left"
@@ -942,60 +946,72 @@ def run_acoustic_searchlight_permutations(
 
     scores_all: list[pl.DataFrame] = []
 
+    K = len(permute_seeds)
+    candidate_pairs = [
+        pp for pp in phoneme_pairs
+        if ((md.phoneme_pair == pp).values & resampled_mask).sum() > 0
+    ]
+    units_per_group = K * n_folds
+    total_units = len(candidate_pairs) * units_per_group
+
     pbar = tqdm(
-        phoneme_pairs,
-        desc=f"acoustic-null[{subject}] λ={reg_lambda:g} K={len(permute_seeds)} {target}",
-        unit="pp", leave=False,
+        total=total_units,
+        desc=f"acoustic-null[{subject}] λ={reg_lambda:g} K={K} {target}",
+        unit="perm·fold", leave=False,
     )
-    for phoneme_pair in pbar:
-        selection = (md.phoneme_pair == phoneme_pair).values & resampled_mask
-        if selection.sum() == 0:
-            continue
+    try:
+        for phoneme_pair in candidate_pairs:
+            pbar.set_postfix_str(f"pp={phoneme_pair}")
+            selection = (md.phoneme_pair == phoneme_pair).values & resampled_mask
 
-        y = _resolve_target(md, target, phoneme_pair, selection)
-        if not _has_enough_per_class(y, n_folds):
-            counts = np.bincount(y.astype(np.int64)) if len(np.unique(y)) > 0 else []
-            L.warning(
-                f"[acoustic-null][{subject}/{phoneme_pair}] skipping: insufficient "
-                f"class balance for StratifiedKFold(n_splits={n_folds}); "
-                f"class counts = {list(counts)}"
+            y = _resolve_target(md, target, phoneme_pair, selection)
+            if not _has_enough_per_class(y, n_folds):
+                counts = np.bincount(y.astype(np.int64)) if len(np.unique(y)) > 0 else []
+                L.warning(
+                    f"[acoustic-null][{subject}/{phoneme_pair}] skipping: insufficient "
+                    f"class balance for StratifiedKFold(n_splits={n_folds}); "
+                    f"class counts = {list(counts)}"
+                )
+                pbar.update(units_per_group)
+                continue
+
+            X_sel = X_full[selection]
+            n_trials = X_sel.shape[0]
+
+            B = n_electrodes * n_windows
+            X_batch = np.empty((n_trials, B, win_size), dtype=np.float64)
+            elec_per = np.empty(B, dtype=np.int64)
+            smin_per = np.empty(B, dtype=np.int64)
+            smax_per = np.empty(B, dtype=np.int64)
+            b = 0
+            for e_idx, electrode_idx in enumerate(electrode_idxs):
+                for smin, smax in windows:
+                    X_batch[:, b, :] = X_sel[:, e_idx, smin:smax]
+                    elec_per[b] = int(electrode_idx)
+                    smin_per[b] = int(smin)
+                    smax_per[b] = int(smax)
+                    b += 1
+
+            problem_meta = pl.DataFrame({
+                "subject": [subject] * B,
+                "phoneme_pair": [phoneme_pair] * B,
+                "electrode_idx": elec_per,
+                "smin": smin_per,
+                "smax": smax_per,
+            })
+
+            scores = _fit_batched_cv_permutations(
+                X_batch, y, problem_meta,
+                permute_seeds=permute_seeds,
+                permutation_chunk_size=permutation_chunk_size,
+                reg_lambda=reg_lambda,
+                n_folds=n_folds, cv_random_state=cv_random_state,
+                device=device, dtype=dtype, tol=tol, max_iter=max_iter,
+                pbar=pbar,
             )
-            continue
-
-        X_sel = X_full[selection]
-        n_trials = X_sel.shape[0]
-
-        B = n_electrodes * n_windows
-        X_batch = np.empty((n_trials, B, win_size), dtype=np.float64)
-        elec_per = np.empty(B, dtype=np.int64)
-        smin_per = np.empty(B, dtype=np.int64)
-        smax_per = np.empty(B, dtype=np.int64)
-        b = 0
-        for e_idx, electrode_idx in enumerate(electrode_idxs):
-            for smin, smax in windows:
-                X_batch[:, b, :] = X_sel[:, e_idx, smin:smax]
-                elec_per[b] = int(electrode_idx)
-                smin_per[b] = int(smin)
-                smax_per[b] = int(smax)
-                b += 1
-
-        problem_meta = pl.DataFrame({
-            "subject": [subject] * B,
-            "phoneme_pair": [phoneme_pair] * B,
-            "electrode_idx": elec_per,
-            "smin": smin_per,
-            "smax": smax_per,
-        })
-
-        scores = _fit_batched_cv_permutations(
-            X_batch, y, problem_meta,
-            permute_seeds=permute_seeds,
-            permutation_chunk_size=permutation_chunk_size,
-            reg_lambda=reg_lambda,
-            n_folds=n_folds, cv_random_state=cv_random_state,
-            device=device, dtype=dtype, tol=tol, max_iter=max_iter,
-        )
-        scores_all.append(scores)
+            scores_all.append(scores)
+    finally:
+        pbar.close()
 
     if not scores_all:
         return pl.DataFrame()
@@ -1056,86 +1072,99 @@ def _run_behavior_core_permutations(
             groups.append((phoneme_pair, word_end))
 
     decoder_label = "behavior_full-null" if with_control else "behavior_hga_only-null"
+    K = len(permute_seeds)
+    n_models_per_group = 2 if with_control else 1
+    units_per_group = K * n_folds * n_models_per_group
+    total_units = len(groups) * units_per_group
+
     pbar = tqdm(
-        groups,
-        desc=f"{decoder_label}[{subject}] λ={reg_lambda:g} K={len(permute_seeds)}",
-        unit="group", leave=False,
+        total=total_units,
+        desc=f"{decoder_label}[{subject}] λ={reg_lambda:g} K={K}",
+        unit="perm·fold", leave=False,
     )
-    for phoneme_pair, word_end in pbar:
-        pp_mask = (md.phoneme_pair == phoneme_pair).values
-        sel = pp_mask & (md.word_end == word_end).values
-        y = _resolve_target(md, "behavior_categorical_forced", phoneme_pair, sel)
-        if not _has_enough_per_class(y, n_folds):
-            counts = np.bincount(y.astype(np.int64)) if len(np.unique(y)) > 0 else []
-            L.warning(
-                f"[{decoder_label}][{subject}/{phoneme_pair}/{word_end}] "
-                f"skipping: insufficient class balance for "
-                f"StratifiedKFold(n_splits={n_folds}); class counts = {list(counts)}"
-            )
-            continue
+    try:
+        for phoneme_pair, word_end in groups:
+            pbar.set_postfix_str(f"pp={phoneme_pair} we={word_end} model=full")
+            pp_mask = (md.phoneme_pair == phoneme_pair).values
+            sel = pp_mask & (md.word_end == word_end).values
+            y = _resolve_target(md, "behavior_categorical_forced", phoneme_pair, sel)
+            if not _has_enough_per_class(y, n_folds):
+                counts = np.bincount(y.astype(np.int64)) if len(np.unique(y)) > 0 else []
+                L.warning(
+                    f"[{decoder_label}][{subject}/{phoneme_pair}/{word_end}] "
+                    f"skipping: insufficient class balance for "
+                    f"StratifiedKFold(n_splits={n_folds}); class counts = {list(counts)}"
+                )
+                pbar.update(units_per_group)
+                continue
 
-        X_sel = X_full[sel]
-        n_trials = X_sel.shape[0]
-        resampled_feat = md.resampled[sel].to_numpy().astype(np.float64).reshape(-1, 1)
+            X_sel = X_full[sel]
+            n_trials = X_sel.shape[0]
+            resampled_feat = md.resampled[sel].to_numpy().astype(np.float64).reshape(-1, 1)
 
-        # Full-model batch
-        full_d = (1 + win_size) if with_control else win_size
-        B_full = n_electrodes * n_windows
-        X_full_batch = np.empty((n_trials, B_full, full_d), dtype=np.float64)
-        elec_per = np.empty(B_full, dtype=np.int64)
-        smin_per = np.empty(B_full, dtype=np.int64)
-        smax_per = np.empty(B_full, dtype=np.int64)
-        b = 0
-        for e_idx, electrode_idx in enumerate(electrode_idxs):
-            for smin, smax in windows:
-                hga = X_sel[:, e_idx, smin:smax]
-                if with_control:
-                    X_full_batch[:, b, 0:1] = resampled_feat
-                    X_full_batch[:, b, 1:] = hga
-                else:
-                    X_full_batch[:, b, :] = hga
-                elec_per[b] = int(electrode_idx)
-                smin_per[b] = int(smin)
-                smax_per[b] = int(smax)
-                b += 1
+            # Full-model batch
+            full_d = (1 + win_size) if with_control else win_size
+            B_full = n_electrodes * n_windows
+            X_full_batch = np.empty((n_trials, B_full, full_d), dtype=np.float64)
+            elec_per = np.empty(B_full, dtype=np.int64)
+            smin_per = np.empty(B_full, dtype=np.int64)
+            smax_per = np.empty(B_full, dtype=np.int64)
+            b = 0
+            for e_idx, electrode_idx in enumerate(electrode_idxs):
+                for smin, smax in windows:
+                    hga = X_sel[:, e_idx, smin:smax]
+                    if with_control:
+                        X_full_batch[:, b, 0:1] = resampled_feat
+                        X_full_batch[:, b, 1:] = hga
+                    else:
+                        X_full_batch[:, b, :] = hga
+                    elec_per[b] = int(electrode_idx)
+                    smin_per[b] = int(smin)
+                    smax_per[b] = int(smax)
+                    b += 1
 
-        full_meta = pl.DataFrame({
-            "subject": [subject] * B_full,
-            "phoneme_pair": [phoneme_pair] * B_full,
-            "word_end": [word_end] * B_full,
-            "electrode_idx": elec_per,
-            "smin": smin_per,
-            "smax": smax_per,
-            "model": ["full"] * B_full,
-        })
-        full_parts.append(_fit_batched_cv_permutations(
-            X_full_batch, y, full_meta,
-            permute_seeds=permute_seeds,
-            permutation_chunk_size=permutation_chunk_size,
-            reg_lambda=reg_lambda,
-            n_folds=n_folds, cv_random_state=cv_random_state,
-            device=device, dtype=dtype, tol=tol, max_iter=max_iter,
-        ))
-
-        if with_control:
-            X_base = resampled_feat.reshape(n_trials, 1, 1)
-            base_meta = pl.DataFrame({
-                "subject": [subject],
-                "phoneme_pair": [phoneme_pair],
-                "word_end": [word_end],
-                "electrode_idx": [-1],
-                "smin": [-1], "smax": [-1],
-                "model": ["baseline"],
+            full_meta = pl.DataFrame({
+                "subject": [subject] * B_full,
+                "phoneme_pair": [phoneme_pair] * B_full,
+                "word_end": [word_end] * B_full,
+                "electrode_idx": elec_per,
+                "smin": smin_per,
+                "smax": smax_per,
+                "model": ["full"] * B_full,
             })
-            base_parts.append(_fit_batched_cv_permutations(
-                X_base, y, base_meta,
+            full_parts.append(_fit_batched_cv_permutations(
+                X_full_batch, y, full_meta,
                 permute_seeds=permute_seeds,
                 permutation_chunk_size=permutation_chunk_size,
-                reg_lambda=(reg_lambda_baseline if reg_lambda_baseline is not None
-                            else reg_lambda),
+                reg_lambda=reg_lambda,
                 n_folds=n_folds, cv_random_state=cv_random_state,
                 device=device, dtype=dtype, tol=tol, max_iter=max_iter,
+                pbar=pbar,
             ))
+
+            if with_control:
+                pbar.set_postfix_str(f"pp={phoneme_pair} we={word_end} model=baseline")
+                X_base = resampled_feat.reshape(n_trials, 1, 1)
+                base_meta = pl.DataFrame({
+                    "subject": [subject],
+                    "phoneme_pair": [phoneme_pair],
+                    "word_end": [word_end],
+                    "electrode_idx": [-1],
+                    "smin": [-1], "smax": [-1],
+                    "model": ["baseline"],
+                })
+                base_parts.append(_fit_batched_cv_permutations(
+                    X_base, y, base_meta,
+                    permute_seeds=permute_seeds,
+                    permutation_chunk_size=permutation_chunk_size,
+                    reg_lambda=(reg_lambda_baseline if reg_lambda_baseline is not None
+                                else reg_lambda),
+                    n_folds=n_folds, cv_random_state=cv_random_state,
+                    device=device, dtype=dtype, tol=tol, max_iter=max_iter,
+                    pbar=pbar,
+                ))
+    finally:
+        pbar.close()
 
     parts = full_parts + base_parts
     if not parts:
@@ -1442,85 +1471,99 @@ def _run_ganong_core_permutations(
     base_parts: list[pl.DataFrame] = []
 
     decoder_label = "ganong_full-null" if with_control else "ganong_hga_only-null"
+    K = len(permute_seeds)
+    n_models_per_group = 2 if with_control else 1
+    units_per_group = K * n_folds * n_models_per_group
+    candidate_pairs = [
+        pp for pp in phoneme_pairs if (md.phoneme_pair == pp).values.sum() > 0
+    ]
+    total_units = len(candidate_pairs) * units_per_group
+
     pbar = tqdm(
-        phoneme_pairs,
-        desc=f"{decoder_label}[{subject}] λ={reg_lambda:g} K={len(permute_seeds)}",
-        unit="pp", leave=False,
+        total=total_units,
+        desc=f"{decoder_label}[{subject}] λ={reg_lambda:g} K={K}",
+        unit="perm·fold", leave=False,
     )
-    for phoneme_pair in pbar:
-        sel = (md.phoneme_pair == phoneme_pair).values
-        if sel.sum() == 0:
-            continue
-        y = _resolve_target(md, "behavior_categorical_forced", phoneme_pair, sel)
-        if not _has_enough_per_class(y, n_folds):
-            counts = np.bincount(y.astype(np.int64)) if len(np.unique(y)) > 0 else []
-            L.warning(
-                f"[{decoder_label}][{subject}/{phoneme_pair}] "
-                f"skipping: insufficient class balance for "
-                f"StratifiedKFold(n_splits={n_folds}); class counts = {list(counts)}"
-            )
-            continue
+    try:
+        for phoneme_pair in candidate_pairs:
+            pbar.set_postfix_str(f"pp={phoneme_pair} model=full")
+            sel = (md.phoneme_pair == phoneme_pair).values
+            y = _resolve_target(md, "behavior_categorical_forced", phoneme_pair, sel)
+            if not _has_enough_per_class(y, n_folds):
+                counts = np.bincount(y.astype(np.int64)) if len(np.unique(y)) > 0 else []
+                L.warning(
+                    f"[{decoder_label}][{subject}/{phoneme_pair}] "
+                    f"skipping: insufficient class balance for "
+                    f"StratifiedKFold(n_splits={n_folds}); class counts = {list(counts)}"
+                )
+                pbar.update(units_per_group)
+                continue
 
-        X_sel = X_full[sel]
-        n_trials = X_sel.shape[0]
-        resampled_feat = md.resampled[sel].to_numpy().astype(np.float64).reshape(-1, 1)
+            X_sel = X_full[sel]
+            n_trials = X_sel.shape[0]
+            resampled_feat = md.resampled[sel].to_numpy().astype(np.float64).reshape(-1, 1)
 
-        # Full-model batch
-        full_d = (1 + win_size) if with_control else win_size
-        B_full = n_electrodes * n_windows
-        X_full_batch = np.empty((n_trials, B_full, full_d), dtype=np.float64)
-        elec_per = np.empty(B_full, dtype=np.int64)
-        smin_per = np.empty(B_full, dtype=np.int64)
-        smax_per = np.empty(B_full, dtype=np.int64)
-        b = 0
-        for e_idx, electrode_idx in enumerate(electrode_idxs):
-            for smin, smax in windows:
-                hga = X_sel[:, e_idx, smin:smax]
-                if with_control:
-                    X_full_batch[:, b, 0:1] = resampled_feat
-                    X_full_batch[:, b, 1:] = hga
-                else:
-                    X_full_batch[:, b, :] = hga
-                elec_per[b] = int(electrode_idx)
-                smin_per[b] = int(smin)
-                smax_per[b] = int(smax)
-                b += 1
+            # Full-model batch
+            full_d = (1 + win_size) if with_control else win_size
+            B_full = n_electrodes * n_windows
+            X_full_batch = np.empty((n_trials, B_full, full_d), dtype=np.float64)
+            elec_per = np.empty(B_full, dtype=np.int64)
+            smin_per = np.empty(B_full, dtype=np.int64)
+            smax_per = np.empty(B_full, dtype=np.int64)
+            b = 0
+            for e_idx, electrode_idx in enumerate(electrode_idxs):
+                for smin, smax in windows:
+                    hga = X_sel[:, e_idx, smin:smax]
+                    if with_control:
+                        X_full_batch[:, b, 0:1] = resampled_feat
+                        X_full_batch[:, b, 1:] = hga
+                    else:
+                        X_full_batch[:, b, :] = hga
+                    elec_per[b] = int(electrode_idx)
+                    smin_per[b] = int(smin)
+                    smax_per[b] = int(smax)
+                    b += 1
 
-        full_meta = pl.DataFrame({
-            "subject": [subject] * B_full,
-            "phoneme_pair": [phoneme_pair] * B_full,
-            "electrode_idx": elec_per,
-            "smin": smin_per,
-            "smax": smax_per,
-            "model": ["full"] * B_full,
-        })
-        full_parts.append(_fit_batched_cv_permutations(
-            X_full_batch, y, full_meta,
-            permute_seeds=permute_seeds,
-            permutation_chunk_size=permutation_chunk_size,
-            reg_lambda=reg_lambda,
-            n_folds=n_folds, cv_random_state=cv_random_state,
-            device=device, dtype=dtype, tol=tol, max_iter=max_iter,
-        ))
-
-        if with_control:
-            X_base = resampled_feat.reshape(n_trials, 1, 1)
-            base_meta = pl.DataFrame({
-                "subject": [subject],
-                "phoneme_pair": [phoneme_pair],
-                "electrode_idx": [-1],
-                "smin": [-1], "smax": [-1],
-                "model": ["baseline"],
+            full_meta = pl.DataFrame({
+                "subject": [subject] * B_full,
+                "phoneme_pair": [phoneme_pair] * B_full,
+                "electrode_idx": elec_per,
+                "smin": smin_per,
+                "smax": smax_per,
+                "model": ["full"] * B_full,
             })
-            base_parts.append(_fit_batched_cv_permutations(
-                X_base, y, base_meta,
+            full_parts.append(_fit_batched_cv_permutations(
+                X_full_batch, y, full_meta,
                 permute_seeds=permute_seeds,
                 permutation_chunk_size=permutation_chunk_size,
-                reg_lambda=(reg_lambda_baseline if reg_lambda_baseline is not None
-                            else reg_lambda),
+                reg_lambda=reg_lambda,
                 n_folds=n_folds, cv_random_state=cv_random_state,
                 device=device, dtype=dtype, tol=tol, max_iter=max_iter,
+                pbar=pbar,
             ))
+
+            if with_control:
+                pbar.set_postfix_str(f"pp={phoneme_pair} model=baseline")
+                X_base = resampled_feat.reshape(n_trials, 1, 1)
+                base_meta = pl.DataFrame({
+                    "subject": [subject],
+                    "phoneme_pair": [phoneme_pair],
+                    "electrode_idx": [-1],
+                    "smin": [-1], "smax": [-1],
+                    "model": ["baseline"],
+                })
+                base_parts.append(_fit_batched_cv_permutations(
+                    X_base, y, base_meta,
+                    permute_seeds=permute_seeds,
+                    permutation_chunk_size=permutation_chunk_size,
+                    reg_lambda=(reg_lambda_baseline if reg_lambda_baseline is not None
+                                else reg_lambda),
+                    n_folds=n_folds, cv_random_state=cv_random_state,
+                    device=device, dtype=dtype, tol=tol, max_iter=max_iter,
+                    pbar=pbar,
+                ))
+    finally:
+        pbar.close()
 
     parts = full_parts + base_parts
     if not parts:
