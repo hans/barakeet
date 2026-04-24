@@ -1,29 +1,43 @@
 """
-Null-standardized peak-finding + max-stat permutation test.
+Null-standardized peak-finding + max-stat permutation test, plus two
+helper aggregates used alongside it: a fold-variance-normalized t-stat
+and a 1D TFCE enhancement.
 
-Generic utility shared by causal6 peak-finding rules across decoders
-(acoustic, behavior-with-control, behavior-HGA-only, and future ganong).
-Callers pre-aggregate per-(site, window[, permutation]) statistics; this
-module computes pointwise p-values per window against the per-window null
-distribution, selects peaks in the standardized space, and applies
-max-stat correction across windows.
+The workhorse is ``null_standardized_peak_test``. It takes pre-aggregated
+per-(site, window[, permutation]) statistics and produces per-site
+peak-windows + p-values by pointwise permutation p + max-stat correction.
 
-Rationale: peak-finding on raw fold-mean AUC implicitly assumes
-homoscedastic null across windows. In ECoG searchlight decoding the null
-varies — low-variance pre-stimulus HGA gives a tight ~0.5 null while
-structured task-response HGA gives a wider null. Raw-AUC peaks therefore
-systematically favour the noisiest windows. Pointwise standardization
-removes that bias, and max-stat correction keeps family-wise Type I
-control across windows.
+The two helpers build different statistics to feed it:
+
+* ``fold_tstat_aggregate`` — collapses fold-wise AUCs to per-(site, window[,
+  perm]) with both ``fold_mean`` and ``t_stat = (fold_mean - center) /
+  (fold_std / sqrt(n_folds))``. Variance-normalization can improve the
+  separation between real and null if real signal is consistent across
+  folds while null permutations scatter.
+* ``tfce_1d_per_site`` — Threshold-Free Cluster Enhancement along the
+  window axis, per site (and per perm). Real signal that spans multiple
+  adjacent windows accumulates extent credit; isolated noise peaks do
+  not. Use before max-stat so the correction acts on cluster-enhanced
+  values rather than on single-window statistics.
+
+Rationale for pointwise standardization: peak-finding on raw fold-mean
+AUC implicitly assumes homoscedastic null across windows. In ECoG
+searchlight decoding the null varies — low-variance pre-stimulus HGA
+gives a tight ~0.5 null while structured task-response HGA gives a wider
+null. Raw-AUC peaks therefore systematically favour the noisiest
+windows. Pointwise standardization removes that bias, and max-stat
+correction keeps family-wise Type I control across windows.
 
 Reference: Westfall & Young (1993) *Resampling-Based Multiple Testing*;
-Nichols & Holmes (2002) for fMRI / searchlight applications.
+Nichols & Holmes (2002) for fMRI / searchlight applications; Smith &
+Nichols (2009) for TFCE.
 """
 
 from __future__ import annotations
 
-from typing import Sequence
+from typing import Optional, Sequence
 
+import numpy as np
 import polars as pl
 
 
@@ -209,3 +223,201 @@ def null_standardized_peak_test(
     )
 
     return peak_summary, window_stats
+
+
+def fold_tstat_aggregate(
+    scores: pl.DataFrame,
+    *,
+    group_keys: Sequence[str],
+    stat_col: str = "test_roc_auc",
+    center: float = 0.5,
+    std_floor: float = 0.01,
+) -> pl.DataFrame:
+    """Aggregate fold-wise scores to per-group (fold_mean, fold_std, t_stat).
+
+    ``t_stat = (fold_mean - center) / (max(fold_std, std_floor) / sqrt(n_folds))``
+
+    The ``std_floor`` prevents the t-stat from blowing up at groups with
+    near-zero fold variance (which can happen at degenerate windows);
+    0.01 is ~1 pp of AUC and small vs typical fold-SD of ~0.03–0.10.
+
+    The caller supplies the centering value: 0.5 for AUC (chance level),
+    0 for signed ``diff`` statistics like ``full - baseline``. Centering
+    does not change the rank structure of the permutation test — it
+    only changes the sign convention for t — so the pointwise p is
+    identical under any monotone recentering that keeps the real and
+    null inputs aligned. Provided for interpretability of the raw value.
+
+    Args:
+        scores: long-format DataFrame with ``group_keys + ['fold', stat_col]``.
+            One row per (group, fold).
+        group_keys: columns identifying a group to collapse folds within.
+            Typically ``site_keys + window_keys`` for real, or the same
+            plus ``perm_key`` for null.
+        stat_col: name of the per-fold statistic column.
+        center: centering value for the numerator.
+        std_floor: minimum effective fold_std used in the t-stat
+            denominator. Fold_std below this value gets clamped up to
+            std_floor.
+
+    Returns:
+        DataFrame with one row per group and columns:
+            ``*group_keys, fold_mean, fold_std, n_folds, t_stat``.
+    """
+    group_keys = list(group_keys)
+    if stat_col not in scores.columns:
+        raise ValueError(
+            f"scores missing required column {stat_col!r}; has {scores.columns}"
+        )
+
+    agg = scores.group_by(group_keys).agg(
+        pl.col(stat_col).mean().alias("fold_mean"),
+        pl.col(stat_col).std().alias("fold_std"),
+        pl.col(stat_col).len().alias("n_folds"),
+    )
+    sem = (
+        pl.max_horizontal(pl.col("fold_std"), pl.lit(std_floor))
+        / pl.col("n_folds").cast(pl.Float64).sqrt()
+    )
+    return agg.with_columns(
+        ((pl.col("fold_mean") - center) / sem).alias("t_stat")
+    )
+
+
+def _tfce_1d(stat: np.ndarray, *, E: float, H: float, dh: Optional[float], threshold: float) -> np.ndarray:
+    """One-tailed 1D TFCE enhancement for a 1D numpy array.
+
+    Matches MNE's convention (see ``mne.stats.cluster_level._find_clusters``
+    with ``threshold={'start': threshold, 'step': dh}``, ``tail=1``):
+
+        score[v] = sum over thresholds t of (delta_t)^H * extent(t, v)^E
+
+    where ``delta_t`` is the step between consecutive thresholds (equal
+    to ``abs(t_0)`` at the first threshold, ``dh`` for the rest), and
+    ``extent(t, v)`` is the length of the contiguous run containing
+    voxel ``v`` in ``stat > t`` (or 0 if v is not in any run at that t).
+
+    This differs from the canonical Smith & Nichols (2009) continuous
+    form (``integral of h^H * e^E dh``); MNE's form uses ``(dh)^H``
+    rather than ``h^H * dh``. Permutation inference is rank-invariant so
+    the choice does not affect p-values, but we match MNE's formula so
+    the cross-validation test in ``tests/test_significance.py`` can
+    assert numerical equivalence.
+    """
+    out = np.zeros_like(stat, dtype=np.float64)
+    finite = stat[np.isfinite(stat)]
+    if finite.size == 0:
+        return out
+    max_stat = float(finite.max())
+    if max_stat <= threshold:
+        return out
+    if dh is None:
+        step = max_stat / 100.0
+    else:
+        step = float(dh)
+    if step <= 0:
+        raise ValueError(f"dh must be positive, got {step}")
+
+    thresholds = np.arange(threshold, max_stat, step, dtype=np.float64)
+    prev_t: Optional[float] = None
+    for ti, t in enumerate(thresholds):
+        if ti == 0:
+            delta = abs(float(t))
+        else:
+            delta = abs(float(t) - prev_t)  # type: ignore[operator]
+        prev_t = float(t)
+        delta_H = delta ** H
+        if delta_H == 0:
+            continue  # degenerate first threshold at h=0 contributes nothing
+        above = stat > t  # strict inequality matches MNE
+        if not above.any():
+            break
+        # Contiguous-run extents via edge detection.
+        padded = np.concatenate(([False], above, [False]))
+        diff = np.diff(padded.astype(np.int8))
+        starts = np.where(diff == 1)[0]
+        ends = np.where(diff == -1)[0]
+        for s, e in zip(starts, ends):
+            extent = e - s
+            out[s:e] += (extent ** E) * delta_H
+    return out
+
+
+def tfce_1d_per_site(
+    stats: pl.DataFrame,
+    *,
+    site_keys: Sequence[str],
+    window_keys: Sequence[str] = ("smin", "smax"),
+    perm_key: Optional[str] = None,
+    stat_col: str = "statistic",
+    E: float = 0.5,
+    H: float = 2.0,
+    dh: Optional[float] = None,
+    threshold: float = 0.0,
+) -> pl.DataFrame:
+    """Per-site (and per-permutation) 1D TFCE along ``window_keys``.
+
+    Windows are ordered by the first element of ``window_keys`` (default
+    ``smin``) within each (site[, perm]) group. The returned DataFrame
+    has the same schema as the input but with ``stat_col`` replaced by
+    the TFCE-enhanced value.
+
+    Args:
+        stats: long-format with ``site_keys + window_keys + [perm_key?,
+            stat_col]``. One row per (site, window[, perm]).
+        site_keys: columns identifying a site.
+        window_keys: columns identifying a window inside a site.
+        perm_key: permutation-index column, or ``None`` for a real-only
+            (one-enhancement-per-site) run.
+        stat_col: name of the statistic to enhance.
+        E: extent exponent (TFCE default 0.5).
+        H: height exponent (TFCE default 2.0).
+        dh: threshold step. ``None`` = ``max(stat_in_group) / 100``
+            computed per group (adaptive to each site's dynamic range).
+        threshold: one-tailed floor; values at or below are zeroed
+            before enhancement. Use 0.5 for AUC to drop below-chance
+            windows, or 0 for centered diff-type statistics.
+
+    Returns:
+        DataFrame with columns ``site_keys + window_keys + [perm_key?,
+        stat_col]``, ``stat_col`` containing TFCE-enhanced values.
+    """
+    site_keys = list(site_keys)
+    window_keys = list(window_keys)
+    group_keys = site_keys + ([perm_key] if perm_key is not None else [])
+    required = site_keys + window_keys + ([perm_key] if perm_key else []) + [stat_col]
+    for col in required:
+        if col not in stats.columns:
+            raise ValueError(
+                f"stats missing required column {col!r}; has {stats.columns}"
+            )
+
+    order_col = window_keys[0]
+    # Sort so that each group's rows appear contiguously and in window order.
+    sorted_df = stats.sort(group_keys + [order_col])
+
+    enhanced = np.empty(sorted_df.height, dtype=np.float64)
+    stat_np = sorted_df[stat_col].to_numpy()
+
+    # Walk contiguous group slices and apply _tfce_1d in place.
+    if group_keys:
+        # Use polars partition_by to get per-group row indices in sorted order.
+        # Simpler: derive group-change boundaries from the group columns.
+        group_cols = [sorted_df[c].to_numpy() for c in group_keys]
+        n = sorted_df.height
+        start = 0
+        for i in range(1, n + 1):
+            at_end = i == n
+            if not at_end:
+                changed = any(col[i] != col[i - 1] for col in group_cols)
+            if at_end or changed:
+                enhanced[start:i] = _tfce_1d(
+                    stat_np[start:i], E=E, H=H, dh=dh, threshold=threshold,
+                )
+                start = i
+    else:
+        enhanced[:] = _tfce_1d(stat_np, E=E, H=H, dh=dh, threshold=threshold)
+
+    return sorted_df.with_columns(
+        pl.Series(stat_col, enhanced)
+    )

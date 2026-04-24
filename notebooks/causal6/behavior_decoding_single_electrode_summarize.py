@@ -16,32 +16,38 @@
 # %% [markdown]
 # causal6 summarize: behavior decoding with control, null-standardized peak.
 #
+# Emits four flavors per subject, all with the same peak_summary.parquet
+# schema (so downstream consumers can swap which one they read):
+#   * foldmean_maxstat — statistic = fold-mean(diff), max-stat correction (v1 contract)
+#   * tstat_maxstat    — statistic = t-stat(diff, center=0), max-stat correction
+#   * foldmean_tfce    — fold-mean(diff) enhanced by 1D TFCE along windows, max-stat
+#   * tstat_tfce       — t-stat(diff) enhanced by 1D TFCE, max-stat
+#
 # Inputs:
-#   scores.parquet         — real per-fold AUC for both `model='full'`
-#                            and `model='baseline'`
+#   scores.parquet         — real per-fold AUC for `model ∈ {full, baseline}`
 #   predictions.parquet    — real per-trial held-out predictions
 #   null_scores.parquet    — permutation null with both models refit per perm
 #
-# Paired statistic = fold-mean(full_roc_auc − baseline_roc_auc), computed per
-# (site, window[, permutation]). Peak-finding uses null-standardized pointwise
-# p (see src/models/significance.py).
-#
 # Outputs:
-#   peak_summary.parquet        — one row per site: peak window, fold-mean
-#                                  full/baseline/diff at that window, +
-#                                  pointwise_p / T_obs / p_value / n_permutations
-#                                  / null_q{05,50,95,99}.
-#   peak_predictions.parquet    — trial-level real predictions filtered to
-#                                  the peak window per site (unchanged contract).
-#   window_mean_scores.parquet  — fold-mean full/baseline/diff per (site,
-#                                  window); diagnostic, same schema as before.
+#   peak_summary.parquet                — foldmean_maxstat (v1 contract)
+#   peak_summary_tstat_maxstat.parquet
+#   peak_summary_foldmean_tfce.parquet
+#   peak_summary_tstat_tfce.parquet
+#   peak_predictions.parquet    — trial-level predictions at the foldmean_maxstat
+#                                  peak window (v1 contract; other flavors don't
+#                                  yet have trial-level consumers).
+#   window_mean_scores.parquet  — fold-mean full/baseline/diff per (site, window).
 
 # %%
 from pathlib import Path
 
 import polars as pl
 
-from src.models.significance import null_standardized_peak_test
+from src.models.significance import (
+    fold_tstat_aggregate,
+    null_standardized_peak_test,
+    tfce_1d_per_site,
+)
 from src.stimuli import OFFSET_DICT
 
 # %% tags=["parameters"]
@@ -108,60 +114,128 @@ real_paired = _pair_and_filter(real_scores)
 null_paired = _pair_and_filter(null_scores, extra_keys=["permutation_idx"])
 
 # %% [markdown]
-# ## Aggregate to fold-mean per (site, window[, perm])
+# ## Aggregate folds to (fold_mean, fold_std, t_stat) per (site, window[, perm])
+#
+# The diff statistic is centered at 0 (chance for full - baseline); AUC columns
+# are kept alongside for diagnostics / v1 schema compatibility.
 
 # %%
+real_agg_diff = fold_tstat_aggregate(
+    real_paired, group_keys=window_keys, stat_col="diff", center=0.0,
+)
+null_agg_diff = fold_tstat_aggregate(
+    null_paired, group_keys=window_keys + ["permutation_idx"],
+    stat_col="diff", center=0.0,
+)
+
+# Also aggregate full/baseline fold-means for v1 diagnostic output.
 real_window_mean = real_paired.group_by(window_keys).agg(
     pl.col("full_roc_auc").mean().alias("full_roc_auc"),
     pl.col("baseline_roc_auc").mean().alias("baseline_roc_auc"),
     pl.col("diff").mean().alias("diff"),
 )
 
-null_window_mean = null_paired.group_by(window_keys + ["permutation_idx"]).agg(
-    pl.col("diff").mean().alias("diff"),
-)
-
 # %% [markdown]
-# ## Null-standardized peak test
+# ## Four flavors of null-standardized peak test
 #
-# Statistic = fold-mean `diff` (full − baseline).
+# Each flavor shares the same peak_summary.parquet schema. The only moving
+# parts are (a) which column of the aggregate feeds the test
+# (``fold_mean`` vs ``t_stat``) and (b) whether TFCE is applied first.
 
 # %%
-peak_summary_std, _window_stats_std = null_standardized_peak_test(
-    real_window_mean.select(site_keys + ["smin", "smax", "diff"]),
-    null_window_mean,
-    site_keys=site_keys,
-    window_keys=["smin", "smax"],
-    stat_col="diff",
-)
-
-# Rename peak_smin/peak_smax → smin/smax and real_statistic → diff, then
-# re-join full_roc_auc & baseline_roc_auc at the chosen peak window.
-peak_summary = (
-    peak_summary_std
-    .rename({"peak_smin": "smin", "peak_smax": "smax", "real_statistic": "diff"})
-    .join(
-        real_window_mean.select(site_keys + ["smin", "smax", "full_roc_auc", "baseline_roc_auc"]),
-        on=site_keys + ["smin", "smax"],
-        how="left",
+def _run_maxstat(real_stat: pl.DataFrame, null_stat: pl.DataFrame,
+                 stat_col: str, rename_to: str) -> pl.DataFrame:
+    real_in = real_stat.select(window_keys + [stat_col]).rename({stat_col: "statistic"})
+    null_in = null_stat.select(window_keys + ["permutation_idx", stat_col]).rename(
+        {stat_col: "statistic"}
     )
+    peaks, _ = null_standardized_peak_test(
+        real_in, null_in,
+        site_keys=site_keys, window_keys=["smin", "smax"], stat_col="statistic",
+    )
+    return peaks.rename({
+        "peak_smin": "smin", "peak_smax": "smax", "real_statistic": rename_to,
+    })
+
+
+def _run_tfce_maxstat(real_stat: pl.DataFrame, null_stat: pl.DataFrame,
+                      stat_col: str, rename_to: str) -> pl.DataFrame:
+    """TFCE-enhance per (site[, perm]) along windows, then max-stat."""
+    real_in = real_stat.select(window_keys + [stat_col]).rename({stat_col: "statistic"})
+    null_in = null_stat.select(window_keys + ["permutation_idx", stat_col]).rename(
+        {stat_col: "statistic"}
+    )
+    real_enh = tfce_1d_per_site(
+        real_in, site_keys=site_keys, window_keys=["smin", "smax"], stat_col="statistic",
+    )
+    null_enh = tfce_1d_per_site(
+        null_in, site_keys=site_keys, window_keys=["smin", "smax"],
+        perm_key="permutation_idx", stat_col="statistic",
+    )
+    peaks, _ = null_standardized_peak_test(
+        real_enh, null_enh,
+        site_keys=site_keys, window_keys=["smin", "smax"], stat_col="statistic",
+    )
+    return peaks.rename({
+        "peak_smin": "smin", "peak_smax": "smax", "real_statistic": rename_to,
+    })
+
+
+# (1) foldmean_maxstat — v1 contract. Re-join full/baseline at the peak window.
+peak_summary_foldmean_maxstat = _run_maxstat(
+    real_agg_diff, null_agg_diff, stat_col="fold_mean", rename_to="diff",
+).join(
+    real_window_mean.select(site_keys + ["smin", "smax", "full_roc_auc", "baseline_roc_auc"]),
+    on=site_keys + ["smin", "smax"], how="left",
 )
 print(
-    f"{peak_summary.height} sites: "
-    f"{(peak_summary['p_value'] < 0.05).sum()} with p<0.05 (uncorrected)"
+    f"[foldmean_maxstat] {peak_summary_foldmean_maxstat.height} sites: "
+    f"{(peak_summary_foldmean_maxstat['p_value'] < 0.05).sum()} with p<0.05 (uncorrected)"
+)
+
+# (2) tstat_maxstat
+peak_summary_tstat_maxstat = _run_maxstat(
+    real_agg_diff, null_agg_diff, stat_col="t_stat", rename_to="t_stat",
+)
+print(
+    f"[tstat_maxstat]    {peak_summary_tstat_maxstat.height} sites: "
+    f"{(peak_summary_tstat_maxstat['p_value'] < 0.05).sum()} with p<0.05 (uncorrected)"
+)
+
+# (3) foldmean_tfce
+peak_summary_foldmean_tfce = _run_tfce_maxstat(
+    real_agg_diff, null_agg_diff, stat_col="fold_mean", rename_to="diff_tfce",
+)
+print(
+    f"[foldmean_tfce]    {peak_summary_foldmean_tfce.height} sites: "
+    f"{(peak_summary_foldmean_tfce['p_value'] < 0.05).sum()} with p<0.05 (uncorrected)"
+)
+
+# (4) tstat_tfce
+peak_summary_tstat_tfce = _run_tfce_maxstat(
+    real_agg_diff, null_agg_diff, stat_col="t_stat", rename_to="t_stat_tfce",
+)
+print(
+    f"[tstat_tfce]       {peak_summary_tstat_tfce.height} sites: "
+    f"{(peak_summary_tstat_tfce['p_value'] < 0.05).sum()} with p<0.05 (uncorrected)"
 )
 
 # %%
-peak_keys = peak_summary.select(site_keys + ["smin", "smax"])
+# peak_predictions is derived from the v1 (foldmean_maxstat) peak windows,
+# so existing consumers of trial-level predictions continue to work unchanged.
+peak_keys = peak_summary_foldmean_maxstat.select(site_keys + ["smin", "smax"])
 peak_predictions = predictions.join(peak_keys, on=site_keys + ["smin", "smax"], how="inner")
 
 # %%
 outdir = Path(outdir)
-peak_summary.write_parquet(outdir / "peak_summary.parquet")
+peak_summary_foldmean_maxstat.write_parquet(outdir / "peak_summary.parquet")
+peak_summary_tstat_maxstat.write_parquet(outdir / "peak_summary_tstat_maxstat.parquet")
+peak_summary_foldmean_tfce.write_parquet(outdir / "peak_summary_foldmean_tfce.parquet")
+peak_summary_tstat_tfce.write_parquet(outdir / "peak_summary_tstat_tfce.parquet")
 peak_predictions.write_parquet(outdir / "peak_predictions.parquet")
 real_window_mean.write_parquet(outdir / "window_mean_scores.parquet")
 print(
-    f"Wrote peak_summary.parquet ({peak_summary.height} rows), "
-    f"peak_predictions.parquet ({peak_predictions.height} rows), "
+    f"Wrote peak_summary.parquet ({peak_summary_foldmean_maxstat.height} rows) "
+    f"+ 3 extra flavors, peak_predictions.parquet ({peak_predictions.height} rows), "
     f"window_mean_scores.parquet ({real_window_mean.height} rows) to {outdir}"
 )

@@ -1,5 +1,5 @@
 """
-Unit tests for src.models.significance.null_standardized_peak_test.
+Unit tests for src.models.significance.
 
 Synthetic-only; no real data or torch required.
 """
@@ -9,7 +9,11 @@ import numpy as np
 import polars as pl
 import pytest
 
-from src.models.significance import null_standardized_peak_test
+from src.models.significance import (
+    fold_tstat_aggregate,
+    null_standardized_peak_test,
+    tfce_1d_per_site,
+)
 
 
 SITE_KEYS = ["subject", "electrode_idx"]
@@ -234,3 +238,226 @@ def test_validation_missing_columns():
         null_standardized_peak_test(
             real_df, null_df, site_keys=["subject"],
         )
+
+
+# =============================================================================
+# fold_tstat_aggregate
+# =============================================================================
+
+
+def test_fold_tstat_aggregate_basic():
+    """fold_mean, fold_std, t_stat match hand computation."""
+    aucs = np.array([0.60, 0.62, 0.58, 0.63, 0.61])
+    scores = pl.DataFrame({
+        "subject": ["S1"] * 5,
+        "electrode_idx": [0] * 5,
+        "fold": list(range(5)),
+        "test_roc_auc": aucs,
+    })
+    out = fold_tstat_aggregate(
+        scores, group_keys=["subject", "electrode_idx"], center=0.5, std_floor=0.01,
+    )
+    assert out.height == 1
+    row = out.to_dicts()[0]
+    assert row["fold_mean"] == pytest.approx(aucs.mean())
+    # polars uses ddof=1 by default for std
+    assert row["fold_std"] == pytest.approx(aucs.std(ddof=1))
+    assert row["n_folds"] == 5
+    expected_t = (aucs.mean() - 0.5) / (max(aucs.std(ddof=1), 0.01) / np.sqrt(5))
+    assert row["t_stat"] == pytest.approx(expected_t)
+
+
+def test_fold_tstat_aggregate_std_floor_clamps():
+    """When fold_std < std_floor, the denominator uses std_floor instead."""
+    # All folds equal → std = 0 → without floor, t would be +inf
+    aucs = np.array([0.70] * 5)
+    scores = pl.DataFrame({
+        "subject": ["S1"] * 5,
+        "electrode_idx": [0] * 5,
+        "fold": list(range(5)),
+        "test_roc_auc": aucs,
+    })
+    out = fold_tstat_aggregate(
+        scores, group_keys=["subject", "electrode_idx"], center=0.5, std_floor=0.05,
+    )
+    row = out.to_dicts()[0]
+    expected_t = 0.20 / (0.05 / np.sqrt(5))
+    assert row["t_stat"] == pytest.approx(expected_t)
+    assert np.isfinite(row["t_stat"])
+
+
+def test_fold_tstat_aggregate_center_param():
+    """Changing center shifts t but not the other aggregates."""
+    aucs = np.array([0.10, 0.12, 0.08, 0.13, 0.11])  # centered around 0.1 (diff-like)
+    scores = pl.DataFrame({
+        "subject": ["S1"] * 5,
+        "electrode_idx": [0] * 5,
+        "fold": list(range(5)),
+        "diff": aucs,
+    })
+    out_0 = fold_tstat_aggregate(
+        scores, group_keys=["subject", "electrode_idx"],
+        stat_col="diff", center=0.0, std_floor=0.01,
+    ).to_dicts()[0]
+    out_half = fold_tstat_aggregate(
+        scores, group_keys=["subject", "electrode_idx"],
+        stat_col="diff", center=0.5, std_floor=0.01,
+    ).to_dicts()[0]
+    # Means and stds are identical
+    assert out_0["fold_mean"] == pytest.approx(out_half["fold_mean"])
+    assert out_0["fold_std"] == pytest.approx(out_half["fold_std"])
+    # t_stat shifts by (0.0 - 0.5) / sem; center=0 gives the larger (positive) t
+    sem = max(aucs.std(ddof=1), 0.01) / np.sqrt(5)
+    assert out_0["t_stat"] == pytest.approx(aucs.mean() / sem)
+    assert out_half["t_stat"] == pytest.approx((aucs.mean() - 0.5) / sem)
+
+
+# =============================================================================
+# tfce_1d_per_site
+# =============================================================================
+
+
+def _lattice_adj(n: int):
+    """Construct a 1D nearest-neighbor adjacency for MNE's TFCE. Required
+    because MNE's adjacency=None branch has a long-standing bug for 1D data
+    (cluster extents reported as 1 regardless of actual run length)."""
+    from scipy import sparse
+
+    rows, cols = [], []
+    for i in range(n - 1):
+        rows.extend([i, i + 1])
+        cols.extend([i + 1, i])
+    return sparse.coo_matrix(
+        (np.ones(len(rows)), (rows, cols)), shape=(n, n),
+    )
+
+
+def test_tfce_matches_mne_no_threshold():
+    """Values match mne.stats.cluster_level._find_clusters exactly for a
+    representative smooth signal at threshold=0."""
+    from mne.stats.cluster_level import _find_clusters
+
+    rng = np.random.default_rng(42)
+    x = rng.standard_normal(25)
+    x[5:12] += 1.5  # smooth bump
+    x[18:21] += 0.8  # narrower bump
+
+    _, mne_vals = _find_clusters(
+        x, threshold={"start": 0.0, "step": 0.05}, tail=1, adjacency=_lattice_adj(len(x)),
+    )
+
+    stats_df = pl.DataFrame({
+        "subject": ["S1"] * len(x),
+        "electrode_idx": [0] * len(x),
+        "smin": list(range(len(x))),
+        "smax": [s + 10 for s in range(len(x))],
+        "statistic": x.astype(np.float64),
+    })
+    out = tfce_1d_per_site(
+        stats_df, site_keys=["subject", "electrode_idx"],
+        E=0.5, H=2.0, dh=0.05, threshold=0.0,
+    )
+    ours = out.sort("smin")["statistic"].to_numpy()
+    assert np.allclose(ours, mne_vals, atol=1e-9), (
+        f"max |diff| = {np.max(np.abs(ours - mne_vals)):.3e}"
+    )
+
+
+def test_tfce_matches_mne_with_threshold():
+    """Same equivalence with a nonzero integration start."""
+    from mne.stats.cluster_level import _find_clusters
+
+    rng = np.random.default_rng(7)
+    x = 0.5 + 0.1 * rng.standard_normal(30)  # AUC-like values around 0.5
+    x[8:18] += 0.15
+
+    _, mne_vals = _find_clusters(
+        x, threshold={"start": 0.5, "step": 0.01}, tail=1, adjacency=_lattice_adj(len(x)),
+    )
+    stats_df = pl.DataFrame({
+        "subject": ["S1"] * len(x),
+        "electrode_idx": [0] * len(x),
+        "smin": list(range(len(x))),
+        "smax": [s + 10 for s in range(len(x))],
+        "statistic": x.astype(np.float64),
+    })
+    out = tfce_1d_per_site(
+        stats_df, site_keys=["subject", "electrode_idx"],
+        E=0.5, H=2.0, dh=0.01, threshold=0.5,
+    )
+    ours = out.sort("smin")["statistic"].to_numpy()
+    assert np.allclose(ours, mne_vals, atol=1e-9)
+
+
+def test_tfce_broad_cluster_beats_narrow_peak():
+    """A broad cluster should receive a larger TFCE value than a narrow
+    peak of the same height. This is the whole point of TFCE."""
+    n = 30
+    x_narrow = np.zeros(n)
+    x_narrow[15] = 1.0          # single-window peak
+
+    x_broad = np.zeros(n)
+    x_broad[10:20] = 1.0        # 10-window plateau at same height
+
+    def _run(arr):
+        df = pl.DataFrame({
+            "subject": ["S1"] * n,
+            "electrode_idx": [0] * n,
+            "smin": list(range(n)),
+            "smax": [s + 10 for s in range(n)],
+            "statistic": arr.astype(np.float64),
+        })
+        return tfce_1d_per_site(
+            df, site_keys=["subject", "electrode_idx"],
+            E=0.5, H=2.0, dh=0.05, threshold=0.0,
+        ).sort("smin")["statistic"].to_numpy()
+
+    narrow_vals = _run(x_narrow)
+    broad_vals = _run(x_broad)
+    # Peak-to-peak comparison: broad's plateau value > narrow's single peak
+    assert broad_vals[15] > narrow_vals[15]
+
+
+def test_tfce_per_site_and_per_perm_isolation():
+    """Enhancement applied per (site, perm) group; different groups don't
+    interfere."""
+    n_windows = 10
+    sites = ["A", "B"]
+    rows = []
+    # Site A: broad cluster in windows 3-6
+    # Site B: narrow peak at window 7
+    for perm in range(3):
+        for site in sites:
+            for w in range(n_windows):
+                if site == "A":
+                    v = 1.0 if 3 <= w <= 6 else 0.0
+                else:
+                    v = 1.0 if w == 7 else 0.0
+                # Add a small per-perm perturbation so groups differ
+                v += 0.01 * perm
+                rows.append({
+                    "subject": site, "electrode_idx": 0,
+                    "smin": w, "smax": w + 1,
+                    "permutation_idx": perm,
+                    "statistic": v,
+                })
+    df = pl.DataFrame(rows)
+    out = tfce_1d_per_site(
+        df, site_keys=["subject", "electrode_idx"],
+        perm_key="permutation_idx",
+        E=0.5, H=2.0, dh=0.05, threshold=0.0,
+    )
+    # Site A at any window in its cluster should outscore Site B's narrow peak
+    a_peak = out.filter(
+        (pl.col("subject") == "A") & (pl.col("smin") == 5) & (pl.col("permutation_idx") == 0)
+    )["statistic"][0]
+    b_peak = out.filter(
+        (pl.col("subject") == "B") & (pl.col("smin") == 7) & (pl.col("permutation_idx") == 0)
+    )["statistic"][0]
+    assert a_peak > b_peak
+
+
+def test_tfce_rejects_missing_columns():
+    df = pl.DataFrame({"subject": ["S1"], "electrode_idx": [0], "smin": [0]})
+    with pytest.raises(ValueError, match="smax"):
+        tfce_1d_per_site(df, site_keys=["subject", "electrode_idx"])

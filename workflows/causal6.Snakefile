@@ -160,11 +160,28 @@ C6 = config["causal6"]  # shorthand — rules below fail early if this block is 
 
 
 rule causal6_all:
-    """Default target: run all five causal6 decoders + null-standardized peaks + FDR."""
+    """Default target: run all five causal6 decoders + null-standardized peaks + FDR.
+
+    For the three behavior/acoustic decoders, four peak-finding flavors are
+    emitted (foldmean_maxstat, tstat_maxstat, foldmean_tfce, tstat_tfce —
+    acoustic skips TFCE since its peak-search window is already narrow).
+    Each has its own aggregate+FDR output so downstream consumers can choose.
+    """
     input:
+        # Acoustic — foldmean_maxstat (v1) + tstat_maxstat
         "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet",
+        "outputs/causal6/acoustic_decoding_peaks/phon_peaks_tstat_maxstat_all.parquet",
+        # Behavior with control — four flavors
         "outputs/causal6/behavior_decoding_single_electrode_summarize/peak_summary_all.parquet",
+        "outputs/causal6/behavior_decoding_single_electrode_summarize/peak_summary_tstat_maxstat_all.parquet",
+        "outputs/causal6/behavior_decoding_single_electrode_summarize/peak_summary_foldmean_tfce_all.parquet",
+        "outputs/causal6/behavior_decoding_single_electrode_summarize/peak_summary_tstat_tfce_all.parquet",
+        # Behavior HGA-only — four flavors
         "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/peak_summary_all.parquet",
+        "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/peak_summary_tstat_maxstat_all.parquet",
+        "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/peak_summary_foldmean_tfce_all.parquet",
+        "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/peak_summary_tstat_tfce_all.parquet",
+        # Ganong (single v1 flavor; t-stat/TFCE extensions left as follow-up)
         "outputs/causal6/ganong_decoding_summarize/peak_summary_all.parquet",
         "outputs/causal6/ganong_decoding_hga_only_summarize/peak_summary_all.parquet",
 
@@ -543,7 +560,11 @@ rule behavior_decoding_single_electrode_hga_only_null:
 
 
 rule behavior_decoding_single_electrode_summarize:
-    """Null-standardized peak-finding + p-values for behavior-with-control."""
+    """Null-standardized peak-finding + p-values for behavior-with-control.
+
+    Emits four peak-summary parquet flavors per subject (see notebook
+    docstring). peak_summary.parquet keeps the v1 foldmean_maxstat contract.
+    """
     input:
         scores       = "outputs/causal6/behavior_decoding_single_electrode/{subject}/scores.parquet",
         predictions  = "outputs/causal6/behavior_decoding_single_electrode/{subject}/predictions.parquet",
@@ -551,9 +572,12 @@ rule behavior_decoding_single_electrode_summarize:
         notebook     = "notebooks/causal6/behavior_decoding_single_electrode_summarize.py",
 
     output:
-        notebook         = "outputs/causal6/behavior_decoding_single_electrode_summarize/{subject}/notebook.ipynb",
-        peak_summary     = "outputs/causal6/behavior_decoding_single_electrode_summarize/{subject}/peak_summary.parquet",
-        peak_predictions = "outputs/causal6/behavior_decoding_single_electrode_summarize/{subject}/peak_predictions.parquet",
+        notebook                      = "outputs/causal6/behavior_decoding_single_electrode_summarize/{subject}/notebook.ipynb",
+        peak_summary                  = "outputs/causal6/behavior_decoding_single_electrode_summarize/{subject}/peak_summary.parquet",
+        peak_summary_tstat_maxstat    = "outputs/causal6/behavior_decoding_single_electrode_summarize/{subject}/peak_summary_tstat_maxstat.parquet",
+        peak_summary_foldmean_tfce    = "outputs/causal6/behavior_decoding_single_electrode_summarize/{subject}/peak_summary_foldmean_tfce.parquet",
+        peak_summary_tstat_tfce       = "outputs/causal6/behavior_decoding_single_electrode_summarize/{subject}/peak_summary_tstat_tfce.parquet",
+        peak_predictions              = "outputs/causal6/behavior_decoding_single_electrode_summarize/{subject}/peak_predictions.parquet",
 
     run:
         outdir = Path(output.notebook).parent
@@ -576,7 +600,11 @@ rule behavior_decoding_single_electrode_summarize:
 
 
 rule behavior_decoding_single_electrode_hga_only_summarize:
-    """Null-standardized peak-finding + p-values for behavior-HGA-only."""
+    """Null-standardized peak-finding + p-values for behavior-HGA-only.
+
+    Emits four peak-summary flavors; peak_summary.parquet keeps the v1
+    foldmean_maxstat contract.
+    """
     input:
         scores       = "outputs/causal6/behavior_decoding_single_electrode_hga_only/{subject}/scores.parquet",
         predictions  = "outputs/causal6/behavior_decoding_single_electrode_hga_only/{subject}/predictions.parquet",
@@ -584,9 +612,12 @@ rule behavior_decoding_single_electrode_hga_only_summarize:
         notebook     = "notebooks/causal6/behavior_decoding_single_electrode_hga_only_summarize.py",
 
     output:
-        notebook         = "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/{subject}/notebook.ipynb",
-        peak_summary     = "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/{subject}/peak_summary.parquet",
-        peak_predictions = "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/{subject}/peak_predictions.parquet",
+        notebook                      = "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/{subject}/notebook.ipynb",
+        peak_summary                  = "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/{subject}/peak_summary.parquet",
+        peak_summary_tstat_maxstat    = "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/{subject}/peak_summary_tstat_maxstat.parquet",
+        peak_summary_foldmean_tfce    = "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/{subject}/peak_summary_foldmean_tfce.parquet",
+        peak_summary_tstat_tfce       = "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/{subject}/peak_summary_tstat_tfce.parquet",
+        peak_predictions              = "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/{subject}/peak_predictions.parquet",
 
     run:
         outdir = Path(output.notebook).parent
@@ -623,9 +654,10 @@ rule acoustic_decoding_peaks:
         notebook     = "notebooks/causal6/acoustic_decoding_peaks.py",
 
     output:
-        notebook = "outputs/causal6/acoustic_decoding_peaks/{subject}/notebook.ipynb",
-        peaks    = "outputs/causal6/acoustic_decoding_peaks/{subject}/phon_peaks.parquet",
-        roc_auc  = "outputs/causal6/acoustic_decoding_peaks/{subject}/phon_roc_auc_searchlight.parquet",
+        notebook        = "outputs/causal6/acoustic_decoding_peaks/{subject}/notebook.ipynb",
+        peaks           = "outputs/causal6/acoustic_decoding_peaks/{subject}/phon_peaks.parquet",
+        peaks_tstat     = "outputs/causal6/acoustic_decoding_peaks/{subject}/phon_peaks_tstat_maxstat.parquet",
+        roc_auc         = "outputs/causal6/acoustic_decoding_peaks/{subject}/phon_roc_auc_searchlight.parquet",
 
     run:
         outdir = Path(output.notebook).parent
@@ -724,6 +756,202 @@ rule behavior_decoding_single_electrode_hga_only_summarize_aggregate:
                 result_paths=list(input.result_paths),
                 outdir=str(outdir),
                 output_name="peak_summary_all.parquet",
+                fdr_alpha=config["analysis"]["fdr_alpha"],
+            ),
+        )
+
+
+# =============================================================================
+# Aggregates for the t-stat / TFCE flavors (added alongside the v1 flavors
+# above; each flavor's per-subject parquet is concatenated and BH-FDR'd
+# independently so consumers can pick whichever they prefer).
+# =============================================================================
+
+
+rule acoustic_decoding_peaks_aggregate_tstat_maxstat:
+    """Acoustic t-stat peaks: concatenate + BH-FDR."""
+    input:
+        notebook     = "notebooks/causal6/significance_aggregate.py",
+        result_paths = expand(
+            "outputs/causal6/acoustic_decoding_peaks/{subject}/phon_peaks_tstat_maxstat.parquet",
+            subject=config["data"]["subjects"],
+        ),
+
+    output:
+        notebook = "outputs/causal6/acoustic_decoding_peaks/aggregate_notebook_tstat_maxstat.ipynb",
+        all      = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_tstat_maxstat_all.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                result_paths=list(input.result_paths),
+                outdir=str(outdir),
+                output_name="phon_peaks_tstat_maxstat_all.parquet",
+                fdr_alpha=config["analysis"]["fdr_alpha"],
+            ),
+        )
+
+
+rule behavior_decoding_single_electrode_summarize_aggregate_tstat_maxstat:
+    """Behavior-with-control, t-stat max-stat peaks: concatenate + BH-FDR."""
+    input:
+        notebook     = "notebooks/causal6/significance_aggregate.py",
+        result_paths = expand(
+            "outputs/causal6/behavior_decoding_single_electrode_summarize/{subject}/peak_summary_tstat_maxstat.parquet",
+            subject=config["data"]["subjects"],
+        ),
+
+    output:
+        notebook = "outputs/causal6/behavior_decoding_single_electrode_summarize/aggregate_notebook_tstat_maxstat.ipynb",
+        all      = "outputs/causal6/behavior_decoding_single_electrode_summarize/peak_summary_tstat_maxstat_all.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                result_paths=list(input.result_paths),
+                outdir=str(outdir),
+                output_name="peak_summary_tstat_maxstat_all.parquet",
+                fdr_alpha=config["analysis"]["fdr_alpha"],
+            ),
+        )
+
+
+rule behavior_decoding_single_electrode_summarize_aggregate_foldmean_tfce:
+    """Behavior-with-control, fold-mean TFCE peaks: concatenate + BH-FDR."""
+    input:
+        notebook     = "notebooks/causal6/significance_aggregate.py",
+        result_paths = expand(
+            "outputs/causal6/behavior_decoding_single_electrode_summarize/{subject}/peak_summary_foldmean_tfce.parquet",
+            subject=config["data"]["subjects"],
+        ),
+
+    output:
+        notebook = "outputs/causal6/behavior_decoding_single_electrode_summarize/aggregate_notebook_foldmean_tfce.ipynb",
+        all      = "outputs/causal6/behavior_decoding_single_electrode_summarize/peak_summary_foldmean_tfce_all.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                result_paths=list(input.result_paths),
+                outdir=str(outdir),
+                output_name="peak_summary_foldmean_tfce_all.parquet",
+                fdr_alpha=config["analysis"]["fdr_alpha"],
+            ),
+        )
+
+
+rule behavior_decoding_single_electrode_summarize_aggregate_tstat_tfce:
+    """Behavior-with-control, t-stat TFCE peaks: concatenate + BH-FDR."""
+    input:
+        notebook     = "notebooks/causal6/significance_aggregate.py",
+        result_paths = expand(
+            "outputs/causal6/behavior_decoding_single_electrode_summarize/{subject}/peak_summary_tstat_tfce.parquet",
+            subject=config["data"]["subjects"],
+        ),
+
+    output:
+        notebook = "outputs/causal6/behavior_decoding_single_electrode_summarize/aggregate_notebook_tstat_tfce.ipynb",
+        all      = "outputs/causal6/behavior_decoding_single_electrode_summarize/peak_summary_tstat_tfce_all.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                result_paths=list(input.result_paths),
+                outdir=str(outdir),
+                output_name="peak_summary_tstat_tfce_all.parquet",
+                fdr_alpha=config["analysis"]["fdr_alpha"],
+            ),
+        )
+
+
+rule behavior_decoding_single_electrode_hga_only_summarize_aggregate_tstat_maxstat:
+    """Behavior HGA-only, t-stat max-stat peaks: concatenate + BH-FDR."""
+    input:
+        notebook     = "notebooks/causal6/significance_aggregate.py",
+        result_paths = expand(
+            "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/{subject}/peak_summary_tstat_maxstat.parquet",
+            subject=config["data"]["subjects"],
+        ),
+
+    output:
+        notebook = "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/aggregate_notebook_tstat_maxstat.ipynb",
+        all      = "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/peak_summary_tstat_maxstat_all.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                result_paths=list(input.result_paths),
+                outdir=str(outdir),
+                output_name="peak_summary_tstat_maxstat_all.parquet",
+                fdr_alpha=config["analysis"]["fdr_alpha"],
+            ),
+        )
+
+
+rule behavior_decoding_single_electrode_hga_only_summarize_aggregate_foldmean_tfce:
+    """Behavior HGA-only, fold-mean TFCE peaks: concatenate + BH-FDR."""
+    input:
+        notebook     = "notebooks/causal6/significance_aggregate.py",
+        result_paths = expand(
+            "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/{subject}/peak_summary_foldmean_tfce.parquet",
+            subject=config["data"]["subjects"],
+        ),
+
+    output:
+        notebook = "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/aggregate_notebook_foldmean_tfce.ipynb",
+        all      = "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/peak_summary_foldmean_tfce_all.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                result_paths=list(input.result_paths),
+                outdir=str(outdir),
+                output_name="peak_summary_foldmean_tfce_all.parquet",
+                fdr_alpha=config["analysis"]["fdr_alpha"],
+            ),
+        )
+
+
+rule behavior_decoding_single_electrode_hga_only_summarize_aggregate_tstat_tfce:
+    """Behavior HGA-only, t-stat TFCE peaks: concatenate + BH-FDR."""
+    input:
+        notebook     = "notebooks/causal6/significance_aggregate.py",
+        result_paths = expand(
+            "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/{subject}/peak_summary_tstat_tfce.parquet",
+            subject=config["data"]["subjects"],
+        ),
+
+    output:
+        notebook = "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/aggregate_notebook_tstat_tfce.ipynb",
+        all      = "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/peak_summary_tstat_tfce_all.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                result_paths=list(input.result_paths),
+                outdir=str(outdir),
+                output_name="peak_summary_tstat_tfce_all.parquet",
                 fdr_alpha=config["analysis"]["fdr_alpha"],
             ),
         )

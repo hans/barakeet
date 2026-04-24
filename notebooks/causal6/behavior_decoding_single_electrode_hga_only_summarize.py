@@ -16,20 +16,28 @@
 # %% [markdown]
 # causal6 summarize: behavior decoding HGA-only, null-standardized peak.
 #
+# Emits four flavors per subject, all with the same peak_summary.parquet
+# schema:
+#   * foldmean_maxstat — statistic = fold-mean AUC, max-stat correction (v1 contract)
+#   * tstat_maxstat    — statistic = (fold_mean - 0.5) / (fold_std / sqrt(n)), max-stat
+#   * foldmean_tfce    — fold-mean AUC enhanced by 1D TFCE along windows, max-stat
+#   * tstat_tfce       — t-stat enhanced by 1D TFCE, max-stat
+#
 # Inputs:
 #   scores.parquet         — real per-fold AUC (single model, no baseline)
 #   predictions.parquet    — real per-trial held-out predictions
 #   null_scores.parquet    — permutation null per (site, window, perm)
-#
-# Peak-finding uses null-standardized pointwise p of fold-mean AUC (see
-# src/models/significance.py for rationale).
 
 # %%
 from pathlib import Path
 
 import polars as pl
 
-from src.models.significance import null_standardized_peak_test
+from src.models.significance import (
+    fold_tstat_aggregate,
+    null_standardized_peak_test,
+    tfce_1d_per_site,
+)
 from src.stimuli import OFFSET_DICT
 
 # %% tags=["parameters"]
@@ -75,50 +83,109 @@ predictions = pl.read_parquet(predictions_path)
 null_scores = pl.read_parquet(null_scores_path).pipe(_window_filter)
 
 # %% [markdown]
-# ## Aggregate to fold-mean per (site, window[, perm])
+# ## Aggregate folds to (fold_mean, fold_std, t_stat) per (site, window[, perm])
+#
+# HGA-only uses raw AUC; centering = 0.5 (chance).
 
 # %%
-real_window_mean = real_scores.group_by(window_keys).agg(
-    pl.col("test_roc_auc").mean().alias("test_roc_auc")
+real_agg = fold_tstat_aggregate(
+    real_scores, group_keys=window_keys, stat_col="test_roc_auc", center=0.5,
+)
+null_agg = fold_tstat_aggregate(
+    null_scores, group_keys=window_keys + ["permutation_idx"],
+    stat_col="test_roc_auc", center=0.5,
 )
 
-null_window_mean = null_scores.group_by(window_keys + ["permutation_idx"]).agg(
-    pl.col("test_roc_auc").mean().alias("test_roc_auc")
+# v1-compat diagnostic
+real_window_mean = real_agg.select(window_keys + ["fold_mean"]).rename(
+    {"fold_mean": "test_roc_auc"}
 )
 
 # %% [markdown]
-# ## Null-standardized peak test
+# ## Four flavors of null-standardized peak test
 
 # %%
-peak_summary_std, _window_stats_std = null_standardized_peak_test(
-    real_window_mean,
-    null_window_mean,
-    site_keys=site_keys,
-    window_keys=["smin", "smax"],
-    stat_col="test_roc_auc",
-)
+def _run_maxstat(stat_col: str, rename_to: str) -> pl.DataFrame:
+    real_in = real_agg.select(window_keys + [stat_col]).rename({stat_col: "statistic"})
+    null_in = null_agg.select(window_keys + ["permutation_idx", stat_col]).rename(
+        {stat_col: "statistic"}
+    )
+    peaks, _ = null_standardized_peak_test(
+        real_in, null_in,
+        site_keys=site_keys, window_keys=["smin", "smax"], stat_col="statistic",
+    )
+    return peaks.rename({
+        "peak_smin": "smin", "peak_smax": "smax", "real_statistic": rename_to,
+    })
 
-peak_summary = peak_summary_std.rename({
-    "peak_smin": "smin",
-    "peak_smax": "smax",
-    "real_statistic": "test_roc_auc",
-})
+
+def _run_tfce_maxstat(stat_col: str, rename_to: str, tfce_threshold: float) -> pl.DataFrame:
+    """Threshold is the TFCE integration floor: 0.5 for AUC so chance-level
+    windows don't contribute; 0 for centered statistics like t_stat."""
+    real_in = real_agg.select(window_keys + [stat_col]).rename({stat_col: "statistic"})
+    null_in = null_agg.select(window_keys + ["permutation_idx", stat_col]).rename(
+        {stat_col: "statistic"}
+    )
+    real_enh = tfce_1d_per_site(
+        real_in, site_keys=site_keys, window_keys=["smin", "smax"],
+        stat_col="statistic", threshold=tfce_threshold,
+    )
+    null_enh = tfce_1d_per_site(
+        null_in, site_keys=site_keys, window_keys=["smin", "smax"],
+        perm_key="permutation_idx", stat_col="statistic", threshold=tfce_threshold,
+    )
+    peaks, _ = null_standardized_peak_test(
+        real_enh, null_enh,
+        site_keys=site_keys, window_keys=["smin", "smax"], stat_col="statistic",
+    )
+    return peaks.rename({
+        "peak_smin": "smin", "peak_smax": "smax", "real_statistic": rename_to,
+    })
+
+
+peak_summary_foldmean_maxstat = _run_maxstat("fold_mean", rename_to="test_roc_auc")
 print(
-    f"{peak_summary.height} sites: "
-    f"{(peak_summary['p_value'] < 0.05).sum()} with p<0.05 (uncorrected)"
+    f"[foldmean_maxstat] {peak_summary_foldmean_maxstat.height} sites: "
+    f"{(peak_summary_foldmean_maxstat['p_value'] < 0.05).sum()} with p<0.05 (uncorrected)"
+)
+
+peak_summary_tstat_maxstat = _run_maxstat("t_stat", rename_to="t_stat")
+print(
+    f"[tstat_maxstat]    {peak_summary_tstat_maxstat.height} sites: "
+    f"{(peak_summary_tstat_maxstat['p_value'] < 0.05).sum()} with p<0.05 (uncorrected)"
+)
+
+peak_summary_foldmean_tfce = _run_tfce_maxstat(
+    "fold_mean", rename_to="test_roc_auc_tfce", tfce_threshold=0.5,
+)
+print(
+    f"[foldmean_tfce]    {peak_summary_foldmean_tfce.height} sites: "
+    f"{(peak_summary_foldmean_tfce['p_value'] < 0.05).sum()} with p<0.05 (uncorrected)"
+)
+
+peak_summary_tstat_tfce = _run_tfce_maxstat(
+    "t_stat", rename_to="t_stat_tfce", tfce_threshold=0.0,
+)
+print(
+    f"[tstat_tfce]       {peak_summary_tstat_tfce.height} sites: "
+    f"{(peak_summary_tstat_tfce['p_value'] < 0.05).sum()} with p<0.05 (uncorrected)"
 )
 
 # %%
-peak_keys = peak_summary.select(site_keys + ["smin", "smax"])
+# peak_predictions derived from the v1 peak windows (foldmean_maxstat).
+peak_keys = peak_summary_foldmean_maxstat.select(site_keys + ["smin", "smax"])
 peak_predictions = predictions.join(peak_keys, on=site_keys + ["smin", "smax"], how="inner")
 
 # %%
 outdir = Path(outdir)
-peak_summary.write_parquet(outdir / "peak_summary.parquet")
+peak_summary_foldmean_maxstat.write_parquet(outdir / "peak_summary.parquet")
+peak_summary_tstat_maxstat.write_parquet(outdir / "peak_summary_tstat_maxstat.parquet")
+peak_summary_foldmean_tfce.write_parquet(outdir / "peak_summary_foldmean_tfce.parquet")
+peak_summary_tstat_tfce.write_parquet(outdir / "peak_summary_tstat_tfce.parquet")
 peak_predictions.write_parquet(outdir / "peak_predictions.parquet")
 real_window_mean.write_parquet(outdir / "window_mean_scores.parquet")
 print(
-    f"Wrote peak_summary.parquet ({peak_summary.height} rows), "
-    f"peak_predictions.parquet ({peak_predictions.height} rows), "
+    f"Wrote peak_summary.parquet ({peak_summary_foldmean_maxstat.height} rows) "
+    f"+ 3 extra flavors, peak_predictions.parquet ({peak_predictions.height} rows), "
     f"window_mean_scores.parquet ({real_window_mean.height} rows) to {outdir}"
 )
