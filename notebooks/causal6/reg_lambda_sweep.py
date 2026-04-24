@@ -16,9 +16,10 @@
 # %% [markdown]
 # causal6 reg_lambda sweep on the tuning subject.
 #
-# Runs each of the three decoders (acoustic, behavior-full, behavior-HGA-only)
-# at every reg_lambda in `reg_lambda_grid`. Picks the argmax mean test AUC per
-# decoder and writes the winners to `reg_lambda_winners.json`.
+# Runs each of the five decoders (acoustic, behavior-full, behavior-HGA-only,
+# ganong-full, ganong-HGA-only) at every reg_lambda in `reg_lambda_grid`.
+# Picks the argmax mean test AUC per decoder and writes the winners to
+# `reg_lambda_winners.json`.
 #
 # Decoder rules in the Snakefile read `reg_lambda_winners.json` directly as a
 # Snakemake input — no config edit required.
@@ -46,6 +47,8 @@ from src.models.causal6 import (
     run_acoustic_searchlight,
     run_behavior_hga_only,
     run_behavior_with_control,
+    run_ganong_hga_only,
+    run_ganong_with_control,
 )
 
 # %% tags=["parameters"]
@@ -169,6 +172,31 @@ for seed in cv_seeds:
         )
         all_scores.append(_tag(s, "behavior_hga_only", rl, seed))
 
+        L.info(f"[ganong_full] reg_lambda={rl} cv_seed={seed}")
+        s, _, _ = run_ganong_with_control(
+            epochs, subject=subject,
+            electrode_idxs=speech_responsive_idxs,
+            windows=windows,
+            reg_lambda=rl,
+            n_folds=n_folds, cv_random_state=seed,
+            device=device, dtype=torch.float32,
+            tol=tol, max_iter=max_iter,
+        )
+        # Keep both full + baseline rows; use the `model` column downstream.
+        all_scores.append(_tag(s, "ganong_full", rl, seed))
+
+        L.info(f"[ganong_hga_only] reg_lambda={rl} cv_seed={seed}")
+        s, _, _ = run_ganong_hga_only(
+            epochs, subject=subject,
+            electrode_idxs=speech_responsive_idxs,
+            windows=windows,
+            reg_lambda=rl,
+            n_folds=n_folds, cv_random_state=seed,
+            device=device, dtype=torch.float32,
+            tol=tol, max_iter=max_iter,
+        )
+        all_scores.append(_tag(s, "ganong_hga_only", rl, seed))
+
 all_scores_df = pl.concat(all_scores, how="diagonal_relaxed")
 
 # For winner selection: match how λ will actually be USED downstream — each
@@ -184,7 +212,8 @@ all_scores_df = pl.concat(all_scores, how="diagonal_relaxed")
 # the behavior decoders — it is null for acoustic rows and forms its own
 # (single-valued) group there, which gives the right grouping for both.
 winner_input = all_scores_df.filter(
-    (pl.col("decoder") != "behavior_full") | (pl.col("model") == "full")
+    (~pl.col("decoder").is_in(["behavior_full", "ganong_full"]))
+    | (pl.col("model") == "full")
 )
 
 # cv_random_state is part of the site/aggregation key: with multiple seeds,
@@ -298,6 +327,8 @@ fold_variance.write_parquet(outdir / "sweep_fold_variance.parquet")
     "reg_lambda_acoustic": winners["acoustic"],
     "reg_lambda_behavior_full": winners["behavior_full"],
     "reg_lambda_behavior_hga_only": winners["behavior_hga_only"],
+    "reg_lambda_ganong_full": winners["ganong_full"],
+    "reg_lambda_ganong_hga_only": winners["ganong_hga_only"],
 }, indent=2))
 L.info(
     f"Wrote sweep_results.parquet ({sweep.height} rows), "

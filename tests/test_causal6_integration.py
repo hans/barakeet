@@ -34,6 +34,9 @@ from src.models.causal6 import (
     run_behavior_hga_only,
     run_behavior_with_control,
     run_behavior_with_control_permutations,
+    run_ganong_hga_only,
+    run_ganong_with_control,
+    run_ganong_with_control_permutations,
 )
 from src.models.significance import null_standardized_peak_test
 
@@ -114,6 +117,44 @@ def behavior_with_control_result(ec248_epochs, ec248_smoke_electrodes, smoke_con
 def behavior_hga_only_result(ec248_epochs, ec248_smoke_electrodes, smoke_config):
     windows = _make_smoke_windows(ec248_epochs, smoke_config)
     scores, preds, coefs = run_behavior_hga_only(
+        ec248_epochs,
+        subject="EC248",
+        electrode_idxs=ec248_smoke_electrodes,
+        windows=windows,
+        reg_lambda=smoke_config["reg_lambda"],
+        n_folds=smoke_config["n_folds"],
+        cv_random_state=smoke_config["cv_random_state"],
+        device=smoke_config["device"],
+        dtype=smoke_config["dtype"],
+        tol=smoke_config["tol"],
+        max_iter=smoke_config["max_iter"],
+    )
+    return {"scores": scores, "preds": preds, "coefs": coefs, "windows": windows}
+
+
+@pytest.fixture(scope="session")
+def ganong_with_control_result(ec248_epochs, ec248_smoke_electrodes, smoke_config):
+    windows = _make_smoke_windows(ec248_epochs, smoke_config)
+    scores, preds, coefs = run_ganong_with_control(
+        ec248_epochs,
+        subject="EC248",
+        electrode_idxs=ec248_smoke_electrodes,
+        windows=windows,
+        reg_lambda=smoke_config["reg_lambda"],
+        n_folds=smoke_config["n_folds"],
+        cv_random_state=smoke_config["cv_random_state"],
+        device=smoke_config["device"],
+        dtype=smoke_config["dtype"],
+        tol=smoke_config["tol"],
+        max_iter=smoke_config["max_iter"],
+    )
+    return {"scores": scores, "preds": preds, "coefs": coefs, "windows": windows}
+
+
+@pytest.fixture(scope="session")
+def ganong_hga_only_result(ec248_epochs, ec248_smoke_electrodes, smoke_config):
+    windows = _make_smoke_windows(ec248_epochs, smoke_config)
+    scores, preds, coefs = run_ganong_hga_only(
         ec248_epochs,
         subject="EC248",
         electrode_idxs=ec248_smoke_electrodes,
@@ -233,6 +274,69 @@ def test_behavior_hga_only_ec248(behavior_hga_only_result):
     per_key = (
         preds.group_by(
             ["electrode_idx", "smin", "smax", "phoneme_pair", "word_end", "epoch_idx"]
+        )
+        .agg(pl.len().alias("n"))
+    )
+    assert (per_key["n"] == 1).all()
+
+
+def test_ganong_with_control_ec248(ganong_with_control_result):
+    """Ganong-full (pooled across completions): schema, baseline-reuse invariant, no NaN.
+
+    Differs from the behavior-full test on two points:
+      - no `word_end` column (trials pooled across completions)
+      - baseline fit once per (phoneme_pair, fold), not per (phoneme_pair, word_end, fold)
+    """
+    scores = ganong_with_control_result["scores"]
+    preds = ganong_with_control_result["preds"]
+
+    assert "word_end" not in scores.columns, (
+        "ganong scores must NOT include a word_end column — trials are pooled"
+    )
+    assert "word_end" not in preds.columns
+
+    assert set(scores["model"].unique().to_list()) == {"full", "baseline"}
+
+    # Baseline is fit once per (phoneme_pair, fold) — shared across electrodes,
+    # windows, AND lexical completions.
+    base = scores.filter(pl.col("model") == "baseline")
+    assert (base["electrode_idx"] == -1).all()
+    assert (base["smin"] == -1).all()
+    per_group = base.group_by(["phoneme_pair", "fold"]).agg(pl.len().alias("n"))
+    assert (per_group["n"] == 1).all(), (
+        "ganong baseline fit more than once per (phoneme_pair, fold) — "
+        "pooled-reuse invariant broken"
+    )
+
+    full = scores.filter(pl.col("model") == "full")
+    assert np.isfinite(full["test_roc_auc"].to_numpy()).all()
+
+    # CV partition on full-model preds: pooled across completions so every
+    # (epoch_idx, electrode, window) appears in exactly one fold.
+    full_preds = preds.filter(pl.col("model") == "full")
+    per_key = (
+        full_preds.group_by(
+            ["electrode_idx", "smin", "smax", "phoneme_pair", "epoch_idx"]
+        )
+        .agg(pl.len().alias("n"))
+    )
+    assert (per_key["n"] == 1).all()
+
+
+def test_ganong_hga_only_ec248(ganong_hga_only_result):
+    """Ganong HGA-only: only full rows, no baseline, no word_end column."""
+    scores = ganong_hga_only_result["scores"]
+    preds = ganong_hga_only_result["preds"]
+
+    assert "word_end" not in scores.columns
+    assert "word_end" not in preds.columns
+
+    assert scores["model"].unique().to_list() == ["full"]
+    assert np.isfinite(scores["test_roc_auc"].to_numpy()).all()
+
+    per_key = (
+        preds.group_by(
+            ["electrode_idx", "smin", "smax", "phoneme_pair", "epoch_idx"]
         )
         .agg(pl.len().alias("n"))
     )
@@ -528,4 +632,101 @@ def test_behavior_peak_finder_on_real_scores(
     # real_statistic at each peak row matches the max-over-windows `diff`
     # with the smallest pointwise_p — this is what the summarize notebook
     # writes out as the site's peak score.
+    assert peaks["real_statistic"].is_not_null().all()
+
+
+def test_ganong_peak_finder_on_real_scores(
+    ec248_epochs, ec248_smoke_electrodes, smoke_config, ganong_with_control_result
+):
+    """Ganong-full peak-finder contract on real EC248 output.
+
+    Mirrors notebooks/causal6/ganong_decoding_summarize.py: pair full +
+    baseline on (phoneme_pair, fold), statistic = fold-mean(full − baseline),
+    apply per-phoneme-pair POD floor bound, then null_standardized_peak_test.
+    Site = (subject, electrode_idx, phoneme_pair) — no word_end.
+    """
+    from src.stimuli import POD_dict
+
+    null_scores = run_ganong_with_control_permutations(
+        ec248_epochs,
+        subject="EC248",
+        electrode_idxs=ec248_smoke_electrodes,
+        windows=ganong_with_control_result["windows"],
+        reg_lambda=smoke_config["reg_lambda"],
+        permute_seeds=list(range(10)),
+        permutation_chunk_size=smoke_config["permutation_chunk_size"],
+        n_folds=smoke_config["n_folds"],
+        cv_random_state=smoke_config["cv_random_state"],
+        device=smoke_config["device"],
+        dtype=smoke_config["dtype"],
+        tol=smoke_config["tol"],
+        max_iter=smoke_config["max_iter"],
+    )
+
+    site_keys = ["subject", "electrode_idx", "phoneme_pair"]
+
+    # POD floor in samples — matches the summarize notebook's conversion.
+    epoch_tmin = -0.4
+    epoch_sfreq = 100
+    pod_samples = {
+        pp: int((pod_s - epoch_tmin) * epoch_sfreq)
+        for pp, pod_s in POD_dict.items()
+    }
+
+    def _pair_and_filter(scores: pl.DataFrame, perm: bool) -> pl.DataFrame:
+        join_keys = ["subject", "phoneme_pair", "fold"] + (
+            ["permutation_idx"] if perm else []
+        )
+        full = scores.filter(pl.col("model") == "full").drop("model")
+        base = (
+            scores.filter(pl.col("model") == "baseline")
+            .drop("model", "electrode_idx", "smin", "smax")
+            .rename({"test_roc_auc": "baseline_roc_auc"})
+        )
+        paired = (
+            full.rename({"test_roc_auc": "full_roc_auc"})
+            .join(base, on=join_keys, how="left")
+            .with_columns((pl.col("full_roc_auc") - pl.col("baseline_roc_auc")).alias("diff"))
+        )
+        return (
+            paired.with_columns(
+                pl.col("phoneme_pair").replace_strict(pod_samples, default=None).alias("_floor")
+            )
+            .filter(pl.col("smin") >= pl.col("_floor"))
+            .drop("_floor")
+        )
+
+    real_paired = _pair_and_filter(ganong_with_control_result["scores"], perm=False)
+    null_paired = _pair_and_filter(null_scores, perm=True)
+
+    real_window_mean = real_paired.group_by(site_keys + ["smin", "smax"]).agg(
+        pl.col("diff").mean().alias("diff")
+    )
+    null_window_mean = null_paired.group_by(
+        site_keys + ["smin", "smax", "permutation_idx"]
+    ).agg(pl.col("diff").mean().alias("diff"))
+
+    peaks, _ = null_standardized_peak_test(
+        real_window_mean, null_window_mean,
+        site_keys=site_keys,
+        window_keys=["smin", "smax"],
+        stat_col="diff",
+    )
+
+    # One row per site.
+    assert peaks.height == real_window_mean.select(site_keys).n_unique()
+    assert peaks.height == peaks.select(site_keys).n_unique()
+
+    # p-values in valid range.
+    p = peaks["p_value"].to_numpy()
+    assert ((p >= 1.0 / 11.0) & (p <= 1.0)).all()
+
+    # Peak window respects the POD floor per phoneme_pair.
+    check = peaks.with_columns(
+        pl.col("phoneme_pair").replace_strict(pod_samples, default=None).alias("_floor")
+    )
+    assert (check["peak_smin"] >= check["_floor"]).all(), (
+        "ganong peak_smin below POD floor — filter failed"
+    )
+
     assert peaks["real_statistic"].is_not_null().all()

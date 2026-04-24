@@ -5,6 +5,8 @@
 #   - behavior_decoding_single_electrode
 #   - behavior_decoding_single_electrode_hga_only
 #   - acoustic_decoding_single_electrode
+#   - ganong_decoding_single_electrode
+#   - ganong_decoding_single_electrode_hga_only
 #
 # Uses a shared batched L2-regularized LogReg kernel on GPU (see
 # src/models/decoding_gpu.py) with:
@@ -22,22 +24,25 @@
 #       │       writes tuning_subject.txt + ranking CSV.
 #       │
 #       ├─► reg_lambda_sweep
-#       │       Runs all three decoders on the tuning subject across
+#       │       Runs all five decoders on the tuning subject across
 #       │       {0.01, 0.1, 1.0, 10.0}, picks argmax mean test AUC per decoder,
 #       │       writes reg_lambda_winners.json.
 #       │
 #       ├─► acoustic_decoding_single_electrode
 #       ├─► behavior_decoding_single_electrode
 #       ├─► behavior_decoding_single_electrode_hga_only
+#       ├─► ganong_decoding_single_electrode
+#       ├─► ganong_decoding_single_electrode_hga_only
 #       │       Per-subject decoder runs using the frozen per-task reg_lambda.
 #       │
 #       ├─► acoustic_decoding_peaks
 #       ├─► behavior_decoding_single_electrode_summarize
-#       └─► behavior_decoding_single_electrode_hga_only_summarize
+#       ├─► behavior_decoding_single_electrode_hga_only_summarize
+#       ├─► ganong_decoding_summarize
+#       └─► ganong_decoding_hga_only_summarize
 #               Per-subject peak-window summaries from the parquet outputs.
 #
 # Out of scope vs causal5:
-#   - ganong_decoding_* (follow-up once core three decoders are validated)
 #   - prepare_neurometrics / A_neurometrics (downstream, consume causal5 for now)
 # =============================================================================
 
@@ -155,11 +160,13 @@ C6 = config["causal6"]  # shorthand — rules below fail early if this block is 
 
 
 rule causal6_all:
-    """Default target: run all three causal6 decoders + null-standardized peaks + FDR."""
+    """Default target: run all five causal6 decoders + null-standardized peaks + FDR."""
     input:
         "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet",
         "outputs/causal6/behavior_decoding_single_electrode_summarize/peak_summary_all.parquet",
         "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/peak_summary_all.parquet",
+        "outputs/causal6/ganong_decoding_summarize/peak_summary_all.parquet",
+        "outputs/causal6/ganong_decoding_hga_only_summarize/peak_summary_all.parquet",
 
 
 rule select_tuning_subject:
@@ -700,6 +707,297 @@ rule behavior_decoding_single_electrode_hga_only_summarize_aggregate:
     output:
         notebook = "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/aggregate_notebook.ipynb",
         all      = "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/peak_summary_all.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                result_paths=list(input.result_paths),
+                outdir=str(outdir),
+                output_name="peak_summary_all.parquet",
+                fdr_alpha=config["analysis"]["fdr_alpha"],
+            ),
+        )
+
+
+# =============================================================================
+# Ganong decoders: behavior decoding pooled across lexical completions.
+# Mirrors the behavior decoder pair (full+baseline and HGA-only) but drops the
+# within-word_end split so trials from both completions enter the same fit.
+# =============================================================================
+
+
+rule ganong_decoding_single_electrode:
+    """Ganong decoding with resampled control — GPU-batched, pooled across completions."""
+    input:
+        epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
+        electrodes = "outputs/causal5/find_speech_responsive/{subject}_results.csv",
+        winners    = REG_LAMBDA_WINNERS,
+        notebook   = "notebooks/causal6/ganong_decoding_single_electrode.py",
+
+    output:
+        notebook     = "outputs/causal6/ganong_decoding_single_electrode/{subject}/notebook.ipynb",
+        scores       = "outputs/causal6/ganong_decoding_single_electrode/{subject}/scores.parquet",
+        predictions  = "outputs/causal6/ganong_decoding_single_electrode/{subject}/predictions.parquet",
+        coefficients = "outputs/causal6/ganong_decoding_single_electrode/{subject}/coefficients.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                epochs_path=str(input.epochs),
+                electrodes_path=str(input.electrodes),
+                outdir=str(outdir),
+
+                min_sample=config["analysis"]["decoding"]["min_sample"],
+                window_size=config["analysis"]["decoding"]["window_size"],
+                stride=config["analysis"]["decoding"]["stride"],
+
+                reg_lambda=_load_reg_lambda(input.winners, "ganong_full"),
+                reg_lambda_baseline=None,
+                n_folds=C6["n_folds"],
+                cv_random_state=C6["cv_random_state"],
+                device=C6["device"],
+                tol=C6["tol"],
+                max_iter=C6["max_iter"],
+            ),
+        )
+
+
+rule ganong_decoding_single_electrode_hga_only:
+    """Ganong decoding, HGA only — GPU-batched, pooled across completions."""
+    input:
+        epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
+        electrodes = "outputs/causal5/find_speech_responsive/{subject}_results.csv",
+        winners    = REG_LAMBDA_WINNERS,
+        notebook   = "notebooks/causal6/ganong_decoding_single_electrode_hga_only.py",
+
+    output:
+        notebook     = "outputs/causal6/ganong_decoding_single_electrode_hga_only/{subject}/notebook.ipynb",
+        scores       = "outputs/causal6/ganong_decoding_single_electrode_hga_only/{subject}/scores.parquet",
+        predictions  = "outputs/causal6/ganong_decoding_single_electrode_hga_only/{subject}/predictions.parquet",
+        coefficients = "outputs/causal6/ganong_decoding_single_electrode_hga_only/{subject}/coefficients.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                epochs_path=str(input.epochs),
+                electrodes_path=str(input.electrodes),
+                outdir=str(outdir),
+
+                min_sample=config["analysis"]["decoding"]["min_sample"],
+                window_size=config["analysis"]["decoding"]["window_size"],
+                stride=config["analysis"]["decoding"]["stride"],
+
+                reg_lambda=_load_reg_lambda(input.winners, "ganong_hga_only"),
+                n_folds=C6["n_folds"],
+                cv_random_state=C6["cv_random_state"],
+                device=C6["device"],
+                tol=C6["tol"],
+                max_iter=C6["max_iter"],
+            ),
+        )
+
+
+rule ganong_decoding_null:
+    """Per-subject ganong-with-control permutation-null refits."""
+    input:
+        epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
+        electrodes = "outputs/causal5/find_speech_responsive/{subject}_results.csv",
+        winners    = REG_LAMBDA_WINNERS,
+        notebook   = "notebooks/causal6/ganong_decoding_null.py",
+
+    output:
+        notebook    = "outputs/causal6/ganong_decoding_null/{subject}/notebook.ipynb",
+        null_scores = "outputs/causal6/ganong_decoding_null/{subject}/null_scores.parquet",
+
+    resources:
+        gpu = 1
+
+    run:
+        outdir = Path(output.notebook).parent
+        gpu_device = select_gpu_device(wildcards, resources)
+        run_notebook_gpu(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                epochs_path=str(input.epochs),
+                electrodes_path=str(input.electrodes),
+                outdir=str(outdir),
+
+                min_sample=config["analysis"]["decoding"]["min_sample"],
+                window_size=config["analysis"]["decoding"]["window_size"],
+                stride=config["analysis"]["decoding"]["stride"],
+
+                reg_lambda=_load_reg_lambda(input.winners, "ganong_full"),
+                reg_lambda_baseline=None,
+                n_folds=C6["n_folds"],
+                cv_random_state=C6["cv_random_state"],
+                device=C6["device"],
+                tol=C6["tol"],
+                max_iter=C6["max_iter"],
+
+                n_permutations=C6["n_permutations"],
+                permutation_seed=C6["permutation_seed"],
+                permutation_chunk_size=C6["permutation_chunk_size"],
+            ),
+            gpu_device=gpu_device,
+        )
+
+
+rule ganong_decoding_hga_only_null:
+    """Per-subject ganong-HGA-only permutation-null refits."""
+    input:
+        epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
+        electrodes = "outputs/causal5/find_speech_responsive/{subject}_results.csv",
+        winners    = REG_LAMBDA_WINNERS,
+        notebook   = "notebooks/causal6/ganong_decoding_hga_only_null.py",
+
+    output:
+        notebook    = "outputs/causal6/ganong_decoding_hga_only_null/{subject}/notebook.ipynb",
+        null_scores = "outputs/causal6/ganong_decoding_hga_only_null/{subject}/null_scores.parquet",
+
+    resources:
+        gpu = 1
+
+    run:
+        outdir = Path(output.notebook).parent
+        gpu_device = select_gpu_device(wildcards, resources)
+        run_notebook_gpu(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                epochs_path=str(input.epochs),
+                electrodes_path=str(input.electrodes),
+                outdir=str(outdir),
+
+                min_sample=config["analysis"]["decoding"]["min_sample"],
+                window_size=config["analysis"]["decoding"]["window_size"],
+                stride=config["analysis"]["decoding"]["stride"],
+
+                reg_lambda=_load_reg_lambda(input.winners, "ganong_hga_only"),
+                n_folds=C6["n_folds"],
+                cv_random_state=C6["cv_random_state"],
+                device=C6["device"],
+                tol=C6["tol"],
+                max_iter=C6["max_iter"],
+
+                n_permutations=C6["n_permutations"],
+                permutation_seed=C6["permutation_seed"],
+                permutation_chunk_size=C6["permutation_chunk_size"],
+            ),
+            gpu_device=gpu_device,
+        )
+
+
+rule ganong_decoding_summarize:
+    """Null-standardized peak-finding + p-values for ganong-with-control."""
+    input:
+        scores       = "outputs/causal6/ganong_decoding_single_electrode/{subject}/scores.parquet",
+        predictions  = "outputs/causal6/ganong_decoding_single_electrode/{subject}/predictions.parquet",
+        null_scores  = "outputs/causal6/ganong_decoding_null/{subject}/null_scores.parquet",
+        notebook     = "notebooks/causal6/ganong_decoding_summarize.py",
+
+    output:
+        notebook         = "outputs/causal6/ganong_decoding_summarize/{subject}/notebook.ipynb",
+        peak_summary     = "outputs/causal6/ganong_decoding_summarize/{subject}/peak_summary.parquet",
+        peak_predictions = "outputs/causal6/ganong_decoding_summarize/{subject}/peak_predictions.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                scores_path=str(input.scores),
+                predictions_path=str(input.predictions),
+                null_scores_path=str(input.null_scores),
+                outdir=str(outdir),
+
+                epoch_tmin=config["analysis"]["epoch_tmin"],
+                epoch_sfreq=config["analysis"]["epoch_sfreq"],
+                peak_search_smax=config["analysis"]["decoding"]["peak_search_smax"],
+            ),
+        )
+
+
+rule ganong_decoding_hga_only_summarize:
+    """Null-standardized peak-finding + p-values for ganong-HGA-only."""
+    input:
+        scores       = "outputs/causal6/ganong_decoding_single_electrode_hga_only/{subject}/scores.parquet",
+        predictions  = "outputs/causal6/ganong_decoding_single_electrode_hga_only/{subject}/predictions.parquet",
+        null_scores  = "outputs/causal6/ganong_decoding_hga_only_null/{subject}/null_scores.parquet",
+        notebook     = "notebooks/causal6/ganong_decoding_hga_only_summarize.py",
+
+    output:
+        notebook         = "outputs/causal6/ganong_decoding_hga_only_summarize/{subject}/notebook.ipynb",
+        peak_summary     = "outputs/causal6/ganong_decoding_hga_only_summarize/{subject}/peak_summary.parquet",
+        peak_predictions = "outputs/causal6/ganong_decoding_hga_only_summarize/{subject}/peak_predictions.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                scores_path=str(input.scores),
+                predictions_path=str(input.predictions),
+                null_scores_path=str(input.null_scores),
+                outdir=str(outdir),
+
+                epoch_tmin=config["analysis"]["epoch_tmin"],
+                epoch_sfreq=config["analysis"]["epoch_sfreq"],
+                peak_search_smax=config["analysis"]["decoding"]["peak_search_smax"],
+            ),
+        )
+
+
+rule ganong_decoding_summarize_aggregate:
+    """Concatenate per-subject ganong peak_summary.parquet + BH-FDR on p_value."""
+    input:
+        notebook     = "notebooks/causal6/significance_aggregate.py",
+        result_paths = expand(
+            "outputs/causal6/ganong_decoding_summarize/{subject}/peak_summary.parquet",
+            subject=config["data"]["subjects"],
+        ),
+
+    output:
+        notebook = "outputs/causal6/ganong_decoding_summarize/aggregate_notebook.ipynb",
+        all      = "outputs/causal6/ganong_decoding_summarize/peak_summary_all.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                result_paths=list(input.result_paths),
+                outdir=str(outdir),
+                output_name="peak_summary_all.parquet",
+                fdr_alpha=config["analysis"]["fdr_alpha"],
+            ),
+        )
+
+
+rule ganong_decoding_hga_only_summarize_aggregate:
+    """Concatenate per-subject ganong HGA-only peak_summary.parquet + BH-FDR on p_value."""
+    input:
+        notebook     = "notebooks/causal6/significance_aggregate.py",
+        result_paths = expand(
+            "outputs/causal6/ganong_decoding_hga_only_summarize/{subject}/peak_summary.parquet",
+            subject=config["data"]["subjects"],
+        ),
+
+    output:
+        notebook = "outputs/causal6/ganong_decoding_hga_only_summarize/aggregate_notebook.ipynb",
+        all      = "outputs/causal6/ganong_decoding_hga_only_summarize/peak_summary_all.parquet",
 
     run:
         outdir = Path(output.notebook).parent

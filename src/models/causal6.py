@@ -1,13 +1,15 @@
 """
 causal6 decoder entry points.
 
-Three decoders, one GPU kernel, one outer CV strategy (StratifiedKFold).
+Five decoders, one GPU kernel, one outer CV strategy (StratifiedKFold).
 Clean parquet-only outputs — no fitted-estimator joblib blobs.
 
 Functions:
     run_acoustic_searchlight(...)
     run_behavior_with_control(...)
     run_behavior_hga_only(...)
+    run_ganong_with_control(...)
+    run_ganong_hga_only(...)
 
 Each returns three polars DataFrames:
     - scores: per-fold test AUC + metadata per decoder key
@@ -189,6 +191,16 @@ def audit_class_balance(
             y = _resolve_target(md, "behavior_categorical_forced", pp, sel)
             for decoder in ("behavior_full", "behavior_hga_only"):
                 rows.append(_summarize(decoder, pp, we, y))
+
+    # Ganong: pooled across completions — one row per phoneme_pair per decoder.
+    # word_end = None reflects the pooled group.
+    for pp in phoneme_pairs:
+        sel = (md.phoneme_pair == pp).values
+        if sel.sum() == 0:
+            continue
+        y = _resolve_target(md, "behavior_categorical_forced", pp, sel)
+        for decoder in ("ganong_full", "ganong_hga_only"):
+            rows.append(_summarize(decoder, pp, None, y))
 
     schema = {
         "subject": pl.Utf8,
@@ -1178,6 +1190,391 @@ def run_behavior_hga_only_permutations(
 ) -> pl.DataFrame:
     """Permutation-test twin of `run_behavior_hga_only` (full only)."""
     return _run_behavior_core_permutations(
+        epochs, subject, electrode_idxs, windows,
+        with_control=False,
+        reg_lambda=reg_lambda, reg_lambda_baseline=None,
+        permute_seeds=permute_seeds,
+        permutation_chunk_size=permutation_chunk_size,
+        n_folds=n_folds, cv_random_state=cv_random_state,
+        device=device, dtype=dtype, tol=tol, max_iter=max_iter,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Ganong decoders (pooled across lexical completions)
+# ---------------------------------------------------------------------------
+#
+# Mirrors the behavior decoders but iterates `phoneme_pair` only — trials from
+# both `word_end` groups (e.g. -esolate + -ecessary for `dn`) are pooled into
+# a single fit per phoneme_pair. Output schemas drop the `word_end` column.
+# The full-vs-baseline contrast (baseline features = [resampled]) exposes the
+# HGA contribution to the Ganong boundary shift: the baseline can only see
+# the acoustic step, so full − baseline attributes both acoustic-driven and
+# lexical-driven perceptual bias to HGA.
+
+
+def _run_ganong_core(
+    epochs: mne.Epochs,
+    subject: str,
+    electrode_idxs: Sequence[int],
+    windows: np.ndarray,
+    *,
+    with_control: bool,
+    reg_lambda: float,
+    reg_lambda_baseline: Optional[float],
+    n_folds: int,
+    cv_random_state: int,
+    device: str,
+    dtype: torch.dtype,
+    tol: float,
+    max_iter: int,
+) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
+    """
+    Shared core for ganong-with-control and ganong-HGA-only decoders.
+
+    Groups by `phoneme_pair` only (no word_end split). For each group:
+      - one batched call for all (electrode × window) full-model problems
+      - (when with_control) one separate single-problem call for the baseline
+        model — shared across all electrodes/windows in the group
+    """
+    assert epochs.metadata is not None
+    md = epochs.metadata
+    phoneme_pairs = sorted(md.phoneme_pair.dropna().unique())
+
+    X_full = epochs.get_data(picks=list(electrode_idxs))
+    n_electrodes = len(electrode_idxs)
+    n_windows = windows.shape[0]
+    win_size = int(windows[0, 1] - windows[0, 0])
+    assert (windows[:, 1] - windows[:, 0] == win_size).all()
+
+    full_scores, full_preds, full_coefs = [], [], []
+    base_scores, base_preds, base_coefs = [], [], []
+
+    decoder_label = "ganong_full" if with_control else "ganong_hga_only"
+    pbar = tqdm(
+        phoneme_pairs,
+        desc=f"{decoder_label}[{subject}] λ={reg_lambda:g}",
+        unit="pp", leave=False,
+    )
+    for phoneme_pair in pbar:
+        sel = (md.phoneme_pair == phoneme_pair).values
+        if sel.sum() == 0:
+            continue
+        y = _resolve_target(md, "behavior_categorical_forced", phoneme_pair, sel)
+        if not _has_enough_per_class(y, n_folds):
+            counts = np.bincount(y.astype(np.int64)) if len(np.unique(y)) > 0 else []
+            L.warning(
+                f"[{decoder_label}][{subject}/{phoneme_pair}] "
+                f"skipping: insufficient class balance for "
+                f"StratifiedKFold(n_splits={n_folds}); class counts = {list(counts)}"
+            )
+            continue
+
+        epoch_idxs_sel = md.index[sel].to_numpy()
+        X_sel = X_full[sel]
+        n_trials = X_sel.shape[0]
+        resampled_feat = md.resampled[sel].to_numpy().astype(np.float64).reshape(-1, 1)
+
+        # Full-model batch
+        full_d = (1 + win_size) if with_control else win_size
+        B_full = n_electrodes * n_windows
+        X_full_batch = np.empty((n_trials, B_full, full_d), dtype=np.float64)
+        elec_per = np.empty(B_full, dtype=np.int64)
+        smin_per = np.empty(B_full, dtype=np.int64)
+        smax_per = np.empty(B_full, dtype=np.int64)
+        b = 0
+        for e_idx, electrode_idx in enumerate(electrode_idxs):
+            for smin, smax in windows:
+                hga = X_sel[:, e_idx, smin:smax]
+                if with_control:
+                    X_full_batch[:, b, 0:1] = resampled_feat
+                    X_full_batch[:, b, 1:] = hga
+                else:
+                    X_full_batch[:, b, :] = hga
+                elec_per[b] = int(electrode_idx)
+                smin_per[b] = int(smin)
+                smax_per[b] = int(smax)
+                b += 1
+
+        full_meta = pl.DataFrame({
+            "subject": [subject] * B_full,
+            "phoneme_pair": [phoneme_pair] * B_full,
+            "electrode_idx": elec_per,
+            "smin": smin_per,
+            "smax": smax_per,
+            "model": ["full"] * B_full,
+        })
+        fs, fp, fc = _fit_batched_cv(
+            X_full_batch, y, epoch_idxs_sel, full_meta,
+            reg_lambda=reg_lambda,
+            n_folds=n_folds, cv_random_state=cv_random_state,
+            device=device, dtype=dtype, tol=tol, max_iter=max_iter,
+        )
+        full_scores.append(fs)
+        full_preds.append(fp)
+        full_coefs.append(fc)
+
+        # Baseline model: one problem (resampled only), shared across electrodes/windows
+        if with_control:
+            X_base = resampled_feat.reshape(n_trials, 1, 1)
+            base_meta = pl.DataFrame({
+                "subject": [subject],
+                "phoneme_pair": [phoneme_pair],
+                "electrode_idx": [-1],     # sentinel: not electrode-specific
+                "smin": [-1], "smax": [-1],
+                "model": ["baseline"],
+            })
+            bs, bp, bc = _fit_batched_cv(
+                X_base, y, epoch_idxs_sel, base_meta,
+                reg_lambda=(reg_lambda_baseline if reg_lambda_baseline is not None
+                            else reg_lambda),
+                n_folds=n_folds, cv_random_state=cv_random_state,
+                device=device, dtype=dtype, tol=tol, max_iter=max_iter,
+            )
+            base_scores.append(bs)
+            base_preds.append(bp)
+            base_coefs.append(bc)
+
+    scores_parts = full_scores + base_scores
+    preds_parts = full_preds + base_preds
+    coefs_parts = full_coefs + base_coefs
+    if not scores_parts:
+        return pl.DataFrame(), pl.DataFrame(), pl.DataFrame()
+
+    scores = pl.concat(scores_parts)
+    preds = pl.concat(preds_parts).with_columns(
+        (pl.col("decoder_proba") > 0.5).cast(pl.Int8).alias("decoder_prediction")
+    )
+    coefs = pl.concat(coefs_parts)
+    return scores, preds, coefs
+
+
+def run_ganong_with_control(
+    epochs: mne.Epochs,
+    subject: str,
+    electrode_idxs: Sequence[int],
+    windows: np.ndarray,
+    *,
+    reg_lambda: float,
+    reg_lambda_baseline: Optional[float] = None,
+    n_folds: int = 5,
+    cv_random_state: int = 42,
+    device: str = "cuda",
+    dtype: torch.dtype = torch.float32,
+    tol: float = 1e-6,
+    max_iter: int = 50,
+) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
+    """
+    Ganong decoding with `resampled` control predictor, pooled across
+    lexical completions.
+
+    Full model features: [resampled, HGA window]. Baseline features: [resampled].
+    Baseline is fit once per (phoneme_pair, fold) and reused across electrodes
+    via the `model` key in the output DataFrames. `word_end` is NOT in the
+    output schema — trials from both completions enter the same fit.
+    """
+    return _run_ganong_core(
+        epochs, subject, electrode_idxs, windows,
+        with_control=True,
+        reg_lambda=reg_lambda, reg_lambda_baseline=reg_lambda_baseline,
+        n_folds=n_folds, cv_random_state=cv_random_state,
+        device=device, dtype=dtype, tol=tol, max_iter=max_iter,
+    )
+
+
+def run_ganong_hga_only(
+    epochs: mne.Epochs,
+    subject: str,
+    electrode_idxs: Sequence[int],
+    windows: np.ndarray,
+    *,
+    reg_lambda: float,
+    n_folds: int = 5,
+    cv_random_state: int = 42,
+    device: str = "cuda",
+    dtype: torch.dtype = torch.float32,
+    tol: float = 1e-6,
+    max_iter: int = 50,
+) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
+    """
+    Ganong decoding without control predictor: single model on HGA window only,
+    pooled across lexical completions. Outputs have `model='full'` only.
+    """
+    return _run_ganong_core(
+        epochs, subject, electrode_idxs, windows,
+        with_control=False,
+        reg_lambda=reg_lambda, reg_lambda_baseline=None,
+        n_folds=n_folds, cv_random_state=cv_random_state,
+        device=device, dtype=dtype, tol=tol, max_iter=max_iter,
+    )
+
+
+def _run_ganong_core_permutations(
+    epochs: mne.Epochs,
+    subject: str,
+    electrode_idxs: Sequence[int],
+    windows: np.ndarray,
+    *,
+    with_control: bool,
+    reg_lambda: float,
+    reg_lambda_baseline: Optional[float],
+    permute_seeds: Sequence[int],
+    permutation_chunk_size: int,
+    n_folds: int,
+    cv_random_state: int,
+    device: str,
+    dtype: torch.dtype,
+    tol: float,
+    max_iter: int,
+) -> pl.DataFrame:
+    """Permutation-test twin of `_run_ganong_core`."""
+    assert epochs.metadata is not None
+    md = epochs.metadata
+    phoneme_pairs = sorted(md.phoneme_pair.dropna().unique())
+
+    X_full = epochs.get_data(picks=list(electrode_idxs))
+    n_electrodes = len(electrode_idxs)
+    n_windows = windows.shape[0]
+    win_size = int(windows[0, 1] - windows[0, 0])
+    assert (windows[:, 1] - windows[:, 0] == win_size).all()
+
+    full_parts: list[pl.DataFrame] = []
+    base_parts: list[pl.DataFrame] = []
+
+    decoder_label = "ganong_full-null" if with_control else "ganong_hga_only-null"
+    pbar = tqdm(
+        phoneme_pairs,
+        desc=f"{decoder_label}[{subject}] λ={reg_lambda:g} K={len(permute_seeds)}",
+        unit="pp", leave=False,
+    )
+    for phoneme_pair in pbar:
+        sel = (md.phoneme_pair == phoneme_pair).values
+        if sel.sum() == 0:
+            continue
+        y = _resolve_target(md, "behavior_categorical_forced", phoneme_pair, sel)
+        if not _has_enough_per_class(y, n_folds):
+            counts = np.bincount(y.astype(np.int64)) if len(np.unique(y)) > 0 else []
+            L.warning(
+                f"[{decoder_label}][{subject}/{phoneme_pair}] "
+                f"skipping: insufficient class balance for "
+                f"StratifiedKFold(n_splits={n_folds}); class counts = {list(counts)}"
+            )
+            continue
+
+        X_sel = X_full[sel]
+        n_trials = X_sel.shape[0]
+        resampled_feat = md.resampled[sel].to_numpy().astype(np.float64).reshape(-1, 1)
+
+        # Full-model batch
+        full_d = (1 + win_size) if with_control else win_size
+        B_full = n_electrodes * n_windows
+        X_full_batch = np.empty((n_trials, B_full, full_d), dtype=np.float64)
+        elec_per = np.empty(B_full, dtype=np.int64)
+        smin_per = np.empty(B_full, dtype=np.int64)
+        smax_per = np.empty(B_full, dtype=np.int64)
+        b = 0
+        for e_idx, electrode_idx in enumerate(electrode_idxs):
+            for smin, smax in windows:
+                hga = X_sel[:, e_idx, smin:smax]
+                if with_control:
+                    X_full_batch[:, b, 0:1] = resampled_feat
+                    X_full_batch[:, b, 1:] = hga
+                else:
+                    X_full_batch[:, b, :] = hga
+                elec_per[b] = int(electrode_idx)
+                smin_per[b] = int(smin)
+                smax_per[b] = int(smax)
+                b += 1
+
+        full_meta = pl.DataFrame({
+            "subject": [subject] * B_full,
+            "phoneme_pair": [phoneme_pair] * B_full,
+            "electrode_idx": elec_per,
+            "smin": smin_per,
+            "smax": smax_per,
+            "model": ["full"] * B_full,
+        })
+        full_parts.append(_fit_batched_cv_permutations(
+            X_full_batch, y, full_meta,
+            permute_seeds=permute_seeds,
+            permutation_chunk_size=permutation_chunk_size,
+            reg_lambda=reg_lambda,
+            n_folds=n_folds, cv_random_state=cv_random_state,
+            device=device, dtype=dtype, tol=tol, max_iter=max_iter,
+        ))
+
+        if with_control:
+            X_base = resampled_feat.reshape(n_trials, 1, 1)
+            base_meta = pl.DataFrame({
+                "subject": [subject],
+                "phoneme_pair": [phoneme_pair],
+                "electrode_idx": [-1],
+                "smin": [-1], "smax": [-1],
+                "model": ["baseline"],
+            })
+            base_parts.append(_fit_batched_cv_permutations(
+                X_base, y, base_meta,
+                permute_seeds=permute_seeds,
+                permutation_chunk_size=permutation_chunk_size,
+                reg_lambda=(reg_lambda_baseline if reg_lambda_baseline is not None
+                            else reg_lambda),
+                n_folds=n_folds, cv_random_state=cv_random_state,
+                device=device, dtype=dtype, tol=tol, max_iter=max_iter,
+            ))
+
+    parts = full_parts + base_parts
+    if not parts:
+        return pl.DataFrame()
+    return pl.concat(parts)
+
+
+def run_ganong_with_control_permutations(
+    epochs: mne.Epochs,
+    subject: str,
+    electrode_idxs: Sequence[int],
+    windows: np.ndarray,
+    *,
+    reg_lambda: float,
+    permute_seeds: Sequence[int],
+    permutation_chunk_size: int,
+    reg_lambda_baseline: Optional[float] = None,
+    n_folds: int = 5,
+    cv_random_state: int = 42,
+    device: str = "cuda",
+    dtype: torch.dtype = torch.float32,
+    tol: float = 1e-6,
+    max_iter: int = 50,
+) -> pl.DataFrame:
+    """Permutation-test twin of `run_ganong_with_control` (full + baseline)."""
+    return _run_ganong_core_permutations(
+        epochs, subject, electrode_idxs, windows,
+        with_control=True,
+        reg_lambda=reg_lambda, reg_lambda_baseline=reg_lambda_baseline,
+        permute_seeds=permute_seeds,
+        permutation_chunk_size=permutation_chunk_size,
+        n_folds=n_folds, cv_random_state=cv_random_state,
+        device=device, dtype=dtype, tol=tol, max_iter=max_iter,
+    )
+
+
+def run_ganong_hga_only_permutations(
+    epochs: mne.Epochs,
+    subject: str,
+    electrode_idxs: Sequence[int],
+    windows: np.ndarray,
+    *,
+    reg_lambda: float,
+    permute_seeds: Sequence[int],
+    permutation_chunk_size: int,
+    n_folds: int = 5,
+    cv_random_state: int = 42,
+    device: str = "cuda",
+    dtype: torch.dtype = torch.float32,
+    tol: float = 1e-6,
+    max_iter: int = 50,
+) -> pl.DataFrame:
+    """Permutation-test twin of `run_ganong_hga_only` (full only)."""
+    return _run_ganong_core_permutations(
         epochs, subject, electrode_idxs, windows,
         with_control=False,
         reg_lambda=reg_lambda, reg_lambda_baseline=None,
