@@ -138,13 +138,14 @@ agg_lazy = (
         pl.col("n_test").mean().alias("n_test_mean"),
     )
 )
-# Try the streaming engine; fall back to the default collect for older polars.
+# Streaming aggregation. Polars 1.24 takes `streaming=True`; newer
+# versions take `engine="streaming"`. Try both, fall back to non-streaming.
 try:
-    agg = agg_lazy.collect(engine="streaming")
-except TypeError:
+    agg = agg_lazy.collect(streaming=True)
+except (TypeError, ValueError):
     try:
-        agg = agg_lazy.collect(streaming=True)
-    except TypeError:
+        agg = agg_lazy.collect(engine="streaming")
+    except (TypeError, ValueError):
         agg = agg_lazy.collect()
 sem = (
     pl.max_horizontal(pl.col("fold_std"), pl.lit(std_floor))
