@@ -48,6 +48,7 @@ from src.models.decoding_gpu import (
     batched_roc_auc,
     compute_balanced_sample_weight,
     fit_batched_l2_logreg,
+    fit_batched_l2_logreg_perms,
     standardise_per_batch,
 )
 
@@ -452,16 +453,17 @@ def _fit_batched_cv_permutations(
     permutation). Predictions/coefficients are dropped (nulls only need AUC).
 
     K permutations are fit in chunks of `permutation_chunk_size` per GPU
-    call; within each chunk the feature tensor X is tiled along the problem
-    dimension (same X, K_chunk different y's) so a single `fit_batched_l2_logreg`
-    call handles K_chunk permutations at once.
+    call. Within each chunk a single `fit_batched_l2_logreg_perms` call
+    handles K_chunk permutations at once — X stays at (B, n, d) and is
+    broadcast over the K dimension internally, avoiding the K× memory
+    copy the old tiled-X path required.
 
     Splits use the real y (stratification guarantees balanced fold sizes
     that match the real run's convention). Under permuted labels a fold's
     test set may happen to have zero class variance — those AUCs are NaN
     and get `nanmean`'d out by downstream aggregation.
     """
-    n_trials, B, d = X.shape
+    n_trials, B, _d = X.shape
     K = len(permute_seeds)
     assert y.shape == (n_trials,)
     assert problem_meta.height == B, (
@@ -509,38 +511,38 @@ def _fit_batched_cv_permutations(
             chunk_end = min(chunk_start + permutation_chunk_size, K)
             Kc = chunk_end - chunk_start
 
-            # Tile X along the problem dimension: (Kc * B, n_tr, d).
-            # .expand is a zero-stride view; .reshape materialises a contiguous copy.
-            X_tr_chunk = (
-                X_tr_std_b.unsqueeze(0).expand(Kc, B, n_tr, d).reshape(Kc * B, n_tr, d)
-            )
-            X_te_chunk = (
-                X_te_std_b.unsqueeze(0).expand(Kc, B, n_te, d).reshape(Kc * B, n_te, d)
-            )
+            # Pull the Kc permutations' label rows for train & test.
+            # y is per-permutation (no B dim); we broadcast across B via
+            # zero-stride .expand views — no K× materialisation.
+            y_perm_chunk = y_perms_gpu[chunk_start:chunk_end]                # (Kc, n_trials)
+            y_train_kn = y_perm_chunk.index_select(1, train_idx_t)           # (Kc, n_tr)
+            y_test_kn = y_perm_chunk.index_select(1, test_idx_t)             # (Kc, n_te)
+            y_train_kbn = y_train_kn.unsqueeze(1).expand(Kc, B, n_tr)        # broadcast view
+            y_test_kbn = y_test_kn.unsqueeze(1).expand(Kc, B, n_te)          # broadcast view
 
-            # Pull the Kc permutations' label rows for train & test, then
-            # tile each row across the B problems: (Kc * B, n_tr/n_te).
-            y_perm_chunk = y_perms_gpu[chunk_start:chunk_end]  # (Kc, n_trials)
-            y_train_chunk = (
-                y_perm_chunk.index_select(1, train_idx_t)
-                .unsqueeze(1).expand(Kc, B, n_tr).reshape(Kc * B, n_tr).contiguous()
-            )
-            y_test_chunk = (
-                y_perm_chunk.index_select(1, test_idx_t)
-                .unsqueeze(1).expand(Kc, B, n_te).reshape(Kc * B, n_te).contiguous()
-            )
+            # Class-balanced sample weights depend only on the permuted y
+            # (mask is uniform across B). Compute at (Kc, n_tr) and broadcast.
+            sw_train_kn = compute_balanced_sample_weight(
+                y_train_kn,
+                torch.ones(Kc, n_tr, dtype=dtype, device=device),
+            )                                                                # (Kc, n_tr)
+            sw_train_kbn = sw_train_kn.unsqueeze(1).expand(Kc, B, n_tr)      # broadcast view
 
-            mask_tr_chunk = torch.ones(Kc * B, n_tr, dtype=dtype, device=device)
-            sw_tr_chunk = compute_balanced_sample_weight(y_train_chunk, mask_tr_chunk)
-
-            beta, _, _ = fit_batched_l2_logreg(
-                X_tr_chunk, y_train_chunk, mask_tr_chunk, sw_tr_chunk,
+            beta, _, _ = fit_batched_l2_logreg_perms(
+                X_tr_std_b, y_train_kbn, mask_tr_b, sw_train_kbn,
                 reg_lambda=reg_lambda, tol=tol, max_iter=max_iter,
-            )
+            )                                                                # (Kc, B, d)
 
-            z_te = torch.einsum("bnd,bd->bn", X_te_chunk, beta)
-            proba_te = torch.sigmoid(z_te)  # (Kc * B, n_te)
-            aucs = batched_roc_auc(proba_te, y_test_chunk).cpu().numpy()
+            z_te = torch.einsum("bnd,kbd->kbn", X_te_std_b, beta)            # (Kc, B, n_te)
+            proba_te = torch.sigmoid(z_te)
+            # batched_roc_auc takes 2D tensors; flatten (K, B) into one batch
+            # dim. proba_te is contiguous so reshape is a view; y_test_kbn
+            # is an expand view and reshape materialises here (~Kc*B*n_te
+            # floats — small relative to the fit).
+            aucs = batched_roc_auc(
+                proba_te.reshape(Kc * B, n_te),
+                y_test_kbn.reshape(Kc * B, n_te),
+            ).cpu().numpy()
 
             perm_ids = np.repeat(
                 np.arange(chunk_start, chunk_end, dtype=np.int64), B

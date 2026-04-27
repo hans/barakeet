@@ -178,6 +178,150 @@ def fit_batched_l2_logreg(
 
 
 # ---------------------------------------------------------------------------
+# K-broadcasted variant for permutation-test refits
+# ---------------------------------------------------------------------------
+
+
+def _penalised_loss_perms(
+    X: Tensor,              # (B, n, d)
+    y: Tensor,              # (K, B, n) in {0, 1}
+    mask_sw: Tensor,        # (K, B, n)  = mask * sample_weight
+    beta: Tensor,           # (K, B, d)
+    reg_lambda: Tensor,     # (B,)
+) -> Tensor:                # (K, B)
+    z = torch.einsum("bnd,kbd->kbn", X, beta)
+    y_signed = 2.0 * y - 1.0
+    per_sample = torch.nn.functional.softplus(-y_signed * z)
+    data = (mask_sw * per_sample).sum(dim=-1)
+    reg = 0.5 * reg_lambda * (beta * beta).sum(dim=-1)
+    return data + reg
+
+
+def fit_batched_l2_logreg_perms(
+    X: Tensor,                       # (B, n, d) — shared across K
+    y: Tensor,                       # (K, B, n) in {0, 1}
+    mask: Tensor,                    # (B, n)    — shared across K
+    sample_weight: Tensor,           # (K, B, n) >= 0
+    reg_lambda: Union[float, Tensor],  # scalar or (B,)
+    *,
+    max_iter: int = 50,
+    tol: float = 1e-6,
+    ls_max_halvings: int = 10,
+    armijo_c: float = 1e-4,
+) -> tuple[Tensor, Tensor, Tensor]:
+    """
+    K-broadcasted twin of `fit_batched_l2_logreg` for permutation-test refits.
+
+    Solves K × B independent L2-regularised binary logreg problems where
+    every K-slice shares the same B feature matrices. The kernel reads X
+    once per Newton iter regardless of K — eliminating the K× memory copy
+    that the old tiled-X caller pattern incurred (`expand→reshape` over the
+    batch dim).
+
+    Same algorithm as `fit_batched_l2_logreg`: damped Newton-IRLS with
+    Armijo backtracking, exact Hessian, no intercept, per-batch independent
+    convergence and step size.
+
+    Args:
+        X: (B, n, d) feature matrices, shared across all K.
+        y: (K, B, n) binary labels. Broadcast views are accepted; e.g. a
+            per-permutation label vector can be passed as
+            `y_kn.unsqueeze(1).expand(K, B, n)` without materialising.
+            Shape is checked against (K, B, n).
+        mask: (B, n) valid-row mask; 0 for padding. Shared across K.
+        sample_weight: (K, B, n) per-permutation sample weights. As with
+            `y`, broadcast views are fine.
+        reg_lambda: scalar or (B,). Regularisation is not permuted, so
+            there is no K dimension here.
+        max_iter, tol, ls_max_halvings, armijo_c: see `fit_batched_l2_logreg`.
+
+    Returns:
+        beta: (K, B, d) fitted coefficients.
+        n_iter: (K, B) int32 number of Newton iterations taken.
+        converged: (K, B) bool relative-tolerance convergence flag.
+    """
+    assert X.dim() == 3, f"X must be (B, n, d), got {X.shape}"
+    assert y.dim() == 3, f"y must be (K, B, n), got {y.shape}"
+    K, By, ny = y.shape
+    B, n, d = X.shape
+    assert (By, ny) == (B, n), f"X (B={B}, n={n}) inconsistent with y (B={By}, n={ny})"
+    assert mask.shape == (B, n), f"mask must be (B, n), got {mask.shape}"
+    assert sample_weight.shape == (K, B, n), \
+        f"sample_weight must be (K, B, n), got {sample_weight.shape}"
+    device, dtype = X.device, X.dtype
+
+    if not torch.is_tensor(reg_lambda):
+        reg_lambda_t = torch.full((B,), float(reg_lambda), device=device, dtype=dtype)
+    else:
+        reg_lambda_t = reg_lambda.to(device=device, dtype=dtype)
+        if reg_lambda_t.shape == ():
+            reg_lambda_t = reg_lambda_t.expand(B).contiguous()
+    assert reg_lambda_t.shape == (B,)
+
+    # mask broadcasts across K. Materialised because it's used in einsums via
+    # downstream (mask_sw * resid) products.
+    mask_sw = mask.unsqueeze(0) * sample_weight  # (K, B, n)
+
+    beta = torch.zeros(K, B, d, device=device, dtype=dtype)
+    I_d = torch.eye(d, device=device, dtype=dtype)  # broadcasts to (K, B, d, d)
+
+    # Baseline gradient norm at beta=0 (p = 0.5 for all rows).
+    g0 = torch.einsum("bnd,kbn->kbd", X, mask_sw * (0.5 - y))   # (K, B, d)
+    g0_norm = g0.abs().amax(dim=-1).clamp(min=1e-12)            # (K, B)
+
+    n_iter = torch.zeros(K, B, dtype=torch.int32, device=device)
+    converged = torch.zeros(K, B, dtype=torch.bool, device=device)
+    active = torch.ones(K, B, dtype=torch.bool, device=device)
+
+    for _ in range(max_iter):
+        z = torch.einsum("bnd,kbd->kbn", X, beta)                # (K, B, n)
+        p = torch.sigmoid(z)
+
+        resid = mask_sw * (p - y)                                # (K, B, n)
+        g = (
+            torch.einsum("bnd,kbn->kbd", X, resid)
+            + reg_lambda_t.view(1, B, 1) * beta
+        )                                                        # (K, B, d)
+
+        g_inf = g.abs().amax(dim=-1)
+        newly_converged = active & (g_inf < tol * g0_norm)
+        converged = converged | newly_converged
+        active = active & ~newly_converged
+        # No CPU sync — same rationale as fit_batched_l2_logreg: extra Newton
+        # iters on converged problems are zeroed out via the direction mask.
+
+        # Hessian: H[k,b,d,e] = sum_n W[k,b,n] X[b,n,d] X[b,n,e] + λ_b * I
+        # 3-input einsum lets PyTorch's optimizer pick a contraction order
+        # that does not materialise (K, B, n, d) intermediates.
+        W_diag = mask_sw * p * (1.0 - p)                         # (K, B, n)
+        H = (
+            torch.einsum("bnd,bne,kbn->kbde", X, X, W_diag)
+            + reg_lambda_t.view(1, B, 1, 1) * I_d
+        )                                                        # (K, B, d, d)
+
+        direction = -torch.linalg.solve(H, g.unsqueeze(-1)).squeeze(-1)  # (K, B, d)
+        direction = torch.where(
+            active.unsqueeze(-1), direction, torch.zeros_like(direction)
+        )
+
+        gd = (g * direction).sum(dim=-1)                         # (K, B)
+        loss0 = _penalised_loss_perms(X, y, mask_sw, beta, reg_lambda_t)
+        step = torch.ones(K, B, device=device, dtype=dtype)
+        accepted = ~active
+        for _ in range(ls_max_halvings):
+            cand = beta + step.unsqueeze(-1) * direction
+            loss_c = _penalised_loss_perms(X, y, mask_sw, cand, reg_lambda_t)
+            ok = accepted | (loss_c <= loss0 + armijo_c * step * gd)
+            step = torch.where(ok, step, step * 0.5)
+            accepted = ok
+
+        beta = beta + step.unsqueeze(-1) * direction
+        n_iter = torch.where(active, n_iter + 1, n_iter)
+
+    return beta, n_iter, converged
+
+
+# ---------------------------------------------------------------------------
 # Standardisation helpers
 # ---------------------------------------------------------------------------
 
@@ -252,18 +396,22 @@ def batched_roc_auc(
 
 
 def compute_balanced_sample_weight(
-    y: Tensor,       # (B, n) in {0, 1}
-    mask: Tensor,    # (B, n)
+    y: Tensor,       # (..., n) in {0, 1}
+    mask: Tensor,    # (..., n)
 ) -> Tensor:
     """
     Per-batch 'balanced' sample weights: w_i = n_valid / (K * count_k) for y_i in class k.
 
     Matches sklearn.utils.class_weight.compute_sample_weight('balanced', y) when
     applied to the masked rows of each batch element. Padded rows get weight 0.
+
+    Operates over the last dim, so any leading batch shape works: (B, n),
+    (K, B, n), etc. y and mask must broadcast against each other; the output
+    has shape `torch.broadcast_shapes(y.shape, mask.shape)`.
     """
-    n_valid = mask.sum(dim=1, keepdim=True).clamp(min=1.0)  # (B, 1)
-    pos = (mask * y).sum(dim=1, keepdim=True).clamp(min=1.0)           # (B, 1)
-    neg = (mask * (1.0 - y)).sum(dim=1, keepdim=True).clamp(min=1.0)   # (B, 1)
+    n_valid = mask.sum(dim=-1, keepdim=True).clamp(min=1.0)
+    pos = (mask * y).sum(dim=-1, keepdim=True).clamp(min=1.0)
+    neg = (mask * (1.0 - y)).sum(dim=-1, keepdim=True).clamp(min=1.0)
     # K = 2 classes
     w_pos = n_valid / (2.0 * pos)
     w_neg = n_valid / (2.0 * neg)
