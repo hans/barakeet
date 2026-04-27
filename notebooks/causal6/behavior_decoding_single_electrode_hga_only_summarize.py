@@ -37,12 +37,14 @@ from pathlib import Path
 
 import polars as pl
 
+from src.models.causal6_aggregates import (
+    SITE_KEYS_BEHAVIOR_HGA_ONLY as site_keys,
+    aggregate_behavior_hga_only,
+)
 from src.models.significance import (
-    fold_tstat_aggregate,
     null_standardized_peak_test,
     tfce_1d_per_site,
 )
-from src.stimuli import OFFSET_DICT
 
 # %% tags=["parameters"]
 subject = "EC282"
@@ -58,46 +60,19 @@ peak_search_smin = 0
 peak_search_smax = 290
 
 # %%
-site_keys = ["subject", "electrode_idx", "phoneme_pair", "word_end"]
 window_keys = site_keys + ["smin", "smax"]
 
-offset_samples = {
-    we: int((offset_s - epoch_tmin) * epoch_sfreq + behav_peak_post_offset_s * epoch_sfreq)
-    for we, offset_s in OFFSET_DICT.items()
-}
-
-
-def _window_filter(df: pl.DataFrame) -> pl.DataFrame:
-    return (
-        df.with_columns(
-            pl.col("word_end").replace_strict(offset_samples, default=None).alias("_smax_limit")
-        )
-        .filter(
-            (pl.col("smin") >= peak_search_smin)
-            & (pl.col("smax") <= pl.col("_smax_limit"))
-            & (pl.col("smax") <= peak_search_smax)
-        )
-        .drop("_smax_limit")
-    )
-
-
 # %%
-real_scores = pl.read_parquet(scores_path).pipe(_window_filter)
 predictions = pl.read_parquet(predictions_path)
-null_scores = pl.read_parquet(null_scores_path).pipe(_window_filter)
 
-# %% [markdown]
-# ## Aggregate folds to (fold_mean, fold_std, t_stat) per (site, window[, perm])
-#
-# HGA-only uses raw AUC; centering = 0.5 (chance).
-
-# %%
-real_agg = fold_tstat_aggregate(
-    real_scores, group_keys=window_keys, stat_col="test_roc_auc", center=0.5,
-)
-null_agg = fold_tstat_aggregate(
-    null_scores, group_keys=window_keys + ["permutation_idx"],
-    stat_col="test_roc_auc", center=0.5,
+real_agg, null_agg = aggregate_behavior_hga_only(
+    pl.read_parquet(scores_path),
+    pl.read_parquet(null_scores_path),
+    epoch_tmin=epoch_tmin,
+    epoch_sfreq=epoch_sfreq,
+    behav_peak_post_offset_s=behav_peak_post_offset_s,
+    peak_search_smin=peak_search_smin,
+    peak_search_smax=peak_search_smax,
 )
 
 # v1-compat diagnostic

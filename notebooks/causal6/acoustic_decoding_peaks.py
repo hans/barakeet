@@ -42,7 +42,11 @@ from pathlib import Path
 
 import polars as pl
 
-from src.models.significance import fold_tstat_aggregate, null_standardized_peak_test
+from src.models.causal6_aggregates import (
+    SITE_KEYS_ACOUSTIC as site_keys,
+    aggregate_acoustic,
+)
+from src.models.significance import null_standardized_peak_test
 
 # %% tags=["parameters"]
 subject = "EC282"
@@ -55,27 +59,7 @@ peak_search_smin = 0
 peak_search_smax = 290
 
 # %%
-site_keys = ["subject", "electrode_idx", "phoneme_pair"]
 window_keys = site_keys + ["smin", "smax"]
-
-
-def _window_filter(df: pl.DataFrame) -> pl.DataFrame:
-    return df.filter(
-        (pl.col("smin") >= peak_search_smin) & (pl.col("smax") <= peak_search_smax)
-    )
-
-
-# %%
-real_scores = (
-    pl.read_parquet(scores_path)
-    .filter(pl.col("target") == target)
-    .pipe(_window_filter)
-)
-null_scores = (
-    pl.read_parquet(null_scores_path)
-    .filter(pl.col("target") == target)
-    .pipe(_window_filter)
-)
 
 # %% [markdown]
 # Aggregate each fold into (fold_mean, fold_std, t_stat) per (site, window)
@@ -83,13 +67,12 @@ null_scores = (
 # same aggregation; only the statistic column fed to the peak test differs.
 
 # %%
-real_agg = fold_tstat_aggregate(
-    real_scores, group_keys=window_keys,
-    stat_col="test_roc_auc", center=0.5,
-)
-null_agg = fold_tstat_aggregate(
-    null_scores, group_keys=window_keys + ["permutation_idx"],
-    stat_col="test_roc_auc", center=0.5,
+real_agg, null_agg = aggregate_acoustic(
+    pl.read_parquet(scores_path),
+    pl.read_parquet(null_scores_path),
+    target=target,
+    peak_search_smin=peak_search_smin,
+    peak_search_smax=peak_search_smax,
 )
 
 

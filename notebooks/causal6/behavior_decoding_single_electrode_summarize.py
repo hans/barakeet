@@ -47,12 +47,14 @@ from pathlib import Path
 
 import polars as pl
 
+from src.models.causal6_aggregates import (
+    SITE_KEYS_BEHAVIOR_WITH_CONTROL as site_keys,
+    aggregate_behavior_with_control,
+)
 from src.models.significance import (
-    fold_tstat_aggregate,
     null_standardized_peak_test,
     tfce_1d_per_site,
 )
-from src.stimuli import OFFSET_DICT
 
 # %% tags=["parameters"]
 subject = "EC282"
@@ -68,76 +70,25 @@ peak_search_smin = 0
 peak_search_smax = 290
 
 # %%
-site_keys = ["subject", "electrode_idx", "phoneme_pair", "word_end"]
 window_keys = site_keys + ["smin", "smax"]
 
-offset_samples = {
-    we: int((offset_s - epoch_tmin) * epoch_sfreq + behav_peak_post_offset_s * epoch_sfreq)
-    for we, offset_s in OFFSET_DICT.items()
-}
-
-
-def _pair_and_filter(scores: pl.DataFrame, extra_keys: list[str] | None = None) -> pl.DataFrame:
-    """Pair full + baseline on (phoneme_pair, word_end, fold[, perm]) and
-    keep only windows inside the peak-search range."""
-    extra_keys = extra_keys or []
-    full_keys = ["subject", "phoneme_pair", "word_end", "fold"] + extra_keys
-
-    full = scores.filter(pl.col("model") == "full").drop("model")
-    base = (
-        scores.filter(pl.col("model") == "baseline")
-        .drop("model", "electrode_idx", "smin", "smax")
-        .rename({"test_roc_auc": "baseline_roc_auc"})
-    )
-    paired = (
-        full.rename({"test_roc_auc": "full_roc_auc"})
-        .join(base, on=full_keys, how="left")
-        .with_columns(
-            (pl.col("full_roc_auc") - pl.col("baseline_roc_auc")).alias("diff")
-        )
-    )
-    return (
-        paired.with_columns(
-            pl.col("word_end").replace_strict(offset_samples, default=None).alias("_smax_limit")
-        )
-        .filter(
-            (pl.col("smin") >= peak_search_smin)
-            & (pl.col("smax") <= pl.col("_smax_limit"))
-            & (pl.col("smax") <= peak_search_smax)
-        )
-        .drop("_smax_limit")
-    )
-
-
 # %%
-real_scores = pl.read_parquet(scores_path)
 predictions = pl.read_parquet(predictions_path)
-null_scores = pl.read_parquet(null_scores_path)
 
-real_paired = _pair_and_filter(real_scores)
-null_paired = _pair_and_filter(null_scores, extra_keys=["permutation_idx"])
-
-# %% [markdown]
-# ## Aggregate folds to (fold_mean, fold_std, t_stat) per (site, window[, perm])
-#
-# The diff statistic is centered at 0 (chance for full - baseline); AUC columns
-# are kept alongside for diagnostics / v1 schema compatibility.
-
-# %%
-real_agg_diff = fold_tstat_aggregate(
-    real_paired, group_keys=window_keys, stat_col="diff", center=0.0,
-)
-null_agg_diff = fold_tstat_aggregate(
-    null_paired, group_keys=window_keys + ["permutation_idx"],
-    stat_col="diff", center=0.0,
+real_agg_diff, null_agg_diff = aggregate_behavior_with_control(
+    pl.read_parquet(scores_path),
+    pl.read_parquet(null_scores_path),
+    epoch_tmin=epoch_tmin,
+    epoch_sfreq=epoch_sfreq,
+    behav_peak_post_offset_s=behav_peak_post_offset_s,
+    peak_search_smin=peak_search_smin,
+    peak_search_smax=peak_search_smax,
 )
 
-# Also aggregate full/baseline fold-means for v1 diagnostic output.
-real_window_mean = real_paired.group_by(window_keys).agg(
-    pl.col("full_roc_auc").mean().alias("full_roc_auc"),
-    pl.col("baseline_roc_auc").mean().alias("baseline_roc_auc"),
-    pl.col("diff").mean().alias("diff"),
-)
+# v1 diagnostic: fold-mean full / baseline / diff per (site, window).
+real_window_mean = real_agg_diff.select(
+    window_keys + ["full_roc_auc", "baseline_roc_auc", "fold_mean"]
+).rename({"fold_mean": "diff"})
 
 # %% [markdown]
 # ## Four flavors of null-standardized peak test
