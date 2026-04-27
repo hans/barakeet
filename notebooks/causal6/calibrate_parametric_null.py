@@ -58,9 +58,6 @@ import numpy as np
 import polars as pl
 from scipy.stats import genpareto, norm
 
-# %%
-from src.models.significance import fold_tstat_aggregate
-
 # %% tags=["parameters"]
 # Defaults: an acoustic null run. Override to point at any decoder's parquet.
 subject = "EC282"
@@ -97,25 +94,29 @@ rng = np.random.default_rng(rng_seed)
 
 null_path = Path(null_scores_path)
 assert null_path.exists(), f"missing null parquet: {null_path}"
-print(f"Loading {null_path} ...")
-raw = pl.read_parquet(null_path)
-print(f"  {raw.height} rows, columns: {raw.columns}")
+print(f"Lazy-scanning {null_path} ...")
+# Lazy scan + push-down filter + aggregation. Loading the long-format K=10000
+# parquet eagerly would peak at ~45 GB for acoustic / ~90 GB for behavior;
+# streaming aggregation collapses 5x at IO time and keeps peak memory bounded.
+raw_lazy = pl.scan_parquet(null_path)
+schema_cols = raw_lazy.collect_schema().names()
+print(f"  schema: {schema_cols}")
 
 # %% [markdown]
 # ## Aggregate folds → per-(site, window, perm) statistic
 #
-# `fold_tstat_aggregate` mirrors `acoustic_decoding_peaks.py`: collapses
-# the 5 fold-wise AUCs to (`fold_mean`, `fold_std`, `t_stat`) per group.
+# Inlines `fold_tstat_aggregate`'s logic so we can run it on a LazyFrame
+# (push-down to streaming) and fold the n_test mean into the same pass.
 
 # %%
 # Detect which group keys are present (acoustic has phoneme_pair, behavior
 # adds word_end and model). Filter to model="full" if present (baseline is
 # a separate test).
-has_word_end = "word_end" in raw.columns
-has_model = "model" in raw.columns
+has_word_end = "word_end" in schema_cols
+has_model = "model" in schema_cols
 if has_model:
-    raw = raw.filter(pl.col("model") == "full")
-    print(f"  filtered to model='full' → {raw.height} rows")
+    raw_lazy = raw_lazy.filter(pl.col("model") == "full")
+    print("  filter pushed: model='full'")
 
 site_keys = ["subject", "phoneme_pair", "electrode_idx"]
 if has_word_end:
@@ -125,15 +126,31 @@ group_keys = window_keys + ["permutation_idx"]
 print(f"  site_keys = {site_keys}")
 print(f"  window_keys = {window_keys}")
 
-agg = fold_tstat_aggregate(
-    raw, group_keys=group_keys,
-    stat_col="test_roc_auc", center=0.5,
+# Single streaming aggregation: collapse folds + carry n_test_mean through.
+std_floor = 0.01
+agg_lazy = (
+    raw_lazy
+    .group_by(group_keys)
+    .agg(
+        pl.col("test_roc_auc").mean().alias("fold_mean"),
+        pl.col("test_roc_auc").std().alias("fold_std"),
+        pl.col("test_roc_auc").len().alias("n_folds"),
+        pl.col("n_test").mean().alias("n_test_mean"),
+    )
 )
-# Carry n_test through (used for the analytic Mann-Whitney variance)
-n_test_per_site = (
-    raw.group_by(window_keys).agg(pl.col("n_test").mean().alias("n_test_mean"))
+# Try the streaming engine; fall back to the default collect for older polars.
+try:
+    agg = agg_lazy.collect(engine="streaming")
+except TypeError:
+    try:
+        agg = agg_lazy.collect(streaming=True)
+    except TypeError:
+        agg = agg_lazy.collect()
+sem = (
+    pl.max_horizontal(pl.col("fold_std"), pl.lit(std_floor))
+    / pl.col("n_folds").cast(pl.Float64).sqrt()
 )
-agg = agg.join(n_test_per_site, on=window_keys, how="left")
+agg = agg.with_columns(((pl.col("fold_mean") - 0.5) / sem).alias("t_stat"))
 print(f"  aggregated → {agg.height} rows ({statistic} available)")
 
 # Build a (n_units, K) numpy block by sorting on (window_keys, permutation_idx)
@@ -155,11 +172,13 @@ assert (counts["n"] == K).all(), (
 # Sort: stable lexicographic sort by (window_keys, permutation_idx) puts
 # every (site, window)'s K rows in contiguous memory in perm-id order.
 sorted_agg = agg.sort(window_keys + ["permutation_idx"])
+del agg
 n_units = sorted_agg.height // K
 stats_mat = sorted_agg[statistic].to_numpy().reshape(n_units, K)
 # (Site, window) metadata in row order; n_test_mean is constant within
 # a (site, window), so just take the first occurrence.
 wide = sorted_agg.gather_every(K).select(window_keys + ["n_test_mean"])
+del sorted_agg  # ~all of the post-aggregation polars memory; freed once arrays are extracted
 n_test_mean = wide["n_test_mean"].to_numpy()
 assert wide.height == n_units, f"row alignment broken: {wide.height} vs {n_units}"
 print(f"  n_units (site × window) = {n_units}")
@@ -293,46 +312,56 @@ def calibrate_per_window(K_sub: int) -> pl.DataFrame:
     """Run the leave-one-out bootstrap calibration with the given K_sub budget."""
     rng_local = np.random.default_rng(rng_seed)
     K_train = K - K_test
-    rows: list[dict] = []
+    cap = n_units * K_test
+    # Pre-allocated columns; trim to actual write count at the end. Avoids
+    # building a list of millions of Python dicts.
+    out_unit = np.empty(cap, dtype=np.int32)
+    out_p_gold = np.empty(cap, dtype=np.float64)
+    out_p_sub_emp = np.empty(cap, dtype=np.float64)
+    out_p_sub_gpd = np.empty(cap, dtype=np.float64)
+    out_p_analytic = np.empty(cap, dtype=np.float64)
+    w = 0
 
     for u in range(n_units):
         nulls_full = stats_mat[u]                                # (K,)
         n_test_u = float(n_test_mean[u])
         if not np.isfinite(nulls_full).any():
             continue
-        # Random partition into (train null, test obs)
         idx = rng_local.permutation(K)
         train_idx = idx[:K_train]
         test_idx = idx[K_train:K_train + K_test]
         null_train = nulls_full[train_idx]
         observed = nulls_full[test_idx]
 
-        # Subsample the production budget from null_train (without replacement).
         sub_idx = rng_local.choice(K_train, size=K_sub, replace=False)
         null_sub = null_train[sub_idx]
 
         p_gold = empirical_pvalue(observed, null_train)
         p_sub_emp = empirical_pvalue(observed, null_sub)
         p_sub_gpd = gpd_tail_pvalue(observed, null_sub, threshold_q=gpd_threshold_q)
-
-        # Analytic only valid for fold_mean (not t_stat)
         if statistic == "fold_mean":
             p_analytic = analytic_foldmean_pvalue(
                 observed, np.full_like(observed, n_test_u),
             )
         else:
-            p_analytic = np.full_like(observed, np.nan)
+            p_analytic = np.full(observed.shape, np.nan)
 
-        for j in range(len(observed)):
-            rows.append({
-                "unit_idx": u,
-                "K_sub": K_sub,
-                "p_gold": float(p_gold[j]),
-                "p_sub_emp": float(p_sub_emp[j]),
-                "p_sub_gpd": float(p_sub_gpd[j]),
-                "p_analytic": float(p_analytic[j]),
-            })
-    return pl.DataFrame(rows)
+        n = observed.size
+        out_unit[w:w + n] = u
+        out_p_gold[w:w + n] = p_gold
+        out_p_sub_emp[w:w + n] = p_sub_emp
+        out_p_sub_gpd[w:w + n] = p_sub_gpd
+        out_p_analytic[w:w + n] = p_analytic
+        w += n
+
+    return pl.DataFrame({
+        "unit_idx": out_unit[:w],
+        "K_sub": np.full(w, K_sub, dtype=np.int32),
+        "p_gold": out_p_gold[:w],
+        "p_sub_emp": out_p_sub_emp[:w],
+        "p_sub_gpd": out_p_sub_gpd[:w],
+        "p_analytic": out_p_analytic[:w],
+    })
 
 
 # %%
@@ -427,8 +456,13 @@ print(f"  maxstat_mat shape = {maxstat_mat.shape}, "
 def calibrate_per_site_peak(K_sub: int) -> pl.DataFrame:
     rng_local = np.random.default_rng(rng_seed + 1)
     K_train = K - K_test
-    rows: list[dict] = []
     n_sites = maxstat_mat.shape[0]
+    cap = n_sites * K_test
+    out_site = np.empty(cap, dtype=np.int32)
+    out_p_gold = np.empty(cap, dtype=np.float64)
+    out_p_sub_emp = np.empty(cap, dtype=np.float64)
+    out_p_sub_gpd = np.empty(cap, dtype=np.float64)
+    w = 0
     for s in range(n_sites):
         nulls_full = maxstat_mat[s]
         if not np.isfinite(nulls_full).any():
@@ -446,16 +480,21 @@ def calibrate_per_site_peak(K_sub: int) -> pl.DataFrame:
         p_sub_emp = empirical_pvalue(observed, null_sub)
         p_sub_gpd = gpd_tail_pvalue(observed, null_sub, threshold_q=gpd_threshold_q)
 
-        for j in range(len(observed)):
-            rows.append({
-                "site_idx": s,
-                "K_sub": K_sub,
-                "p_gold": float(p_gold[j]),
-                "p_sub_emp": float(p_sub_emp[j]),
-                "p_sub_gpd": float(p_sub_gpd[j]),
-                "p_analytic": float("nan"),  # not defined for max-stat
-            })
-    return pl.DataFrame(rows)
+        n = observed.size
+        out_site[w:w + n] = s
+        out_p_gold[w:w + n] = p_gold
+        out_p_sub_emp[w:w + n] = p_sub_emp
+        out_p_sub_gpd[w:w + n] = p_sub_gpd
+        w += n
+
+    return pl.DataFrame({
+        "site_idx": out_site[:w],
+        "K_sub": np.full(w, K_sub, dtype=np.int32),
+        "p_gold": out_p_gold[:w],
+        "p_sub_emp": out_p_sub_emp[:w],
+        "p_sub_gpd": out_p_sub_gpd[:w],
+        "p_analytic": np.full(w, np.nan),  # not defined for max-stat
+    })
 
 
 print(f"\n=== Section 2: per-site peak (max-stat) calibration on `{statistic}` ===")
