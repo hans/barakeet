@@ -50,7 +50,12 @@
 # %%
 import os
 os.environ.setdefault("OMP_NUM_THREADS", "1")
-os.environ["POLARS_MAX_THREADS"] = "1"
+# Polars threading: pinning to 1 makes the single-pass parquet aggregation
+# I/O-bound on 25+ GB null parquets. With streaming aggregation, parallel
+# I/O does not blow up peak memory (each row group aggregates immediately).
+# Set to None / unset to use polars default; small numbers (4-8) are a
+# safe middle ground if you want to cap RAM bandwidth.
+os.environ["POLARS_MAX_THREADS"] = "4"
 # Polars prints query stages, streaming chunk sizes, and group-by progress
 # to stderr when verbose=1. Helpful when watching long-running aggregations.
 os.environ.setdefault("POLARS_VERBOSE", "1")
@@ -131,9 +136,21 @@ _step(f"lazy-scanning {null_path} (file size {size_gb:.2f} GB on disk)")
 # Lazy scan + push-down filter + aggregation. Loading the long-format K=10000
 # parquet eagerly would peak at ~45 GB for acoustic / ~90 GB for behavior;
 # streaming aggregation collapses 5x at IO time and keeps peak memory bounded.
-raw_lazy = pl.scan_parquet(null_path)
-schema_cols = raw_lazy.collect_schema().names()
+schema_cols = pl.scan_parquet(null_path).collect_schema().names()
 _step(f"  schema: {schema_cols}")
+# Project only the columns we actually need — drops `fold`, `n_train`,
+# `target`, etc. ~25-30% I/O reduction with a single-threaded reader,
+# bigger when threading is enabled.
+needed_cols = [
+    "subject", "phoneme_pair", "electrode_idx",
+    "smin", "smax", "permutation_idx", "test_roc_auc", "n_test",
+]
+if "word_end" in schema_cols:
+    needed_cols.append("word_end")
+if "model" in schema_cols:
+    needed_cols.append("model")
+raw_lazy = pl.scan_parquet(null_path).select(needed_cols)
+_step(f"  projecting {len(needed_cols)} columns: {needed_cols}")
 
 # %% [markdown]
 # ## Aggregate folds → per-(site, window, perm) statistic
