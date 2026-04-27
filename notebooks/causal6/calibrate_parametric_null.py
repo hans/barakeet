@@ -51,17 +51,39 @@
 import os
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ["POLARS_MAX_THREADS"] = "1"
+# Polars prints query stages, streaming chunk sizes, and group-by progress
+# to stderr when verbose=1. Helpful when watching long-running aggregations.
+os.environ.setdefault("POLARS_VERBOSE", "1")
 
 # %%
+import resource
+import sys
+import time
 from pathlib import Path
 
 import numpy as np
 import polars as pl
 from scipy.stats import genpareto, norm
+from tqdm.auto import tqdm
+
+
+def _rss_gb() -> float:
+    """Resident set size in GB. macOS reports bytes, Linux kilobytes."""
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return rss / (1024 ** 3) if sys.platform == "darwin" else rss / (1024 ** 2)
+
+
+_step_t0 = time.perf_counter()
+
+
+def _step(msg: str) -> None:
+    """Print a step marker with cumulative wallclock + peak RSS."""
+    elapsed = time.perf_counter() - _step_t0
+    print(f"[{elapsed:7.1f}s | rss={_rss_gb():5.2f}GB] {msg}", flush=True)
 
 # %% tags=["parameters"]
 # Defaults: an acoustic null run. Override to point at any decoder's parquet.
-subject = "EC282"
+subject = "EC248"
 null_scores_path = (
     f"outputs/causal6/acoustic_decoding_null/{subject}/null_scores.parquet"
 )
@@ -104,13 +126,14 @@ rng = np.random.default_rng(rng_seed)
 
 null_path = Path(null_scores_path)
 assert null_path.exists(), f"missing null parquet: {null_path}"
-print(f"Lazy-scanning {null_path} ...")
+size_gb = null_path.stat().st_size / (1024 ** 3)
+_step(f"lazy-scanning {null_path} (file size {size_gb:.2f} GB on disk)")
 # Lazy scan + push-down filter + aggregation. Loading the long-format K=10000
 # parquet eagerly would peak at ~45 GB for acoustic / ~90 GB for behavior;
 # streaming aggregation collapses 5x at IO time and keeps peak memory bounded.
 raw_lazy = pl.scan_parquet(null_path)
 schema_cols = raw_lazy.collect_schema().names()
-print(f"  schema: {schema_cols}")
+_step(f"  schema: {schema_cols}")
 
 # %% [markdown]
 # ## Aggregate folds → per-(site, window, perm) statistic
@@ -151,21 +174,35 @@ agg_lazy = (
         pl.col("n_test").mean().alias("n_test_mean"),
     )
 )
+# Show the optimized plan so it's clear what polars is about to do.
+print("--- query plan ---")
+try:
+    print(agg_lazy.explain(streaming=True))
+except TypeError:
+    print(agg_lazy.explain())
+print("------------------", flush=True)
+
 # Streaming aggregation. Polars 1.24 takes `streaming=True`; newer
 # versions take `engine="streaming"`. Try both, fall back to non-streaming.
+_step("collecting fold-aggregation (this is the big one) ...")
 try:
     agg = agg_lazy.collect(streaming=True)
+    _collect_mode = "streaming=True"
 except (TypeError, ValueError):
     try:
         agg = agg_lazy.collect(engine="streaming")
+        _collect_mode = "engine=streaming"
     except (TypeError, ValueError):
         agg = agg_lazy.collect()
+        _collect_mode = "non-streaming"
+_step(f"  agg collected ({_collect_mode}) → {agg.height} rows, "
+      f"{agg.estimated_size('mb'):.0f} MB")
 sem = (
     pl.max_horizontal(pl.col("fold_std"), pl.lit(std_floor))
     / pl.col("n_folds").cast(pl.Float64).sqrt()
 )
 agg = agg.with_columns(((pl.col("fold_mean") - 0.5) / sem).alias("t_stat"))
-print(f"  aggregated → {agg.height} rows ({statistic} available)")
+_step(f"  added t_stat → {agg.height} rows ({statistic} available)")
 
 # Build a (n_units, K) numpy block by sorting on (window_keys, permutation_idx)
 # and reshaping. Avoids polars pivot-version pitfalls.
@@ -185,18 +222,21 @@ assert (counts["n"] == K).all(), (
 
 # Sort: stable lexicographic sort by (window_keys, permutation_idx) puts
 # every (site, window)'s K rows in contiguous memory in perm-id order.
+_step(f"sorting agg ({agg.height} rows) ...")
 sorted_agg = agg.sort(window_keys + ["permutation_idx"])
 del agg
+_step("  sort done")
 n_units = sorted_agg.height // K
 stats_mat = sorted_agg[statistic].to_numpy().reshape(n_units, K)
+_step(f"  extracted stats_mat ({stats_mat.nbytes / 1024**2:.0f} MB)")
 # (Site, window) metadata in row order; n_test_mean is constant within
 # a (site, window), so just take the first occurrence.
 wide = sorted_agg.gather_every(K).select(window_keys + ["n_test_mean"])
 del sorted_agg  # ~all of the post-aggregation polars memory; freed once arrays are extracted
 n_test_mean = wide["n_test_mean"].to_numpy()
 assert wide.height == n_units, f"row alignment broken: {wide.height} vs {n_units}"
-print(f"  n_units (site × window) = {n_units}")
-print(f"  stats_mat shape = {stats_mat.shape}, "
+_step(f"  n_units (site × window) = {n_units}")
+_step(f"  stats_mat shape = {stats_mat.shape}, "
       f"finite fraction = {np.isfinite(stats_mat).mean():.4f}")
 
 
@@ -336,7 +376,8 @@ def calibrate_per_window(K_sub: int) -> pl.DataFrame:
     out_p_analytic = np.empty(cap, dtype=np.float64)
     w = 0
 
-    for u in range(n_units):
+    for u in tqdm(range(n_units), desc=f"calibrate_per_window K_sub={K_sub}",
+                  unit="unit", leave=False):
         nulls_full = stats_mat[u]                                # (K,)
         n_test_u = float(n_test_mean[u])
         if not np.isfinite(nulls_full).any():
@@ -379,11 +420,12 @@ def calibrate_per_window(K_sub: int) -> pl.DataFrame:
 
 
 # %%
-print(f"\n=== Section 1: per-(site, window) calibration on `{statistic}` ===")
+_step(f"=== Section 1: per-(site, window) calibration on `{statistic}` ===")
 section1_parts = []
 for K_sub in K_subs:
-    print(f"  computing K_sub={K_sub} ...")
+    _step(f"  computing K_sub={K_sub} ...")
     section1_parts.append(calibrate_per_window(K_sub))
+    _step(f"  K_sub={K_sub} done")
 section1 = pl.concat(section1_parts)
 section1.write_parquet(outdir / f"section1_{statistic}.parquet")
 print(f"  → {outdir / f'section1_{statistic}.parquet'} ({section1.height} rows)")
@@ -477,7 +519,8 @@ def calibrate_per_site_peak(K_sub: int) -> pl.DataFrame:
     out_p_sub_emp = np.empty(cap, dtype=np.float64)
     out_p_sub_gpd = np.empty(cap, dtype=np.float64)
     w = 0
-    for s in range(n_sites):
+    for s in tqdm(range(n_sites), desc=f"calibrate_per_site_peak K_sub={K_sub}",
+                  unit="site", leave=False):
         nulls_full = maxstat_mat[s]
         if not np.isfinite(nulls_full).any():
             continue
@@ -511,11 +554,12 @@ def calibrate_per_site_peak(K_sub: int) -> pl.DataFrame:
     })
 
 
-print(f"\n=== Section 2: per-site peak (max-stat) calibration on `{statistic}` ===")
+_step(f"=== Section 2: per-site peak (max-stat) calibration on `{statistic}` ===")
 section2_parts = []
 for K_sub in K_subs:
-    print(f"  computing K_sub={K_sub} ...")
+    _step(f"  computing K_sub={K_sub} ...")
     section2_parts.append(calibrate_per_site_peak(K_sub))
+    _step(f"  K_sub={K_sub} done")
 section2 = pl.concat(section2_parts)
 section2.write_parquet(outdir / f"section2_{statistic}.parquet")
 print(f"  → {outdir / f'section2_{statistic}.parquet'} ({section2.height} rows)")
