@@ -162,7 +162,14 @@ group_keys = window_keys + ["permutation_idx"]
 print(f"  site_keys = {site_keys}")
 print(f"  window_keys = {window_keys}")
 
-# Single streaming aggregation: collapse folds + carry n_test_mean through.
+# %% [markdown]
+# ### Build the lazy aggregation plan and print it
+#
+# Run this cell alone to see the optimized query plan without doing any
+# work. If you see "GroupBy(InMemory)" instead of streaming, the next
+# cell will OOM.
+
+# %%
 std_floor = 0.01
 agg_lazy = (
     raw_lazy
@@ -174,7 +181,6 @@ agg_lazy = (
         pl.col("n_test").mean().alias("n_test_mean"),
     )
 )
-# Show the optimized plan so it's clear what polars is about to do.
 print("--- query plan ---")
 try:
     print(agg_lazy.explain(streaming=True))
@@ -182,8 +188,14 @@ except TypeError:
     print(agg_lazy.explain())
 print("------------------", flush=True)
 
-# Streaming aggregation. Polars 1.24 takes `streaming=True`; newer
-# versions take `engine="streaming"`. Try both, fall back to non-streaming.
+# %% [markdown]
+# ### Collect the aggregation (the slow step)
+#
+# This is the I/O + group-by pass over the parquet. With K=10000 and
+# streaming working, ~30s–2min and bounded memory. If polars falls back
+# to non-streaming this peaks at ~10–45 GB.
+
+# %%
 _step("collecting fold-aggregation (this is the big one) ...")
 try:
     agg = agg_lazy.collect(streaming=True)
@@ -204,24 +216,31 @@ sem = (
 agg = agg.with_columns(((pl.col("fold_mean") - 0.5) / sem).alias("t_stat"))
 _step(f"  added t_stat → {agg.height} rows ({statistic} available)")
 
-# Build a (n_units, K) numpy block by sorting on (window_keys, permutation_idx)
-# and reshaping. Avoids polars pivot-version pitfalls.
+# %% [markdown]
+# ### Validate K and per-group counts
+
+# %%
 permutation_ids = sorted(agg["permutation_idx"].unique().to_list())
 K = len(permutation_ids)
-print(f"  K = {K} permutations")
+_step(f"K = {K} permutations")
 assert K >= max(K_subs) + K_test, (
     f"need at least {max(K_subs) + K_test} perms for K_sub={max(K_subs)} "
     f"and K_test={K_test}; got {K}"
 )
-# Defensive: confirm every (site, window) has all K permutation rows.
 counts = agg.group_by(window_keys).agg(pl.len().alias("n"))
 assert (counts["n"] == K).all(), (
     f"some (site, window) groups have != {K} perms; "
     f"min={counts['n'].min()}, max={counts['n'].max()}"
 )
+_step("  per-group count check OK")
 
-# Sort: stable lexicographic sort by (window_keys, permutation_idx) puts
-# every (site, window)'s K rows in contiguous memory in perm-id order.
+# %% [markdown]
+# ### Sort + extract numpy stats_mat
+#
+# Final memory-heavy step before calibration. `agg.sort(...)` peaks at
+# ~2x agg size; if this cell hangs the sort is the cause.
+
+# %%
 _step(f"sorting agg ({agg.height} rows) ...")
 sorted_agg = agg.sort(window_keys + ["permutation_idx"])
 del agg
@@ -229,10 +248,8 @@ _step("  sort done")
 n_units = sorted_agg.height // K
 stats_mat = sorted_agg[statistic].to_numpy().reshape(n_units, K)
 _step(f"  extracted stats_mat ({stats_mat.nbytes / 1024**2:.0f} MB)")
-# (Site, window) metadata in row order; n_test_mean is constant within
-# a (site, window), so just take the first occurrence.
 wide = sorted_agg.gather_every(K).select(window_keys + ["n_test_mean"])
-del sorted_agg  # ~all of the post-aggregation polars memory; freed once arrays are extracted
+del sorted_agg
 n_test_mean = wide["n_test_mean"].to_numpy()
 assert wide.height == n_units, f"row alignment broken: {wide.height} vs {n_units}"
 _step(f"  n_units (site × window) = {n_units}")
