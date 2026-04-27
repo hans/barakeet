@@ -50,6 +50,7 @@
 # %%
 import os
 os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ["POLARS_MAX_THREADS"] = "1"
 
 # %%
 from pathlib import Path
