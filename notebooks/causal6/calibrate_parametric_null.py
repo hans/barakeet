@@ -80,6 +80,15 @@ K_subs = [200, 500, 1000]
 # the bootstrap calibration. Higher = tighter tail estimate but more compute.
 K_test = 500
 
+# Optional: cap the perms loaded from the parquet to control memory.
+# Pushed down through the lazy scan as `permutation_idx < cap`.
+#
+# Tradeoff: gold-standard empirical CDF has p-floor 1/(K_train+1) where
+# K_train = cap - K_test. To validate GPD at p=1e-3 you want K_train >=
+# ~2000 (so cap >= 2500). For p=1e-4 you want K_train >= ~10000. Set to
+# None to use every perm in the parquet (default for full validation).
+n_permutations_cap = None
+
 # Random seed for the leave-one-out bootstrap subsample selection.
 rng_seed = 0
 
@@ -118,6 +127,9 @@ has_model = "model" in schema_cols
 if has_model:
     raw_lazy = raw_lazy.filter(pl.col("model") == "full")
     print("  filter pushed: model='full'")
+if n_permutations_cap is not None:
+    raw_lazy = raw_lazy.filter(pl.col("permutation_idx") < n_permutations_cap)
+    print(f"  filter pushed: permutation_idx < {n_permutations_cap}")
 
 site_keys = ["subject", "phoneme_pair", "electrode_idx"]
 if has_word_end:
