@@ -61,7 +61,7 @@ n_folds = 5
 cv_random_state = 42
 device = "cuda"
 tol = 1e-6
-max_iter = 50
+max_iter = 15
 
 n_permutations = 500
 permutation_seed = 0
