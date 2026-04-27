@@ -39,6 +39,10 @@
 #   window_mean_scores.parquet  — fold-mean full/baseline/diff per (site, window).
 
 # %%
+import os
+os.environ.setdefault("POLARS_MAX_THREADS", "4")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+
 from pathlib import Path
 
 import polars as pl

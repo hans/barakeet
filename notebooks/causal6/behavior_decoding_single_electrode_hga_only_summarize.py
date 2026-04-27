@@ -29,6 +29,10 @@
 #   null_scores.parquet    — permutation null per (site, window, perm)
 
 # %%
+import os
+os.environ.setdefault("POLARS_MAX_THREADS", "4")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+
 from pathlib import Path
 
 import polars as pl
