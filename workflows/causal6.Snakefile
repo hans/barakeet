@@ -93,32 +93,77 @@ def run_notebook(input_path: str, output_path: str, parameters, **kwargs):
             tmp_path.unlink(missing_ok=True)
 
 
-def select_gpu_device(wildcards, resources):
-    """Pick `resources.gpu` free GPU IDs at random via nvidia-ml.
+import os
+import sys
+import random
+import pynvml
+import time
+import fcntl
 
-    Returns a comma-separated string suitable for CUDA_VISIBLE_DEVICES,
-    or None if `resources.gpu == 0`. Raises if no GPU is free.
-    """
+def select_gpu_device(wildcards, resources):
     if resources.gpu == 0:
         return None
-    import sys
 
-    import GPUtil
-    available = GPUtil.getAvailable(
-        order="random", limit=resources.gpu,
-        maxLoad=0.01, maxMemory=0.49, includeNan=False,
-        excludeID=[], excludeUUID=[],
-    )
-    if not available:
-        raise RuntimeError("select_gpu_device: no free GPU")
-    if len(available) < resources.gpu:
-        sys.stderr.write(
-            f"[WARN] select_gpu_device got {len(available)} GPU(s), "
-            f"requested {resources.gpu}\n"
-        )
-    available_str = ",".join(str(x) for x in available)
-    print(f"Assigning {resources.gpu} GPU device(s): {available_str}")
-    return available_str
+    lock_dir = "/tmp/snakemake_gpu_locks"
+    os.makedirs(lock_dir, exist_ok=True)
+    
+    # Use a master lock to prevent two jobs from picking IDs simultaneously
+    master_lock_path = os.path.join(lock_dir, "master.lock")
+    
+    with open(master_lock_path, "w") as master_f:
+        fcntl.flock(master_f, fcntl.LOCK_EX)
+        
+        pynvml.nvmlInit()
+        try:
+            device_count = pynvml.nvmlDeviceGetCount()
+            candidate_ids = []
+
+            for i in range(device_count):
+                handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+                
+                # 1. Check Hardware (Memory/Load)
+                mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                if (mem_info.used / mem_info.total) >= 0.24:
+                    continue
+                
+                # 2. Check Software (NVML Process Count)
+                procs = pynvml.nvmlDeviceGetComputeRunningProcesses(handle)
+                nvml_count = len(procs)
+
+                # 3. Check File Locks (Our "Claims")
+                # Look for files like gpu_0_slot_0, gpu_0_slot_1
+                existing_claims = [f for f in os.listdir(lock_dir) 
+                                   if f.startswith(f"gpu_{i}_slot_")]
+                
+                # Total virtual load = Actual processes + Our file claims
+                total_load = max(nvml_count, len(existing_claims))
+
+                if total_load < 1:  # Allow up to 1 active process/claim per GPU
+                    candidate_ids.append((i, len(existing_claims)))
+
+            if not candidate_ids:
+                raise RuntimeError("No GPUs available with < 2 processes")
+
+            # Pick a GPU (randomly among candidates)
+            random.shuffle(candidate_ids)
+            selected_id, current_slot = candidate_ids[0]
+            
+            # Create the claim file (e.g., gpu_0_slot_1)
+            # We include the PID so we know who owns it
+            claim_file = os.path.join(lock_dir, f"gpu_{selected_id}_slot_{current_slot}")
+            with open(claim_file, "w") as cf:
+                cf.write(str(os.getpid()))
+
+            print(f"Claimed GPU {selected_id} Slot {current_slot} (PID: {os.getpid()})")
+            return str(selected_id)
+
+        finally:
+            pynvml.nvmlShutdown()
+            # Master lock is released when exiting 'with' block
+
+
+def gpu_lock_cleanup(pid):
+    shell(f"""find /tmp/snakemake_gpu_locks -type f -print0 | xargs -0 -r grep -l "{pid}" | xargs -r rm -f""")
 
 
 def run_notebook_gpu(input_path, output_path, parameters, gpu_device):
@@ -469,6 +514,8 @@ rule acoustic_decoding_null:
             gpu_device=gpu_device,
         )
 
+        gpu_lock_cleanup(os.getpid())
+
 
 rule behavior_decoding_single_electrode_null:
     """Per-subject behavior-with-control permutation-null refits with two-stage adaptive K."""
@@ -526,6 +573,8 @@ rule behavior_decoding_single_electrode_null:
             gpu_device=gpu_device,
         )
 
+        gpu_lock_cleanup(os.getpid())
+
 
 rule behavior_decoding_single_electrode_hga_only_null:
     """Per-subject behavior-HGA-only permutation-null refits with two-stage adaptive K."""
@@ -581,6 +630,8 @@ rule behavior_decoding_single_electrode_hga_only_null:
             ),
             gpu_device=gpu_device,
         )
+
+        gpu_lock_cleanup(os.getpid())
 
 
 # =============================================================================
