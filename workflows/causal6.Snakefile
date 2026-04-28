@@ -101,18 +101,20 @@ import time
 import fcntl
 
 def select_gpu_device(wildcards, resources):
+    """Pick a free GPU and create a claim file. Returns (gpu_id_str, claim_file_path)
+    or (None, None) when the rule does not request a GPU."""
     if resources.gpu == 0:
-        return None
+        return None, None
 
     lock_dir = "/tmp/snakemake_gpu_locks"
     os.makedirs(lock_dir, exist_ok=True)
-    
+
     # Use a master lock to prevent two jobs from picking IDs simultaneously
     master_lock_path = os.path.join(lock_dir, "master.lock")
-    
+
     with open(master_lock_path, "w") as master_f:
         fcntl.flock(master_f, fcntl.LOCK_EX)
-        
+
         pynvml.nvmlInit()
         try:
             device_count = pynvml.nvmlDeviceGetCount()
@@ -120,21 +122,21 @@ def select_gpu_device(wildcards, resources):
 
             for i in range(device_count):
                 handle = pynvml.nvmlDeviceGetHandleByIndex(i)
-                
+
                 # 1. Check Hardware (Memory/Load)
                 mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
                 if (mem_info.used / mem_info.total) >= 0.24:
                     continue
-                
+
                 # 2. Check Software (NVML Process Count)
                 procs = pynvml.nvmlDeviceGetComputeRunningProcesses(handle)
                 nvml_count = len(procs)
 
                 # 3. Check File Locks (Our "Claims")
                 # Look for files like gpu_0_slot_0, gpu_0_slot_1
-                existing_claims = [f for f in os.listdir(lock_dir) 
+                existing_claims = [f for f in os.listdir(lock_dir)
                                    if f.startswith(f"gpu_{i}_slot_")]
-                
+
                 # Total virtual load = Actual processes + Our file claims
                 total_load = max(nvml_count, len(existing_claims))
 
@@ -147,7 +149,7 @@ def select_gpu_device(wildcards, resources):
             # Pick a GPU (randomly among candidates)
             random.shuffle(candidate_ids)
             selected_id, current_slot = candidate_ids[0]
-            
+
             # Create the claim file (e.g., gpu_0_slot_1)
             # We include the PID so we know who owns it
             claim_file = os.path.join(lock_dir, f"gpu_{selected_id}_slot_{current_slot}")
@@ -155,15 +157,11 @@ def select_gpu_device(wildcards, resources):
                 cf.write(str(os.getpid()))
 
             print(f"Claimed GPU {selected_id} Slot {current_slot} (PID: {os.getpid()})")
-            return str(selected_id)
+            return str(selected_id), claim_file
 
         finally:
             pynvml.nvmlShutdown()
             # Master lock is released when exiting 'with' block
-
-
-def gpu_lock_cleanup(pid):
-    shell(f"""find /tmp/snakemake_gpu_locks -type f -print0 | xargs -0 -r grep -l "{pid}" | xargs -r rm -f""")
 
 
 def run_notebook_gpu(input_path, output_path, parameters, gpu_device):
@@ -194,6 +192,16 @@ def run_notebook_gpu(input_path, output_path, parameters, gpu_device):
         )
     finally:
         Path(params_path).unlink(missing_ok=True)
+
+
+def run_notebook_with_gpu(input_path, output_path, parameters, wildcards, resources):
+    """Acquire a GPU claim, run the notebook, and release the claim — even on failure."""
+    gpu_device, claim_file = select_gpu_device(wildcards, resources)
+    try:
+        run_notebook_gpu(input_path, output_path, parameters, gpu_device=gpu_device)
+    finally:
+        if claim_file is not None:
+            Path(claim_file).unlink(missing_ok=True)
 
 
 C6 = config["causal6"]  # shorthand — rules below fail early if this block is missing
@@ -480,8 +488,7 @@ rule acoustic_decoding_null:
 
     run:
         outdir = Path(output.notebook).parent
-        gpu_device = select_gpu_device(wildcards, resources)
-        run_notebook_gpu(
+        run_notebook_with_gpu(
             str(input.notebook),
             str(output.notebook),
             parameters=dict(
@@ -511,10 +518,9 @@ rule acoustic_decoding_null:
                 permutation_seed=C6["permutation_seed"],
                 permutation_chunk_size=C6["permutation_chunk_size"],
             ),
-            gpu_device=gpu_device,
+            wildcards=wildcards,
+            resources=resources,
         )
-
-        gpu_lock_cleanup(os.getpid())
 
 
 rule behavior_decoding_single_electrode_null:
@@ -536,8 +542,7 @@ rule behavior_decoding_single_electrode_null:
 
     run:
         outdir = Path(output.notebook).parent
-        gpu_device = select_gpu_device(wildcards, resources)
-        run_notebook_gpu(
+        run_notebook_with_gpu(
             str(input.notebook),
             str(output.notebook),
             parameters=dict(
@@ -570,10 +575,9 @@ rule behavior_decoding_single_electrode_null:
                 permutation_seed=C6["permutation_seed"],
                 permutation_chunk_size=C6["permutation_chunk_size"],
             ),
-            gpu_device=gpu_device,
+            wildcards=wildcards,
+            resources=resources,
         )
-
-        gpu_lock_cleanup(os.getpid())
 
 
 rule behavior_decoding_single_electrode_hga_only_null:
@@ -595,8 +599,7 @@ rule behavior_decoding_single_electrode_hga_only_null:
 
     run:
         outdir = Path(output.notebook).parent
-        gpu_device = select_gpu_device(wildcards, resources)
-        run_notebook_gpu(
+        run_notebook_with_gpu(
             str(input.notebook),
             str(output.notebook),
             parameters=dict(
@@ -628,10 +631,9 @@ rule behavior_decoding_single_electrode_hga_only_null:
                 permutation_seed=C6["permutation_seed"],
                 permutation_chunk_size=C6["permutation_chunk_size"],
             ),
-            gpu_device=gpu_device,
+            wildcards=wildcards,
+            resources=resources,
         )
-
-        gpu_lock_cleanup(os.getpid())
 
 
 # =============================================================================
@@ -1140,8 +1142,7 @@ rule ganong_decoding_null:
 
     run:
         outdir = Path(output.notebook).parent
-        gpu_device = select_gpu_device(wildcards, resources)
-        run_notebook_gpu(
+        run_notebook_with_gpu(
             str(input.notebook),
             str(output.notebook),
             parameters=dict(
@@ -1172,7 +1173,8 @@ rule ganong_decoding_null:
                 permutation_seed=C6["permutation_seed"],
                 permutation_chunk_size=C6["permutation_chunk_size"],
             ),
-            gpu_device=gpu_device,
+            wildcards=wildcards,
+            resources=resources,
         )
 
 
@@ -1195,8 +1197,7 @@ rule ganong_decoding_hga_only_null:
 
     run:
         outdir = Path(output.notebook).parent
-        gpu_device = select_gpu_device(wildcards, resources)
-        run_notebook_gpu(
+        run_notebook_with_gpu(
             str(input.notebook),
             str(output.notebook),
             parameters=dict(
@@ -1226,7 +1227,8 @@ rule ganong_decoding_hga_only_null:
                 permutation_seed=C6["permutation_seed"],
                 permutation_chunk_size=C6["permutation_chunk_size"],
             ),
-            gpu_device=gpu_device,
+            wildcards=wildcards,
+            resources=resources,
         )
 
 
