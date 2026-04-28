@@ -41,10 +41,18 @@ class FlavorSpec:
         apply_tfce: Whether the gate should TFCE-enhance this column
             before computing pointwise_p. Mirrors whether the
             decoder's summarize step produces a TFCE flavor.
+        tfce_threshold: TFCE integration floor when ``apply_tfce=True``.
+            Default 0.0 matches centered statistics (``t_stat``,
+            with-control ``diff``). Use 0.5 for raw AUC (HGA-only
+            fold_mean) so chance-level windows don't contribute. Must
+            match what the decoder's summarize step passes to
+            ``tfce_1d_per_site`` so the gate's enhanced statistic is
+            comparable to the production peak-test's.
     """
 
     stat_col: str
     apply_tfce: bool
+    tfce_threshold: float = 0.0
 
 
 # Single source of truth for site_keys (imported by both summarize
@@ -76,10 +84,17 @@ FLAVORS_ACOUSTIC: list[FlavorSpec] = [
 FLAVORS_BEHAVIOR_WITH_CONTROL: list[FlavorSpec] = [
     FlavorSpec("fold_mean", apply_tfce=False),
     FlavorSpec("t_stat", apply_tfce=False),
+    # diff is centered at 0 → tfce_threshold=0.0 (default).
     FlavorSpec("fold_mean", apply_tfce=True),
     FlavorSpec("t_stat", apply_tfce=True),
 ]
-FLAVORS_BEHAVIOR_HGA_ONLY: list[FlavorSpec] = list(FLAVORS_BEHAVIOR_WITH_CONTROL)
+FLAVORS_BEHAVIOR_HGA_ONLY: list[FlavorSpec] = [
+    FlavorSpec("fold_mean", apply_tfce=False),
+    FlavorSpec("t_stat", apply_tfce=False),
+    # fold_mean is raw AUC (centered ~0.5) → integrate above chance.
+    FlavorSpec("fold_mean", apply_tfce=True, tfce_threshold=0.5),
+    FlavorSpec("t_stat", apply_tfce=True),
+]
 
 FLAVORS_GANONG_WITH_CONTROL: list[FlavorSpec] = [
     FlavorSpec("fold_mean", apply_tfce=False),

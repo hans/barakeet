@@ -14,16 +14,23 @@
 # ---
 
 # %% [markdown]
-# causal6: acoustic decoder permutation-null refits.
+# causal6: acoustic decoder permutation-null refits with two-stage adaptive K.
 #
-# Runs K label-shuffled refits of the acoustic searchlight and writes one
-# parquet: `null_scores.parquet`, with columns:
-#   subject, phoneme_pair, electrode_idx, smin, smax, fold,
-#   permutation_idx, test_roc_auc, n_train, n_test, target.
+# Stage 1 runs `n_permutations_stage1` shuffles across all speech-responsive
+# electrodes. The stage-1 nulls are aggregated via
+# `src.models.causal6_aggregates.aggregate_acoustic` and gated by
+# `stage1_gate` from `src.models.causal6_adaptive_null`: any site whose
+# global-min pointwise_p (over the same flavors as
+# `acoustic_decoding_peaks` produces) is ≤ `escalate_pointwise_p_max` is
+# flagged for stage 2. Stage 2 runs `n_permutations_stage2` more shuffles
+# on the borderline electrodes only, with non-overlapping seeds so the
+# merged null is bit-identical to a flat-K=K1+K2 reference.
 #
-# Downstream consumers: `acoustic_decoding_peaks` joins this with real
-# scores, computes pointwise-p per (site, window), and selects
-# null-standardized peak windows.
+# Outputs:
+#   null_scores.parquet     — merged (stage1 + stage2-filtered) null.
+#   escalation_log.parquet  — one row per site with per-flavor
+#                             min_pointwise_p, argmin window/flavor,
+#                             escalated bool, and final per-site K.
 
 # %%
 import os
@@ -35,6 +42,7 @@ import re
 
 import mne
 import pandas as pd
+import polars as pl
 import torch
 
 # %%
@@ -43,11 +51,21 @@ from src.models.causal6 import (
     make_windows,
     run_acoustic_searchlight_permutations,
 )
+from src.models.causal6_adaptive_null import (
+    filter_null_to_borderline,
+    stage1_gate,
+)
+from src.models.causal6_aggregates import (
+    FLAVORS_ACOUSTIC,
+    SITE_KEYS_ACOUSTIC,
+    aggregate_acoustic,
+)
 
 # %% tags=["parameters"]
 subject = "EC282"
 epochs_path = f"outputs/epochs_preprocessed/{subject}_epo.fif"
 electrodes_path = f"outputs/causal5/find_speech_responsive/{subject}_results.csv"
+scores_path = f"outputs/causal6/acoustic_decoding_single_electrode/{subject}/scores.parquet"
 outdir = "."
 
 min_sample = 1
@@ -55,6 +73,8 @@ window_size = 15
 stride = 2
 
 target = "categorical_acoustic_cue"
+peak_search_smin = 50
+peak_search_smax = 75
 
 reg_lambda = 1.0
 n_folds = 5
@@ -63,7 +83,9 @@ device = "cuda"
 tol = 1e-6
 max_iter = 15
 
-n_permutations = 500
+n_permutations_stage1 = 1000
+n_permutations_stage2 = 9000
+escalate_pointwise_p_max = 0.20
 permutation_seed = 0
 permutation_chunk_size = 6
 
@@ -84,23 +106,112 @@ epochs.metadata = add_metadata_features(epochs.metadata)
 max_sample = epochs.times.shape[0]
 windows = make_windows(min_sample, max_sample, window_size, stride)
 
-# %%
-permute_seeds = list(range(permutation_seed, permutation_seed + n_permutations))
+# %% [markdown]
+# ## Stage 1 — permutations across all speech-responsive electrodes.
 
-null_scores = run_acoustic_searchlight_permutations(
+# %%
+stage1_seeds = list(range(permutation_seed, permutation_seed + n_permutations_stage1))
+null_stage1 = run_acoustic_searchlight_permutations(
     epochs, subject=subject,
     electrode_idxs=speech_responsive_idxs,
     windows=windows,
     reg_lambda=reg_lambda,
-    permute_seeds=permute_seeds,
+    permute_seeds=stage1_seeds,
     permutation_chunk_size=permutation_chunk_size,
     target=target,
     n_folds=n_folds, cv_random_state=cv_random_state,
     device=device, dtype=torch.float32,
     tol=tol, max_iter=max_iter,
 )
-assert null_scores.height > 0, f"[{subject}] acoustic null run produced no rows"
+assert null_stage1.height > 0, f"[{subject}] acoustic stage-1 produced no rows"
+
+# %% [markdown]
+# ## Gate — aggregate, compute per-flavor min pointwise_p, decide escalation.
 
 # %%
+real_scores = pl.read_parquet(scores_path)
+real_agg, null_agg_stage1 = aggregate_acoustic(
+    real_scores, null_stage1,
+    target=target,
+    peak_search_smin=peak_search_smin,
+    peak_search_smax=peak_search_smax,
+)
+
+borderline_keys, gate_log = stage1_gate(
+    real_agg, null_agg_stage1,
+    site_keys=SITE_KEYS_ACOUSTIC,
+    flavors=FLAVORS_ACOUSTIC,
+    p_max=escalate_pointwise_p_max,
+)
+
+n_total = gate_log.height
+n_esc = len(borderline_keys)
+print(
+    f"[{subject}] stage1 K={n_permutations_stage1}: "
+    f"{n_esc}/{n_total} sites with min_pointwise_p_global<={escalate_pointwise_p_max} "
+    f"-> escalating"
+)
+if n_esc > 0:
+    print(
+        gate_log.filter(pl.col("escalated"))
+        .sort("min_pointwise_p_global")
+        .to_pandas()
+        .to_string(index=False)
+    )
+
+# %% [markdown]
+# ## Stage 2 — additional permutations on the borderline electrodes only.
+
+# %%
+if borderline_keys and n_permutations_stage2 > 0:
+    stage2_seeds = list(range(
+        permutation_seed + n_permutations_stage1,
+        permutation_seed + n_permutations_stage1 + n_permutations_stage2,
+    ))
+    eidx_pos = SITE_KEYS_ACOUSTIC.index("electrode_idx")
+    borderline_electrode_idxs = sorted({k[eidx_pos] for k in borderline_keys})
+    null_stage2_raw = run_acoustic_searchlight_permutations(
+        epochs, subject=subject,
+        electrode_idxs=borderline_electrode_idxs,
+        windows=windows,
+        reg_lambda=reg_lambda,
+        permute_seeds=stage2_seeds,
+        permutation_chunk_size=permutation_chunk_size,
+        target=target,
+        n_folds=n_folds, cv_random_state=cv_random_state,
+        device=device, dtype=torch.float32,
+        tol=tol, max_iter=max_iter,
+    )
+    null_stage2 = filter_null_to_borderline(
+        null_stage2_raw, borderline_keys, site_keys=SITE_KEYS_ACOUSTIC,
+    )
+    null_scores = pl.concat([null_stage1, null_stage2])
+    print(
+        f"[{subject}] stage2 K={n_permutations_stage2} on "
+        f"{len(borderline_electrode_idxs)} electrodes ({n_esc} sites after "
+        f"site_keys filter); merged null has {null_scores.height} rows"
+    )
+else:
+    null_scores = null_stage1
+    print(
+        f"[{subject}] no escalation needed "
+        f"(borderline={n_esc}, K2={n_permutations_stage2})"
+    )
+
+# %% [markdown]
+# ## Outputs.
+
+# %%
+gate_log = gate_log.with_columns(
+    pl.when(pl.col("escalated"))
+    .then(n_permutations_stage1 + n_permutations_stage2)
+    .otherwise(n_permutations_stage1)
+    .alias("n_permutations")
+)
+
 null_scores.write_parquet(outdir / "null_scores.parquet")
-print(f"Wrote null_scores.parquet ({null_scores.height} rows) to {outdir}")
+gate_log.write_parquet(outdir / "escalation_log.parquet")
+print(
+    f"Wrote null_scores.parquet ({null_scores.height} rows) and "
+    f"escalation_log.parquet ({gate_log.height} rows) to {outdir}"
+)

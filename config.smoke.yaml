@@ -42,6 +42,8 @@ analysis:
     n_jobs: 4
     peak_search_smin: 0
     peak_search_smax: 290
+    acoustic_peak_search_smin: 0
+    acoustic_peak_search_smax: 290
 
   multivariate:
     window_sizes: [10]
@@ -70,6 +72,10 @@ causal6:
 
   tuning_reg_lambda_grid: [1.0]     # smoke-test: single lambda (was 7-point grid)
 
-  n_permutations: 10                # smoke-test: was 500 (significance rules only)
+  # Two-stage adaptive K — tiny K_total=20 with a strict gate so both
+  # branches (escalation triggered / not triggered) get exercised.
+  n_permutations_stage1: 8
+  n_permutations_stage2: 12
+  escalate_pointwise_p_max: 0.05    # tighter than prod 0.20 so only obvious sites escalate
   permutation_seed: 0
   permutation_chunk_size: 6

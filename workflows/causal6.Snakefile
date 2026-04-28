@@ -417,16 +417,18 @@ rule behavior_decoding_single_electrode_hga_only:
 
 
 rule acoustic_decoding_null:
-    """Per-subject acoustic permutation-null refits."""
+    """Per-subject acoustic permutation-null refits with two-stage adaptive K."""
     input:
         epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
         electrodes = "outputs/causal5/find_speech_responsive/{subject}_results.csv",
         winners    = REG_LAMBDA_WINNERS,
+        scores     = "outputs/causal6/acoustic_decoding_single_electrode/{subject}/scores.parquet",
         notebook   = "notebooks/causal6/acoustic_decoding_null.py",
 
     output:
-        notebook    = "outputs/causal6/acoustic_decoding_null/{subject}/notebook.ipynb",
-        null_scores = "outputs/causal6/acoustic_decoding_null/{subject}/null_scores.parquet",
+        notebook        = "outputs/causal6/acoustic_decoding_null/{subject}/notebook.ipynb",
+        null_scores     = "outputs/causal6/acoustic_decoding_null/{subject}/null_scores.parquet",
+        escalation_log  = "outputs/causal6/acoustic_decoding_null/{subject}/escalation_log.parquet",
 
     resources:
         gpu = 1
@@ -440,6 +442,7 @@ rule acoustic_decoding_null:
             parameters=dict(
                 epochs_path=str(input.epochs),
                 electrodes_path=str(input.electrodes),
+                scores_path=str(input.scores),
                 outdir=str(outdir),
 
                 min_sample=config["analysis"]["decoding"]["min_sample"],
@@ -447,6 +450,8 @@ rule acoustic_decoding_null:
                 stride=config["analysis"]["decoding"]["stride"],
 
                 target="categorical_acoustic_cue",
+                peak_search_smin=config["analysis"]["decoding"]["acoustic_peak_search_smin"],
+                peak_search_smax=config["analysis"]["decoding"]["acoustic_peak_search_smax"],
 
                 reg_lambda=_load_reg_lambda(input.winners, "acoustic"),
                 n_folds=C6["n_folds"],
@@ -455,7 +460,9 @@ rule acoustic_decoding_null:
                 tol=C6["tol"],
                 max_iter=C6["max_iter"],
 
-                n_permutations=C6["n_permutations"],
+                n_permutations_stage1=C6["n_permutations_stage1"],
+                n_permutations_stage2=C6["n_permutations_stage2"],
+                escalate_pointwise_p_max=C6["escalate_pointwise_p_max"],
                 permutation_seed=C6["permutation_seed"],
                 permutation_chunk_size=C6["permutation_chunk_size"],
             ),
@@ -464,16 +471,18 @@ rule acoustic_decoding_null:
 
 
 rule behavior_decoding_single_electrode_null:
-    """Per-subject behavior-with-control permutation-null refits."""
+    """Per-subject behavior-with-control permutation-null refits with two-stage adaptive K."""
     input:
         epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
         electrodes = "outputs/causal5/find_speech_responsive/{subject}_results.csv",
         winners    = REG_LAMBDA_WINNERS,
+        scores     = "outputs/causal6/behavior_decoding_single_electrode/{subject}/scores.parquet",
         notebook   = "notebooks/causal6/behavior_decoding_single_electrode_null.py",
 
     output:
-        notebook    = "outputs/causal6/behavior_decoding_single_electrode_null/{subject}/notebook.ipynb",
-        null_scores = "outputs/causal6/behavior_decoding_single_electrode_null/{subject}/null_scores.parquet",
+        notebook        = "outputs/causal6/behavior_decoding_single_electrode_null/{subject}/notebook.ipynb",
+        null_scores     = "outputs/causal6/behavior_decoding_single_electrode_null/{subject}/null_scores.parquet",
+        escalation_log  = "outputs/causal6/behavior_decoding_single_electrode_null/{subject}/escalation_log.parquet",
 
     resources:
         gpu = 1
@@ -487,11 +496,18 @@ rule behavior_decoding_single_electrode_null:
             parameters=dict(
                 epochs_path=str(input.epochs),
                 electrodes_path=str(input.electrodes),
+                scores_path=str(input.scores),
                 outdir=str(outdir),
 
                 min_sample=config["analysis"]["decoding"]["min_sample"],
                 window_size=config["analysis"]["decoding"]["window_size"],
                 stride=config["analysis"]["decoding"]["stride"],
+
+                epoch_tmin=config["analysis"]["epoch_tmin"],
+                epoch_sfreq=config["analysis"]["epoch_sfreq"],
+                behav_peak_post_offset_s=config["analysis"]["behav_peak_post_offset_s"],
+                peak_search_smin=config["analysis"]["decoding"]["peak_search_smin"],
+                peak_search_smax=config["analysis"]["decoding"]["peak_search_smax"],
 
                 reg_lambda=_load_reg_lambda(input.winners, "behavior_full"),
                 reg_lambda_baseline=None,
@@ -501,7 +517,9 @@ rule behavior_decoding_single_electrode_null:
                 tol=C6["tol"],
                 max_iter=C6["max_iter"],
 
-                n_permutations=C6["n_permutations"],
+                n_permutations_stage1=C6["n_permutations_stage1"],
+                n_permutations_stage2=C6["n_permutations_stage2"],
+                escalate_pointwise_p_max=C6["escalate_pointwise_p_max"],
                 permutation_seed=C6["permutation_seed"],
                 permutation_chunk_size=C6["permutation_chunk_size"],
             ),
@@ -510,16 +528,18 @@ rule behavior_decoding_single_electrode_null:
 
 
 rule behavior_decoding_single_electrode_hga_only_null:
-    """Per-subject behavior-HGA-only permutation-null refits."""
+    """Per-subject behavior-HGA-only permutation-null refits with two-stage adaptive K."""
     input:
         epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
         electrodes = "outputs/causal5/find_speech_responsive/{subject}_results.csv",
         winners    = REG_LAMBDA_WINNERS,
+        scores     = "outputs/causal6/behavior_decoding_single_electrode_hga_only/{subject}/scores.parquet",
         notebook   = "notebooks/causal6/behavior_decoding_single_electrode_hga_only_null.py",
 
     output:
-        notebook    = "outputs/causal6/behavior_decoding_single_electrode_hga_only_null/{subject}/notebook.ipynb",
-        null_scores = "outputs/causal6/behavior_decoding_single_electrode_hga_only_null/{subject}/null_scores.parquet",
+        notebook        = "outputs/causal6/behavior_decoding_single_electrode_hga_only_null/{subject}/notebook.ipynb",
+        null_scores     = "outputs/causal6/behavior_decoding_single_electrode_hga_only_null/{subject}/null_scores.parquet",
+        escalation_log  = "outputs/causal6/behavior_decoding_single_electrode_hga_only_null/{subject}/escalation_log.parquet",
 
     resources:
         gpu = 1
@@ -533,11 +553,18 @@ rule behavior_decoding_single_electrode_hga_only_null:
             parameters=dict(
                 epochs_path=str(input.epochs),
                 electrodes_path=str(input.electrodes),
+                scores_path=str(input.scores),
                 outdir=str(outdir),
 
                 min_sample=config["analysis"]["decoding"]["min_sample"],
                 window_size=config["analysis"]["decoding"]["window_size"],
                 stride=config["analysis"]["decoding"]["stride"],
+
+                epoch_tmin=config["analysis"]["epoch_tmin"],
+                epoch_sfreq=config["analysis"]["epoch_sfreq"],
+                behav_peak_post_offset_s=config["analysis"]["behav_peak_post_offset_s"],
+                peak_search_smin=config["analysis"]["decoding"]["peak_search_smin"],
+                peak_search_smax=config["analysis"]["decoding"]["peak_search_smax"],
 
                 reg_lambda=_load_reg_lambda(input.winners, "behavior_hga_only"),
                 n_folds=C6["n_folds"],
@@ -546,7 +573,9 @@ rule behavior_decoding_single_electrode_hga_only_null:
                 tol=C6["tol"],
                 max_iter=C6["max_iter"],
 
-                n_permutations=C6["n_permutations"],
+                n_permutations_stage1=C6["n_permutations_stage1"],
+                n_permutations_stage2=C6["n_permutations_stage2"],
+                escalate_pointwise_p_max=C6["escalate_pointwise_p_max"],
                 permutation_seed=C6["permutation_seed"],
                 permutation_chunk_size=C6["permutation_chunk_size"],
             ),
@@ -1042,16 +1071,18 @@ rule ganong_decoding_single_electrode_hga_only:
 
 
 rule ganong_decoding_null:
-    """Per-subject ganong-with-control permutation-null refits."""
+    """Per-subject ganong-with-control permutation-null refits with two-stage adaptive K."""
     input:
         epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
         electrodes = "outputs/causal5/find_speech_responsive/{subject}_results.csv",
         winners    = REG_LAMBDA_WINNERS,
+        scores     = "outputs/causal6/ganong_decoding_single_electrode/{subject}/scores.parquet",
         notebook   = "notebooks/causal6/ganong_decoding_null.py",
 
     output:
-        notebook    = "outputs/causal6/ganong_decoding_null/{subject}/notebook.ipynb",
-        null_scores = "outputs/causal6/ganong_decoding_null/{subject}/null_scores.parquet",
+        notebook        = "outputs/causal6/ganong_decoding_null/{subject}/notebook.ipynb",
+        null_scores     = "outputs/causal6/ganong_decoding_null/{subject}/null_scores.parquet",
+        escalation_log  = "outputs/causal6/ganong_decoding_null/{subject}/escalation_log.parquet",
 
     resources:
         gpu = 1
@@ -1065,11 +1096,16 @@ rule ganong_decoding_null:
             parameters=dict(
                 epochs_path=str(input.epochs),
                 electrodes_path=str(input.electrodes),
+                scores_path=str(input.scores),
                 outdir=str(outdir),
 
                 min_sample=config["analysis"]["decoding"]["min_sample"],
                 window_size=config["analysis"]["decoding"]["window_size"],
                 stride=config["analysis"]["decoding"]["stride"],
+
+                epoch_tmin=config["analysis"]["epoch_tmin"],
+                epoch_sfreq=config["analysis"]["epoch_sfreq"],
+                peak_search_smax=config["analysis"]["decoding"]["peak_search_smax"],
 
                 reg_lambda=_load_reg_lambda(input.winners, "ganong_full"),
                 reg_lambda_baseline=None,
@@ -1079,7 +1115,9 @@ rule ganong_decoding_null:
                 tol=C6["tol"],
                 max_iter=C6["max_iter"],
 
-                n_permutations=C6["n_permutations"],
+                n_permutations_stage1=C6["n_permutations_stage1"],
+                n_permutations_stage2=C6["n_permutations_stage2"],
+                escalate_pointwise_p_max=C6["escalate_pointwise_p_max"],
                 permutation_seed=C6["permutation_seed"],
                 permutation_chunk_size=C6["permutation_chunk_size"],
             ),
@@ -1088,16 +1126,18 @@ rule ganong_decoding_null:
 
 
 rule ganong_decoding_hga_only_null:
-    """Per-subject ganong-HGA-only permutation-null refits."""
+    """Per-subject ganong-HGA-only permutation-null refits with two-stage adaptive K."""
     input:
         epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
         electrodes = "outputs/causal5/find_speech_responsive/{subject}_results.csv",
         winners    = REG_LAMBDA_WINNERS,
+        scores     = "outputs/causal6/ganong_decoding_single_electrode_hga_only/{subject}/scores.parquet",
         notebook   = "notebooks/causal6/ganong_decoding_hga_only_null.py",
 
     output:
-        notebook    = "outputs/causal6/ganong_decoding_hga_only_null/{subject}/notebook.ipynb",
-        null_scores = "outputs/causal6/ganong_decoding_hga_only_null/{subject}/null_scores.parquet",
+        notebook        = "outputs/causal6/ganong_decoding_hga_only_null/{subject}/notebook.ipynb",
+        null_scores     = "outputs/causal6/ganong_decoding_hga_only_null/{subject}/null_scores.parquet",
+        escalation_log  = "outputs/causal6/ganong_decoding_hga_only_null/{subject}/escalation_log.parquet",
 
     resources:
         gpu = 1
@@ -1111,11 +1151,16 @@ rule ganong_decoding_hga_only_null:
             parameters=dict(
                 epochs_path=str(input.epochs),
                 electrodes_path=str(input.electrodes),
+                scores_path=str(input.scores),
                 outdir=str(outdir),
 
                 min_sample=config["analysis"]["decoding"]["min_sample"],
                 window_size=config["analysis"]["decoding"]["window_size"],
                 stride=config["analysis"]["decoding"]["stride"],
+
+                epoch_tmin=config["analysis"]["epoch_tmin"],
+                epoch_sfreq=config["analysis"]["epoch_sfreq"],
+                peak_search_smax=config["analysis"]["decoding"]["peak_search_smax"],
 
                 reg_lambda=_load_reg_lambda(input.winners, "ganong_hga_only"),
                 n_folds=C6["n_folds"],
@@ -1124,7 +1169,9 @@ rule ganong_decoding_hga_only_null:
                 tol=C6["tol"],
                 max_iter=C6["max_iter"],
 
-                n_permutations=C6["n_permutations"],
+                n_permutations_stage1=C6["n_permutations_stage1"],
+                n_permutations_stage2=C6["n_permutations_stage2"],
+                escalate_pointwise_p_max=C6["escalate_pointwise_p_max"],
                 permutation_seed=C6["permutation_seed"],
                 permutation_chunk_size=C6["permutation_chunk_size"],
             ),
