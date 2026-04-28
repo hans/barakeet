@@ -349,6 +349,56 @@ def test_filter_null_to_borderline_keeps_only_named_site_keys():
     assert out.height == 6
 
 
+def test_stage1_gate_handles_float32_stat_inputs():
+    """Regression: GPU permutation kernels return ``test_roc_auc`` as
+    Float32, so ``fold_tstat_aggregate`` produces a Float32 ``fold_mean``
+    column while ``t_stat`` and TFCE-enhanced statistics are Float64.
+    Without dtype normalization in ``min_pointwise_p_per_site``,
+    ``pl.concat`` over per-flavor frames raises ``SchemaError: type
+    Float64 is incompatible with expected type Float32``.
+    """
+    S, W, K = 2, 4, 19
+    rng = np.random.default_rng(11)
+    fold_mean_real = rng.uniform(0.45, 0.7, size=(S, W)).astype(np.float32)
+    fold_mean_null = rng.uniform(0.45, 0.7, size=(S, K, W)).astype(np.float32)
+    # t_stat in real pipelines is Float64 (Float32 / Float64 promotion).
+    t_stat_real = (fold_mean_real.astype(np.float64) - 0.5) * 10
+    t_stat_null = (fold_mean_null.astype(np.float64) - 0.5) * 10
+
+    real_agg, null_agg = _make_agg_with_flavor_cols(
+        fold_mean_real, fold_mean_null,
+        site_ids=[("S0", 0), ("S1", 1)],
+        t_stat_real=t_stat_real, t_stat_null=t_stat_null,
+    )
+    # Force fold_mean back to Float32 (the helper coerced via float()).
+    real_agg = real_agg.with_columns(pl.col("fold_mean").cast(pl.Float32))
+    null_agg = null_agg.with_columns(pl.col("fold_mean").cast(pl.Float32))
+    assert real_agg.schema["fold_mean"] == pl.Float32
+    assert real_agg.schema["t_stat"] == pl.Float64
+
+    # All four BEHAVIOR_HGA_ONLY flavors mix raw + TFCE on both columns —
+    # exactly the configuration that tripped the GPU run.
+    flavors = [
+        FlavorSpec("fold_mean", apply_tfce=False),
+        FlavorSpec("t_stat", apply_tfce=False),
+        FlavorSpec("fold_mean", apply_tfce=True, tfce_threshold=0.5),
+        FlavorSpec("t_stat", apply_tfce=True),
+    ]
+    borderline, gate_log = stage1_gate(
+        real_agg, null_agg,
+        site_keys=SITE_KEYS, flavors=flavors, p_max=0.20,
+    )
+    assert gate_log.height == S
+    expected_cols = {
+        "min_pointwise_p_fold_mean", "min_pointwise_p_t_stat",
+        "min_pointwise_p_fold_mean_tfce", "min_pointwise_p_t_stat_tfce",
+        "min_pointwise_p_global", "argmin_flavor",
+        "argmin_smin", "argmin_smax",
+        "real_at_argmin", "n_windows", "escalated",
+    } | set(SITE_KEYS)
+    assert expected_cols.issubset(set(gate_log.columns))
+
+
 def test_filter_null_to_borderline_empty_set():
     """Empty borderline_keys → empty output of same schema."""
     null_scores = pl.DataFrame({

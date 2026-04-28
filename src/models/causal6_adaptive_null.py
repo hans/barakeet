@@ -102,10 +102,15 @@ def min_pointwise_p_per_site(
         on=sw_keys,
         how="left",
     )
+    # Cast real_statistic to Float64 so the output schema is stable across
+    # callers — GPU outputs are Float32, but ``t_stat`` and TFCE-enhanced
+    # statistics are computed in Float64; without this cast, stacking
+    # per-flavor frames in ``stage1_gate`` raises a polars SchemaError on
+    # strict concat.
     pw = (
         merged.group_by(sw_keys)
         .agg(
-            pl.col(stat_col).first().alias("real_statistic"),
+            pl.col(stat_col).first().cast(pl.Float64).alias("real_statistic"),
             (
                 (pl.col("_null_stat") >= pl.col(stat_col))
                 & pl.col("_null_stat").is_not_null()
