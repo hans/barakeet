@@ -329,12 +329,12 @@ def _filter_aggregator_rows(df: pl.DataFrame, fresh_subjects, *, label: str) -> 
     per-subject outputs are now considered stale; this keeps the cross-subject
     set consistent.
 
-    NOTE: the FDR p_value_fdr column in the aggregator was computed over the
-    full set of subjects at aggregation time. After filtering by fresh subjects
-    here, the FDR threshold is no longer guaranteed to be valid for the
-    remaining set — it is conservative (more rejections survive than would on
-    the smaller set). Re-run *_aggregate after upstream is fully fresh to get
-    canonical FDR.
+    NOTE: the `q_value` / `significant` columns in the aggregator were
+    computed by BH-FDR over the full set of subjects at aggregation time.
+    After filtering by fresh subjects here, the FDR threshold is no longer
+    guaranteed to be valid for the remaining set — it is conservative (more
+    rejections survive than would on the smaller set). Re-run *_aggregate
+    after upstream is fully fresh to get canonical FDR.
     """
     n_before = df.height
     df = df.filter(pl.col("subject").is_in(list(fresh_subjects)))
@@ -647,12 +647,11 @@ behav_peaks_df_unfiltered = behav_peaks_lookup[primary_peak_flavor]
 
 # Treat "behaviorally selective" as FDR-significant peaks, dropping rows that
 # lack the column (legacy). FDR significance is added by significance_aggregate.
-sig_col = "is_significant" if "is_significant" in behav_peaks_df_unfiltered.columns else None
-if sig_col is not None:
-    behav_peaks_df = behav_peaks_df_unfiltered.filter(pl.col(sig_col))
+if "significant" in behav_peaks_df_unfiltered.columns:
+    behav_peaks_df = behav_peaks_df_unfiltered.filter(pl.col("significant"))
 else:
     L.warning(
-        "behav peaks parquet has no `is_significant` column — falling back to "
+        "behav peaks parquet has no `significant` column — falling back to "
         "p_value < 0.05 (uncorrected); regenerate with significance_aggregate "
         "for FDR-corrected output."
     )

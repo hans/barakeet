@@ -173,9 +173,13 @@ paper_data = PaperData(
 
 # %%
 def _is_significant(df: pl.DataFrame) -> pl.Series:
-    """FDR-significance column with safe fallback."""
-    if "is_significant" in df.columns:
-        return df.get_column("is_significant")
+    """FDR-significance column with safe fallback. The aggregator
+    (notebooks/causal6/significance_aggregate.py) writes a `significant`
+    bool column from BH-FDR on `p_value` at fdr_alpha; if that column is
+    absent (e.g. consumed pre-aggregation), fall back to uncorrected
+    p_value < 0.05."""
+    if "significant" in df.columns:
+        return df.get_column("significant")
     return df.get_column("p_value") < 0.05
 
 
