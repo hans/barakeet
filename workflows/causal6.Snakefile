@@ -1346,3 +1346,230 @@ rule ganong_decoding_hga_only_summarize_aggregate:
                 fdr_alpha=config["analysis"]["fdr_alpha"],
             ),
         )
+
+
+# =============================================================================
+# Downstream analysis: prepare_neurometrics + A_neurometrics.
+#
+# prepare_neurometrics assembles the PaperData parquet bundle (electrode meta,
+# peak windows in two/three flavors, HGA windows, polarities, plot_*_dfs,
+# decoder weights) from the cross-subject aggregator outputs above.
+#
+# A_neurometrics consumes that bundle and renders population figures + tables
+# (overlap contingency, peak-timing KDE, cross-window decoding spaghetti,
+# behavioral decoding improvement, cross-window transfer, exploratory
+# zoomin/contrast PDFs). Sections #8-#14 from causal4 left as TODO stubs.
+# =============================================================================
+
+
+rule prepare_neurometrics:
+    """Assemble PaperData parquet bundle for A_neurometrics.
+
+    Adapted from causal5's prepare_neurometrics:
+      - Acoustic peaks shipped in two flavors (foldmean_maxstat, tstat_maxstat).
+      - Behavior peaks (both behavior_full and behavior_hga_only) shipped in
+        three flavors (foldmean_maxstat, tstat_maxstat, tstat_tfce).
+      - The behav_baseline_df is built from the model="baseline" rows in
+        behavior_decoding_single_electrode/scores.parquet (the with-control
+        decoder; the baseline rows are control-features-only LR scores).
+      - decoder_weights_*.parquet expose per-fold beta + scaler stats from each
+        decoder's coefficients.parquet, so A_neurometrics can apply trained
+        weights to swapped-window HGA features for cross-window transfer
+        analyses (sections #5/#6) without re-fitting.
+    """
+    input:
+        all_epochs = expand(
+            "outputs/epochs_preprocessed/{subject}_epo.fif",
+            subject=config["data"]["subjects"],
+        ),
+        electrode_paths = expand(
+            "outputs/causal5/find_speech_responsive/{subject}_results.csv",
+            subject=config["data"]["subjects"],
+        ),
+
+        # Acoustic decoder outputs
+        acoustic_scores = expand(
+            "outputs/causal6/acoustic_decoding_single_electrode/{subject}/scores.parquet",
+            subject=config["data"]["subjects"],
+        ),
+        acoustic_predictions = expand(
+            "outputs/causal6/acoustic_decoding_single_electrode/{subject}/predictions.parquet",
+            subject=config["data"]["subjects"],
+        ),
+        acoustic_coefficients = expand(
+            "outputs/causal6/acoustic_decoding_single_electrode/{subject}/coefficients.parquet",
+            subject=config["data"]["subjects"],
+        ),
+        phon_peaks_foldmean_maxstat   = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet",
+        phon_peaks_tstat_maxstat      = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_tstat_maxstat_all.parquet",
+        phon_roc_auc_searchlight = expand(
+            "outputs/causal6/acoustic_decoding_peaks/{subject}/phon_roc_auc_searchlight.parquet",
+            subject=config["data"]["subjects"],
+        ),
+
+        # Behavior with-control (full) decoder outputs
+        behav_full_scores = expand(
+            "outputs/causal6/behavior_decoding_single_electrode/{subject}/scores.parquet",
+            subject=config["data"]["subjects"],
+        ),
+        behav_full_predictions = expand(
+            "outputs/causal6/behavior_decoding_single_electrode/{subject}/predictions.parquet",
+            subject=config["data"]["subjects"],
+        ),
+        behav_full_coefficients = expand(
+            "outputs/causal6/behavior_decoding_single_electrode/{subject}/coefficients.parquet",
+            subject=config["data"]["subjects"],
+        ),
+        behav_full_peaks_foldmean_maxstat = "outputs/causal6/behavior_decoding_single_electrode_summarize/peak_summary_all.parquet",
+        behav_full_peaks_tstat_maxstat    = "outputs/causal6/behavior_decoding_single_electrode_summarize/peak_summary_tstat_maxstat_all.parquet",
+        behav_full_peaks_tstat_tfce       = "outputs/causal6/behavior_decoding_single_electrode_summarize/peak_summary_tstat_tfce_all.parquet",
+
+        # Behavior HGA-only decoder outputs (canonical "behaviorally selective")
+        behav_hga_only_scores = expand(
+            "outputs/causal6/behavior_decoding_single_electrode_hga_only/{subject}/scores.parquet",
+            subject=config["data"]["subjects"],
+        ),
+        behav_hga_only_predictions = expand(
+            "outputs/causal6/behavior_decoding_single_electrode_hga_only/{subject}/predictions.parquet",
+            subject=config["data"]["subjects"],
+        ),
+        behav_hga_only_coefficients = expand(
+            "outputs/causal6/behavior_decoding_single_electrode_hga_only/{subject}/coefficients.parquet",
+            subject=config["data"]["subjects"],
+        ),
+        behav_hga_only_peaks_foldmean_maxstat = "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/peak_summary_all.parquet",
+        behav_hga_only_peaks_tstat_maxstat    = "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/peak_summary_tstat_maxstat_all.parquet",
+        behav_hga_only_peaks_tstat_tfce       = "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/peak_summary_tstat_tfce_all.parquet",
+
+        notebook = "notebooks/causal6/prepare_neurometrics.py",
+
+    output:
+        notebook                              = "outputs/causal6/prepare_neurometrics/notebook.ipynb",
+        electrode_df                          = "outputs/causal6/prepare_neurometrics/electrode_df.parquet",
+        all_md                                = "outputs/causal6/prepare_neurometrics/all_md.parquet",
+        word_end_df                           = "outputs/causal6/prepare_neurometrics/word_end_df.parquet",
+        # Peak parquets keyed by flavor
+        phon_peaks_foldmean_maxstat           = "outputs/causal6/prepare_neurometrics/phon_peaks_foldmean_maxstat.parquet",
+        phon_peaks_tstat_maxstat              = "outputs/causal6/prepare_neurometrics/phon_peaks_tstat_maxstat.parquet",
+        behav_hga_only_peaks_foldmean_maxstat = "outputs/causal6/prepare_neurometrics/behav_hga_only_peaks_foldmean_maxstat.parquet",
+        behav_hga_only_peaks_tstat_maxstat    = "outputs/causal6/prepare_neurometrics/behav_hga_only_peaks_tstat_maxstat.parquet",
+        behav_hga_only_peaks_tstat_tfce       = "outputs/causal6/prepare_neurometrics/behav_hga_only_peaks_tstat_tfce.parquet",
+        behav_full_peaks_foldmean_maxstat     = "outputs/causal6/prepare_neurometrics/behav_full_peaks_foldmean_maxstat.parquet",
+        behav_full_peaks_tstat_maxstat        = "outputs/causal6/prepare_neurometrics/behav_full_peaks_tstat_maxstat.parquet",
+        behav_full_peaks_tstat_tfce           = "outputs/causal6/prepare_neurometrics/behav_full_peaks_tstat_tfce.parquet",
+        # ROC-AUC searchlight (used for figure #3 + #4)
+        phon_roc_auc_searchlight_df           = "outputs/causal6/prepare_neurometrics/phon_roc_auc_searchlight_df.parquet",
+        behav_roc_auc_searchlight_df          = "outputs/causal6/prepare_neurometrics/behav_roc_auc_searchlight_df.parquet",
+        behav_baseline_df                     = "outputs/causal6/prepare_neurometrics/behav_baseline_df.parquet",
+        # Plot dataframes (default flavor, taken from canonical peak set)
+        plot_phon_phon_df                     = "outputs/causal6/prepare_neurometrics/plot_phon_phon_df.parquet",
+        plot_behav_phon_df                    = "outputs/causal6/prepare_neurometrics/plot_behav_phon_df.parquet",
+        plot_phon_behav_df                    = "outputs/causal6/prepare_neurometrics/plot_phon_behav_df.parquet",
+        plot_behav_behav_df                   = "outputs/causal6/prepare_neurometrics/plot_behav_behav_df.parquet",
+        zoomin_keys                           = "outputs/causal6/prepare_neurometrics/zoomin_keys.parquet",
+        # HGA + polarity + reg_df
+        hga_df                                = "outputs/causal6/prepare_neurometrics/hga_df.parquet",
+        early_polarity                        = "outputs/causal6/prepare_neurometrics/early_polarity.parquet",
+        late_polarity                         = "outputs/causal6/prepare_neurometrics/late_polarity.parquet",
+        reg_df                                = "outputs/causal6/prepare_neurometrics/reg_df.parquet",
+        # Decoder weights (per-fold beta + scaler stats) for cross-window transfer
+        decoder_weights_acoustic              = "outputs/causal6/prepare_neurometrics/decoder_weights_acoustic.parquet",
+        decoder_weights_behav_hga_only        = "outputs/causal6/prepare_neurometrics/decoder_weights_behav_hga_only.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                all_epochs=list(input.all_epochs),
+                electrode_paths=list(input.electrode_paths),
+
+                acoustic_scores=list(input.acoustic_scores),
+                acoustic_predictions=list(input.acoustic_predictions),
+                acoustic_coefficients=list(input.acoustic_coefficients),
+                phon_peaks_foldmean_maxstat=str(input.phon_peaks_foldmean_maxstat),
+                phon_peaks_tstat_maxstat=str(input.phon_peaks_tstat_maxstat),
+                phon_roc_auc_searchlight_paths=list(input.phon_roc_auc_searchlight),
+
+                behav_full_scores=list(input.behav_full_scores),
+                behav_full_predictions=list(input.behav_full_predictions),
+                behav_full_coefficients=list(input.behav_full_coefficients),
+                behav_full_peaks_foldmean_maxstat=str(input.behav_full_peaks_foldmean_maxstat),
+                behav_full_peaks_tstat_maxstat=str(input.behav_full_peaks_tstat_maxstat),
+                behav_full_peaks_tstat_tfce=str(input.behav_full_peaks_tstat_tfce),
+
+                behav_hga_only_scores=list(input.behav_hga_only_scores),
+                behav_hga_only_predictions=list(input.behav_hga_only_predictions),
+                behav_hga_only_coefficients=list(input.behav_hga_only_coefficients),
+                behav_hga_only_peaks_foldmean_maxstat=str(input.behav_hga_only_peaks_foldmean_maxstat),
+                behav_hga_only_peaks_tstat_maxstat=str(input.behav_hga_only_peaks_tstat_maxstat),
+                behav_hga_only_peaks_tstat_tfce=str(input.behav_hga_only_peaks_tstat_tfce),
+
+                outdir=str(outdir),
+
+                epoch_sfreq=config["analysis"]["epoch_sfreq"],
+                epoch_tmin=config["analysis"]["epoch_tmin"],
+                ambiguous_response_threshold=config["analysis"]["ambiguous_response_threshold"],
+                # Which behavior peak flavor defines the canonical "behaviorally
+                # selective" set used for plot_*_df + zoomin_keys downstream.
+                # All flavors are emitted as separate parquets regardless.
+                primary_peak_flavor=C6.get("primary_peak_flavor", "tstat_maxstat"),
+            ),
+        )
+
+
+rule A_neurometrics:
+    """Population analyses + figures from the prepare_neurometrics bundle.
+
+    Ports causal4 sections #1, #2, #3, #4, #5, #6, #7. Sections #8-#14 are
+    TODO stubs in the notebook (see the plan file).
+
+    Section #1 contingency runs per peak-flavor (tstat_maxstat & tstat_tfce);
+    behavior_full reported alongside as preliminary.
+    Section #7 emits a multi-page exploratory PDF over all selective sites.
+    """
+    input:
+        notebook = "notebooks/causal6/A_neurometrics.py",
+        prep_dir_marker = "outputs/causal6/prepare_neurometrics/electrode_df.parquet",
+        all_epochs = expand(
+            "outputs/epochs_preprocessed/{subject}_epo.fif",
+            subject=config["data"]["subjects"],
+        ),
+
+    output:
+        notebook                       = "outputs/causal6/A_neurometrics/notebook.ipynb",
+        # Section #1
+        contingency_figure             = "outputs/causal6/A_neurometrics/electrode_distribution.pdf",
+        contingency_summary            = "outputs/causal6/A_neurometrics/electrode_distribution_summary.csv",
+        # Section #2
+        peak_timing_necessary          = "outputs/causal6/A_neurometrics/decoding_timing-necessary.pdf",
+        peak_timing_desolate           = "outputs/causal6/A_neurometrics/decoding_timing-desolate.pdf",
+        # Section #3
+        cross_window_phon              = "outputs/causal6/A_neurometrics/decoding_phonetic.pdf",
+        # Section #4
+        decoding_improvement           = "outputs/causal6/A_neurometrics/decoding_behavioral_improvement.pdf",
+        # Sections #5/#6
+        transfer_phon                  = "outputs/causal6/A_neurometrics/decoding_acoustic_transfer.pdf",
+        transfer_behav                 = "outputs/causal6/A_neurometrics/decoding_phon_decoder_on_behav_window.pdf",
+        # Section #7
+        zoomin_exploratory             = "outputs/causal6/A_neurometrics/zoomin_exploratory.pdf",
+        condition_contrasts_necessary  = "outputs/causal6/A_neurometrics/condition_contrasts-necessary.pdf",
+        condition_contrasts_desolate   = "outputs/causal6/A_neurometrics/condition_contrasts-desolate.pdf",
+
+    run:
+        prep_dir = Path(input.prep_dir_marker).parent
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                neurometrics_dir=str(prep_dir),
+                all_epochs=list(input.all_epochs),
+                outdir=str(outdir),
+                epoch_sfreq=config["analysis"]["epoch_sfreq"],
+                epoch_tmin=config["analysis"]["epoch_tmin"],
+                ambiguous_response_threshold=config["analysis"]["ambiguous_response_threshold"],
+                primary_peak_flavor=C6.get("primary_peak_flavor", "tstat_maxstat"),
+            ),
+        )
