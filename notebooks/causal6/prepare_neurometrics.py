@@ -1,6 +1,7 @@
 # ---
 # jupyter:
 #   jupytext:
+#     formats: ipynb,py:percent
 #     text_representation:
 #       extension: .py
 #       format_name: percent
@@ -252,11 +253,14 @@ def _filter_fresh_subjects(decoder_dirs, *, decoder_label, summarize_rule, requi
         ok, msg = _coefficients_ok(d)
         if not ok:
             problems.append(f"coefficients: {msg}")
-        ok, msg = _escalation_ok(_null_dir_for(d / "scores.parquet"))
-        if not ok:
-            problems.append(f"null: {msg}")
-        elif msg != "OK":
-            L.warning(f"[stale-filter] {decoder_label}/{subj}: null {msg}")
+
+        # not worried about escalation; some runs ran with non-adaptive K and that's fine
+        # ok, msg = _escalation_ok(_null_dir_for(d / "scores.parquet"))
+        # if not ok:
+        #     problems.append(f"null: {msg}")
+        # elif msg != "OK":
+        #     L.warning(f"[stale-filter] {decoder_label}/{subj}: null {msg}")
+        
         if summarize_rule is not None and require_tfce:
             ok, msg = _tfce_flavors_ok(_summarize_dir_for(d, summarize_rule))
             if not ok:
@@ -395,6 +399,7 @@ all_md_pd = pd.concat(
     {subj: ep.metadata.assign(subject=subj) for subj, ep in epochs.items()},
     ignore_index=True,
 )
+all_md_pd["TDT Block"] = all_md_pd["TDT Block"].astype(str)
 all_md = pl.from_pandas(all_md_pd).with_columns(
     pl.col("subject").cast(subject_enum),
     pl.col("phoneme_pair").cast(phoneme_pair_enum),
