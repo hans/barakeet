@@ -460,6 +460,55 @@ def test_fit_batched_cv_permutations_matches_manual_reference():
             np.testing.assert_allclose(got, expected, atol=1e-10)
 
 
+def test_fit_batched_cv_permutations_spill_matches_inmem(tmp_path):
+    """spill_dir mode produces identical rows to the in-memory return path.
+
+    Stage-2 nulls on high-electrode-count subjects can exceed RAM; spill
+    mode streams chunks to parquet and lets the caller scan_parquet +
+    filter lazily. The streamed shards must be byte-equivalent to the
+    DataFrame we'd otherwise return (modulo row order).
+    """
+    X, y, pm = _small_cv_problem(seed=3, B=4, n=80, d=5)
+    seeds = [2, 4, 6, 8, 10, 12]
+    common = dict(
+        permute_seeds=seeds,
+        permutation_chunk_size=2,
+        reg_lambda=1.0, n_folds=5, cv_random_state=0,
+        device="cpu", dtype=torch.float64, tol=1e-6, max_iter=50,
+    )
+
+    inmem = _fit_batched_cv_permutations(X, y, pm, **common)
+    assert inmem is not None
+
+    spill_dir = tmp_path / "shards"
+    spill_dir.mkdir()
+    out = _fit_batched_cv_permutations(X, y, pm, spill_dir=spill_dir, **common)
+    assert out is None
+
+    shards = sorted(spill_dir.glob("*.parquet"))
+    assert len(shards) > 0, "spill mode should produce at least one shard"
+    streamed = pl.read_parquet(shards)
+
+    # Row counts and schemas match.
+    assert streamed.height == inmem.height
+    assert streamed.columns == inmem.columns
+
+    # Sort on a key that uniquely identifies each row in both frames, then
+    # compare. (problem_meta has no `subject`/`phoneme_pair` cols here, so
+    # `electrode_idx` alone identifies the problem.)
+    sort_keys = ["permutation_idx", "electrode_idx", "fold"]
+    a = inmem.sort(sort_keys)
+    b = streamed.sort(sort_keys)
+    np.testing.assert_array_equal(
+        a["test_roc_auc"].to_numpy(), b["test_roc_auc"].to_numpy()
+    )
+    for col in ["fold", "permutation_idx", "n_train", "n_test", "electrode_idx"]:
+        np.testing.assert_array_equal(
+            a[col].to_numpy(), b[col].to_numpy(),
+            err_msg=f"mismatch in column {col}",
+        )
+
+
 # ---------------------------------------------------------------------------
 # Permutation-test entry points
 # ---------------------------------------------------------------------------

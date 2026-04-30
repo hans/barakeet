@@ -35,12 +35,40 @@ TFCE flavors are included:
 
 from __future__ import annotations
 
+import shutil
+from collections.abc import Generator
+from contextlib import contextmanager
+from pathlib import Path
 from typing import Sequence
 
 import polars as pl
 
 from src.models.causal6_aggregates import FlavorSpec
 from src.models.significance import tfce_1d_per_site
+
+
+@contextmanager
+def stage2_spill_dir(parent: Path, name: str = "_stage2_spill") -> Generator[Path]:
+    """Scratch directory for stage-2 permutation-null parquet shards.
+
+    Creates ``parent/name`` empty (wiping any leftovers from an aborted
+    prior run), yields it for use as the ``spill_dir`` argument to
+    ``run_*_permutations``, and removes the directory on exit so shards
+    never outlive the rule.
+
+    All five ``*_null`` notebooks share this pattern: stream stage-2
+    perm chunks to disk, ``pl.scan_parquet`` + ``filter_null_to_borderline``
+    lazily, ``.collect()`` the (much smaller) filtered result. The
+    context manager keeps the lifecycle in one place.
+    """
+    spill = parent / name
+    if spill.exists():
+        shutil.rmtree(spill)
+    spill.mkdir(parents=True)
+    try:
+        yield spill
+    finally:
+        shutil.rmtree(spill, ignore_errors=True)
 
 
 def _flavor_name(flavor: FlavorSpec) -> str:
@@ -259,11 +287,11 @@ def stage1_gate(
 
 
 def filter_null_to_borderline(
-    null_scores: pl.DataFrame,
+    null_scores: pl.DataFrame | pl.LazyFrame,
     borderline_keys: set[tuple],
     *,
     site_keys: Sequence[str],
-) -> pl.DataFrame:
+) -> pl.DataFrame | pl.LazyFrame:
     """Filter raw null_scores to rows whose ``site_keys`` tuple is in ``borderline_keys``.
 
     ``run_<flavor>_permutations`` only takes a coarse ``electrode_idxs``
@@ -271,17 +299,27 @@ def filter_null_to_borderline(
     (``phoneme_pair``, ``word_end``), this filters down to exactly the
     site tuples flagged at stage 1 so stage-2 perms don't waste rows on
     sites that were already cleared.
+
+    Accepts both ``DataFrame`` and ``LazyFrame``; returns the same kind.
+    The LazyFrame path lets callers stream raw stage-2 shards from disk,
+    apply this filter lazily, and only collect the (much smaller) result —
+    avoiding the full-null materialization that triggers OOMs on
+    high-electrode-count subjects.
     """
     site_keys = list(site_keys)
+    is_lazy = isinstance(null_scores, pl.LazyFrame)
     if not borderline_keys:
         return null_scores.head(0)
 
+    schema = null_scores.collect_schema() if is_lazy else null_scores.schema
     keys_data = {
         sk: [k[i] for k in borderline_keys] for i, sk in enumerate(site_keys)
     }
     keys_df = pl.DataFrame(keys_data)
     for sk in site_keys:
-        target_dtype = null_scores.schema[sk]
+        target_dtype = schema[sk]
         if keys_df.schema[sk] != target_dtype:
             keys_df = keys_df.with_columns(pl.col(sk).cast(target_dtype))
+    if isinstance(null_scores, pl.LazyFrame):
+        return null_scores.join(keys_df.lazy(), on=site_keys, how="semi")
     return null_scores.join(keys_df, on=site_keys, how="semi")

@@ -348,6 +348,18 @@ def test_filter_null_to_borderline_keeps_only_named_site_keys():
     # All 3 perms × 2 keys = 6 rows.
     assert out.height == 6
 
+    # LazyFrame path must produce the same result. Stage-2 spill mode
+    # scans parquet shards and applies this filter lazily, so the
+    # collected output has to match the eager path row-for-row.
+    lazy_out = filter_null_to_borderline(
+        null_scores.lazy(), borderline, site_keys=site_keys,
+    )
+    assert isinstance(lazy_out, pl.LazyFrame)
+    collected = lazy_out.collect()
+    assert collected.height == out.height
+    lazy_kept = set(collected.select(site_keys).unique().iter_rows())
+    assert lazy_kept == borderline
+
 
 def test_stage1_gate_handles_float32_stat_inputs():
     """Regression: GPU permutation kernels return ``test_roc_auc`` as

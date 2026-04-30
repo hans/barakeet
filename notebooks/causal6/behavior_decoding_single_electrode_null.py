@@ -53,6 +53,7 @@ from src.models.causal6 import (
 from src.models.causal6_adaptive_null import (
     filter_null_to_borderline,
     stage1_gate,
+    stage2_spill_dir,
 )
 from src.models.causal6_aggregates import (
     FLAVORS_BEHAVIOR_WITH_CONTROL,
@@ -176,22 +177,26 @@ if borderline_keys and n_permutations_stage2 > 0:
     ))
     eidx_pos = SITE_KEYS_BEHAVIOR_WITH_CONTROL.index("electrode_idx")
     borderline_electrode_idxs = sorted({k[eidx_pos] for k in borderline_keys})
-    null_stage2_raw = run_behavior_with_control_permutations(
-        epochs, subject=subject,
-        electrode_idxs=borderline_electrode_idxs,
-        windows=windows,
-        reg_lambda=reg_lambda,
-        reg_lambda_baseline=reg_lambda_baseline,
-        permute_seeds=stage2_seeds,
-        permutation_chunk_size=permutation_chunk_size,
-        n_folds=n_folds, cv_random_state=cv_random_state,
-        device=device, dtype=torch.float32,
-        tol=tol, max_iter=max_iter,
-    )
-    null_stage2 = filter_null_to_borderline(
-        null_stage2_raw, borderline_keys,
-        site_keys=SITE_KEYS_BEHAVIOR_WITH_CONTROL,
-    )
+
+    with stage2_spill_dir(outdir) as spill_dir:
+        run_behavior_with_control_permutations(
+            epochs, subject=subject,
+            electrode_idxs=borderline_electrode_idxs,
+            windows=windows,
+            reg_lambda=reg_lambda,
+            reg_lambda_baseline=reg_lambda_baseline,
+            permute_seeds=stage2_seeds,
+            permutation_chunk_size=permutation_chunk_size,
+            n_folds=n_folds, cv_random_state=cv_random_state,
+            device=device, dtype=torch.float32,
+            tol=tol, max_iter=max_iter,
+            spill_dir=spill_dir,
+        )
+        null_stage2 = filter_null_to_borderline(
+            pl.scan_parquet(spill_dir / "*.parquet"),
+            borderline_keys,
+            site_keys=SITE_KEYS_BEHAVIOR_WITH_CONTROL,
+        ).collect()
     null_scores = pl.concat([null_stage1, null_stage2])
     print(
         f"[{subject}] stage2 K={n_permutations_stage2} on "

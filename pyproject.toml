@@ -54,3 +54,8 @@ addopts = "-m 'not integration'"
 markers = [
     "integration: requires preprocessed EC248 epochs on disk; slow; skipped by default",
 ]
+
+[dependency-groups]
+dev = [
+    "pynvml>=13.0.1",
+]

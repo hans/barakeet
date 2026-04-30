@@ -33,6 +33,8 @@ replaces.
 
 from __future__ import annotations
 
+import uuid
+from pathlib import Path
 from typing import Literal, Optional, Sequence
 
 import mne
@@ -443,7 +445,8 @@ def _fit_batched_cv_permutations(
     tol: float,
     max_iter: int,
     pbar: Optional[tqdm] = None,
-) -> pl.DataFrame:
+    spill_dir: Optional[Path] = None,
+) -> Optional[pl.DataFrame]:
     """
     Batched CV fit under label permutations — proper refit-based null.
 
@@ -462,6 +465,14 @@ def _fit_batched_cv_permutations(
     that match the real run's convention). Under permuted labels a fold's
     test set may happen to have zero class variance — those AUCs are NaN
     and get `nanmean`'d out by downstream aggregation.
+
+    If `spill_dir` is provided, each chunk's scores frame is joined with
+    `problem_meta` and written as ``spill_dir/{uid}_{seq:08d}.parquet``
+    instead of accumulating in RAM. Returns ``None`` in that case — the
+    caller is expected to ``pl.scan_parquet(spill_dir / "*.parquet")``
+    and apply downstream filters lazily. The shard filenames carry a
+    per-call uuid prefix so multiple `_fit_batched_cv_permutations`
+    invocations can spill to the same directory without colliding.
     """
     n_trials, B, _d = X.shape
     K = len(permute_seeds)
@@ -490,6 +501,8 @@ def _fit_batched_cv_permutations(
     problem_meta_with_idx = problem_meta.with_row_index("_problem_idx").with_columns(
         pl.col("_problem_idx").cast(pl.Int64)
     )
+    spill_uid = uuid.uuid4().hex[:8] if spill_dir is not None else None
+    spill_seq = 0
 
     for fold, (train_idx, test_idx) in enumerate(skf.split(np.zeros(n_trials), y)):
         n_tr, n_te = len(train_idx), len(test_idx)
@@ -548,18 +561,29 @@ def _fit_batched_cv_permutations(
                 np.arange(chunk_start, chunk_end, dtype=np.int64), B
             )
             prob_ids = np.tile(problem_idx, Kc)
-            scores_frames.append(pl.DataFrame({
+            chunk_df = pl.DataFrame({
                 "_problem_idx": prob_ids,
                 "fold": np.full(Kc * B, fold, dtype=np.int32),
                 "permutation_idx": perm_ids,
                 "test_roc_auc": aucs,
                 "n_train": np.full(Kc * B, n_tr, dtype=np.int64),
                 "n_test": np.full(Kc * B, n_te, dtype=np.int64),
-            }))
+            })
+            if spill_dir is not None:
+                chunk_df.join(
+                    problem_meta_with_idx, on="_problem_idx", how="left"
+                ).drop("_problem_idx").write_parquet(
+                    spill_dir / f"{spill_uid}_{spill_seq:08d}.parquet"
+                )
+                spill_seq += 1
+            else:
+                scores_frames.append(chunk_df)
 
             if pbar is not None:
                 pbar.update(Kc)
 
+    if spill_dir is not None:
+        return None
     scores = pl.concat(scores_frames).join(
         problem_meta_with_idx, on="_problem_idx", how="left"
     ).drop("_problem_idx")
@@ -921,7 +945,8 @@ def run_acoustic_searchlight_permutations(
     dtype: torch.dtype = torch.float32,
     tol: float = 1e-6,
     max_iter: int = 50,
-) -> pl.DataFrame:
+    spill_dir: Optional[Path] = None,
+) -> Optional[pl.DataFrame]:
     """
     Permutation-test twin of `run_acoustic_searchlight`.
 
@@ -996,12 +1021,17 @@ def run_acoustic_searchlight_permutations(
                     smax_per[b] = int(smax)
                     b += 1
 
+            # Carry `target` in per-problem metadata so spill shards already
+            # ship the schema downstream consumers expect; the eager-return
+            # path below would otherwise tack it on at the final concat,
+            # but in spill mode there is no final concat.
             problem_meta = pl.DataFrame({
                 "subject": [subject] * B,
                 "phoneme_pair": [phoneme_pair] * B,
                 "electrode_idx": elec_per,
                 "smin": smin_per,
                 "smax": smax_per,
+                "target": [target] * B,
             })
 
             scores = _fit_batched_cv_permutations(
@@ -1011,16 +1041,19 @@ def run_acoustic_searchlight_permutations(
                 reg_lambda=reg_lambda,
                 n_folds=n_folds, cv_random_state=cv_random_state,
                 device=device, dtype=dtype, tol=tol, max_iter=max_iter,
-                pbar=pbar,
+                pbar=pbar, spill_dir=spill_dir,
             )
-            scores_all.append(scores)
+            if scores is not None:
+                scores_all.append(scores)
     finally:
         pbar.close()
 
+    if spill_dir is not None:
+        return None
     if not scores_all:
         return pl.DataFrame()
 
-    return pl.concat(scores_all).with_columns(pl.lit(target).alias("target"))
+    return pl.concat(scores_all)
 
 
 def _run_behavior_core_permutations(
@@ -1040,7 +1073,8 @@ def _run_behavior_core_permutations(
     dtype: torch.dtype,
     tol: float,
     max_iter: int,
-) -> pl.DataFrame:
+    spill_dir: Optional[Path] = None,
+) -> Optional[pl.DataFrame]:
     """
     Permutation-test twin of `_run_behavior_core`.
 
@@ -1053,6 +1087,9 @@ def _run_behavior_core_permutations(
     from each `permute_seeds[k]`, the full and baseline calls see the same
     shuffled labels per permutation — pairing `full - baseline` works the
     same as in the real run.
+
+    If `spill_dir` is set, results are streamed to that directory as
+    parquet shards instead of accumulated; returns ``None``.
     """
     assert epochs.metadata is not None
     md = epochs.metadata
@@ -1136,15 +1173,17 @@ def _run_behavior_core_permutations(
                 "smax": smax_per,
                 "model": ["full"] * B_full,
             })
-            full_parts.append(_fit_batched_cv_permutations(
+            full_part = _fit_batched_cv_permutations(
                 X_full_batch, y, full_meta,
                 permute_seeds=permute_seeds,
                 permutation_chunk_size=permutation_chunk_size,
                 reg_lambda=reg_lambda,
                 n_folds=n_folds, cv_random_state=cv_random_state,
                 device=device, dtype=dtype, tol=tol, max_iter=max_iter,
-                pbar=pbar,
-            ))
+                pbar=pbar, spill_dir=spill_dir,
+            )
+            if full_part is not None:
+                full_parts.append(full_part)
 
             if with_control:
                 pbar.set_postfix_str(f"pp={phoneme_pair} we={word_end} model=baseline")
@@ -1157,7 +1196,7 @@ def _run_behavior_core_permutations(
                     "smin": [-1], "smax": [-1],
                     "model": ["baseline"],
                 })
-                base_parts.append(_fit_batched_cv_permutations(
+                base_part = _fit_batched_cv_permutations(
                     X_base, y, base_meta,
                     permute_seeds=permute_seeds,
                     permutation_chunk_size=permutation_chunk_size,
@@ -1165,11 +1204,15 @@ def _run_behavior_core_permutations(
                                 else reg_lambda),
                     n_folds=n_folds, cv_random_state=cv_random_state,
                     device=device, dtype=dtype, tol=tol, max_iter=max_iter,
-                    pbar=pbar,
-                ))
+                    pbar=pbar, spill_dir=spill_dir,
+                )
+                if base_part is not None:
+                    base_parts.append(base_part)
     finally:
         pbar.close()
 
+    if spill_dir is not None:
+        return None
     parts = full_parts + base_parts
     if not parts:
         return pl.DataFrame()
@@ -1192,7 +1235,8 @@ def run_behavior_with_control_permutations(
     dtype: torch.dtype = torch.float32,
     tol: float = 1e-6,
     max_iter: int = 50,
-) -> pl.DataFrame:
+    spill_dir: Optional[Path] = None,
+) -> Optional[pl.DataFrame]:
     """Permutation-test twin of `run_behavior_with_control` (full + baseline)."""
     return _run_behavior_core_permutations(
         epochs, subject, electrode_idxs, windows,
@@ -1202,6 +1246,7 @@ def run_behavior_with_control_permutations(
         permutation_chunk_size=permutation_chunk_size,
         n_folds=n_folds, cv_random_state=cv_random_state,
         device=device, dtype=dtype, tol=tol, max_iter=max_iter,
+        spill_dir=spill_dir,
     )
 
 
@@ -1220,7 +1265,8 @@ def run_behavior_hga_only_permutations(
     dtype: torch.dtype = torch.float32,
     tol: float = 1e-6,
     max_iter: int = 50,
-) -> pl.DataFrame:
+    spill_dir: Optional[Path] = None,
+) -> Optional[pl.DataFrame]:
     """Permutation-test twin of `run_behavior_hga_only` (full only)."""
     return _run_behavior_core_permutations(
         epochs, subject, electrode_idxs, windows,
@@ -1230,6 +1276,7 @@ def run_behavior_hga_only_permutations(
         permutation_chunk_size=permutation_chunk_size,
         n_folds=n_folds, cv_random_state=cv_random_state,
         device=device, dtype=dtype, tol=tol, max_iter=max_iter,
+        spill_dir=spill_dir,
     )
 
 
@@ -1459,8 +1506,13 @@ def _run_ganong_core_permutations(
     dtype: torch.dtype,
     tol: float,
     max_iter: int,
-) -> pl.DataFrame:
-    """Permutation-test twin of `_run_ganong_core`."""
+    spill_dir: Optional[Path] = None,
+) -> Optional[pl.DataFrame]:
+    """Permutation-test twin of `_run_ganong_core`.
+
+    If `spill_dir` is set, results are streamed to that directory as
+    parquet shards instead of accumulated; returns ``None``.
+    """
     assert epochs.metadata is not None
     md = epochs.metadata
     phoneme_pairs = sorted(md.phoneme_pair.dropna().unique())
@@ -1536,15 +1588,17 @@ def _run_ganong_core_permutations(
                 "smax": smax_per,
                 "model": ["full"] * B_full,
             })
-            full_parts.append(_fit_batched_cv_permutations(
+            full_part = _fit_batched_cv_permutations(
                 X_full_batch, y, full_meta,
                 permute_seeds=permute_seeds,
                 permutation_chunk_size=permutation_chunk_size,
                 reg_lambda=reg_lambda,
                 n_folds=n_folds, cv_random_state=cv_random_state,
                 device=device, dtype=dtype, tol=tol, max_iter=max_iter,
-                pbar=pbar,
-            ))
+                pbar=pbar, spill_dir=spill_dir,
+            )
+            if full_part is not None:
+                full_parts.append(full_part)
 
             if with_control:
                 pbar.set_postfix_str(f"pp={phoneme_pair} model=baseline")
@@ -1556,7 +1610,7 @@ def _run_ganong_core_permutations(
                     "smin": [-1], "smax": [-1],
                     "model": ["baseline"],
                 })
-                base_parts.append(_fit_batched_cv_permutations(
+                base_part = _fit_batched_cv_permutations(
                     X_base, y, base_meta,
                     permute_seeds=permute_seeds,
                     permutation_chunk_size=permutation_chunk_size,
@@ -1564,11 +1618,15 @@ def _run_ganong_core_permutations(
                                 else reg_lambda),
                     n_folds=n_folds, cv_random_state=cv_random_state,
                     device=device, dtype=dtype, tol=tol, max_iter=max_iter,
-                    pbar=pbar,
-                ))
+                    pbar=pbar, spill_dir=spill_dir,
+                )
+                if base_part is not None:
+                    base_parts.append(base_part)
     finally:
         pbar.close()
 
+    if spill_dir is not None:
+        return None
     parts = full_parts + base_parts
     if not parts:
         return pl.DataFrame()
@@ -1591,7 +1649,8 @@ def run_ganong_with_control_permutations(
     dtype: torch.dtype = torch.float32,
     tol: float = 1e-6,
     max_iter: int = 50,
-) -> pl.DataFrame:
+    spill_dir: Optional[Path] = None,
+) -> Optional[pl.DataFrame]:
     """Permutation-test twin of `run_ganong_with_control` (full + baseline)."""
     return _run_ganong_core_permutations(
         epochs, subject, electrode_idxs, windows,
@@ -1601,6 +1660,7 @@ def run_ganong_with_control_permutations(
         permutation_chunk_size=permutation_chunk_size,
         n_folds=n_folds, cv_random_state=cv_random_state,
         device=device, dtype=dtype, tol=tol, max_iter=max_iter,
+        spill_dir=spill_dir,
     )
 
 
@@ -1619,7 +1679,8 @@ def run_ganong_hga_only_permutations(
     dtype: torch.dtype = torch.float32,
     tol: float = 1e-6,
     max_iter: int = 50,
-) -> pl.DataFrame:
+    spill_dir: Optional[Path] = None,
+) -> Optional[pl.DataFrame]:
     """Permutation-test twin of `run_ganong_hga_only` (full only)."""
     return _run_ganong_core_permutations(
         epochs, subject, electrode_idxs, windows,
@@ -1629,4 +1690,5 @@ def run_ganong_hga_only_permutations(
         permutation_chunk_size=permutation_chunk_size,
         n_folds=n_folds, cv_random_state=cv_random_state,
         device=device, dtype=dtype, tol=tol, max_iter=max_iter,
+        spill_dir=spill_dir,
     )

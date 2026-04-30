@@ -44,6 +44,7 @@ from src.models.causal6 import (
 from src.models.causal6_adaptive_null import (
     filter_null_to_borderline,
     stage1_gate,
+    stage2_spill_dir,
 )
 from src.models.causal6_aggregates import (
     FLAVORS_BEHAVIOR_HGA_ONLY,
@@ -156,6 +157,14 @@ if n_esc > 0:
 
 # %% [markdown]
 # ## Stage 2 — additional permutations on the borderline electrodes only.
+#
+# Stage-2 raw output (electrode × phoneme_pair × word_end × window × perm ×
+# fold) blows past 200 GB of RAM on high-electrode-count subjects when
+# materialized as a single DataFrame, then ~5/6 of those rows get dropped
+# by the `(electrode, phoneme_pair, word_end)` borderline filter. We
+# instead stream chunks to a per-rule spill directory, scan_parquet → semi-
+# join with `borderline_keys` lazily → collect, so peak RAM stays bounded
+# by the filtered result.
 
 # %%
 if borderline_keys and n_permutations_stage2 > 0:
@@ -165,21 +174,26 @@ if borderline_keys and n_permutations_stage2 > 0:
     ))
     eidx_pos = SITE_KEYS_BEHAVIOR_HGA_ONLY.index("electrode_idx")
     borderline_electrode_idxs = sorted({k[eidx_pos] for k in borderline_keys})
-    null_stage2_raw = run_behavior_hga_only_permutations(
-        epochs, subject=subject,
-        electrode_idxs=borderline_electrode_idxs,
-        windows=windows,
-        reg_lambda=reg_lambda,
-        permute_seeds=stage2_seeds,
-        permutation_chunk_size=permutation_chunk_size,
-        n_folds=n_folds, cv_random_state=cv_random_state,
-        device=device, dtype=torch.float32,
-        tol=tol, max_iter=max_iter,
-    )
-    null_stage2 = filter_null_to_borderline(
-        null_stage2_raw, borderline_keys,
-        site_keys=SITE_KEYS_BEHAVIOR_HGA_ONLY,
-    )
+
+    with stage2_spill_dir(outdir) as spill_dir:
+        run_behavior_hga_only_permutations(
+            epochs, subject=subject,
+            electrode_idxs=borderline_electrode_idxs,
+            windows=windows,
+            reg_lambda=reg_lambda,
+            permute_seeds=stage2_seeds,
+            permutation_chunk_size=permutation_chunk_size,
+            n_folds=n_folds, cv_random_state=cv_random_state,
+            device=device, dtype=torch.float32,
+            tol=tol, max_iter=max_iter,
+            spill_dir=spill_dir,
+        )
+        null_stage2 = filter_null_to_borderline(
+            pl.scan_parquet(spill_dir / "*.parquet"),
+            borderline_keys,
+            site_keys=SITE_KEYS_BEHAVIOR_HGA_ONLY,
+        ).collect()
+
     null_scores = pl.concat([null_stage1, null_stage2])
     print(
         f"[{subject}] stage2 K={n_permutations_stage2} on "
