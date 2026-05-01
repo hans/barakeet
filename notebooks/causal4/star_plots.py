@@ -214,7 +214,9 @@ print(f"Rendering star plots for {sig_keys.height} sites")
 combined_pdf_path = outdir / "star_plots_all.pdf"
 failed = []
 
-with PdfPages(combined_pdf_path) as pdf:
+# keep_empty=True so the file is always written even if every site fails
+# (matplotlib >= 3.8 deletes empty PDFs by default).
+with PdfPages(combined_pdf_path, keep_empty=True) as pdf:
     for row in tqdm(sig_keys.iter_rows(named=True), total=sig_keys.height):
         subject = row["subject"]
         electrode_idx = row["electrode_idx"]
@@ -241,6 +243,8 @@ with PdfPages(combined_pdf_path) as pdf:
                     error=repr(exc),
                 )
             )
+            # zoomin_hga may have created a figure before raising; sweep up.
+            plt.close("all")
             continue
 
         site_pdf = (
