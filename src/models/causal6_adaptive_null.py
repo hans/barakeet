@@ -77,6 +77,101 @@ def stage2_spill_dir(parent: Path, name: str = "_stage2_spill") -> Generator[Pat
         shutil.rmtree(spill, ignore_errors=True)
 
 
+_GATE_TAG = "CAUSAL6-GATE"
+
+
+def log_stage1_gate(
+    subject: str,
+    *,
+    n_permutations_stage1: int,
+    p_max: float,
+    gate_log: pl.DataFrame,
+    n_borderline: int,
+    print_top_k: int = 50,
+) -> None:
+    """Print a stage-1 escalation summary to stdout immediately after the gate.
+
+    Output is tagged with ``[CAUSAL6-GATE/<subject>]`` so it's grep-able
+    in the snakemake log. ``flush=True`` plus the runner's
+    ``log_output=True`` ensure the line lands in the rule's log before
+    stage 2's GPU work begins (which is the point of the two-stage
+    design — surfacing the escalation count ASAP).
+
+    Args:
+        subject: subject id, included in the tag.
+        n_permutations_stage1: K1 (printed for context).
+        p_max: gate threshold (printed for context).
+        gate_log: full gate_log returned by ``stage1_gate``; used for
+            the corrected-p quantile summary and the top-K escalated
+            sites table.
+        n_borderline: ``len(borderline_keys)``.
+        print_top_k: cap on the escalated-sites table dump (avoid
+            multi-thousand-row dumps when the gate escalates broadly).
+    """
+    n_total = gate_log.height
+    print(
+        f"[{_GATE_TAG}/{subject}] stage1 K={n_permutations_stage1}: "
+        f"{n_borderline}/{n_total} sites escalated "
+        f"(min_corrected_p_global ≤ {p_max})",
+        flush=True,
+    )
+    if n_total > 0:
+        q = gate_log.select([
+            pl.col("min_corrected_p_global").min().alias("min"),
+            pl.col("min_corrected_p_global").quantile(0.25).alias("q25"),
+            pl.col("min_corrected_p_global").median().alias("median"),
+            pl.col("min_corrected_p_global").quantile(0.75).alias("q75"),
+            pl.col("min_corrected_p_global").max().alias("max"),
+        ]).row(0, named=True)
+        print(
+            f"[{_GATE_TAG}/{subject}] corrected_p over {n_total} sites: "
+            f"min={q['min']:.4g} q25={q['q25']:.4g} median={q['median']:.4g} "
+            f"q75={q['q75']:.4g} max={q['max']:.4g}",
+            flush=True,
+        )
+    if n_borderline > 0:
+        print(f"[{_GATE_TAG}/{subject}] escalated sites (top {print_top_k}):", flush=True)
+        print(
+            gate_log.filter(pl.col("escalated"))
+            .sort("min_corrected_p_global")
+            .head(print_top_k)
+            .to_pandas()
+            .to_string(index=False),
+            flush=True,
+        )
+
+
+def log_stage2_done(
+    subject: str,
+    *,
+    n_permutations_stage2: int,
+    n_borderline_electrodes: int,
+    n_borderline_sites: int,
+    null_height: int,
+) -> None:
+    """Print a stage-2 completion summary to stdout. See ``log_stage1_gate``."""
+    print(
+        f"[{_GATE_TAG}/{subject}] stage2 K={n_permutations_stage2} on "
+        f"{n_borderline_electrodes} electrodes ({n_borderline_sites} sites "
+        f"after site_keys filter); merged null has {null_height} rows",
+        flush=True,
+    )
+
+
+def log_stage2_skipped(
+    subject: str,
+    *,
+    n_borderline: int,
+    n_permutations_stage2: int,
+) -> None:
+    """Print a stage-2-skipped notice (no borderline sites or K2=0)."""
+    print(
+        f"[{_GATE_TAG}/{subject}] stage2 skipped "
+        f"(borderline={n_borderline}, K2={n_permutations_stage2})",
+        flush=True,
+    )
+
+
 def _flavor_name(flavor: FlavorSpec) -> str:
     """Stable column-name fragment for a flavor.
 

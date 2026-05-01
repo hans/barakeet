@@ -87,7 +87,14 @@ def run_notebook(input_path: str, output_path: str, parameters, **kwargs):
         )
         dag.render(force=True)
 
-        return execute_notebook(actual_input, Path(output_path), parameters=parameters)
+        # log_output=True forwards cell stdout to the parent process so
+        # `print()` from inside notebooks (e.g. the *_null gate summary)
+        # ends up in the per-rule snakemake log instead of being buried
+        # in the .ipynb output.
+        return execute_notebook(
+            actual_input, Path(output_path), parameters=parameters,
+            log_output=True,
+        )
     finally:
         if tmp_path is not None:
             tmp_path.unlink(missing_ok=True)

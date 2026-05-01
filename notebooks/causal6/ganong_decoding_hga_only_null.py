@@ -39,6 +39,9 @@ from src.models.causal6 import (
 )
 from src.models.causal6_adaptive_null import (
     filter_null_to_borderline,
+    log_stage1_gate,
+    log_stage2_done,
+    log_stage2_skipped,
     stage1_gate,
     stage2_spill_dir,
 )
@@ -132,20 +135,14 @@ borderline_keys, gate_log = stage1_gate(
     p_max=escalate_corrected_p_max,
 )
 
-n_total = gate_log.height
 n_esc = len(borderline_keys)
-print(
-    f"[{subject}] stage1 K={n_permutations_stage1}: "
-    f"{n_esc}/{n_total} sites with min_corrected_p_global<={escalate_corrected_p_max} "
-    f"-> escalating"
+log_stage1_gate(
+    subject,
+    n_permutations_stage1=n_permutations_stage1,
+    p_max=escalate_corrected_p_max,
+    gate_log=gate_log,
+    n_borderline=n_esc,
 )
-if n_esc > 0:
-    print(
-        gate_log.filter(pl.col("escalated"))
-        .sort("min_corrected_p_global")
-        .to_pandas()
-        .to_string(index=False)
-    )
 
 # %% [markdown]
 # ## Stage 2 — additional permutations on the borderline electrodes only.
@@ -178,16 +175,19 @@ if borderline_keys and n_permutations_stage2 > 0:
             site_keys=SITE_KEYS_GANONG_HGA_ONLY,
         ).collect()
     null_scores = pl.concat([null_stage1, null_stage2])
-    print(
-        f"[{subject}] stage2 K={n_permutations_stage2} on "
-        f"{len(borderline_electrode_idxs)} electrodes ({n_esc} sites after "
-        f"site_keys filter); merged null has {null_scores.height} rows"
+    log_stage2_done(
+        subject,
+        n_permutations_stage2=n_permutations_stage2,
+        n_borderline_electrodes=len(borderline_electrode_idxs),
+        n_borderline_sites=n_esc,
+        null_height=null_scores.height,
     )
 else:
     null_scores = null_stage1
-    print(
-        f"[{subject}] no escalation needed "
-        f"(borderline={n_esc}, K2={n_permutations_stage2})"
+    log_stage2_skipped(
+        subject,
+        n_borderline=n_esc,
+        n_permutations_stage2=n_permutations_stage2,
     )
 
 # %% [markdown]
@@ -205,5 +205,6 @@ null_scores.write_parquet(outdir / "null_scores.parquet")
 gate_log.write_parquet(outdir / "escalation_log.parquet")
 print(
     f"Wrote null_scores.parquet ({null_scores.height} rows) and "
-    f"escalation_log.parquet ({gate_log.height} rows) to {outdir}"
+    f"escalation_log.parquet ({gate_log.height} rows) to {outdir}",
+    flush=True,
 )
