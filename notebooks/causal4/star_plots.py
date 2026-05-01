@@ -23,6 +23,7 @@
 
 # %%
 import re
+import traceback
 from pathlib import Path
 
 import matplotlib
@@ -214,9 +215,25 @@ print(f"Rendering star plots for {sig_keys.height} sites")
 combined_pdf_path = outdir / "star_plots_all.pdf"
 failed = []
 
-# keep_empty=True so the file is always written even if every site fails
-# (matplotlib >= 3.8 deletes empty PDFs by default).
-with PdfPages(combined_pdf_path, keep_empty=True) as pdf:
+first_traceback = None
+
+with PdfPages(combined_pdf_path) as pdf:
+    # Always write a title/summary page so the PDF exists even if every
+    # site fails — matplotlib >= 3.10 ignores `keep_empty` and deletes
+    # empty PDFs, which would make snakemake's missing-output check fail.
+    title_fig, title_ax = plt.subplots(figsize=(8.5, 11))
+    title_ax.text(
+        0.5, 0.6, "HGA star plots\n(significant electrodes)",
+        ha="center", va="center", fontsize=20,
+    )
+    title_ax.text(
+        0.5, 0.45, f"{sig_keys.height} sites",
+        ha="center", va="center", fontsize=14,
+    )
+    title_ax.axis("off")
+    pdf.savefig(title_fig)
+    plt.close(title_fig)
+
     for row in tqdm(sig_keys.iter_rows(named=True), total=sig_keys.height):
         subject = row["subject"]
         electrode_idx = row["electrode_idx"]
@@ -234,6 +251,15 @@ with PdfPages(combined_pdf_path, keep_empty=True) as pdf:
                 **star_plot_kwargs,
             )
         except Exception as exc:
+            tb = traceback.format_exc()
+            if first_traceback is None:
+                first_traceback = tb
+                # Print first failure traceback to the executor log so we can
+                # diagnose without having to read the failures CSV.
+                print(
+                    f"First failure: {subject} {electrode_idx} "
+                    f"{phoneme_pair} {word_end}\n{tb}"
+                )
             failed.append(
                 dict(
                     subject=subject,
@@ -241,6 +267,7 @@ with PdfPages(combined_pdf_path, keep_empty=True) as pdf:
                     phoneme_pair=phoneme_pair,
                     word_end=word_end,
                     error=repr(exc),
+                    traceback=tb,
                 )
             )
             # zoomin_hga may have created a figure before raising; sweep up.
@@ -258,8 +285,11 @@ with PdfPages(combined_pdf_path, keep_empty=True) as pdf:
 # %%
 failed_df = pd.DataFrame(
     failed,
-    columns=["subject", "electrode_idx", "phoneme_pair", "word_end", "error"],
+    columns=[
+        "subject", "electrode_idx", "phoneme_pair", "word_end",
+        "error", "traceback",
+    ],
 )
 failed_df.to_csv(outdir / "star_plot_failures.csv", index=False)
 print(f"Failed: {len(failed_df)} / {sig_keys.height}")
-failed_df
+failed_df.drop(columns=["traceback"], errors="ignore")
