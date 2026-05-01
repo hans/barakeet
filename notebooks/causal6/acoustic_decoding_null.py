@@ -20,8 +20,8 @@
 # electrodes. The stage-1 nulls are aggregated via
 # `src.models.causal6_aggregates.aggregate_acoustic` and gated by
 # `stage1_gate` from `src.models.causal6_adaptive_null`: any site whose
-# global-min pointwise_p (over the same flavors as
-# `acoustic_decoding_peaks` produces) is ≤ `escalate_pointwise_p_max` is
+# global-min K1 max-stat-corrected p (over the same flavors as
+# `acoustic_decoding_peaks` produces) is ≤ `escalate_corrected_p_max` is
 # flagged for stage 2. Stage 2 runs `n_permutations_stage2` more shuffles
 # on the borderline electrodes only, with non-overlapping seeds so the
 # merged null is bit-identical to a flat-K=K1+K2 reference.
@@ -29,7 +29,7 @@
 # Outputs:
 #   null_scores.parquet     — merged (stage1 + stage2-filtered) null.
 #   escalation_log.parquet  — one row per site with per-flavor
-#                             min_pointwise_p, argmin window/flavor,
+#                             corrected_p, peak window/flavor,
 #                             escalated bool, and final per-site K.
 
 # %%
@@ -86,7 +86,7 @@ max_iter = 15
 
 n_permutations_stage1 = 1000
 n_permutations_stage2 = 9000
-escalate_pointwise_p_max = 0.20
+escalate_corrected_p_max = 0.20
 permutation_seed = 0
 permutation_chunk_size = 6
 
@@ -127,7 +127,7 @@ null_stage1 = run_acoustic_searchlight_permutations(
 assert null_stage1.height > 0, f"[{subject}] acoustic stage-1 produced no rows"
 
 # %% [markdown]
-# ## Gate — aggregate, compute per-flavor min pointwise_p, decide escalation.
+# ## Gate — aggregate, compute per-flavor corrected p, decide escalation.
 
 # %%
 real_scores = pl.read_parquet(scores_path)
@@ -142,20 +142,20 @@ borderline_keys, gate_log = stage1_gate(
     real_agg, null_agg_stage1,
     site_keys=SITE_KEYS_ACOUSTIC,
     flavors=FLAVORS_ACOUSTIC,
-    p_max=escalate_pointwise_p_max,
+    p_max=escalate_corrected_p_max,
 )
 
 n_total = gate_log.height
 n_esc = len(borderline_keys)
 print(
     f"[{subject}] stage1 K={n_permutations_stage1}: "
-    f"{n_esc}/{n_total} sites with min_pointwise_p_global<={escalate_pointwise_p_max} "
+    f"{n_esc}/{n_total} sites with min_corrected_p_global<={escalate_corrected_p_max} "
     f"-> escalating"
 )
 if n_esc > 0:
     print(
         gate_log.filter(pl.col("escalated"))
-        .sort("min_pointwise_p_global")
+        .sort("min_corrected_p_global")
         .to_pandas()
         .to_string(index=False)
     )

@@ -28,7 +28,7 @@
 #
 # Outputs:
 #   null_scores.parquet     — merged stage1 + filtered stage2 null.
-#   escalation_log.parquet  — per-site min_pointwise_p, argmin window/
+#   escalation_log.parquet  — per-site corrected_p, peak window/
 #                             flavor, escalated bool, final per-site K.
 
 # %%
@@ -88,7 +88,7 @@ max_iter = 15
 
 n_permutations_stage1 = 1000
 n_permutations_stage2 = 9000
-escalate_pointwise_p_max = 0.20
+escalate_corrected_p_max = 0.20
 permutation_seed = 0
 permutation_chunk_size = 6
 
@@ -131,7 +131,7 @@ assert null_stage1.height > 0, (
 )
 
 # %% [markdown]
-# ## Gate — aggregate, compute per-flavor min pointwise_p, decide escalation.
+# ## Gate — aggregate, compute per-flavor corrected p, decide escalation.
 
 # %%
 real_scores = pl.read_parquet(scores_path)
@@ -148,20 +148,20 @@ borderline_keys, gate_log = stage1_gate(
     real_agg, null_agg_stage1,
     site_keys=SITE_KEYS_BEHAVIOR_WITH_CONTROL,
     flavors=FLAVORS_BEHAVIOR_WITH_CONTROL,
-    p_max=escalate_pointwise_p_max,
+    p_max=escalate_corrected_p_max,
 )
 
 n_total = gate_log.height
 n_esc = len(borderline_keys)
 print(
     f"[{subject}] stage1 K={n_permutations_stage1}: "
-    f"{n_esc}/{n_total} sites with min_pointwise_p_global<={escalate_pointwise_p_max} "
+    f"{n_esc}/{n_total} sites with min_corrected_p_global<={escalate_corrected_p_max} "
     f"-> escalating"
 )
 if n_esc > 0:
     print(
         gate_log.filter(pl.col("escalated"))
-        .sort("min_pointwise_p_global")
+        .sort("min_corrected_p_global")
         .to_pandas()
         .to_string(index=False)
     )

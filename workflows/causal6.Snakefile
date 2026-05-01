@@ -514,7 +514,7 @@ rule acoustic_decoding_null:
 
                 n_permutations_stage1=C6["n_permutations_stage1"],
                 n_permutations_stage2=C6["n_permutations_stage2"],
-                escalate_pointwise_p_max=C6["escalate_pointwise_p_max"],
+                escalate_corrected_p_max=C6["escalate_corrected_p_max"],
                 permutation_seed=C6["permutation_seed"],
                 permutation_chunk_size=C6["permutation_chunk_size"],
             ),
@@ -571,7 +571,7 @@ rule behavior_decoding_single_electrode_null:
 
                 n_permutations_stage1=C6["n_permutations_stage1"],
                 n_permutations_stage2=C6["n_permutations_stage2"],
-                escalate_pointwise_p_max=C6["escalate_pointwise_p_max"],
+                escalate_corrected_p_max=C6["escalate_corrected_p_max"],
                 permutation_seed=C6["permutation_seed"],
                 permutation_chunk_size=C6["permutation_chunk_size"],
             ),
@@ -627,7 +627,7 @@ rule behavior_decoding_single_electrode_hga_only_null:
 
                 n_permutations_stage1=C6["n_permutations_stage1"],
                 n_permutations_stage2=C6["n_permutations_stage2"],
-                escalate_pointwise_p_max=C6["escalate_pointwise_p_max"],
+                escalate_corrected_p_max=C6["escalate_corrected_p_max"],
                 permutation_seed=C6["permutation_seed"],
                 permutation_chunk_size=C6["permutation_chunk_size"],
             ),
@@ -1169,7 +1169,7 @@ rule ganong_decoding_null:
 
                 n_permutations_stage1=C6["n_permutations_stage1"],
                 n_permutations_stage2=C6["n_permutations_stage2"],
-                escalate_pointwise_p_max=C6["escalate_pointwise_p_max"],
+                escalate_corrected_p_max=C6["escalate_corrected_p_max"],
                 permutation_seed=C6["permutation_seed"],
                 permutation_chunk_size=C6["permutation_chunk_size"],
             ),
@@ -1223,7 +1223,7 @@ rule ganong_decoding_hga_only_null:
 
                 n_permutations_stage1=C6["n_permutations_stage1"],
                 n_permutations_stage2=C6["n_permutations_stage2"],
-                escalate_pointwise_p_max=C6["escalate_pointwise_p_max"],
+                escalate_corrected_p_max=C6["escalate_corrected_p_max"],
                 permutation_seed=C6["permutation_seed"],
                 permutation_chunk_size=C6["permutation_chunk_size"],
             ),

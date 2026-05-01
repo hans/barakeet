@@ -76,6 +76,6 @@ causal6:
   # branches (escalation triggered / not triggered) get exercised.
   n_permutations_stage1: 8
   n_permutations_stage2: 12
-  escalate_pointwise_p_max: 0.05    # tighter than prod 0.20 so only obvious sites escalate
+  escalate_corrected_p_max: 0.05    # tighter than prod 0.20 so only obvious sites escalate
   permutation_seed: 0
   permutation_chunk_size: 6
