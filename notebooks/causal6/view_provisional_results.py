@@ -36,10 +36,7 @@ os.environ.setdefault("POLARS_MAX_THREADS", "8")
 
 from pathlib import Path
 
-from src.models.causal6_aggregates import (
-    SITE_KEYS_BEHAVIOR_HGA_ONLY,
-    aggregate_behavior_hga_only,
-)
+from src.models.causal6_aggregates import SITE_KEYS_BEHAVIOR_HGA_ONLY
 from src.models.significance import null_standardized_peak_test
 
 ROOT = Path("outputs/causal6")
@@ -229,6 +226,29 @@ if beh_peak_frames:
 # to get FDR-corrected aggregates.
 
 # %%
+# Null aggregation uses scan_parquet + streaming collect so the raw null frame
+# (potentially 100s of GB) never fully materialises in RAM.  The fold-collapse
+# happens chunk-by-chunk and only the per-(site, window, perm) means land in memory.
+import gc
+
+from src.models.causal6_aggregates import _behavior_offset_samples
+from src.models.significance import fold_tstat_aggregate
+
+_PEAK_SEARCH_SMIN = 0
+_PEAK_SEARCH_SMAX = 290
+_BEHAV_POST_OFFSET_S = 0.2
+_WINDOW_KEYS = SITE_KEYS_BEHAV + ["smin", "smax"]
+_OFFSET_SAMPLES = _behavior_offset_samples(EPOCH_TMIN, EPOCH_SFREQ, _BEHAV_POST_OFFSET_S)
+
+
+def _filter_window_expr() -> pl.Expr:
+    return (
+        (pl.col("smin") >= _PEAK_SEARCH_SMIN)
+        & (pl.col("smax") <= pl.col("_smax_limit"))
+        & (pl.col("smax") <= _PEAK_SEARCH_SMAX)
+    )
+
+
 null_dir = ROOT / "behavior_decoding_single_electrode_hga_only_null"
 score_dir = ROOT / "behavior_decoding_single_electrode_hga_only"
 
@@ -242,21 +262,60 @@ for null_path in sorted(null_dir.glob("*/null_scores.parquet")):
         continue
 
     print(f"{subject}: aggregating …", end=" ", flush=True)
-    real_agg, null_agg = aggregate_behavior_hga_only(
-        real_scores=pl.read_parquet(scores_path),
-        null_scores=pl.read_parquet(null_path),
-        epoch_tmin=EPOCH_TMIN,
-        epoch_sfreq=EPOCH_SFREQ,
-        behav_peak_post_offset_s=0.2,
-        peak_search_smin=0,
-        peak_search_smax=290,
+
+    # Real scores: small, load eagerly
+    real_agg = fold_tstat_aggregate(
+        pl.read_parquet(scores_path)
+        .with_columns(
+            pl.col("word_end")
+            .replace_strict(_OFFSET_SAMPLES, default=None)
+            .alias("_smax_limit")
+        )
+        .filter(_filter_window_expr())
+        .drop("_smax_limit"),
+        group_keys=_WINDOW_KEYS,
+        stat_col="test_roc_auc",
+        center=0.5,
     )
+
+    # Null scores: scan lazily, stream the fold-collapse to avoid materialising
+    # the full file (can be 100+ GB for large subjects with many permutations).
+    null_agg = (
+        pl.scan_parquet(null_path)
+        .with_columns(
+            pl.col("word_end")
+            .replace_strict(_OFFSET_SAMPLES, default=None)
+            .alias("_smax_limit")
+        )
+        .filter(_filter_window_expr())
+        .drop("_smax_limit")
+        .group_by(_WINDOW_KEYS + ["permutation_idx"])
+        .agg(
+            pl.col("test_roc_auc").mean().alias("fold_mean"),
+            pl.col("test_roc_auc").std().alias("fold_std"),
+            pl.col("test_roc_auc").len().alias("n_folds"),
+        )
+        .with_columns(
+            (
+                (pl.col("fold_mean") - 0.5)
+                / (
+                    pl.max_horizontal(pl.col("fold_std"), pl.lit(0.01))
+                    / pl.col("n_folds").cast(pl.Float64).sqrt()
+                )
+            ).alias("t_stat")
+        )
+        .collect(streaming=True)
+    )
+
     peaks, _ = null_standardized_peak_test(
         real_agg, null_agg,
         site_keys=SITE_KEYS_BEHAV,
         window_keys=["smin", "smax"],
         stat_col="fold_mean",
     )
+    del null_agg
+    gc.collect()
+
     beh_sig_frames[subject] = peaks
     n_total = len(peaks)
     n_sig = int((peaks["p_value"] < 0.05).sum())
