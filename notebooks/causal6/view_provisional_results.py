@@ -166,7 +166,7 @@ for _p in sorted(ROOT.glob("acoustic_decoding_single_electrode/*/scores.parquet"
         .filter(
             (pl.col("target") == _AC_TARGET)
             & (pl.col("smin") >= _AC_PEAK_SEARCH_SMIN)
-            & (pl.col("smin") <= _AC_PEAK_SEARCH_SMAX)
+            & (pl.col("smax") <= _AC_PEAK_SEARCH_SMAX)
         )
     )
 
