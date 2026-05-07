@@ -98,7 +98,7 @@ causal6:
   device: cuda
 
   # Tuning-sweep grid (only used by reg_lambda_sweep)
-  tuning_reg_lambda_grid: [0.0001, 0.0001, 0.001, 0.01, 0.1, 1.0, 10.0]
+  tuning_reg_lambda_grid: [0.00001, 0.0001, 0.001, 0.01, 0.1, 1.0, 10.0]
 
   # Permutation significance testing (refit-based null per decoder), with
   # two-stage adaptive K. Each *_null rule first runs K_stage1 perms across
