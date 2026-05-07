@@ -26,13 +26,12 @@
 
 # %%
 import os
+# Cap threading so this doesn't monopolize the node.
+os.environ.setdefault("POLARS_MAX_THREADS", "8")
 
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
-
-# Cap threading so this doesn't monopolize the node.
-os.environ.setdefault("POLARS_MAX_THREADS", "8")
 
 from pathlib import Path
 
