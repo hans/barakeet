@@ -102,14 +102,15 @@ causal6:
 
   # Permutation significance testing (refit-based null per decoder), with
   # two-stage adaptive K. Each *_null rule first runs K_stage1 perms across
-  # all speech-responsive electrodes; sites with global-min pointwise_p
-  # over their decoder's flavors <= escalate_pointwise_p_max are flagged
-  # for K_stage2 additional perms (non-overlapping seeds for determinism).
-  # Non-escalated sites stop at K_stage1; escalated sites end with
-  # K_stage1+K_stage2 (the floor for max-stat-corrected p-values).
+  # all speech-responsive electrodes; sites with global-min K1
+  # max-stat-corrected p over their decoder's flavors <=
+  # escalate_corrected_p_max are flagged for K_stage2 additional perms
+  # (non-overlapping seeds for determinism). Non-escalated sites stop at
+  # K_stage1; escalated sites end with K_stage1+K_stage2 (the floor for
+  # max-stat-corrected p-values).
   n_permutations_stage1: 1000
   n_permutations_stage2: 9000
-  escalate_pointwise_p_max: 0.20
+  escalate_corrected_p_max: 0.20
   permutation_seed: 0          # base RNG seed; stage 1 uses [seed, seed+K1),
                                # stage 2 uses [seed+K1, seed+K1+K2).
   permutation_chunk_size: 10   # permutations fit per GPU call

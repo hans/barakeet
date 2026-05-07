@@ -193,35 +193,28 @@ def _make_agg_with_flavor_cols(
 
 
 def test_stage1_gate_returns_borderline_set():
-    """4 sites with min_pointwise_p approximately 0.05 / 0.15 / 0.25 /
-    0.50; gate at p_max=0.20 → expect borderline = {site0, site1}.
-    Uses a single non-TFCE flavor for simplicity.
+    """4 sites; site i has real placed at the (i+1)-th rank of its
+    K=19-perm null distribution. With a single window the max-stat
+    corrected p reduces to ``(rank + 1) / (K + 1)``: targets become
+    0.10 / 0.15 / 0.25 / 0.45. At p_max=0.20 → borderline = {site0, site1}.
+    Uses a single non-TFCE flavor.
     """
-    S, W, K = 4, 3, 19  # 1/(K+1) = 0.05; need exact-rank values
+    S, W, K = 4, 1, 19
     rng = np.random.default_rng(123)
     null = rng.uniform(0.0, 1.0, size=(S, K, W))
 
-    # For each site, control real[w=0] so its rank yields a target p.
-    # pointwise_p = (ge_count + 1) / (K + 1), so ge_count = round(p*(K+1))-1.
-    # Place real strictly between the (ge)-th and (ge+1)-th largest null
-    # values so exactly ge entries are >= real.
-    targets = [0.05, 0.15, 0.25, 0.50]
-    target_ge_count = [int(round(t * (K + 1))) - 1 for t in targets]
+    # Place real strictly between the rank-th and (rank+1)-th largest
+    # null entries so exactly ``rank`` null values are >= real.
+    target_ranks = [0, 1, 3, 7]  # corrected_p = (rank+1+1)/(K+1)
     real = np.zeros((S, W))
     for s_i in range(S):
         sorted_null = np.sort(null[s_i, :, 0])  # ascending
-        ge = target_ge_count[s_i]
-        if ge == 0:
+        rank = target_ranks[s_i]
+        if rank == 0:
             real[s_i, 0] = sorted_null[-1] + 1.0
         else:
-            # real strictly between (ge+1)-th and ge-th from top → ge_count=ge.
-            real[s_i, 0] = (sorted_null[K - ge - 1] + sorted_null[K - ge]) / 2.0
-        # Other windows: real=0 in [0, 1] uniform null → ge_count=K, p≈1, so
-        # window 0 dominates the per-site min.
-        for w_i in range(1, W):
-            real[s_i, w_i] = 0.0
+            real[s_i, 0] = (sorted_null[K - rank - 1] + sorted_null[K - rank]) / 2.0
 
-    # Make sure no other window has lower p (real=0 → ge_count = K → p=1).
     real_agg, null_agg = _make_agg_with_flavor_cols(
         real, null,
         site_ids=[("S0", 0), ("S1", 1), ("S2", 2), ("S3", 3)],
@@ -233,8 +226,9 @@ def test_stage1_gate_returns_borderline_set():
         site_keys=SITE_KEYS, flavors=flavors, p_max=0.20,
     )
     gate_log = gate_log.sort("electrode_idx")
-    actual_min = gate_log["min_pointwise_p_global"].to_numpy()
-    np.testing.assert_allclose(actual_min, targets, atol=0.001)
+    actual = gate_log["min_corrected_p_global"].to_numpy()
+    expected = np.array([(r + 2) / (K + 1) for r in target_ranks])
+    np.testing.assert_allclose(actual, expected, atol=1e-9)
 
     assert borderline_keys == {("S0", 0), ("S1", 1)}
     escalated = gate_log["escalated"].to_list()
@@ -250,13 +244,14 @@ def test_stage1_gate_includes_tfce_flavors():
       * Null per (perm, window) alternates ±0.4 (no spatial coherence;
         every null cluster has length 1).
       * Real site 0: full-W plateau at h=0.3. Below the null peak ±0.4
-        so individual pointwise_p ≈ 0.5 > 0.20.
+        so individual pointwise_p ≈ 0.5 → raw corrected_p stays high
+        because every perm's max-stat sits at the same level.
       * Real site 1: flat 0 (control — should not escalate).
 
-    Real TFCE on the plateau (extent=W, h=0.3) ≈ W^0.5 * h² / 100 dominates
-    the null TFCE, which is bounded by the length-1 cluster contribution
-    1^0.5 * 0.4² / 100. Real TFCE > all null TFCE → pointwise_p_TFCE
-    hits the floor 1/(K+1).
+    Real TFCE on the plateau (extent=W, h=0.3) dominates the null TFCE
+    (bounded by length-1 cluster contributions). Real TFCE > all null
+    TFCE at every window → pointwise_p_real_TFCE = 1/(K+1) at every
+    window, T_obs ≫ T_null[k] for all k, corrected p hits 1/(K+1).
     """
     S, W = 2, 20
     K = 19
@@ -277,17 +272,17 @@ def test_stage1_gate_includes_tfce_flavors():
         real, null, site_ids=[("S0", 0), ("S1", 1)],
     )
 
-    # Raw flavor only: site 0 must NOT escalate (individual p ≈ 0.5).
+    # Raw flavor only: site 0 must NOT escalate (corrected p ≫ 0.20).
     raw_only = [FlavorSpec("fold_mean", apply_tfce=False)]
     borderline_raw, gate_raw = stage1_gate(
         real_agg, null_agg,
         site_keys=SITE_KEYS, flavors=raw_only, p_max=0.20,
     )
-    s0_min_raw = gate_raw.filter(pl.col("electrode_idx") == 0)[
-        "min_pointwise_p_global"
+    s0_corrected_raw = gate_raw.filter(pl.col("electrode_idx") == 0)[
+        "min_corrected_p_global"
     ][0]
-    assert s0_min_raw > 0.20, (
-        f"raw min_pointwise_p for site 0 should be > 0.20; got {s0_min_raw}"
+    assert s0_corrected_raw > 0.20, (
+        f"raw corrected_p for site 0 should be > 0.20; got {s0_corrected_raw}"
     )
     assert ("S0", 0) not in borderline_raw
 
@@ -301,9 +296,9 @@ def test_stage1_gate_includes_tfce_flavors():
         site_keys=SITE_KEYS, flavors=flavors, p_max=0.20,
     )
     s0_row = gate.filter(pl.col("electrode_idx") == 0).to_dicts()[0]
-    assert s0_row["min_pointwise_p_fold_mean_tfce"] <= 0.20, (
-        f"TFCE-enhanced min_pointwise_p for broad cluster should be ≤ 0.20; "
-        f"got {s0_row['min_pointwise_p_fold_mean_tfce']}"
+    assert s0_row["corrected_p_fold_mean_tfce"] <= 0.20, (
+        f"TFCE-enhanced corrected_p for broad cluster should be ≤ 0.20; "
+        f"got {s0_row['corrected_p_fold_mean_tfce']}"
     )
     assert s0_row["argmin_flavor"] == "fold_mean_tfce"
     assert ("S0", 0) in borderline
@@ -365,9 +360,9 @@ def test_stage1_gate_handles_float32_stat_inputs():
     """Regression: GPU permutation kernels return ``test_roc_auc`` as
     Float32, so ``fold_tstat_aggregate`` produces a Float32 ``fold_mean``
     column while ``t_stat`` and TFCE-enhanced statistics are Float64.
-    Without dtype normalization in ``min_pointwise_p_per_site``,
-    ``pl.concat`` over per-flavor frames raises ``SchemaError: type
-    Float64 is incompatible with expected type Float32``.
+    Without dtype normalization inside ``stage1_gate``, ``pl.concat``
+    over per-flavor frames raises ``SchemaError: type Float64 is
+    incompatible with expected type Float32``.
     """
     S, W, K = 2, 4, 19
     rng = np.random.default_rng(11)
@@ -402,11 +397,11 @@ def test_stage1_gate_handles_float32_stat_inputs():
     )
     assert gate_log.height == S
     expected_cols = {
-        "min_pointwise_p_fold_mean", "min_pointwise_p_t_stat",
-        "min_pointwise_p_fold_mean_tfce", "min_pointwise_p_t_stat_tfce",
-        "min_pointwise_p_global", "argmin_flavor",
-        "argmin_smin", "argmin_smax",
-        "real_at_argmin", "n_windows", "escalated",
+        "corrected_p_fold_mean", "corrected_p_t_stat",
+        "corrected_p_fold_mean_tfce", "corrected_p_t_stat_tfce",
+        "min_corrected_p_global", "argmin_flavor",
+        "peak_smin", "peak_smax",
+        "real_at_peak", "n_permutations", "escalated",
     } | set(SITE_KEYS)
     assert expected_cols.issubset(set(gate_log.columns))
 

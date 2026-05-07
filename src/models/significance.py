@@ -396,25 +396,33 @@ def tfce_1d_per_site(
     # Sort so that each group's rows appear contiguously and in window order.
     sorted_df = stats.sort(group_keys + [order_col])
 
-    enhanced = np.empty(sorted_df.height, dtype=np.float64)
+    n = sorted_df.height
+    enhanced = np.empty(n, dtype=np.float64)
     stat_np = sorted_df[stat_col].to_numpy()
 
-    # Walk contiguous group slices and apply _tfce_1d in place.
     if group_keys:
-        # Use polars partition_by to get per-group row indices in sorted order.
-        # Simpler: derive group-change boundaries from the group columns.
-        group_cols = [sorted_df[c].to_numpy() for c in group_keys]
-        n = sorted_df.height
-        start = 0
-        for i in range(1, n + 1):
-            at_end = i == n
-            if not at_end:
-                changed = any(col[i] != col[i - 1] for col in group_cols)
-            if at_end or changed:
-                enhanced[start:i] = _tfce_1d(
-                    stat_np[start:i], E=E, H=H, dh=dh, threshold=threshold,
-                )
-                start = i
+        # Vectorized group-boundary detection. sorted_df is sorted by
+        # group_keys + [order_col], so identical group tuples are
+        # contiguous; rle_id() yields 0,0,…,1,1,…,2,… and increments
+        # exactly where the previous per-row Python comparison fired.
+        if n == 0:
+            boundaries = np.array([0], dtype=np.int64)
+        else:
+            group_id = (
+                sorted_df.select(pl.struct(group_keys).rle_id().alias("_gid"))[
+                    "_gid"
+                ].to_numpy()
+            )
+            boundaries = np.concatenate((
+                [0],
+                np.flatnonzero(np.diff(group_id)) + 1,
+                [n],
+            ))
+        for k in range(len(boundaries) - 1):
+            s, e = int(boundaries[k]), int(boundaries[k + 1])
+            enhanced[s:e] = _tfce_1d(
+                stat_np[s:e], E=E, H=H, dh=dh, threshold=threshold,
+            )
     else:
         enhanced[:] = _tfce_1d(stat_np, E=E, H=H, dh=dh, threshold=threshold)
 

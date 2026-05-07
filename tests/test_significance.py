@@ -461,3 +461,99 @@ def test_tfce_rejects_missing_columns():
     df = pl.DataFrame({"subject": ["S1"], "electrode_idx": [0], "smin": [0]})
     with pytest.raises(ValueError, match="smax"):
         tfce_1d_per_site(df, site_keys=["subject", "electrode_idx"])
+
+
+def _tfce_1d_per_site_old_loop(
+    stats: pl.DataFrame,
+    *,
+    site_keys,
+    window_keys=("smin", "smax"),
+    perm_key=None,
+    stat_col: str = "statistic",
+    E: float = 0.5,
+    H: float = 2.0,
+    dh=None,
+    threshold: float = 0.0,
+) -> pl.DataFrame:
+    """Inlined copy of the pre-vectorization tfce_1d_per_site for regression
+    testing. Uses the per-row Python boundary scan."""
+    from src.models.significance import _tfce_1d
+
+    site_keys = list(site_keys)
+    window_keys = list(window_keys)
+    group_keys = site_keys + ([perm_key] if perm_key is not None else [])
+    order_col = window_keys[0]
+    sorted_df = stats.sort(group_keys + [order_col])
+
+    enhanced = np.empty(sorted_df.height, dtype=np.float64)
+    stat_np = sorted_df[stat_col].to_numpy()
+
+    if group_keys:
+        group_cols = [sorted_df[c].to_numpy() for c in group_keys]
+        n = sorted_df.height
+        start = 0
+        for i in range(1, n + 1):
+            at_end = i == n
+            if not at_end:
+                changed = any(col[i] != col[i - 1] for col in group_cols)
+            if at_end or changed:
+                enhanced[start:i] = _tfce_1d(
+                    stat_np[start:i], E=E, H=H, dh=dh, threshold=threshold,
+                )
+                start = i
+    else:
+        enhanced[:] = _tfce_1d(stat_np, E=E, H=H, dh=dh, threshold=threshold)
+
+    return sorted_df.with_columns(pl.Series(stat_col, enhanced))
+
+
+def test_tfce_vectorized_boundaries_matches_old_loop():
+    """Vectorized group-boundary detection produces byte-identical output
+    to the original per-row Python scan on a fixture covering the moving
+    parts: multiple sites + perms, NaN windows in one site, mixed group
+    key dtypes (str + int), and per-group adaptive dh.
+    """
+    rng = np.random.default_rng(123)
+    sites = [("S1", 0), ("S1", 7), ("S42", 3)]
+    n_perms = 4
+    n_windows = 8
+
+    rows = []
+    for site_id, (subj, elec) in enumerate(sites):
+        for perm in range(n_perms):
+            stats = 0.5 + 0.1 * rng.standard_normal(n_windows)
+            # Inject a smooth bump so TFCE has something to enhance.
+            stats[2:5] += 0.2 * (1 + 0.05 * perm)
+            # NaN-out two windows in site 1 (mixed-NaN code path).
+            if site_id == 1:
+                stats[6:8] = np.nan
+            for w in range(n_windows):
+                rows.append({
+                    "subject": subj,
+                    "electrode_idx": elec,
+                    "smin": w * 10,
+                    "smax": w * 10 + 10,
+                    "permutation_idx": perm,
+                    "statistic": float(stats[w]),
+                })
+    df = pl.DataFrame(rows)
+
+    new = tfce_1d_per_site(
+        df, site_keys=["subject", "electrode_idx"],
+        perm_key="permutation_idx", E=0.5, H=2.0, dh=None, threshold=0.0,
+    )
+    old = _tfce_1d_per_site_old_loop(
+        df, site_keys=["subject", "electrode_idx"],
+        perm_key="permutation_idx", E=0.5, H=2.0, dh=None, threshold=0.0,
+    )
+
+    new_arr = new.sort(
+        ["subject", "electrode_idx", "permutation_idx", "smin"]
+    )["statistic"].to_numpy()
+    old_arr = old.sort(
+        ["subject", "electrode_idx", "permutation_idx", "smin"]
+    )["statistic"].to_numpy()
+
+    assert np.array_equal(new_arr, old_arr), (
+        f"max |diff| = {np.max(np.abs(new_arr - old_arr)):.3e}"
+    )
