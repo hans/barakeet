@@ -242,7 +242,17 @@ beh_peak_frames: dict[str, pl.DataFrame] = {}
 
 for p in beh_score_paths:
     subject = p.parent.name
-    df = pl.read_parquet(p).filter(pl.col("model") == "full")
+    df = (
+        pl.read_parquet(p)
+        .filter(pl.col("model") == "full")
+        .with_columns(
+            pl.col("word_end")
+            .replace_strict(_OFFSET_SAMPLES, default=None)
+            .alias("_smax_limit")
+        )
+        .filter(_filter_window_expr())
+        .drop("_smax_limit")
+    )
     fold_mean = (
         df.group_by(WINDOW_KEYS_BEHAV)
         .agg(pl.col("test_roc_auc").mean().alias("fold_mean"))
