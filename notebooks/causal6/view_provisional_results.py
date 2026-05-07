@@ -795,7 +795,7 @@ if len(_both):
     print(f"  same phoneme pair (acoustic vs behavioral): "
           f"{_both['same_phoneme_pair'].sum()}/{len(_both)}")
     print(_both[["subject", "electrode_idx",
-                 "phoneme_pair_phon", "phoneme_pair_behav", "word_end_behav",
+                 "phoneme_pair_phon", "phoneme_pair_behav", "word_end",
                  "peak_auc_phon", "peak_auc_behav",
                  "peak_smin_phon", "peak_smin_behav"]].to_string(index=False))
 
@@ -947,7 +947,7 @@ else:
                     subject=_row["subject"],
                     electrode_idx=int(_row["electrode_idx"]),
                     phoneme_pair=_row["phoneme_pair_behav"],
-                    word_end=_row["word_end_behav"],
+                    word_end=_row["word_end"],
                     epochs_dict=epochs_dict,
                     phon_smin=int(_row["peak_smin_phon"]),
                     phon_smax=int(_row["peak_smax_phon"]),
