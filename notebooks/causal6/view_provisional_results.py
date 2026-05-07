@@ -185,6 +185,7 @@ for _p in sorted(ROOT.glob("acoustic_decoding_single_electrode/*/scores.parquet"
         .agg(
             pl.col("fold_mean").max().alias("peak_auc"),
             pl.col("smin").get(pl.col("fold_mean").arg_max()).alias("peak_smin"),
+            pl.col("smax").get(pl.col("fold_mean").arg_max()).alias("peak_smax"),
             pl.col("fold_std").get(pl.col("fold_mean").arg_max()).alias("peak_fold_std"),
             pl.col("n_folds").get(pl.col("fold_mean").arg_max()).alias("n_folds"),
         )
@@ -447,6 +448,7 @@ for _p in sorted(ROOT.glob("behavior_decoding_single_electrode_hga_only/*/scores
         .agg(
             pl.col("fold_mean").max().alias("peak_auc"),
             pl.col("smin").get(pl.col("fold_mean").arg_max()).alias("peak_smin"),
+            pl.col("smax").get(pl.col("fold_mean").arg_max()).alias("peak_smax"),
             pl.col("fold_std").get(pl.col("fold_mean").arg_max()).alias("peak_fold_std"),
             pl.col("n_folds").get(pl.col("fold_mean").arg_max()).alias("n_folds"),
         )
@@ -690,3 +692,273 @@ if beh_sig_frames:
 
     fig.tight_layout()
     plt.show()
+
+# %% [markdown]
+# ----
+# ## 7  Contingency + provisional star plots — sites passing both thresholds
+#
+# Cross-filter `brain_plot_acoustic_tstats.parquet` (section 2) and
+# `brain_plot_behav_tstats.parquet` (section 5) by AUC thresholds, identify
+# electrodes that pass **both** filters, and render two-panel HGA traces.
+#
+# **Requires sections 2 and 5 to have been run** (parquets must exist on disk).
+#
+# Star plot panels:
+#   - Top: unambiguous trials (resampled 1 & 6), acoustic peak window shaded.
+#   - Bottom: within-completion controlled ambiguous trials (behaviorally-defined
+#     ambiguous steps via `get_ambiguous_resampled_steps`), behavioral peak
+#     window shaded, split by button-press response.
+#
+# No polarity correction is applied (requires `prepare_neurometrics`).
+#
+# **Output**: `outputs/causal6/provisional_star_plots.pdf`
+
+# %%
+import mne as _mne
+import pandas as pd
+import re as _re_s7
+from matplotlib.backends.backend_pdf import PdfPages
+from src.data import add_metadata_features, get_ambiguous_resampled_steps as _get_ambig_steps
+from src.viz_paper import add_textgrid
+
+_TEXTGRID_DIR = "data/stimuli/textgrid"
+
+# %%
+# Load epochs once per session — guard to avoid reloading on re-run.
+if "epochs_dict" not in dir():
+    _epo_paths = sorted(Path("outputs/epochs_preprocessed").glob("*_epo.fif"))
+    epochs_dict: dict = {}
+    for _p in _epo_paths:
+        _m = _re_s7.search(r"(EC\d+)_epo", str(_p))
+        if not _m:
+            continue
+        _subj = _m.group(1)
+        _ep = _mne.read_epochs(str(_p), preload=False, verbose="WARNING")
+        _ep.metadata = add_metadata_features(_ep.metadata.copy())
+        epochs_dict[_subj] = _ep
+    print(f"Loaded epochs for: {sorted(epochs_dict)}")
+
+# %%
+acoustic_auc_threshold = 0.75
+behav_auc_threshold = 0.8
+
+_ac_path = ROOT / "brain_plot_acoustic_tstats.parquet"
+_beh_path = ROOT / "brain_plot_behav_tstats.parquet"
+if not (_ac_path.exists() and _beh_path.exists()):
+    raise RuntimeError(
+        "brain_plot parquets not found — run sections 2 and 5 first."
+    )
+
+_ac_pd = pl.read_parquet(_ac_path).to_pandas()
+_beh_pd = pl.read_parquet(_beh_path).to_pandas()
+
+acoustic_passes = _ac_pd[_ac_pd.peak_auc >= acoustic_auc_threshold].copy()
+behav_passes    = _beh_pd[_beh_pd.peak_auc >= behav_auc_threshold].copy()
+
+behav_plot = (
+    behav_passes
+    .sort_values("peak_auc", ascending=False)
+    .groupby(["subject", "electrode_idx"], observed=True, as_index=False)
+    .first()
+)
+A_phonetic_plot = (
+    acoustic_passes
+    .sort_values("peak_auc", ascending=False)
+    .groupby(["subject", "electrode_idx"], observed=True, as_index=False)
+    .first()
+)
+
+contingency_df = pd.merge(
+    A_phonetic_plot.drop_duplicates(["subject", "electrode_idx"]),
+    behav_plot.drop_duplicates(["subject", "electrode_idx"]),
+    on=["subject", "electrode_idx"],
+    how="outer",
+    suffixes=("_phon", "_behav"),
+)
+contingency_df["outcome"] = "all"
+contingency_df.loc[contingency_df["peak_auc_behav"].isna(), "outcome"] = "phonetic"
+contingency_df.loc[contingency_df["peak_auc_phon"].isna(),  "outcome"] = "behav"
+contingency_df = (
+    contingency_df
+    .sort_values(["subject", "electrode_idx", "outcome"])
+    .drop_duplicates(["subject", "electrode_idx"])
+    .reset_index(drop=True)
+)
+
+print(contingency_df.outcome.value_counts(normalize=False))
+print(contingency_df.outcome.value_counts(normalize=True).round(3))
+
+_both = contingency_df[contingency_df.outcome == "all"].copy()
+if len(_both):
+    _both["same_phoneme_pair"] = _both["phoneme_pair_phon"] == _both["phoneme_pair_behav"]
+    print(f"\n{len(_both)} sites with BOTH responses:")
+    print(f"  same phoneme pair (acoustic vs behavioral): "
+          f"{_both['same_phoneme_pair'].sum()}/{len(_both)}")
+    print(_both[["subject", "electrode_idx",
+                 "phoneme_pair_phon", "phoneme_pair_behav", "word_end_behav",
+                 "peak_auc_phon", "peak_auc_behav",
+                 "peak_smin_phon", "peak_smin_behav"]].to_string(index=False))
+
+# %%
+# Build behaviorally-defined ambiguous steps dict.
+# get_ambiguous_resampled_steps expects behavior_dummy_forced; alias if absent.
+_all_md_frames = []
+for _s, _ep in epochs_dict.items():
+    _md = _ep.metadata.copy()
+    _md["subject"] = _s
+    _all_md_frames.append(_md)
+
+_all_md_pd = pd.concat(_all_md_frames, ignore_index=True)
+if "behavior_dummy_forced" not in _all_md_pd.columns:
+    _all_md_pd = _all_md_pd.rename(
+        columns={"behavior_categorical": "behavior_dummy_forced"}
+    )
+
+ambig_steps = _get_ambig_steps(
+    pl.from_pandas(
+        _all_md_pd[["subject", "phoneme_pair", "word_end",
+                    "resampled", "behavior_dummy_forced"]]
+    ),
+    ambiguous_response_threshold=2,
+)
+print(f"ambig_steps: {len(ambig_steps)} (subject, phoneme_pair, word_end) keys")
+
+# %%
+def _provisional_star_plot(
+    subject,
+    electrode_idx,
+    phoneme_pair,
+    word_end,
+    epochs_dict,
+    phon_smin,
+    phon_smax,
+    behav_smin,
+    behav_smax,
+    textgrid_dir,
+    ambig_steps,
+    epoch_tmin=EPOCH_TMIN,
+    epoch_sfreq=EPOCH_SFREQ,
+    figsize=(6.5, 5.0),
+):
+    """Two-panel provisional HGA star plot (no prepare_neurometrics required).
+
+    Top: unambiguous trials (resampled 1 & 6), acoustic peak window shaded.
+    Bottom: within-completion controlled ambiguous trials (behaviorally-defined
+    steps from ambig_steps), behavioral peak window shaded, split by response.
+    """
+    ep = epochs_dict[subject]
+    times = ep.times
+    md = ep.metadata
+
+    pp_mask = md["phoneme_pair"] == phoneme_pair
+    ep_pp = ep[pp_mask.values]
+    md_pp = md[pp_mask].reset_index(drop=True)
+
+    hga = (
+        ep_pp.copy()
+        .apply_baseline((None, 0))
+        .get_data(picks=[electrode_idx])
+        .squeeze(1)
+    )
+
+    t_phon  = np.array([phon_smin,  phon_smax])  / epoch_sfreq + epoch_tmin
+    t_behav = np.array([behav_smin, behav_smax]) / epoch_sfreq + epoch_tmin
+
+    fig, (ax_top, ax_bot) = plt.subplots(2, 1, figsize=figsize, sharex=True)
+
+    # ── Top: unambiguous ───────────────────────────────────────────────
+    _step_colors = {1: "#2166ac", 6: "#d73027"}
+    for step, color in _step_colors.items():
+        mask = md_pp["resampled"] == step
+        if not mask.any():
+            continue
+        tr = hga[mask.values]
+        m = tr.mean(0)
+        se = tr.std(0) / np.sqrt(mask.sum())
+        ax_top.plot(times, m, color=color, lw=1.5, label=f"step {step}  (n={mask.sum()})")
+        ax_top.fill_between(times, m - se, m + se, color=color, alpha=0.18)
+    ax_top.axvspan(*t_phon, color="#4dac26", alpha=0.14, label="acoustic window")
+    ax_top.axhline(0, color="k", lw=0.5, ls=":")
+    ax_top.set_ylabel("HGA (z)")
+    ax_top.set_title(
+        f"{subject}  e{electrode_idx}  {phoneme_pair} — unambiguous", fontsize=9
+    )
+    ax_top.legend(fontsize=7, loc="upper left", framealpha=0.7)
+
+    # ── Bottom: controlled ambiguous (within-completion) ───────────────
+    amb = ambig_steps.get((subject, phoneme_pair, word_end), [3, 4])
+    we_amb_mask = (md_pp["word_end"] == word_end) & md_pp["resampled"].isin(amb)
+
+    _bhv_col = (
+        "behavior_dummy_forced"
+        if "behavior_dummy_forced" in md_pp.columns
+        else "behavior_categorical"
+    )
+    _bhv_colors = ["#762a83", "#1b7837"]
+    for _i, _bhv_val in enumerate(
+        sorted(md_pp.loc[we_amb_mask, _bhv_col].dropna().unique())
+    ):
+        mask = we_amb_mask & (md_pp[_bhv_col] == _bhv_val)
+        if not mask.any():
+            continue
+        tr = hga[mask.values]
+        m = tr.mean(0)
+        se = tr.std(0) / np.sqrt(mask.sum())
+        color = _bhv_colors[_i % len(_bhv_colors)]
+        ax_bot.plot(times, m, color=color, lw=1.5,
+                    label=f"resp={_bhv_val}  (n={mask.sum()})")
+        ax_bot.fill_between(times, m - se, m + se, color=color, alpha=0.18)
+    ax_bot.axvspan(*t_behav, color="#f4a582", alpha=0.25, label="behavioral window")
+    ax_bot.axhline(0, color="k", lw=0.5, ls=":")
+    ax_bot.set_ylabel("HGA (z)")
+    ax_bot.set_xlabel("Time (s, post word onset)")
+    ax_bot.set_title(
+        f"Controlled ambiguous — {word_end}  (steps {amb})", fontsize=9
+    )
+    ax_bot.legend(fontsize=7, loc="upper left", framealpha=0.7)
+
+    # ── TextGrid ────────────────────────────────────────────────────────
+    for _ax in (ax_top, ax_bot):
+        try:
+            add_textgrid(_ax, textgrid_dir=textgrid_dir,
+                         textgrid_file=f"11_{word_end}_dn_002.TextGrid",
+                         vline_extent=1.0)
+        except Exception:
+            pass
+
+    fig.tight_layout()
+    return fig
+
+# %%
+_star_out = ROOT / "provisional_star_plots.pdf"
+if len(_both) == 0:
+    print("No sites pass both thresholds — no star plots to render.")
+else:
+    _missing = [s for s in _both["subject"].unique() if s not in epochs_dict]
+    if _missing:
+        print(f"Warning: epochs not loaded for {_missing} — those sites will be skipped.")
+
+    with PdfPages(_star_out) as _pdf:
+        for _, _row in _both.iterrows():
+            if _row["subject"] not in epochs_dict:
+                continue
+            try:
+                _fig = _provisional_star_plot(
+                    subject=_row["subject"],
+                    electrode_idx=int(_row["electrode_idx"]),
+                    phoneme_pair=_row["phoneme_pair_behav"],
+                    word_end=_row["word_end_behav"],
+                    epochs_dict=epochs_dict,
+                    phon_smin=int(_row["peak_smin_phon"]),
+                    phon_smax=int(_row["peak_smax_phon"]),
+                    behav_smin=int(_row["peak_smin_behav"]),
+                    behav_smax=int(_row["peak_smax_behav"]),
+                    textgrid_dir=_TEXTGRID_DIR,
+                    ambig_steps=ambig_steps,
+                )
+                _pdf.savefig(_fig)
+                plt.close(_fig)
+            except Exception as _e:
+                print(f"  skipped {_row['subject']} e{int(_row['electrode_idx'])}: {_e}")
+
+    print(f"Written {len(_both)} pages → {_star_out}")
