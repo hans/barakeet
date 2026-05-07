@@ -177,9 +177,9 @@ for _p in sorted(ROOT.glob("acoustic_decoding_single_electrode/*/scores.parquet"
     )
 
     _elec_df = get_electrode_df(_subject)
-    _elec_pl = pl.from_pandas(
-        _elec_df.reset_index()[["electrode_idx", "x", "y", "z", "roi"]]
-    )
+    _elec_tmp = _elec_df.reset_index()[["electrode_idx", "x", "y", "z", "roi"]]
+    _elec_tmp["roi"] = _elec_tmp["roi"].astype(str)
+    _elec_pl = pl.from_pandas(_elec_tmp)
     ac_brain_frames.append(_peak.join(_elec_pl, on="electrode_idx", how="left"))
 
     _n = len(_peak)
@@ -422,9 +422,9 @@ for _p in sorted(ROOT.glob("behavior_decoding_single_electrode_hga_only/*/scores
 
     # Merge with MNI electrode positions (warped coords)
     _elec_df = get_electrode_df(_subject)
-    _elec_pl = pl.from_pandas(
-        _elec_df.reset_index()[["electrode_idx", "x", "y", "z", "roi"]]
-    )
+    _elec_tmp = _elec_df.reset_index()[["electrode_idx", "x", "y", "z", "roi"]]
+    _elec_tmp["roi"] = _elec_tmp["roi"].astype(str)
+    _elec_pl = pl.from_pandas(_elec_tmp)
     _peak_pos = _peak.join(_elec_pl, on="electrode_idx", how="left")
 
     brain_frames.append(_peak_pos.with_columns(pl.lit(_subject).alias("subject")))
