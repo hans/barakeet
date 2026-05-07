@@ -26,6 +26,7 @@
 
 # %%
 import os
+import yaml
 # Cap threading so this doesn't monopolize the node.
 os.environ.setdefault("POLARS_MAX_THREADS", "8")
 
@@ -38,6 +39,9 @@ from pathlib import Path
 from src.data import get_electrode_df
 from src.models.causal6_aggregates import SITE_KEYS_BEHAVIOR_HGA_ONLY, _behavior_offset_samples
 from src.models.significance import null_standardized_peak_test
+
+with open("config.yaml") as _f:
+    _config = yaml.safe_load(_f)
 
 ROOT = Path("outputs/causal6")
 EPOCH_TMIN = -0.4
@@ -147,7 +151,8 @@ if ac_frames:
 #          peak\_smin, peak\_auc, fold\_tstat, n\_folds, x, y, z, roi
 
 # %%
-_AC_PEAK_SEARCH_SMAX = 290
+_AC_PEAK_SEARCH_SMIN = _config["analysis"]["acoustic_peak_search_smin"]
+_AC_PEAK_SEARCH_SMAX = _config["analysis"]["acoustic_peak_search_smax"]
 _AC_TARGET = "categorical_acoustic_cue"
 _AC_SITE_KEYS = ["subject", "electrode_idx", "phoneme_pair"]
 _AC_WINDOW_KEYS = _AC_SITE_KEYS + ["smin", "smax"]
@@ -160,6 +165,7 @@ for _p in sorted(ROOT.glob("acoustic_decoding_single_electrode/*/scores.parquet"
         pl.read_parquet(_p)
         .filter(
             (pl.col("target") == _AC_TARGET)
+            & (pl.col("smin") >= _AC_PEAK_SEARCH_SMIN)
             & (pl.col("smin") <= _AC_PEAK_SEARCH_SMAX)
         )
     )
