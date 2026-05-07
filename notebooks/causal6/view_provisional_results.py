@@ -55,11 +55,18 @@ _PEAK_SEARCH_SMAX = 290
 _BEHAV_POST_OFFSET_S = 0.2  # max time post word-end to include
 _OFFSET_SAMPLES = _behavior_offset_samples(EPOCH_TMIN, EPOCH_SFREQ, _BEHAV_POST_OFFSET_S)
 
+# Acoustic decoder window search constraints
+_AC_PEAK_SEARCH_SMIN = _config["analysis"]["decoding"]["acoustic_peak_search_smin"]
+_AC_PEAK_SEARCH_SMAX = _config["analysis"]["decoding"]["acoustic_peak_search_smax"]
+_AC_TARGET = "categorical_acoustic_cue"
+_AC_SITE_KEYS = ["subject", "electrode_idx", "phoneme_pair"]
+_AC_WINDOW_KEYS = _AC_SITE_KEYS + ["smin", "smax"]
+
 
 def _filter_window_expr() -> pl.Expr:
     """Keep only windows within the causal search range for each word_end."""
     return (
-        (pl.col("smin") >= _PEAK_SEARCH_SMIN)
+        (pl.col("smin") >= _AC_PEAK_SEARCH_SMIN)
         & (pl.col("smax") <= pl.col("_smax_limit"))
         & (pl.col("smax") <= _PEAK_SEARCH_SMAX)
     )
@@ -151,12 +158,6 @@ if ac_frames:
 #          peak\_smin, peak\_auc, fold\_tstat, n\_folds, x, y, z, roi
 
 # %%
-_AC_PEAK_SEARCH_SMIN = _config["analysis"]["acoustic_peak_search_smin"]
-_AC_PEAK_SEARCH_SMAX = _config["analysis"]["acoustic_peak_search_smax"]
-_AC_TARGET = "categorical_acoustic_cue"
-_AC_SITE_KEYS = ["subject", "electrode_idx", "phoneme_pair"]
-_AC_WINDOW_KEYS = _AC_SITE_KEYS + ["smin", "smax"]
-
 ac_brain_frames: list[pl.DataFrame] = []
 
 for _p in sorted(ROOT.glob("acoustic_decoding_single_electrode/*/scores.parquet")):
