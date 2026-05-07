@@ -35,6 +35,7 @@ import polars as pl
 
 from pathlib import Path
 
+from src.data import get_electrode_df
 from src.models.causal6_aggregates import SITE_KEYS_BEHAVIOR_HGA_ONLY
 from src.models.significance import null_standardized_peak_test
 
@@ -118,7 +119,95 @@ if ac_frames:
     plt.show()
 
 # %% [markdown]
-# ## 2  Behavior HGA-only — raw peak ROC-AUC
+# ## 2  Acoustic — fold t-stats for brain plotting
+#
+# Same fold t-stat approach as the behavior section below, but for acoustic
+# decoding.  Uses `acoustic_decoding_single_electrode/*/scores.parquet`
+# (fold-level AUC per site × window) with the same search window as the peaks
+# rule (`smin` 0–290 samples, `target == "categorical_acoustic_cue"`).
+#
+# **Output**: `outputs/causal6/brain_plot_acoustic_tstats.parquet`
+# Columns: subject, electrode\_idx, phoneme\_pair,
+#          peak\_smin, peak\_auc, fold\_tstat, n\_folds, x, y, z, roi
+
+# %%
+_AC_PEAK_SEARCH_SMAX = 290
+_AC_TARGET = "categorical_acoustic_cue"
+_AC_SITE_KEYS = ["subject", "electrode_idx", "phoneme_pair"]
+_AC_WINDOW_KEYS = _AC_SITE_KEYS + ["smin", "smax"]
+
+ac_brain_frames: list[pl.DataFrame] = []
+
+for _p in sorted(ROOT.glob("acoustic_decoding_single_electrode/*/scores.parquet")):
+    _subject = _p.parent.name
+    _df = (
+        pl.read_parquet(_p)
+        .filter(
+            (pl.col("target") == _AC_TARGET)
+            & (pl.col("smin") <= _AC_PEAK_SEARCH_SMAX)
+        )
+    )
+
+    _win_stats = (
+        _df.group_by(_AC_WINDOW_KEYS)
+        .agg(
+            pl.col("test_roc_auc").mean().alias("fold_mean"),
+            pl.col("test_roc_auc").std().alias("fold_std"),
+            pl.col("test_roc_auc").len().alias("n_folds"),
+        )
+    )
+
+    _peak = (
+        _win_stats.group_by(_AC_SITE_KEYS)
+        .agg(
+            pl.col("fold_mean").max().alias("peak_auc"),
+            pl.col("smin").get(pl.col("fold_mean").arg_max()).alias("peak_smin"),
+            pl.col("fold_std").get(pl.col("fold_mean").arg_max()).alias("peak_fold_std"),
+            pl.col("n_folds").get(pl.col("fold_mean").arg_max()).alias("n_folds"),
+        )
+        .with_columns(
+            (
+                (pl.col("peak_auc") - 0.5)
+                / (
+                    pl.max_horizontal(pl.col("peak_fold_std"), pl.lit(1e-6))
+                    / pl.col("n_folds").cast(pl.Float64).sqrt()
+                )
+            ).alias("fold_tstat")
+        )
+    )
+
+    _elec_df = get_electrode_df(_subject)
+    _elec_pl = pl.from_pandas(
+        _elec_df.reset_index()[["electrode_idx", "x", "y", "z", "roi"]]
+    )
+    ac_brain_frames.append(_peak.join(_elec_pl, on="electrode_idx", how="left"))
+
+    _n = len(_peak)
+    _t = _peak["fold_tstat"].to_numpy()
+    print(
+        f"{_subject}: {_n} sites  |  "
+        f"fold_tstat  median={np.median(_t):.2f}  "
+        f"max={_t.max():.2f}  "
+        f">2.13 (≈p<0.05, df=4): {int((_t > 2.13).sum())}/{_n}"
+    )
+    for _pp in sorted(_peak["phoneme_pair"].unique().to_list()):
+        _sub = _peak.filter(pl.col("phoneme_pair") == _pp)
+        _st = _sub["fold_tstat"].to_numpy()
+        print(
+            f"  {_pp} ({len(_sub)} sites):  "
+            f"t median={np.median(_st):.2f}  max={_st.max():.2f}  "
+            f"AUC median={_sub['peak_auc'].median():.3f}"
+        )
+
+# %%
+if ac_brain_frames:
+    ac_brain_df = pl.concat(ac_brain_frames)
+    _ac_out = ROOT / "brain_plot_acoustic_tstats.parquet"
+    ac_brain_df.write_parquet(_ac_out)
+    print(f"Written: {_ac_out}  ({len(ac_brain_df)} rows × {ac_brain_df.width} cols)")
+
+# %% [markdown]
+# ## 4  Behavior HGA-only — raw peak ROC-AUC
 #
 # For every subject with a `scores.parquet`, compute the per-site peak
 # fold-mean AUC across all windows (no null needed).
@@ -279,7 +368,7 @@ for _subject in sorted(beh_peak_frames):
     ]))
 
 # %% [markdown]
-# ## 3  Behavior HGA-only — fold t-stats for brain plotting
+# ## 5  Behavior HGA-only — fold t-stats for brain plotting
 #
 # Without permutation results, we can still rank sites by the CV fold t-statistic:
 #
@@ -295,8 +384,6 @@ for _subject in sorted(beh_peak_frames):
 #          peak\_smin, peak\_auc, fold\_tstat, n\_folds, x, y, z, roi
 
 # %%
-from src.data import get_electrode_df
-
 brain_frames: list[pl.DataFrame] = []
 
 for _p in sorted(ROOT.glob("behavior_decoding_single_electrode_hga_only/*/scores.parquet")):
@@ -406,7 +493,7 @@ if brain_frames:
     plt.show()
 
 # %% [markdown]
-# ## 4  Behavior HGA-only — on-the-fly significance
+# ## 6  Behavior HGA-only — on-the-fly significance
 #
 # Runs `aggregate_behavior_hga_only` + `null_standardized_peak_test` for every
 # subject that has both `scores.parquet` and `null_scores.parquet`.
