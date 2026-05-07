@@ -830,21 +830,23 @@ def _provisional_star_plot(
     phoneme_pair,
     word_end,
     epochs_dict,
-    phon_smin,
-    phon_smax,
-    behav_smin,
-    behav_smax,
-    textgrid_dir,
     ambig_steps,
+    phon_smin=None,
+    phon_smax=None,
+    behav_smin=None,
+    behav_smax=None,
+    textgrid_dir=_TEXTGRID_DIR,
     epoch_tmin=EPOCH_TMIN,
     epoch_sfreq=EPOCH_SFREQ,
     figsize=(6.5, 5.0),
 ):
     """Two-panel provisional HGA star plot (no prepare_neurometrics required).
 
-    Top: unambiguous trials (resampled 1 & 6), acoustic peak window shaded.
+    Top: unambiguous trials (resampled 1 & 6); acoustic window shaded if
+    phon_smin/phon_smax supplied.
     Bottom: within-completion controlled ambiguous trials (behaviorally-defined
-    steps from ambig_steps), behavioral peak window shaded, split by response.
+    steps from ambig_steps), split by response; behavioral window shaded if
+    behav_smin/behav_smax supplied.
     """
     ep = epochs_dict[subject]
     times = ep.times
@@ -861,9 +863,6 @@ def _provisional_star_plot(
         .squeeze(1)
     )
 
-    t_phon  = np.array([phon_smin,  phon_smax])  / epoch_sfreq + epoch_tmin
-    t_behav = np.array([behav_smin, behav_smax]) / epoch_sfreq + epoch_tmin
-
     fig, (ax_top, ax_bot) = plt.subplots(2, 1, figsize=figsize, sharex=True)
 
     # ── Top: unambiguous ───────────────────────────────────────────────
@@ -877,7 +876,9 @@ def _provisional_star_plot(
         se = tr.std(0) / np.sqrt(mask.sum())
         ax_top.plot(times, m, color=color, lw=1.5, label=f"step {step}  (n={mask.sum()})")
         ax_top.fill_between(times, m - se, m + se, color=color, alpha=0.18)
-    ax_top.axvspan(*t_phon, color="#4dac26", alpha=0.14, label="acoustic window")
+    if phon_smin is not None:
+        t_phon = np.array([phon_smin, phon_smax]) / epoch_sfreq + epoch_tmin
+        ax_top.axvspan(*t_phon, color="#4dac26", alpha=0.14, label="acoustic window")
     ax_top.axhline(0, color="k", lw=0.5, ls=":")
     ax_top.set_ylabel("HGA (z)")
     ax_top.set_title(
@@ -908,7 +909,9 @@ def _provisional_star_plot(
         ax_bot.plot(times, m, color=color, lw=1.5,
                     label=f"resp={_bhv_val}  (n={mask.sum()})")
         ax_bot.fill_between(times, m - se, m + se, color=color, alpha=0.18)
-    ax_bot.axvspan(*t_behav, color="#f4a582", alpha=0.25, label="behavioral window")
+    if behav_smin is not None:
+        t_behav = np.array([behav_smin, behav_smax]) / epoch_sfreq + epoch_tmin
+        ax_bot.axvspan(*t_behav, color="#f4a582", alpha=0.25, label="behavioral window")
     ax_bot.axhline(0, color="k", lw=0.5, ls=":")
     ax_bot.set_ylabel("HGA (z)")
     ax_bot.set_xlabel("Time (s, post word onset)")
@@ -962,3 +965,92 @@ else:
                 print(f"  skipped {_row['subject']} e{int(_row['electrode_idx'])}: {_e}")
 
     print(f"Written {len(_both)} pages → {_star_out}")
+
+# %%
+# Top-K behavioral-only sites (no acoustic window — we expect the bottom panel
+# to separate but not necessarily the top).
+_TOP_K = 10
+
+_behav_only = (
+    contingency_df[contingency_df.outcome == "behav"]
+    .sort_values("peak_auc_behav", ascending=False)
+    .head(_TOP_K)
+)
+print(f"Top {_TOP_K} behavioral-only sites (AUC ≥ {behav_auc_threshold}, no acoustic pass):")
+print(_behav_only[["subject", "electrode_idx", "phoneme_pair_behav",
+                    "word_end", "peak_auc_behav"]].to_string(index=False))
+
+_bonly_out = ROOT / "provisional_star_plots_behav_only.pdf"
+with PdfPages(_bonly_out) as _pdf:
+    for _, _row in _behav_only.iterrows():
+        if _row["subject"] not in epochs_dict:
+            continue
+        try:
+            _fig = _provisional_star_plot(
+                subject=_row["subject"],
+                electrode_idx=int(_row["electrode_idx"]),
+                phoneme_pair=_row["phoneme_pair_behav"],
+                word_end=_row["word_end"],
+                epochs_dict=epochs_dict,
+                ambig_steps=ambig_steps,
+                behav_smin=int(_row["peak_smin_behav"]),
+                behav_smax=int(_row["peak_smax_behav"]),
+            )
+            _pdf.savefig(_fig)
+            plt.close(_fig)
+        except Exception as _e:
+            print(f"  skipped {_row['subject']} e{int(_row['electrode_idx'])}: {_e}")
+print(f"Written {len(_behav_only)} pages → {_bonly_out}")
+
+# %%
+# Top-K acoustic-only sites (no behavioral window — we expect the top panel
+# to separate but not necessarily the bottom).
+# Acoustic peaks have no word_end, so we render one page per word_end available
+# for that (subject, phoneme_pair) in ambig_steps.
+_acoustic_only = (
+    contingency_df[contingency_df.outcome == "phonetic"]
+    .sort_values("peak_auc_phon", ascending=False)
+    .head(_TOP_K)
+)
+print(f"Top {_TOP_K} acoustic-only sites (AUC ≥ {acoustic_auc_threshold}, no behavioral pass):")
+print(_acoustic_only[["subject", "electrode_idx", "phoneme_pair_phon",
+                       "peak_auc_phon"]].to_string(index=False))
+
+_aonly_out = ROOT / "provisional_star_plots_acoustic_only.pdf"
+with PdfPages(_aonly_out) as _pdf:
+    _n_pages = 0
+    for _, _row in _acoustic_only.iterrows():
+        _subj = _row["subject"]
+        _pp = _row["phoneme_pair_phon"]
+        if _subj not in epochs_dict:
+            continue
+        # Find word_ends that have behaviorally-defined ambiguous steps for this site
+        _word_ends = sorted({
+            we for (s, pp, we) in ambig_steps.keys()
+            if s == _subj and pp == _pp
+        })
+        if not _word_ends:
+            # Fall back to any word_ends present in the epoch metadata
+            _word_ends = sorted(
+                epochs_dict[_subj].metadata
+                .loc[epochs_dict[_subj].metadata["phoneme_pair"] == _pp, "word_end"]
+                .dropna().unique().tolist()
+            )
+        for _we in _word_ends:
+            try:
+                _fig = _provisional_star_plot(
+                    subject=_subj,
+                    electrode_idx=int(_row["electrode_idx"]),
+                    phoneme_pair=_pp,
+                    word_end=_we,
+                    epochs_dict=epochs_dict,
+                    ambig_steps=ambig_steps,
+                    phon_smin=int(_row["peak_smin_phon"]),
+                    phon_smax=int(_row["peak_smax_phon"]),
+                )
+                _pdf.savefig(_fig)
+                plt.close(_fig)
+                _n_pages += 1
+            except Exception as _e:
+                print(f"  skipped {_subj} e{int(_row['electrode_idx'])} {_we}: {_e}")
+print(f"Written {_n_pages} pages → {_aonly_out}")
