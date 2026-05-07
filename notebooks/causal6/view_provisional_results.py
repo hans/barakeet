@@ -1,0 +1,328 @@
+# ---
+# jupyter:
+#   jupytext:
+#     formats: ipynb,py:percent
+#     text_representation:
+#       extension: .py
+#       format_name: percent
+#       format_version: '1.3'
+#       jupytext_version: 1.18.1
+#   kernelspec:
+#     display_name: Python 3
+#     language: python
+#     name: python3
+# ---
+
+# %% [markdown]
+# # causal6: provisional results viewer
+#
+# Reads whatever outputs exist in `outputs/causal6/` and shows:
+# 1. **Acoustic** — significance from `acoustic_decoding_peaks/*/phon_peaks.parquet`
+# 2. **Behavior HGA-only (raw)** — peak fold-mean AUC across all subjects with scores
+# 3. **Behavior HGA-only (significance)** — on-the-fly significance for subjects
+#    that have both real scores and null permutations
+#
+# No files are written. Re-run the cell block you care about at any time.
+
+# %%
+import os
+
+import matplotlib.pyplot as plt
+import numpy as np
+import polars as pl
+
+# Cap threading so this doesn't monopolize the node.
+os.environ.setdefault("POLARS_MAX_THREADS", "8")
+
+from pathlib import Path
+
+from src.models.causal6_aggregates import (
+    SITE_KEYS_BEHAVIOR_HGA_ONLY,
+    aggregate_behavior_hga_only,
+)
+from src.models.significance import null_standardized_peak_test
+
+ROOT = Path("outputs/causal6")
+EPOCH_TMIN = -0.4
+EPOCH_SFREQ = 100.0
+SITE_KEYS_BEHAV = SITE_KEYS_BEHAVIOR_HGA_ONLY  # ["subject", "electrode_idx", "phoneme_pair", "word_end"]
+
+
+def smin_to_ms(s) -> np.ndarray:
+    return (np.asarray(s) / EPOCH_SFREQ + EPOCH_TMIN) * 1000
+
+
+# %% [markdown]
+# ## 1  Acoustic decoding — significance
+#
+# `acoustic_decoding_peaks/*/phon_peaks.parquet` is produced by the
+# `acoustic_decoding_peaks` Snakemake rule and already contains maxstat-corrected
+# p-values.  No recomputation needed here.
+
+# %%
+ac_peak_paths = sorted(ROOT.glob("acoustic_decoding_peaks/*/phon_peaks.parquet"))
+ac_frames = {p.parent.name: pl.read_parquet(p) for p in ac_peak_paths}
+
+for subject, df in ac_frames.items():
+    n_total = len(df)
+    n_sig = int((df["p_value"] < 0.05).sum())
+    n_perm = int(df["n_permutations"].max())
+    min_p = 1.0 / (n_perm + 1)
+    print(
+        f"{subject}  {n_total} sites  |  "
+        f"permutations: {n_perm} (min achievable p = {min_p:.4f})  |  "
+        f"significant (p<0.05): {n_sig}/{n_total}"
+    )
+    for pp in sorted(df["phoneme_pair"].unique().to_list()):
+        sub = df.filter(pl.col("phoneme_pair") == pp)
+        print(
+            f"  {pp}:  {int((sub['p_value'] < 0.05).sum())}/{len(sub)} sig  "
+            f"  peak-AUC median={sub['test_roc_auc'].median():.3f}  "
+            f"max={sub['test_roc_auc'].max():.3f}"
+        )
+
+# %%
+if ac_frames:
+    ac_all = pl.concat(list(ac_frames.values()))
+    subjects = sorted(ac_frames)
+    n_cols = max(len(ac_frames), 1)
+
+    fig, axes = plt.subplots(2, n_cols, figsize=(5 * n_cols, 8), squeeze=False)
+
+    for col, subject in enumerate(subjects):
+        df = ac_frames[subject]
+        aucs = df["test_roc_auc"].to_numpy()
+        peak_ms = smin_to_ms(df["smin"].to_numpy())
+        pv = df["p_value"].to_numpy()
+        n_perm = int(df["n_permutations"].max())
+        min_p = 1.0 / (n_perm + 1)
+
+        # Peak AUC distribution, coloured by significance
+        sig_mask = pv < 0.05
+        ax = axes[0, col]
+        ax.hist(aucs[~sig_mask], bins=20, color="steelblue", alpha=0.7, label="n.s.")
+        ax.hist(aucs[sig_mask], bins=20, color="tomato", alpha=0.8, label="p<0.05")
+        ax.axvline(0.5, color="k", lw=0.8, ls="--")
+        ax.set_xlabel("peak ROC-AUC")
+        ax.set_ylabel("sites")
+        ax.set_title(f"{subject} — acoustic peak AUC\n({n_perm} perms, min p={min_p:.3f})")
+        ax.legend(fontsize=8)
+
+        # Peak timing distribution
+        ax2 = axes[1, col]
+        ax2.hist(peak_ms[~sig_mask], bins=20, color="steelblue", alpha=0.7, label="n.s.")
+        ax2.hist(peak_ms[sig_mask], bins=20, color="tomato", alpha=0.8, label="p<0.05")
+        ax2.axvline(0, color="k", lw=0.8, ls="--", label="word onset")
+        ax2.set_xlabel("peak window onset (ms post word onset)")
+        ax2.set_ylabel("sites")
+        ax2.set_title(f"{subject} — acoustic peak timing")
+        ax2.legend(fontsize=8)
+
+    fig.tight_layout()
+    plt.show()
+
+# %% [markdown]
+# ## 2  Behavior HGA-only — raw peak ROC-AUC
+#
+# For every subject with a `scores.parquet`, compute the per-site peak
+# fold-mean AUC across all windows (no null needed).
+
+# %%
+WINDOW_KEYS_BEHAV = SITE_KEYS_BEHAV + ["smin", "smax"]
+
+beh_score_paths = sorted(
+    ROOT.glob("behavior_decoding_single_electrode_hga_only/*/scores.parquet")
+)
+beh_peak_frames: dict[str, pl.DataFrame] = {}
+
+for p in beh_score_paths:
+    subject = p.parent.name
+    df = pl.read_parquet(p).filter(pl.col("model") == "full")
+    fold_mean = (
+        df.group_by(WINDOW_KEYS_BEHAV)
+        .agg(pl.col("test_roc_auc").mean().alias("fold_mean"))
+    )
+    peak_per_site = (
+        fold_mean.group_by(SITE_KEYS_BEHAV)
+        .agg(
+            pl.col("fold_mean").max().alias("peak_auc"),
+            pl.col("smin").get(pl.col("fold_mean").arg_max()).alias("peak_smin"),
+        )
+    )
+    has_null = (
+        ROOT / f"behavior_decoding_single_electrode_hga_only_null/{subject}/null_scores.parquet"
+    ).exists()
+    beh_peak_frames[subject] = peak_per_site.with_columns(
+        pl.lit(has_null).alias("has_null")
+    )
+    n = len(peak_per_site)
+    n_above = int((peak_per_site["peak_auc"] > 0.6).sum())
+    null_tag = "(null done)" if has_null else "(null pending)"
+    print(
+        f"{subject} {null_tag}  {n} sites  |  "
+        f"peak-AUC median={peak_per_site['peak_auc'].median():.3f}  "
+        f"p75={np.percentile(peak_per_site['peak_auc'].to_numpy(), 75):.3f}  "
+        f"max={peak_per_site['peak_auc'].max():.3f}  |  "
+        f">0.60: {n_above}/{n}"
+    )
+    for pp in sorted(peak_per_site["phoneme_pair"].unique().to_list()):
+        sub = peak_per_site.filter(pl.col("phoneme_pair") == pp)
+        print(
+            f"  {pp} ({len(sub)} sites):  "
+            f"median={sub['peak_auc'].median():.3f}  "
+            f"max={sub['peak_auc'].max():.3f}  "
+            f">0.60: {int((sub['peak_auc'] > 0.6).sum())}/{len(sub)}"
+        )
+
+# %%
+if beh_peak_frames:
+    subjects = sorted(beh_peak_frames)
+    phoneme_pairs = sorted(
+        pl.concat(list(beh_peak_frames.values()))["phoneme_pair"].unique().to_list()
+    )
+    colors = {"bm": "#4C8BE2", "dn": "#E26B4C", "pb": "#4CE28B"}
+
+    fig, axes = plt.subplots(
+        len(subjects), 2, figsize=(12, 4 * len(subjects)), squeeze=False
+    )
+
+    for row, subject in enumerate(subjects):
+        df = beh_peak_frames[subject]
+
+        # Left: peak AUC distributions by phoneme pair
+        ax = axes[row, 0]
+        for pp in phoneme_pairs:
+            aucs = df.filter(pl.col("phoneme_pair") == pp)["peak_auc"].to_numpy()
+            ax.hist(aucs, bins=15, alpha=0.6, label=pp, color=colors.get(pp))
+        ax.axvline(0.5, color="k", lw=0.8, ls="--")
+        ax.axvline(0.6, color="k", lw=0.8, ls=":", label="0.60 threshold")
+        ax.set_xlabel("peak fold-mean ROC-AUC")
+        ax.set_ylabel("sites")
+        ax.set_title(f"{subject} — behavior raw peak AUC")
+        ax.legend(fontsize=8)
+
+        # Right: peak timing by phoneme pair
+        ax2 = axes[row, 1]
+        for pp in phoneme_pairs:
+            sub = df.filter(pl.col("phoneme_pair") == pp)
+            peak_ms = smin_to_ms(sub["peak_smin"].to_numpy())
+            ax2.hist(peak_ms, bins=15, alpha=0.6, label=pp, color=colors.get(pp))
+        ax2.axvline(0, color="k", lw=0.8, ls="--", label="word onset")
+        ax2.set_xlabel("peak window onset (ms post word onset)")
+        ax2.set_ylabel("sites")
+        ax2.set_title(f"{subject} — behavior peak timing")
+        ax2.legend(fontsize=8)
+
+    fig.tight_layout()
+    plt.show()
+
+# %% [markdown]
+# ## 3  Behavior HGA-only — on-the-fly significance
+#
+# Runs `aggregate_behavior_hga_only` + `null_standardized_peak_test` for every
+# subject that has both `scores.parquet` and `null_scores.parquet`.
+#
+# **No BH-FDR applied** — partial data.  Once the pipeline finishes, run:
+# ```
+# uv run python scripts/aggregate_partial.py behav_hga_only
+# ```
+# to get FDR-corrected aggregates.
+
+# %%
+null_dir = ROOT / "behavior_decoding_single_electrode_hga_only_null"
+score_dir = ROOT / "behavior_decoding_single_electrode_hga_only"
+
+beh_sig_frames: dict[str, pl.DataFrame] = {}
+
+for null_path in sorted(null_dir.glob("*/null_scores.parquet")):
+    subject = null_path.parent.name
+    scores_path = score_dir / subject / "scores.parquet"
+    if not scores_path.exists():
+        print(f"{subject}: null exists but no real scores — skipping.")
+        continue
+
+    print(f"{subject}: aggregating …", end=" ", flush=True)
+    real_agg, null_agg = aggregate_behavior_hga_only(
+        real_scores=pl.read_parquet(scores_path),
+        null_scores=pl.read_parquet(null_path),
+        epoch_tmin=EPOCH_TMIN,
+        epoch_sfreq=EPOCH_SFREQ,
+        behav_peak_post_offset_s=0.2,
+        peak_search_smin=0,
+        peak_search_smax=290,
+    )
+    peaks, _ = null_standardized_peak_test(
+        real_agg, null_agg,
+        site_keys=SITE_KEYS_BEHAV,
+        window_keys=["smin", "smax"],
+        stat_col="fold_mean",
+    )
+    beh_sig_frames[subject] = peaks
+    n_total = len(peaks)
+    n_sig = int((peaks["p_value"] < 0.05).sum())
+    n_perm = int(peaks["n_permutations"].max())
+    min_p = 1.0 / (n_perm + 1)
+    print(
+        f"{n_perm} perms (min p={min_p:.4f})  |  "
+        f"significant (p<0.05): {n_sig}/{n_total}"
+    )
+    for pp in sorted(peaks["phoneme_pair"].unique().to_list()):
+        sub = peaks.filter(pl.col("phoneme_pair") == pp)
+        print(
+            f"  {pp}:  {int((sub['p_value'] < 0.05).sum())}/{len(sub)} sig  "
+            f"  peak fold-mean median={sub['real_statistic'].median():.3f}  "
+            f"max={sub['real_statistic'].max():.3f}"
+        )
+
+# %%
+if beh_sig_frames:
+    subjects = sorted(beh_sig_frames)
+
+    fig, axes = plt.subplots(
+        len(subjects), 3, figsize=(15, 4 * len(subjects)), squeeze=False
+    )
+
+    for row, subject in enumerate(subjects):
+        peaks = beh_sig_frames[subject]
+        n_perm = int(peaks["n_permutations"].max())
+        min_p = 1.0 / (n_perm + 1)
+
+        aucs = peaks["real_statistic"].to_numpy()
+        peak_ms = smin_to_ms(peaks["peak_smin"].to_numpy())
+        pv = peaks["p_value"].to_numpy()
+        sig_mask = pv < 0.05
+
+        # AUC distribution coloured by significance
+        ax = axes[row, 0]
+        ax.hist(aucs[~sig_mask], bins=20, color="steelblue", alpha=0.7, label="n.s.")
+        ax.hist(aucs[sig_mask], bins=20, color="tomato", alpha=0.8, label="p<0.05")
+        ax.axvline(0.5, color="k", lw=0.8, ls="--")
+        ax.set_xlabel("peak fold-mean ROC-AUC")
+        ax.set_ylabel("sites")
+        ax.set_title(
+            f"{subject} — behavior peak AUC\n({n_perm} perms, min p={min_p:.4f})"
+        )
+        ax.legend(fontsize=8)
+
+        # Peak timing coloured by significance
+        ax2 = axes[row, 1]
+        ax2.hist(peak_ms[~sig_mask], bins=20, color="steelblue", alpha=0.7, label="n.s.")
+        ax2.hist(peak_ms[sig_mask], bins=20, color="tomato", alpha=0.8, label="p<0.05")
+        ax2.axvline(0, color="k", lw=0.8, ls="--", label="word onset")
+        ax2.set_xlabel("peak window onset (ms post word onset)")
+        ax2.set_ylabel("sites")
+        ax2.set_title(f"{subject} — behavior peak timing")
+        ax2.legend(fontsize=8)
+
+        # p-value histogram
+        ax3 = axes[row, 2]
+        ax3.hist(pv[np.isfinite(pv)], bins=20, color="slategray", alpha=0.8)
+        ax3.axvline(0.05, color="tomato", lw=1.2, ls="--", label="p=0.05")
+        ax3.axvline(min_p, color="goldenrod", lw=1.2, ls=":", label=f"min achievable ({min_p:.3f})")
+        ax3.set_xlabel("p-value (maxstat-corrected, uncorrected for FDR)")
+        ax3.set_ylabel("sites")
+        ax3.set_title(f"{subject} — p-value distribution")
+        ax3.legend(fontsize=8)
+
+    fig.tight_layout()
+    plt.show()
