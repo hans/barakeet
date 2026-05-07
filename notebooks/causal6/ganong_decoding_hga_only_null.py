@@ -49,6 +49,7 @@ from src.models.causal6_aggregates import (
     FLAVORS_GANONG_HGA_ONLY,
     SITE_KEYS_GANONG_HGA_ONLY,
     aggregate_ganong_hga_only,
+    preagg_ganong_hga_only_null,
 )
 
 # %% tags=["parameters"]
@@ -101,7 +102,7 @@ windows = make_windows(min_sample, max_sample, window_size, stride)
 
 # %%
 stage1_seeds = list(range(permutation_seed, permutation_seed + n_permutations_stage1))
-null_stage1 = run_ganong_hga_only_permutations(
+null_stage1_raw = run_ganong_hga_only_permutations(
     epochs, subject=subject,
     electrode_idxs=speech_responsive_idxs,
     windows=windows,
@@ -112,7 +113,7 @@ null_stage1 = run_ganong_hga_only_permutations(
     device=device, dtype=torch.float32,
     tol=tol, max_iter=max_iter,
 )
-assert null_stage1.height > 0, (
+assert null_stage1_raw.height > 0, (
     f"[{subject}] ganong hga_only stage-1 produced no rows"
 )
 
@@ -121,6 +122,9 @@ assert null_stage1.height > 0, (
 
 # %%
 real_scores = pl.read_parquet(scores_path)
+null_stage1 = preagg_ganong_hga_only_null(null_stage1_raw, real_scores)
+del null_stage1_raw
+
 real_agg, null_agg_stage1 = aggregate_ganong_hga_only(
     real_scores, null_stage1,
     epoch_tmin=epoch_tmin,
@@ -169,11 +173,14 @@ if borderline_keys and n_permutations_stage2 > 0:
             tol=tol, max_iter=max_iter,
             spill_dir=spill_dir,
         )
-        null_stage2 = filter_null_to_borderline(
+        null_stage2_raw = filter_null_to_borderline(
             pl.scan_parquet(spill_dir / "*.parquet"),
             borderline_keys,
             site_keys=SITE_KEYS_GANONG_HGA_ONLY,
         ).collect()
+    null_stage2 = preagg_ganong_hga_only_null(null_stage2_raw, real_scores)
+    del null_stage2_raw
+
     null_scores = pl.concat([null_stage1, null_stage2])
     log_stage2_done(
         subject,

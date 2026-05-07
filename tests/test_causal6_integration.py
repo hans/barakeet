@@ -32,11 +32,17 @@ from src.models.causal6 import (
     run_acoustic_searchlight,
     run_acoustic_searchlight_permutations,
     run_behavior_hga_only,
+    run_behavior_hga_only_permutations,
     run_behavior_with_control,
     run_behavior_with_control_permutations,
     run_ganong_hga_only,
     run_ganong_with_control,
     run_ganong_with_control_permutations,
+)
+from src.models.causal6_aggregates import (
+    SITE_KEYS_BEHAVIOR_HGA_ONLY,
+    aggregate_behavior_hga_only,
+    preagg_behavior_hga_only_null,
 )
 from src.models.significance import null_standardized_peak_test
 
@@ -428,6 +434,108 @@ def test_acoustic_searchlight_permutations_ec248(
     )
     # Strongest electrode should have p well below 0.5 on EC248 speech-responsive sites.
     assert p_array.min() <= 0.5, f"no site achieved p ≤ 0.5 (min={p_array.min():.3f})"
+
+
+def test_behavior_hga_only_preagg_null_ec248(
+    ec248_epochs, ec248_smoke_electrodes, smoke_config, behavior_hga_only_result
+):
+    """Preagg null has new schema and fold_mean_diff ≥ 0 count matches p-value.
+
+    Verifies:
+    - null_scores.parquet written by preagg has no fold column and has
+      fold_mean_diff, fold_std_diff, n_folds, t_stat columns.
+    - #{perm: fold_mean_diff >= 0} at the peak window closely matches the
+      foldmean p-value from null_standardized_peak_test.
+    """
+    n_perms = 20
+    raw_null = run_behavior_hga_only_permutations(
+        ec248_epochs,
+        subject="EC248",
+        electrode_idxs=ec248_smoke_electrodes,
+        windows=behavior_hga_only_result["windows"],
+        reg_lambda=smoke_config["reg_lambda"],
+        permute_seeds=list(range(n_perms)),
+        permutation_chunk_size=smoke_config["permutation_chunk_size"],
+        n_folds=smoke_config["n_folds"],
+        cv_random_state=smoke_config["cv_random_state"],
+        device=smoke_config["device"],
+        dtype=smoke_config["dtype"],
+        tol=smoke_config["tol"],
+        max_iter=smoke_config["max_iter"],
+    )
+
+    real_scores = behavior_hga_only_result["scores"]
+    preagg_null = preagg_behavior_hga_only_null(raw_null, real_scores)
+
+    # Schema: no fold column; has preagg columns.
+    assert "fold" not in preagg_null.columns
+    for col in ("fold_mean_diff", "fold_std_diff", "n_folds", "t_stat", "permutation_idx"):
+        assert col in preagg_null.columns, f"missing column: {col}"
+
+    # Shape: one row per (site × window × perm).
+    site_keys = SITE_KEYS_BEHAVIOR_HGA_ONLY
+    window_keys = site_keys + ["smin", "smax"]
+    n_expected = preagg_null.select(window_keys + ["permutation_idx"]).n_unique()
+    assert preagg_null.height == n_expected
+
+    # null_agg via aggregate_* with preagg null.
+    real_agg, null_agg = aggregate_behavior_hga_only(
+        real_scores, preagg_null,
+        epoch_tmin=smoke_config["epoch_tmin"],
+        epoch_sfreq=smoke_config["epoch_sfreq"],
+        behav_peak_post_offset_s=smoke_config["behav_peak_post_offset_s"],
+        peak_search_smin=smoke_config["peak_search_smin"],
+        peak_search_smax=smoke_config["peak_search_smax"],
+    )
+
+    # P-values from peak test are in valid range.
+    peaks, _ = null_standardized_peak_test(
+        real_agg.rename({"fold_mean": "statistic"}),
+        null_agg.rename({"fold_mean": "statistic"}),
+        site_keys=site_keys,
+        window_keys=["smin", "smax"],
+        stat_col="statistic",
+    )
+    min_p = 1.0 / (n_perms + 1)
+    p = peaks["p_value"].to_numpy()
+    assert ((p >= min_p) & (p <= 1.0)).all(), f"p-values out of range: {p}"
+
+    # fold_mean_diff >= 0 count at each (site, window) ≈ #{perm: fold_mean_perm >= fold_mean_real}.
+    # Verify by comparing against the old-style fold-mean aggregation from raw_null.
+    null_old = (
+        raw_null.group_by(window_keys + ["permutation_idx"])
+        .agg(pl.col("test_roc_auc").mean().alias("fold_mean_perm"))
+    )
+    real_mean = (
+        real_scores.group_by(window_keys)
+        .agg(pl.col("test_roc_auc").mean().alias("fold_mean_real"))
+    )
+    old_joined = null_old.join(real_mean, on=window_keys, how="left")
+
+    p_from_diff = (
+        preagg_null.group_by(window_keys)
+        .agg(
+            ((pl.col("fold_mean_diff") >= 0).cast(pl.Int64).sum() + 1).alias("ge_preagg"),
+            (pl.len() + 1).alias("K_plus1_preagg"),
+        )
+        .with_columns((pl.col("ge_preagg") / pl.col("K_plus1_preagg")).alias("p_preagg"))
+    )
+    p_from_raw = (
+        old_joined.group_by(window_keys)
+        .agg(
+            ((pl.col("fold_mean_perm") >= pl.col("fold_mean_real")).cast(pl.Int64).sum() + 1)
+            .alias("ge_raw"),
+            (pl.len() + 1).alias("K_plus1_raw"),
+        )
+        .with_columns((pl.col("ge_raw") / pl.col("K_plus1_raw")).alias("p_raw"))
+    )
+    check = p_from_diff.join(p_from_raw, on=window_keys, how="inner")
+    np.testing.assert_allclose(
+        check["p_preagg"].to_numpy(),
+        check["p_raw"].to_numpy(),
+        atol=1e-10,
+        err_msg="preagg foldmean p-values do not match raw foldmean p-values",
+    )
 
 
 def test_behavior_with_control_permutations_ec248(

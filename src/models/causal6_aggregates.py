@@ -118,6 +118,33 @@ def _filter_acoustic(
     )
 
 
+def _reconstruct_null_agg(
+    preagg_null: pl.DataFrame,
+    real_agg: pl.DataFrame,
+    window_keys: list[str],
+) -> pl.DataFrame:
+    """Convert pre-aggregated null (fold_mean_diff schema) to the
+    (fold_mean, fold_std, n_folds, t_stat) schema that fold_tstat_aggregate
+    produces.
+
+    fold_mean is reconstructed as fold_mean_diff + real_agg.fold_mean,
+    recovering the absolute permutation fold-mean. fold_std == fold_std_diff
+    (std of paired diffs). t_stat is the pre-computed paired t-stat.
+    """
+    real_mean = real_agg.select(window_keys + ["fold_mean"])
+    return (
+        preagg_null.join(real_mean, on=window_keys, how="left")
+        .with_columns(
+            (pl.col("fold_mean_diff") + pl.col("fold_mean")).alias("_fm")
+        )
+        .drop("fold_mean_diff", "fold_mean")
+        .rename({"_fm": "fold_mean", "fold_std_diff": "fold_std"})
+        .select(
+            window_keys + ["permutation_idx", "fold_mean", "fold_std", "n_folds", "t_stat"]
+        )
+    )
+
+
 def aggregate_acoustic(
     real_scores: pl.DataFrame,
     null_scores: pl.DataFrame,
@@ -128,6 +155,11 @@ def aggregate_acoustic(
 ) -> tuple[pl.DataFrame, pl.DataFrame]:
     """Acoustic decoder aggregation: filter to target + window range,
     then collapse folds into (fold_mean, fold_std, t_stat) per site×window.
+
+    If null_scores is pre-aggregated (fold_mean_diff schema from
+    preagg_acoustic_null), the fold-aggregation is skipped and fold_mean is
+    reconstructed from the paired differences. The null must be pre-filtered
+    by target before preagg — target is not present in the preagg schema.
     """
     site_keys = SITE_KEYS_ACOUSTIC
     window_keys = site_keys + ["smin", "smax"]
@@ -143,17 +175,23 @@ def aggregate_acoustic(
         stat_col="test_roc_auc",
         center=0.5,
     )
-    null_agg = fold_tstat_aggregate(
-        _filter_acoustic(
-            null_scores,
-            target=target,
-            peak_search_smin=peak_search_smin,
-            peak_search_smax=peak_search_smax,
-        ),
-        group_keys=window_keys + ["permutation_idx"],
-        stat_col="test_roc_auc",
-        center=0.5,
-    )
+    if "fold_mean_diff" in null_scores.columns:
+        null_filtered = null_scores.filter(
+            (pl.col("smin") >= peak_search_smin) & (pl.col("smax") <= peak_search_smax)
+        )
+        null_agg = _reconstruct_null_agg(null_filtered, real_agg, window_keys)
+    else:
+        null_agg = fold_tstat_aggregate(
+            _filter_acoustic(
+                null_scores,
+                target=target,
+                peak_search_smin=peak_search_smin,
+                peak_search_smax=peak_search_smax,
+            ),
+            group_keys=window_keys + ["permutation_idx"],
+            stat_col="test_roc_auc",
+            center=0.5,
+        )
     return real_agg, null_agg
 
 
@@ -238,6 +276,10 @@ def aggregate_behavior_with_control(
     ``diff = full - baseline``, then collapse folds into (fold_mean,
     fold_std, t_stat) on diff. real_agg additionally keeps fold-mean
     full_roc_auc / baseline_roc_auc as diagnostic columns.
+
+    If null_scores is pre-aggregated (fold_mean_diff schema from
+    preagg_behavior_with_control_null), the pairing and fold-aggregation are
+    skipped and fold_mean is reconstructed from the paired differences.
     """
     site_keys = SITE_KEYS_BEHAVIOR_WITH_CONTROL
     window_keys = site_keys + ["smin", "smax"]
@@ -260,17 +302,26 @@ def aggregate_behavior_with_control(
         )
 
     real_paired = _pair_and_filter(real_scores)
-    null_paired = _pair_and_filter(null_scores, extra_keys=["permutation_idx"])
-
     real_agg_diff = fold_tstat_aggregate(
         real_paired, group_keys=window_keys, stat_col="diff", center=0.0,
     )
-    null_agg_diff = fold_tstat_aggregate(
-        null_paired,
-        group_keys=window_keys + ["permutation_idx"],
-        stat_col="diff",
-        center=0.0,
-    )
+
+    if "fold_mean_diff" in null_scores.columns:
+        null_filtered = _filter_behavior_window(
+            null_scores,
+            offset_samples=offset_samples,
+            peak_search_smin=peak_search_smin,
+            peak_search_smax=peak_search_smax,
+        )
+        null_agg_diff = _reconstruct_null_agg(null_filtered, real_agg_diff, window_keys)
+    else:
+        null_paired = _pair_and_filter(null_scores, extra_keys=["permutation_idx"])
+        null_agg_diff = fold_tstat_aggregate(
+            null_paired,
+            group_keys=window_keys + ["permutation_idx"],
+            stat_col="diff",
+            center=0.0,
+        )
 
     # Diagnostic full/baseline fold-means joined onto real_agg.
     real_diag = real_paired.group_by(window_keys).agg(
@@ -295,6 +346,10 @@ def aggregate_behavior_hga_only(
     """Behavior decoder (HGA-only, no control). Filter windows by
     word_end-relative cap, then collapse folds into (fold_mean, fold_std,
     t_stat) on test_roc_auc (centered at 0.5).
+
+    If null_scores is pre-aggregated (fold_mean_diff schema from
+    preagg_behavior_hga_only_null), the fold-aggregation is skipped and
+    fold_mean is reconstructed from the paired differences.
     """
     site_keys = SITE_KEYS_BEHAVIOR_HGA_ONLY
     window_keys = site_keys + ["smin", "smax"]
@@ -308,22 +363,25 @@ def aggregate_behavior_hga_only(
         peak_search_smin=peak_search_smin,
         peak_search_smax=peak_search_smax,
     )
+    real_agg = fold_tstat_aggregate(
+        real_filtered, group_keys=window_keys,
+        stat_col="test_roc_auc", center=0.5,
+    )
+
     null_filtered = _filter_behavior_window(
         null_scores,
         offset_samples=offset_samples,
         peak_search_smin=peak_search_smin,
         peak_search_smax=peak_search_smax,
     )
-
-    real_agg = fold_tstat_aggregate(
-        real_filtered, group_keys=window_keys,
-        stat_col="test_roc_auc", center=0.5,
-    )
-    null_agg = fold_tstat_aggregate(
-        null_filtered,
-        group_keys=window_keys + ["permutation_idx"],
-        stat_col="test_roc_auc", center=0.5,
-    )
+    if "fold_mean_diff" in null_scores.columns:
+        null_agg = _reconstruct_null_agg(null_filtered, real_agg, window_keys)
+    else:
+        null_agg = fold_tstat_aggregate(
+            null_filtered,
+            group_keys=window_keys + ["permutation_idx"],
+            stat_col="test_roc_auc", center=0.5,
+        )
     return real_agg, null_agg
 
 
@@ -372,6 +430,10 @@ def aggregate_ganong_with_control(
 
     Note ``word_end`` is NOT in site_keys: trials are pooled across
     completions in the ganong refit.
+
+    If null_scores is pre-aggregated (fold_mean_diff schema from
+    preagg_ganong_with_control_null), the pairing and fold-aggregation are
+    skipped and fold_mean is reconstructed from the paired differences.
     """
     site_keys = SITE_KEYS_GANONG_WITH_CONTROL
     window_keys = site_keys + ["smin", "smax"]
@@ -387,17 +449,23 @@ def aggregate_ganong_with_control(
         )
 
     real_paired = _pair_and_filter(real_scores)
-    null_paired = _pair_and_filter(null_scores, extra_keys=["permutation_idx"])
-
     real_agg_diff = fold_tstat_aggregate(
         real_paired, group_keys=window_keys, stat_col="diff", center=0.0,
     )
-    null_agg_diff = fold_tstat_aggregate(
-        null_paired,
-        group_keys=window_keys + ["permutation_idx"],
-        stat_col="diff",
-        center=0.0,
-    )
+
+    if "fold_mean_diff" in null_scores.columns:
+        null_filtered = _filter_ganong_window(
+            null_scores, pod_samples=pod_samples, peak_search_smax=peak_search_smax,
+        )
+        null_agg_diff = _reconstruct_null_agg(null_filtered, real_agg_diff, window_keys)
+    else:
+        null_paired = _pair_and_filter(null_scores, extra_keys=["permutation_idx"])
+        null_agg_diff = fold_tstat_aggregate(
+            null_paired,
+            group_keys=window_keys + ["permutation_idx"],
+            stat_col="diff",
+            center=0.0,
+        )
 
     real_diag = real_paired.group_by(window_keys).agg(
         pl.col("full_roc_auc").mean().alias("full_roc_auc"),
@@ -419,6 +487,10 @@ def aggregate_ganong_hga_only(
     """Ganong decoder (HGA-only, no control). Filter windows by
     per-phoneme-pair POD floor + global smax cap, then collapse folds
     into (fold_mean, fold_std, t_stat) on test_roc_auc (centered at 0.5).
+
+    If null_scores is pre-aggregated (fold_mean_diff schema from
+    preagg_ganong_hga_only_null), the fold-aggregation is skipped and
+    fold_mean is reconstructed from the paired differences.
     """
     site_keys = SITE_KEYS_GANONG_HGA_ONLY
     window_keys = site_keys + ["smin", "smax"]
@@ -427,17 +499,190 @@ def aggregate_ganong_hga_only(
     real_filtered = _filter_ganong_window(
         real_scores, pod_samples=pod_samples, peak_search_smax=peak_search_smax,
     )
-    null_filtered = _filter_ganong_window(
-        null_scores, pod_samples=pod_samples, peak_search_smax=peak_search_smax,
-    )
-
     real_agg = fold_tstat_aggregate(
         real_filtered, group_keys=window_keys,
         stat_col="test_roc_auc", center=0.5,
     )
-    null_agg = fold_tstat_aggregate(
-        null_filtered,
-        group_keys=window_keys + ["permutation_idx"],
-        stat_col="test_roc_auc", center=0.5,
+
+    null_filtered = _filter_ganong_window(
+        null_scores, pod_samples=pod_samples, peak_search_smax=peak_search_smax,
     )
+    if "fold_mean_diff" in null_scores.columns:
+        null_agg = _reconstruct_null_agg(null_filtered, real_agg, window_keys)
+    else:
+        null_agg = fold_tstat_aggregate(
+            null_filtered,
+            group_keys=window_keys + ["permutation_idx"],
+            stat_col="test_roc_auc", center=0.5,
+        )
     return real_agg, null_agg
+
+
+# ---------------------------------------------------------------------------
+# Preagg helpers: compute paired fold differences at null-generation time
+# ---------------------------------------------------------------------------
+
+
+def _preagg_hga_only_null(
+    raw_null: pl.DataFrame,
+    real_scores: pl.DataFrame,
+    *,
+    site_keys: list[str],
+    std_floor: float = 0.01,
+) -> pl.DataFrame:
+    """Join on (site_keys + smin + smax + fold), compute diff_k = perm_k −
+    real_k per fold, and aggregate over folds.
+
+    Output schema: site_keys + [smin, smax, permutation_idx,
+    fold_mean_diff, fold_std_diff, n_folds, t_stat].
+    fold_mean_diff ≥ 0 means the permutation outperformed real on that perm.
+    """
+    window_keys = site_keys + ["smin", "smax"]
+    join_keys = window_keys + ["fold"]
+    real_fold = (
+        real_scores.select(join_keys + ["test_roc_auc"])
+        .rename({"test_roc_auc": "_real"})
+    )
+    with_diff = (
+        raw_null.join(real_fold, on=join_keys, how="left")
+        .with_columns((pl.col("test_roc_auc") - pl.col("_real")).alias("_diff"))
+    )
+    agg = (
+        with_diff.group_by(window_keys + ["permutation_idx"])
+        .agg(
+            pl.col("_diff").mean().alias("fold_mean_diff"),
+            pl.col("_diff").std().alias("fold_std_diff"),
+            pl.col("_diff").len().alias("n_folds"),
+        )
+    )
+    sem = (
+        pl.max_horizontal(pl.col("fold_std_diff").fill_nan(std_floor), pl.lit(std_floor))
+        / pl.col("n_folds").cast(pl.Float64).sqrt()
+    )
+    return agg.with_columns((pl.col("fold_mean_diff") / sem).alias("t_stat"))
+
+
+def _preagg_with_control_null(
+    raw_null: pl.DataFrame,
+    real_scores: pl.DataFrame,
+    *,
+    site_keys: list[str],
+    pair_base_keys: list[str],
+    std_floor: float = 0.01,
+) -> pl.DataFrame:
+    """Pair full−baseline within each (fold, perm), then compute
+    paired_diff_k = perm_diff_k − real_diff_k and aggregate over folds.
+
+    pair_base_keys: non-fold, non-perm keys for _pair_full_baseline.
+      behavior_with_control → ["subject", "phoneme_pair", "word_end"]
+      ganong_with_control   → ["subject", "phoneme_pair"]
+
+    Output schema: site_keys + [smin, smax, permutation_idx,
+    fold_mean_diff, fold_std_diff, n_folds, t_stat].
+    """
+    window_keys = site_keys + ["smin", "smax"]
+    real_diff = _pair_full_baseline(
+        real_scores, full_keys=pair_base_keys + ["fold"]
+    )
+    null_diff = _pair_full_baseline(
+        raw_null, full_keys=pair_base_keys + ["fold", "permutation_idx"]
+    )
+
+    real_for_join = (
+        real_diff.select(window_keys + ["fold", "diff"])
+        .rename({"diff": "_real_diff"})
+    )
+    with_paired = (
+        null_diff.join(real_for_join, on=window_keys + ["fold"], how="left")
+        .with_columns(
+            (pl.col("diff") - pl.col("_real_diff")).alias("_paired_diff")
+        )
+    )
+    agg = (
+        with_paired.group_by(window_keys + ["permutation_idx"])
+        .agg(
+            pl.col("_paired_diff").mean().alias("fold_mean_diff"),
+            pl.col("_paired_diff").std().alias("fold_std_diff"),
+            pl.col("_paired_diff").len().alias("n_folds"),
+        )
+    )
+    sem = (
+        pl.max_horizontal(pl.col("fold_std_diff").fill_nan(std_floor), pl.lit(std_floor))
+        / pl.col("n_folds").cast(pl.Float64).sqrt()
+    )
+    return agg.with_columns((pl.col("fold_mean_diff") / sem).alias("t_stat"))
+
+
+def preagg_acoustic_null(
+    raw_null: pl.DataFrame,
+    real_scores: pl.DataFrame,
+    *,
+    site_keys: list[str] = SITE_KEYS_ACOUSTIC,
+    std_floor: float = 0.01,
+) -> pl.DataFrame:
+    """Pre-aggregate acoustic null scores into paired fold differences.
+
+    Both raw_null and real_scores must be pre-filtered to the same target
+    (target is not in site_keys and would contaminate the join).
+    """
+    return _preagg_hga_only_null(
+        raw_null, real_scores, site_keys=site_keys, std_floor=std_floor,
+    )
+
+
+def preagg_behavior_hga_only_null(
+    raw_null: pl.DataFrame,
+    real_scores: pl.DataFrame,
+    *,
+    site_keys: list[str] = SITE_KEYS_BEHAVIOR_HGA_ONLY,
+    std_floor: float = 0.01,
+) -> pl.DataFrame:
+    """Pre-aggregate behavior HGA-only null scores into paired fold differences."""
+    return _preagg_hga_only_null(
+        raw_null, real_scores, site_keys=site_keys, std_floor=std_floor,
+    )
+
+
+def preagg_behavior_with_control_null(
+    raw_null: pl.DataFrame,
+    real_scores: pl.DataFrame,
+    *,
+    site_keys: list[str] = SITE_KEYS_BEHAVIOR_WITH_CONTROL,
+    std_floor: float = 0.01,
+) -> pl.DataFrame:
+    """Pre-aggregate behavior with-control null scores into paired fold differences."""
+    return _preagg_with_control_null(
+        raw_null, real_scores,
+        site_keys=site_keys,
+        pair_base_keys=["subject", "phoneme_pair", "word_end"],
+        std_floor=std_floor,
+    )
+
+
+def preagg_ganong_hga_only_null(
+    raw_null: pl.DataFrame,
+    real_scores: pl.DataFrame,
+    *,
+    site_keys: list[str] = SITE_KEYS_GANONG_HGA_ONLY,
+    std_floor: float = 0.01,
+) -> pl.DataFrame:
+    """Pre-aggregate ganong HGA-only null scores into paired fold differences."""
+    return _preagg_hga_only_null(
+        raw_null, real_scores, site_keys=site_keys, std_floor=std_floor,
+    )
+
+
+def preagg_ganong_with_control_null(
+    raw_null: pl.DataFrame,
+    real_scores: pl.DataFrame,
+    *,
+    site_keys: list[str] = SITE_KEYS_GANONG_WITH_CONTROL,
+    std_floor: float = 0.01,
+) -> pl.DataFrame:
+    """Pre-aggregate ganong with-control null scores into paired fold differences."""
+    return _preagg_with_control_null(
+        raw_null, real_scores,
+        site_keys=site_keys,
+        pair_base_keys=["subject", "phoneme_pair"],
+        std_floor=std_floor,
+    )

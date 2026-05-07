@@ -43,12 +43,18 @@ def smoke_config() -> dict:
     if not SMOKE_CONFIG_PATH.exists():
         pytest.skip(f"{SMOKE_CONFIG_PATH} not available")
     cfg = yaml.safe_load(SMOKE_CONFIG_PATH.read_text())
-    decoding = cfg["analysis"]["decoding"]
+    analysis = cfg["analysis"]
+    decoding = analysis["decoding"]
     c6 = cfg["causal6"]
     return {
         "min_sample": int(decoding["min_sample"]),
         "window_size": int(decoding["window_size"]),
         "stride": int(decoding["stride"]),
+        "peak_search_smin": int(decoding["peak_search_smin"]),
+        "peak_search_smax": int(decoding["peak_search_smax"]),
+        "epoch_tmin": float(analysis["epoch_tmin"]),
+        "epoch_sfreq": float(analysis["epoch_sfreq"]),
+        "behav_peak_post_offset_s": float(analysis["behav_peak_post_offset_s"]),
         "reg_lambda": float(c6["tuning_reg_lambda_grid"][0]),
         "n_folds": int(c6["n_folds"]),
         "cv_random_state": int(c6["cv_random_state"]),
