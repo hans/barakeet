@@ -279,7 +279,134 @@ for _subject in sorted(beh_peak_frames):
     ]))
 
 # %% [markdown]
-# ## 3  Behavior HGA-only — on-the-fly significance
+# ## 3  Behavior HGA-only — fold t-stats for brain plotting
+#
+# Without permutation results, we can still rank sites by the CV fold t-statistic:
+#
+#   **t = (mean\_fold\_AUC − 0.5) / (std\_fold\_AUC / √n\_folds)**
+#
+# This is a one-sample t-test of the fold distribution against chance.  It
+# accounts for subject/ROI SNR differences: noisy folds inflate the denominator,
+# so a consistent AUC=0.55 can outscore a noisy AUC=0.62.
+# With typical 5-fold CV: df=4, t>2.13 ≈ p<0.05 (uncorrected, single site).
+#
+# **Output**: `outputs/causal6/brain_plot_behav_tstats.parquet`
+# Columns: subject, electrode\_idx, phoneme\_pair, word\_end,
+#          peak\_smin, peak\_auc, fold\_tstat, n\_folds, x, y, z, roi
+
+# %%
+from src.data import get_electrode_df
+
+brain_frames: list[pl.DataFrame] = []
+
+for _p in sorted(ROOT.glob("behavior_decoding_single_electrode_hga_only/*/scores.parquet")):
+    _subject = _p.parent.name
+    _df = pl.read_parquet(_p).filter(pl.col("model") == "full")
+
+    # Per-(site, window): fold statistics
+    _win_stats = (
+        _df.group_by(WINDOW_KEYS_BEHAV)
+        .agg(
+            pl.col("test_roc_auc").mean().alias("fold_mean"),
+            pl.col("test_roc_auc").std().alias("fold_std"),
+            pl.col("test_roc_auc").len().alias("n_folds"),
+        )
+    )
+
+    # Peak window per site = argmax of fold_mean; collect fold stats at that window
+    _peak = (
+        _win_stats.group_by(SITE_KEYS_BEHAV)
+        .agg(
+            pl.col("fold_mean").max().alias("peak_auc"),
+            pl.col("smin").get(pl.col("fold_mean").arg_max()).alias("peak_smin"),
+            pl.col("fold_std").get(pl.col("fold_mean").arg_max()).alias("peak_fold_std"),
+            pl.col("n_folds").get(pl.col("fold_mean").arg_max()).alias("n_folds"),
+        )
+        .with_columns(
+            (
+                (pl.col("peak_auc") - 0.5)
+                / (
+                    pl.max_horizontal(pl.col("peak_fold_std"), pl.lit(1e-6))
+                    / pl.col("n_folds").cast(pl.Float64).sqrt()
+                )
+            ).alias("fold_tstat")
+        )
+    )
+
+    # Merge with MNI electrode positions (warped coords)
+    _elec_df = get_electrode_df(_subject)
+    _elec_pl = pl.from_pandas(
+        _elec_df.reset_index()[["electrode_idx", "x", "y", "z", "roi"]]
+    )
+    _peak_pos = _peak.join(_elec_pl, on="electrode_idx", how="left")
+
+    brain_frames.append(_peak_pos.with_columns(pl.lit(_subject).alias("subject")))
+
+    _n = len(_peak)
+    _t = _peak["fold_tstat"].to_numpy()
+    print(
+        f"{_subject}: {_n} sites  |  "
+        f"fold_tstat  median={np.median(_t):.2f}  "
+        f"max={_t.max():.2f}  "
+        f">2.13 (≈p<0.05, df=4): {int((_t > 2.13).sum())}/{_n}"
+    )
+    for _pp in sorted(_peak["phoneme_pair"].unique().to_list()):
+        _sub = _peak.filter(pl.col("phoneme_pair") == _pp)
+        _st = _sub["fold_tstat"].to_numpy()
+        print(
+            f"  {_pp} ({len(_sub)} sites):  "
+            f"t median={np.median(_st):.2f}  max={_st.max():.2f}  "
+            f"AUC median={_sub['peak_auc'].median():.3f}"
+        )
+
+# %%
+if brain_frames:
+    brain_df = pl.concat(brain_frames)
+    _brain_out = ROOT / "brain_plot_behav_tstats.parquet"
+    brain_df.write_parquet(_brain_out)
+    print(f"Written: {_brain_out}  ({len(brain_df)} rows × {brain_df.width} cols)")
+    print(brain_df.schema)
+
+# %%
+# t-stat distribution across all sites/subjects
+if brain_frames:
+    _t_all = brain_df["fold_tstat"].to_numpy()
+    _auc_all = brain_df["peak_auc"].to_numpy()
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 3))
+
+    axes[0].hist(_t_all[np.isfinite(_t_all)], bins=40, color="steelblue", alpha=0.8)
+    for _thresh, _ls in [(2.13, "--"), (3.0, ":")]:
+        axes[0].axvline(_thresh, color="tomato", lw=1.2, ls=_ls,
+                        label=f"t={_thresh}  n={int((_t_all > _thresh).sum())}")
+    axes[0].set_xlabel("fold t-stat")
+    axes[0].set_ylabel("sites")
+    axes[0].set_title("All subjects — fold t-stat distribution")
+    axes[0].legend(fontsize=8)
+
+    axes[1].scatter(_auc_all, _t_all, s=6, alpha=0.4, color="steelblue")
+    axes[1].axhline(2.13, color="tomato", lw=0.8, ls="--", label="t=2.13")
+    axes[1].axvline(0.6, color="k", lw=0.8, ls=":", label="AUC=0.60")
+    axes[1].set_xlabel("peak fold-mean AUC")
+    axes[1].set_ylabel("fold t-stat")
+    axes[1].set_title("AUC vs t-stat (thresholds are not equivalent)")
+    axes[1].legend(fontsize=8)
+
+    # Threshold sweep: how many sites survive each t threshold?
+    _thresholds = np.arange(0, 5.05, 0.25)
+    _n_survive = [int((_t_all > th).sum()) for th in _thresholds]
+    axes[2].plot(_thresholds, _n_survive, "o-", color="steelblue", ms=4)
+    axes[2].axvline(2.13, color="tomato", lw=0.8, ls="--", label="t=2.13 (≈p<0.05, df=4)")
+    axes[2].set_xlabel("fold t-stat threshold")
+    axes[2].set_ylabel("sites surviving")
+    axes[2].set_title("Threshold sweep")
+    axes[2].legend(fontsize=8)
+
+    fig.tight_layout()
+    plt.show()
+
+# %% [markdown]
+# ## 4  Behavior HGA-only — on-the-fly significance
 #
 # Runs `aggregate_behavior_hga_only` + `null_standardized_peak_test` for every
 # subject that has both `scores.parquet` and `null_scores.parquet`.
