@@ -536,162 +536,133 @@ if brain_frames:
     plt.show()
 
 # %% [markdown]
-# ## 6  Behavior HGA-only — on-the-fly significance
+# ----
+# ## 6  Threshold sweep — Jaccard, enrichment, concordance over AUC space
 #
-# Runs `aggregate_behavior_hga_only` + `null_standardized_peak_test` for every
-# subject that has both `scores.parquet` and `null_scores.parquet`.
+# Sweeps a grid of (acoustic_auc_threshold, behav_auc_threshold) and computes
+# four summary statistics at each point.  No fixed threshold assumption —
+# the heatmaps show how the overlap picture changes across the whole space.
 #
-# **No BH-FDR applied** — partial data.  Once the pipeline finishes, run:
-# ```
-# uv run python scripts/aggregate_partial.py behav_hga_only
-# ```
-# to get FDR-corrected aggregates.
+# Aggregation: best-AUC row per (subject, electrode_idx) for both modalities,
+# outer-merged on electrode identity.  The operating point (ac=0.75, beh=0.80)
+# from section 7 is marked with a red box on each panel.
+#
+# **Panels**:
+#   - **n_both**: raw count of electrodes passing both thresholds
+#   - **Jaccard**: |A∩B| / |A∪B|  — symmetric overlap
+#   - **Enrichment**: P(acoustic | behavioral) / P(acoustic | all)  — >1 means
+#     behavioral-selective sites are enriched for acoustic selectivity
+#   - **Concordance**: of "both" sites, fraction where best acoustic and best
+#     behavioral phoneme pair agree
+#
+# **Requires sections 2 and 5 to have been run** (parquets must exist on disk).
 
 # %%
-# Null aggregation uses scan_parquet + streaming collect so the raw null frame
-# (potentially 100s of GB) never fully materialises in RAM.  The fold-collapse
-# happens chunk-by-chunk and only the per-(site, window, perm) means land in memory.
-import gc
+import pandas as pd
+import seaborn as sns
 
-from src.models.significance import fold_tstat_aggregate
-
-
-null_dir = ROOT / "behavior_decoding_single_electrode_hga_only_null"
-score_dir = ROOT / "behavior_decoding_single_electrode_hga_only"
-
-beh_sig_frames: dict[str, pl.DataFrame] = {}
-
-for null_path in sorted(null_dir.glob("*/null_scores.parquet")):
-    subject = null_path.parent.name
-    scores_path = score_dir / subject / "scores.parquet"
-    if not scores_path.exists():
-        print(f"{subject}: null exists but no real scores — skipping.")
-        continue
-
-    print(f"{subject}: aggregating …", end=" ", flush=True)
-
-    # Real scores: small, load eagerly
-    real_agg = fold_tstat_aggregate(
-        pl.read_parquet(scores_path)
-        .with_columns(
-            pl.col("word_end")
-            .replace_strict(_OFFSET_SAMPLES, default=None)
-            .alias("_smax_limit")
-        )
-        .filter(_filter_window_expr())
-        .drop("_smax_limit"),
-        group_keys=WINDOW_KEYS_BEHAV,
-        stat_col="test_roc_auc",
-        center=0.5,
+_sw_ac_path = ROOT / "brain_plot_acoustic_tstats.parquet"
+_sw_bh_path = ROOT / "brain_plot_behav_tstats.parquet"
+if not (_sw_ac_path.exists() and _sw_bh_path.exists()):
+    raise RuntimeError(
+        "brain_plot parquets not found — run sections 2 and 5 first."
     )
 
-    # Null scores: scan lazily, stream the fold-collapse to avoid materialising
-    # the full file (can be 100+ GB for large subjects with many permutations).
-    null_agg = (
-        pl.scan_parquet(null_path)
-        .with_columns(
-            pl.col("word_end")
-            .replace_strict(_OFFSET_SAMPLES, default=None)
-            .alias("_smax_limit")
-        )
-        .filter(_filter_window_expr())
-        .drop("_smax_limit")
-        .group_by(WINDOW_KEYS_BEHAV + ["permutation_idx"])
-        .agg(
-            pl.col("test_roc_auc").mean().alias("fold_mean"),
-            pl.col("test_roc_auc").std().alias("fold_std"),
-            pl.col("test_roc_auc").len().alias("n_folds"),
-        )
-        .with_columns(
+_sw_ac = pl.read_parquet(_sw_ac_path).to_pandas()
+_sw_bh = pl.read_parquet(_sw_bh_path).to_pandas()
+
+# Best-per-electrode (highest AUC across phoneme pairs / word_ends)
+_sw_ac_e = (
+    _sw_ac.sort_values("peak_auc", ascending=False)
+    .groupby(["subject", "electrode_idx"], observed=True, as_index=False)
+    .first()[["subject", "electrode_idx", "phoneme_pair", "peak_auc"]]
+    .rename(columns={"phoneme_pair": "pp_phon", "peak_auc": "auc_phon"})
+)
+_sw_bh_e = (
+    _sw_bh.sort_values("peak_auc", ascending=False)
+    .groupby(["subject", "electrode_idx"], observed=True, as_index=False)
+    .first()[["subject", "electrode_idx", "phoneme_pair", "peak_auc"]]
+    .rename(columns={"phoneme_pair": "pp_beh", "peak_auc": "auc_beh"})
+)
+_sw_all = pd.merge(
+    _sw_ac_e, _sw_bh_e, on=["subject", "electrode_idx"], how="outer"
+)
+_sw_n_total = len(_sw_all)
+
+_AT = np.round(np.arange(0.50, 0.951, 0.05), 3)
+_BT = np.round(np.arange(0.50, 0.951, 0.05), 3)
+
+_sw_records = []
+for _at in _AT:
+    for _bt in _BT:
+        _in_ac = _sw_all["auc_phon"].fillna(-np.inf) >= _at
+        _in_bh = _sw_all["auc_beh"].fillna(-np.inf)  >= _bt
+        _n_both  = int((_in_ac & _in_bh).sum())
+        _n_ac    = int(_in_ac.sum())
+        _n_bh    = int(_in_bh.sum())
+        _n_union = int((_in_ac | _in_bh).sum())
+        _jaccard    = _n_both / _n_union if _n_union else 0.0
+        _p_ac_gv_bh = _n_both / _n_bh if _n_bh else 0.0
+        _p_ac_all   = _n_ac / _sw_n_total if _sw_n_total else 0.0
+        _enrichment = _p_ac_gv_bh / _p_ac_all if _p_ac_all else float("nan")
+        _both_mask  = _in_ac & _in_bh
+        _concordance = (
             (
-                (pl.col("fold_mean") - 0.5)
-                / (
-                    pl.max_horizontal(pl.col("fold_std"), pl.lit(0.01))
-                    / pl.col("n_folds").cast(pl.Float64).sqrt()
-                )
-            ).alias("t_stat")
+                _sw_all.loc[_both_mask, "pp_phon"]
+                == _sw_all.loc[_both_mask, "pp_beh"]
+            ).mean()
+            if _n_both > 0 else float("nan")
         )
-        .collect(streaming=True)
-    )
+        _sw_records.append({
+            "acoustic_t": _at, "behav_t": _bt,
+            "n_both": _n_both, "n_ac": _n_ac, "n_beh": _n_bh,
+            "jaccard": _jaccard, "enrichment": _enrichment,
+            "concordance": _concordance,
+        })
 
-    peaks, _ = null_standardized_peak_test(
-        real_agg, null_agg,
-        site_keys=SITE_KEYS_BEHAV,
-        window_keys=["smin", "smax"],
-        stat_col="fold_mean",
-    )
-    del null_agg
-    gc.collect()
-
-    beh_sig_frames[subject] = peaks
-    n_total = len(peaks)
-    n_sig = int((peaks["p_value"] < 0.05).sum())
-    n_perm = int(peaks["n_permutations"].max())
-    min_p = 1.0 / (n_perm + 1)
-    print(
-        f"{n_perm} perms (min p={min_p:.4f})  |  "
-        f"significant (p<0.05): {n_sig}/{n_total}"
-    )
-    for pp in sorted(peaks["phoneme_pair"].unique().to_list()):
-        sub = peaks.filter(pl.col("phoneme_pair") == pp)
-        print(
-            f"  {pp}:  {int((sub['p_value'] < 0.05).sum())}/{len(sub)} sig  "
-            f"  peak fold-mean median={sub['real_statistic'].median():.3f}  "
-            f"max={sub['real_statistic'].max():.3f}"
-        )
+_sw_df = pd.DataFrame(_sw_records)
 
 # %%
-if beh_sig_frames:
-    subjects = sorted(beh_sig_frames)
+_OP_AC, _OP_BH = 0.75, 0.80  # operating point from section 7
 
-    fig, axes = plt.subplots(
-        len(subjects), 3, figsize=(15, 4 * len(subjects)), squeeze=False
+
+def _sw_heatmap(ax, col, cmap, title, fmt=".2f", center=None, vmin=None, vmax=None):
+    _piv = (
+        _sw_df.pivot(index="behav_t", columns="acoustic_t", values=col)
+        .iloc[::-1]  # high behav_t at top
     )
+    sns.heatmap(
+        _piv, ax=ax, cmap=cmap, annot=True, fmt=fmt,
+        annot_kws={"size": 7}, linewidths=0.3,
+        center=center, vmin=vmin, vmax=vmax,
+        cbar_kws={"shrink": 0.65},
+    )
+    # Mark operating point
+    _cols = list(_piv.columns)
+    _rows = list(_piv.index)  # reversed: high behav_t at index 0
+    _xi = min(range(len(_cols)), key=lambda i: abs(_cols[i] - _OP_AC))
+    _yi = min(range(len(_rows)), key=lambda i: abs(_rows[i] - _OP_BH))
+    ax.add_patch(plt.Rectangle((_xi, _yi), 1, 1, fill=False,
+                                edgecolor="red", lw=2.5, zorder=5))
+    ax.set_title(title, fontsize=10)
+    ax.set_xlabel("acoustic AUC threshold", fontsize=8)
+    ax.set_ylabel("behavioral AUC threshold", fontsize=8)
+    ax.tick_params(axis="both", labelsize=7)
 
-    for row, subject in enumerate(subjects):
-        peaks = beh_sig_frames[subject]
-        n_perm = int(peaks["n_permutations"].max())
-        min_p = 1.0 / (n_perm + 1)
 
-        aucs = peaks["real_statistic"].to_numpy()
-        peak_ms = smin_to_ms(peaks["peak_smin"].to_numpy())
-        pv = peaks["p_value"].to_numpy()
-        sig_mask = pv < 0.05
-
-        # AUC distribution coloured by significance
-        ax = axes[row, 0]
-        ax.hist(aucs[~sig_mask], bins=20, color="steelblue", alpha=0.7, label="n.s.")
-        ax.hist(aucs[sig_mask], bins=20, color="tomato", alpha=0.8, label="p<0.05")
-        ax.axvline(0.5, color="k", lw=0.8, ls="--")
-        ax.set_xlabel("peak fold-mean ROC-AUC")
-        ax.set_ylabel("sites")
-        ax.set_title(
-            f"{subject} — behavior peak AUC\n({n_perm} perms, min p={min_p:.4f})"
-        )
-        ax.legend(fontsize=8)
-
-        # Peak timing coloured by significance
-        ax2 = axes[row, 1]
-        ax2.hist(peak_ms[~sig_mask], bins=20, color="steelblue", alpha=0.7, label="n.s.")
-        ax2.hist(peak_ms[sig_mask], bins=20, color="tomato", alpha=0.8, label="p<0.05")
-        ax2.axvline(0, color="k", lw=0.8, ls="--", label="word onset")
-        ax2.set_xlabel("peak window onset (ms post word onset)")
-        ax2.set_ylabel("sites")
-        ax2.set_title(f"{subject} — behavior peak timing")
-        ax2.legend(fontsize=8)
-
-        # p-value histogram
-        ax3 = axes[row, 2]
-        ax3.hist(pv[np.isfinite(pv)], bins=20, color="slategray", alpha=0.8)
-        ax3.axvline(0.05, color="tomato", lw=1.2, ls="--", label="p=0.05")
-        ax3.axvline(min_p, color="goldenrod", lw=1.2, ls=":", label=f"min achievable ({min_p:.3f})")
-        ax3.set_xlabel("p-value (maxstat-corrected, uncorrected for FDR)")
-        ax3.set_ylabel("sites")
-        ax3.set_title(f"{subject} — p-value distribution")
-        ax3.legend(fontsize=8)
-
-    fig.tight_layout()
-    plt.show()
+_sw_fig, _sw_axes = plt.subplots(2, 2, figsize=(12, 10))
+_sw_fig.suptitle(
+    "Threshold sweep  (best-AUC aggregation per electrode)\n"
+    "red box = current operating point  (ac=0.75, beh=0.80)",
+    fontsize=10,
+)
+_sw_heatmap(_sw_axes[0, 0], "n_both",      "Blues",   "n_both",                         fmt="d")
+_sw_heatmap(_sw_axes[0, 1], "jaccard",     "viridis", "Jaccard  |A∩B| / |A∪B|")
+_sw_heatmap(_sw_axes[1, 0], "enrichment",  "RdYlGn",  "Enrichment  P(ac|beh) / P(ac|all)",
+            center=1.0)
+_sw_heatmap(_sw_axes[1, 1], "concordance", "plasma",  "Concordance (same phoneme pair | both)")
+_sw_fig.tight_layout()
+plt.show()
 
 # %% [markdown]
 # ----
@@ -1054,3 +1025,162 @@ with PdfPages(_aonly_out) as _pdf:
             except Exception as _e:
                 print(f"  skipped {_subj} e{int(_row['electrode_idx'])} {_we}: {_e}")
 print(f"Written {_n_pages} pages → {_aonly_out}")
+
+# %% [markdown]
+# ----
+# ## 8  Behavior HGA-only — on-the-fly significance  *(expensive — run last)*
+#
+# Runs `fold_tstat_aggregate` + `null_standardized_peak_test` for every
+# subject that has both `scores.parquet` and `null_scores.parquet`.
+# Uses `scan_parquet + streaming collect` so the raw null frame
+# (potentially 100s of GB) never fully materialises in RAM.
+#
+# **No BH-FDR applied** — partial data.  Once the pipeline finishes, run:
+# ```
+# uv run python scripts/aggregate_partial.py behav_hga_only
+# ```
+# to get FDR-corrected aggregates.
+
+# %%
+import gc
+
+from src.models.significance import fold_tstat_aggregate
+
+
+null_dir = ROOT / "behavior_decoding_single_electrode_hga_only_null"
+score_dir = ROOT / "behavior_decoding_single_electrode_hga_only"
+
+beh_sig_frames: dict[str, pl.DataFrame] = {}
+
+for null_path in sorted(null_dir.glob("*/null_scores.parquet")):
+    subject = null_path.parent.name
+    scores_path = score_dir / subject / "scores.parquet"
+    if not scores_path.exists():
+        print(f"{subject}: null exists but no real scores — skipping.")
+        continue
+
+    print(f"{subject}: aggregating …", end=" ", flush=True)
+
+    # Real scores: small, load eagerly
+    real_agg = fold_tstat_aggregate(
+        pl.read_parquet(scores_path)
+        .with_columns(
+            pl.col("word_end")
+            .replace_strict(_OFFSET_SAMPLES, default=None)
+            .alias("_smax_limit")
+        )
+        .filter(_filter_window_expr())
+        .drop("_smax_limit"),
+        group_keys=WINDOW_KEYS_BEHAV,
+        stat_col="test_roc_auc",
+        center=0.5,
+    )
+
+    # Null scores: scan lazily, stream the fold-collapse to avoid materialising
+    # the full file (can be 100+ GB for large subjects with many permutations).
+    null_agg = (
+        pl.scan_parquet(null_path)
+        .with_columns(
+            pl.col("word_end")
+            .replace_strict(_OFFSET_SAMPLES, default=None)
+            .alias("_smax_limit")
+        )
+        .filter(_filter_window_expr())
+        .drop("_smax_limit")
+        .group_by(WINDOW_KEYS_BEHAV + ["permutation_idx"])
+        .agg(
+            pl.col("test_roc_auc").mean().alias("fold_mean"),
+            pl.col("test_roc_auc").std().alias("fold_std"),
+            pl.col("test_roc_auc").len().alias("n_folds"),
+        )
+        .with_columns(
+            (
+                (pl.col("fold_mean") - 0.5)
+                / (
+                    pl.max_horizontal(pl.col("fold_std"), pl.lit(0.01))
+                    / pl.col("n_folds").cast(pl.Float64).sqrt()
+                )
+            ).alias("t_stat")
+        )
+        .collect(streaming=True)
+    )
+
+    peaks, _ = null_standardized_peak_test(
+        real_agg, null_agg,
+        site_keys=SITE_KEYS_BEHAV,
+        window_keys=["smin", "smax"],
+        stat_col="fold_mean",
+    )
+    del null_agg
+    gc.collect()
+
+    beh_sig_frames[subject] = peaks
+    n_total = len(peaks)
+    n_sig = int((peaks["p_value"] < 0.05).sum())
+    n_perm = int(peaks["n_permutations"].max())
+    min_p = 1.0 / (n_perm + 1)
+    print(
+        f"{n_perm} perms (min p={min_p:.4f})  |  "
+        f"significant (p<0.05): {n_sig}/{n_total}"
+    )
+    for pp in sorted(peaks["phoneme_pair"].unique().to_list()):
+        sub = peaks.filter(pl.col("phoneme_pair") == pp)
+        print(
+            f"  {pp}:  {int((sub['p_value'] < 0.05).sum())}/{len(sub)} sig  "
+            f"  peak fold-mean median={sub['real_statistic'].median():.3f}  "
+            f"max={sub['real_statistic'].max():.3f}"
+        )
+
+# %%
+if beh_sig_frames:
+    subjects = sorted(beh_sig_frames)
+
+    fig, axes = plt.subplots(
+        len(subjects), 3, figsize=(15, 4 * len(subjects)), squeeze=False
+    )
+
+    for row, subject in enumerate(subjects):
+        peaks = beh_sig_frames[subject]
+        n_perm = int(peaks["n_permutations"].max())
+        min_p = 1.0 / (n_perm + 1)
+
+        aucs = peaks["real_statistic"].to_numpy()
+        peak_ms = smin_to_ms(peaks["peak_smin"].to_numpy())
+        pv = peaks["p_value"].to_numpy()
+        sig_mask = pv < 0.05
+
+        # AUC distribution coloured by significance
+        ax = axes[row, 0]
+        ax.hist(aucs[~sig_mask], bins=20, color="steelblue", alpha=0.7, label="n.s.")
+        ax.hist(aucs[sig_mask], bins=20, color="tomato", alpha=0.8, label="p<0.05")
+        ax.axvline(0.5, color="k", lw=0.8, ls="--")
+        ax.set_xlabel("peak fold-mean ROC-AUC")
+        ax.set_ylabel("sites")
+        ax.set_title(
+            f"{subject} — behavior peak AUC\n({n_perm} perms, min p={min_p:.4f})"
+        )
+        ax.legend(fontsize=8)
+
+        # Peak timing coloured by significance
+        ax2 = axes[row, 1]
+        ax2.hist(peak_ms[~sig_mask], bins=20, color="steelblue", alpha=0.7, label="n.s.")
+        ax2.hist(peak_ms[sig_mask], bins=20, color="tomato", alpha=0.8, label="p<0.05")
+        ax2.axvline(0, color="k", lw=0.8, ls="--", label="word onset")
+        ax2.set_xlabel("peak window onset (ms post word onset)")
+        ax2.set_ylabel("sites")
+        ax2.set_title(f"{subject} — behavior peak timing")
+        ax2.legend(fontsize=8)
+
+        # p-value histogram
+        ax3 = axes[row, 2]
+        ax3.hist(pv[np.isfinite(pv)], bins=20, color="slategray", alpha=0.8)
+        ax3.axvline(0.05, color="tomato", lw=1.2, ls="--", label="p=0.05")
+        ax3.axvline(min_p, color="goldenrod", lw=1.2, ls=":",
+                    label=f"min achievable ({min_p:.3f})")
+        ax3.set_xlabel("p-value (maxstat-corrected, uncorrected for FDR)")
+        ax3.set_ylabel("sites")
+        ax3.set_title(f"{subject} — p-value distribution")
+        ax3.legend(fontsize=8)
+
+    fig.tight_layout()
+    plt.show()
