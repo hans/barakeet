@@ -36,13 +36,29 @@ import polars as pl
 from pathlib import Path
 
 from src.data import get_electrode_df
-from src.models.causal6_aggregates import SITE_KEYS_BEHAVIOR_HGA_ONLY
+from src.models.causal6_aggregates import SITE_KEYS_BEHAVIOR_HGA_ONLY, _behavior_offset_samples
 from src.models.significance import null_standardized_peak_test
 
 ROOT = Path("outputs/causal6")
 EPOCH_TMIN = -0.4
 EPOCH_SFREQ = 100.0
 SITE_KEYS_BEHAV = SITE_KEYS_BEHAVIOR_HGA_ONLY  # ["subject", "electrode_idx", "phoneme_pair", "word_end"]
+WINDOW_KEYS_BEHAV = SITE_KEYS_BEHAV + ["smin", "smax"]
+
+# Behavior decoder window search constraints (shared across sections)
+_PEAK_SEARCH_SMIN = 0
+_PEAK_SEARCH_SMAX = 290
+_BEHAV_POST_OFFSET_S = 0.2  # max time post word-end to include
+_OFFSET_SAMPLES = _behavior_offset_samples(EPOCH_TMIN, EPOCH_SFREQ, _BEHAV_POST_OFFSET_S)
+
+
+def _filter_window_expr() -> pl.Expr:
+    """Keep only windows within the causal search range for each word_end."""
+    return (
+        (pl.col("smin") >= _PEAK_SEARCH_SMIN)
+        & (pl.col("smax") <= pl.col("_smax_limit"))
+        & (pl.col("smax") <= _PEAK_SEARCH_SMAX)
+    )
 
 
 def smin_to_ms(s) -> np.ndarray:
@@ -213,8 +229,6 @@ if ac_brain_frames:
 # fold-mean AUC across all windows (no null needed).
 
 # %%
-WINDOW_KEYS_BEHAV = SITE_KEYS_BEHAV + ["smin", "smax"]
-
 beh_score_paths = sorted(
     ROOT.glob("behavior_decoding_single_electrode_hga_only/*/scores.parquet")
 )
@@ -388,7 +402,17 @@ brain_frames: list[pl.DataFrame] = []
 
 for _p in sorted(ROOT.glob("behavior_decoding_single_electrode_hga_only/*/scores.parquet")):
     _subject = _p.parent.name
-    _df = pl.read_parquet(_p).filter(pl.col("model") == "full")
+    _df = (
+        pl.read_parquet(_p)
+        .filter(pl.col("model") == "full")
+        .with_columns(
+            pl.col("word_end")
+            .replace_strict(_OFFSET_SAMPLES, default=None)
+            .alias("_smax_limit")
+        )
+        .filter(_filter_window_expr())
+        .drop("_smax_limit")
+    )
 
     # Per-(site, window): fold statistics
     _win_stats = (
@@ -510,22 +534,7 @@ if brain_frames:
 # happens chunk-by-chunk and only the per-(site, window, perm) means land in memory.
 import gc
 
-from src.models.causal6_aggregates import _behavior_offset_samples
 from src.models.significance import fold_tstat_aggregate
-
-_PEAK_SEARCH_SMIN = 0
-_PEAK_SEARCH_SMAX = 290
-_BEHAV_POST_OFFSET_S = 0.2
-_WINDOW_KEYS = SITE_KEYS_BEHAV + ["smin", "smax"]
-_OFFSET_SAMPLES = _behavior_offset_samples(EPOCH_TMIN, EPOCH_SFREQ, _BEHAV_POST_OFFSET_S)
-
-
-def _filter_window_expr() -> pl.Expr:
-    return (
-        (pl.col("smin") >= _PEAK_SEARCH_SMIN)
-        & (pl.col("smax") <= pl.col("_smax_limit"))
-        & (pl.col("smax") <= _PEAK_SEARCH_SMAX)
-    )
 
 
 null_dir = ROOT / "behavior_decoding_single_electrode_hga_only_null"
@@ -552,7 +561,7 @@ for null_path in sorted(null_dir.glob("*/null_scores.parquet")):
         )
         .filter(_filter_window_expr())
         .drop("_smax_limit"),
-        group_keys=_WINDOW_KEYS,
+        group_keys=WINDOW_KEYS_BEHAV,
         stat_col="test_roc_auc",
         center=0.5,
     )
@@ -568,7 +577,7 @@ for null_path in sorted(null_dir.glob("*/null_scores.parquet")):
         )
         .filter(_filter_window_expr())
         .drop("_smax_limit")
-        .group_by(_WINDOW_KEYS + ["permutation_idx"])
+        .group_by(WINDOW_KEYS_BEHAV + ["permutation_idx"])
         .agg(
             pl.col("test_roc_auc").mean().alias("fold_mean"),
             pl.col("test_roc_auc").std().alias("fold_std"),
