@@ -213,6 +213,72 @@ if beh_peak_frames:
     plt.show()
 
 # %% [markdown]
+# ### Interactive: filter by peak AUC → inspect timing distribution
+#
+# Suspicious pre-onset peaks show up clearly when you raise the AUC threshold:
+# if they survive a high bar they deserve investigation; if they drop out they
+# were low-accuracy noise leaking through.
+
+# %%
+import ipywidgets as widgets
+from IPython.display import display
+
+_colors = {"bm": "#4C8BE2", "dn": "#E26B4C", "pb": "#4CE28B"}
+
+
+def _make_timing_draw(pp_arr, auc_arr, ms_arr, phoneme_pairs, subject, out):
+    def draw(auc_min):
+        mask = auc_arr >= auc_min
+        with out:
+            out.clear_output(wait=True)
+            fig, ax = plt.subplots(figsize=(9, 3))
+            for pp in phoneme_pairs:
+                sel = mask & (pp_arr == pp)
+                if sel.any():
+                    ax.hist(
+                        ms_arr[sel], bins=25, alpha=0.65,
+                        label=f"{pp} (n={sel.sum()})", color=_colors.get(pp),
+                    )
+            ax.axvline(0, color="k", lw=1.0, ls="--", label="word onset")
+            ax.set_xlabel("peak window onset (ms post word onset)")
+            ax.set_ylabel("sites")
+            ax.set_title(
+                f"{subject} — peak timing  "
+                f"({mask.sum()}/{len(mask)} sites,  AUC ≥ {auc_min:.2f})"
+            )
+            ax.legend(fontsize=8)
+            plt.tight_layout()
+            plt.show()
+    return draw
+
+
+for _subject in sorted(beh_peak_frames):
+    _df = beh_peak_frames[_subject]
+    _pp_arr  = _df["phoneme_pair"].to_numpy()
+    _auc_arr = _df["peak_auc"].to_numpy()
+    _ms_arr  = smin_to_ms(_df["peak_smin"].to_numpy())
+    _pps     = sorted(_df["phoneme_pair"].unique().to_list())
+
+    _slider = widgets.FloatSlider(
+        value=0.5, min=0.5, max=round(float(_auc_arr.max()), 2), step=0.01,
+        description="min AUC:",
+        continuous_update=True,
+        style={"description_width": "80px"},
+        layout=widgets.Layout(width="500px"),
+    )
+    _out = widgets.Output()
+    _draw = _make_timing_draw(_pp_arr, _auc_arr, _ms_arr, _pps, _subject, _out)
+
+    _slider.observe(lambda change, d=_draw: d(change["new"]), names="value")
+    _draw(0.5)  # initial render
+
+    display(widgets.VBox([
+        widgets.HTML(f"<b style='font-size:14px'>{_subject}</b>"),
+        _slider,
+        _out,
+    ]))
+
+# %% [markdown]
 # ## 3  Behavior HGA-only — on-the-fly significance
 #
 # Runs `aggregate_behavior_hga_only` + `null_standardized_peak_test` for every
