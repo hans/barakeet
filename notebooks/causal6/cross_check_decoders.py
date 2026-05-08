@@ -128,6 +128,113 @@ if relevant and not all(s == relevant_sets[relevant[0]] for s in relevant_sets.v
 subjects = union  # loaders skip per-subject paths that don't exist, so union is safe
 
 # %% [markdown]
+# ## 0. Speech-responsive screen comparison
+#
+# The decoding coverage asymmetry (~700 sites differ in each direction) traces
+# back here: causal4 uses an amplitude-threshold criterion (max|epoch| > 0.3
+# after baselining, averaged evoked), while causal5/causal6 uses a paired
+# t-test across all epochs (pre- vs post-onset mean, t > 7) and overrides the
+# amplitude flag with that result. Both are per-subject; causal6 imports its
+# electrode lists directly from `outputs/causal5/find_speech_responsive/`.
+#
+# This section loads both screens, shows their per-subject counts, and
+# breaks down the 4-way agreement (both / only-causal4 / only-causal5 / neither).
+
+# %%
+causal5_speech_resp_root = Path("outputs/causal5/find_speech_responsive")
+causal4_speech_resp_root = ROOTS["causal4"] / "find_speech_responsive"
+
+
+def load_speech_responsive(root: Path, subjects: list[str]) -> pl.DataFrame:
+    frames = []
+    for subj in subjects:
+        p = root / f"{subj}_results.csv"
+        if not p.exists():
+            continue
+        df = pl.read_csv(p)
+        keep = ["subject", "electrode_idx", "speech_responsive"]
+        optional = ["speech_responsive_test_value", "speech_responsive_tval",
+                    "speech_responsive_ttest"]
+        keep += [c for c in optional if c in df.columns]
+        frames.append(df.select(keep).with_columns(
+            pl.col("speech_responsive").cast(pl.Boolean)
+        ))
+    if not frames:
+        return pl.DataFrame({"subject": pl.Series([], dtype=pl.Utf8),
+                             "electrode_idx": pl.Series([], dtype=pl.Int64),
+                             "speech_responsive": pl.Series([], dtype=pl.Boolean)})
+    return pl.concat(frames, how="diagonal")
+
+
+sr_c4 = load_speech_responsive(causal4_speech_resp_root, subjects)
+sr_c5 = load_speech_responsive(causal5_speech_resp_root, subjects)
+
+# %%
+print("Speech-responsive electrode counts (all electrodes loaded):")
+for label, df in [("causal4", sr_c4), ("causal5/6", sr_c5)]:
+    if df.is_empty():
+        print(f"  {label}: (no data)")
+        continue
+    n_resp = df.filter(pl.col("speech_responsive")).height
+    n_total = df.height
+    print(f"  {label}: {n_resp} / {n_total} = {n_resp/n_total:.1%}")
+
+# %%
+if not sr_c4.is_empty() and not sr_c5.is_empty():
+    site_cols_sr = ["subject", "electrode_idx"]
+    joined_sr = (
+        sr_c4.select(site_cols_sr + ["speech_responsive"])
+        .rename({"speech_responsive": "sr_c4"})
+        .join(
+            sr_c5.select(site_cols_sr + ["speech_responsive"])
+            .rename({"speech_responsive": "sr_c5"}),
+            on=site_cols_sr, how="outer",
+        )
+        .with_columns([
+            pl.col("sr_c4").fill_null(False),
+            pl.col("sr_c5").fill_null(False),
+        ])
+    )
+    both    = joined_sr.filter( pl.col("sr_c4") &  pl.col("sr_c5")).height
+    only_c4 = joined_sr.filter( pl.col("sr_c4") & ~pl.col("sr_c5")).height
+    only_c5 = joined_sr.filter(~pl.col("sr_c4") &  pl.col("sr_c5")).height
+    neither = joined_sr.filter(~pl.col("sr_c4") & ~pl.col("sr_c5")).height
+    total   = joined_sr.height
+    print("\n4-way agreement (all shared electrode slots):")
+    print(f"  both responsive  : {both:5d}  ({both/total:.1%})")
+    print(f"  only causal4     : {only_c4:5d}  ({only_c4/total:.1%})")
+    print(f"  only causal5/6   : {only_c5:5d}  ({only_c5/total:.1%})")
+    print(f"  neither          : {neither:5d}  ({neither/total:.1%})")
+
+    # Per-subject breakdown
+    print("\nPer-subject breakdown (both / only-c4 / only-c5 / neither):")
+    for subj, grp in joined_sr.group_by("subject", maintain_order=True):
+        b  = grp.filter( pl.col("sr_c4") &  pl.col("sr_c5")).height
+        c4 = grp.filter( pl.col("sr_c4") & ~pl.col("sr_c5")).height
+        c5 = grp.filter(~pl.col("sr_c4") &  pl.col("sr_c5")).height
+        n  = grp.filter(~pl.col("sr_c4") & ~pl.col("sr_c5")).height
+        print(f"  {subj[0]:>6}:  both={b:3d}  only_c4={c4:3d}  only_c5={c5:3d}  neither={n:3d}")
+
+    # If causal5 wrote test values, show the distribution at disagreement sites
+    if "speech_responsive_test_value" in sr_c5.columns:
+        disagreement = joined_sr.filter(pl.col("sr_c4") != pl.col("sr_c5"))
+        if not disagreement.is_empty():
+            with_vals = disagreement.join(
+                sr_c5.select(["subject", "electrode_idx", "speech_responsive_test_value"]),
+                on=["subject", "electrode_idx"], how="left",
+            )
+            print("\nAmplitude test values at disagreement sites (causal5 criterion):")
+            for group_label, filt in [
+                ("only_causal4 (c4=T, c5=F)", with_vals.filter( pl.col("sr_c4") & ~pl.col("sr_c5"))),
+                ("only_causal5 (c4=F, c5=T)", with_vals.filter(~pl.col("sr_c4") &  pl.col("sr_c5"))),
+            ]:
+                vals = filt["speech_responsive_test_value"].drop_nulls().to_numpy()
+                if len(vals):
+                    print(f"  {group_label}: n={len(vals)}, "
+                          f"med={np.nanmedian(vals):.3f}, "
+                          f"min={vals.min():.3f}, max={vals.max():.3f}")
+
+# %% [markdown]
 # ## 1. Loaders
 #
 # Each loader returns a normalized `pl.DataFrame` with a consistent schema so
