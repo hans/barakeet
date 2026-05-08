@@ -1064,6 +1064,97 @@ def plot_bland_altman_and_paired_hist(
     plt.show()
 
 
+def _fold_mean_at_windows(
+    searchlight: pl.DataFrame,
+    windows: pl.DataFrame,
+    site_cols: list[str],
+    criterion: str,
+) -> pl.DataFrame:
+    """Fold-mean `criterion` in `searchlight` at the exact (site, smin, smax) rows of `windows`."""
+    if searchlight.is_empty() or windows.is_empty():
+        return pl.DataFrame()
+    window_cols = site_cols + ["smin", "smax"]
+    auc_cols = [c for c in searchlight.columns if c.startswith("roc_auc")]
+    fm = searchlight.group_by(window_cols).agg([pl.col(c).mean() for c in auc_cols])
+    return fm.join(windows.select(window_cols), on=window_cols, how="inner")
+
+
+def plot_fixed_window_scatter(
+    searchlights: dict[str, pl.DataFrame],
+    peaks: dict[str, pl.DataFrame],
+    site_cols: list[str],
+    criterion: str,
+    kind: str,
+):
+    """Fixed-window AUC scatter — no argmax.
+
+    Two panels per pipeline pair:
+      Left  — windows chosen by pipeline A; both pipelines evaluated at those windows.
+      Right — windows chosen by pipeline B; both pipelines evaluated at those windows.
+
+    The pipeline whose window is used shows its own peak AUC on the x-axis. The other
+    pipeline shows whatever signal it has at that exact (smin, smax) — possibly outside
+    its own eligible search range. Sites where the other pipeline has no searchlight
+    entry at that window are dropped (title reports the count).
+
+    Diagnostic intent:
+      - Left panel  (A's windows): does causal6 reproduce signal at causal4's chosen
+        windows? Weak causal6 AUC here → causal4's window-selection is noise-driven.
+      - Right panel (B's windows): does causal4 reproduce signal at causal6's narrower
+        canonical window? Agreement here validates the narrow window range.
+    """
+    pipes = [p for p, df in searchlights.items() if not df.is_empty()]
+    pairs = [(a, b) for a, b in PIPELINE_PAIRS if a in pipes and b in pipes]
+    if not pairs:
+        return
+
+    for a, b in pairs:
+        fig, axes = plt.subplots(1, 2, figsize=(10, 5), squeeze=False)
+        for col, window_src in enumerate([a, b]):
+            ax = axes[0, col]
+            if peaks[window_src].is_empty():
+                ax.set_title(f"windows from {window_src}: no peaks")
+                continue
+
+            windows = peaks[window_src].select(site_cols + ["smin", "smax"])
+            at_a = _fold_mean_at_windows(searchlights[a], windows, site_cols, criterion)
+            at_b = _fold_mean_at_windows(searchlights[b], windows, site_cols, criterion)
+
+            if at_a.is_empty() or at_b.is_empty():
+                ax.set_title(f"windows from {window_src}: no overlap")
+                continue
+
+            joined = (
+                at_a.select(site_cols + [criterion])
+                .join(at_b.select(site_cols + [criterion]), on=site_cols, how="inner", suffix="_b")
+                .rename({criterion: f"{criterion}_a"})
+                .to_pandas()
+            )
+            if joined.empty:
+                ax.set_title(f"windows from {window_src}: no shared sites")
+                continue
+
+            x = joined[f"{criterion}_a"].to_numpy()
+            y_vals = joined[f"{criterion}_b"].to_numpy()
+            for subj, sub in joined.groupby("subject"):
+                ax.scatter(sub[f"{criterion}_a"], sub[f"{criterion}_b"], s=14, alpha=0.65, label=subj)
+            lo = float(np.nanmin([x.min(), y_vals.min()]))
+            hi = float(np.nanmax([x.max(), y_vals.max()]))
+            ax.plot([lo, hi], [lo, hi], "k--", lw=0.75, alpha=0.5)
+            mask = ~(np.isnan(x) | np.isnan(y_vals))
+            r = pearsonr(x[mask], y_vals[mask])[0] if mask.sum() >= 3 else float("nan")
+            n_missing = peaks[window_src].height - len(joined)
+            missing_note = f"\n({n_missing} {window_src} sites not in other pipeline)" if n_missing else ""
+            ax.set_title(f"windows from {window_src}\nr={r:.3f}, n={int(mask.sum())}{missing_note}")
+            ax.set_xlabel(f"{a} {criterion}")
+            ax.set_ylabel(f"{b} {criterion}")
+            ax.legend(fontsize=7, ncol=2, loc="best")
+
+        fig.suptitle(f"{kind}: fixed-window AUC (no argmax; window source labeled per panel)")
+        fig.tight_layout()
+        plt.show()
+
+
 # %%
 def run_comparison(kind: str, n_show_heatmaps: int = 5,
                    peak_thresholds=(0.55, 0.6, 0.65, 0.7, 0.75, 0.8)):
@@ -1079,6 +1170,7 @@ def run_comparison(kind: str, n_show_heatmaps: int = 5,
     plot_peak_auc_scatter(peaks, site_cols, criterion, kind)
     plot_peak_window_scatter(peaks, site_cols, criterion, kind)
     plot_bland_altman_and_paired_hist(peaks, site_cols, criterion, kind)
+    plot_fixed_window_scatter(searchlights, peaks, site_cols, criterion, kind)
 
     corrs = searchlight_per_site_correlation(searchlights, site_cols, criterion)
     plot_searchlight_correlation_histograms(corrs, kind)
