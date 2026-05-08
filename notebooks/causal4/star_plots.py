@@ -75,8 +75,14 @@ neurometrics_dir = "outputs/causal4/prepare_neurometrics/p65_b5_a3"
 textgrid_dir = "textgrids"
 outdir = "outputs/causal4/star_plots"
 
-# Steps used as the "controlled / ambiguous" panel in zoomin_hga.
-controlled_resampled_steps = [3, 4]
+# Threshold passed to `data.get_ambiguous_resampled_steps`: the per-site
+# ambiguous steps are those where the minority behavioral response count
+# exceeds this threshold. Used as the bottom-panel ("ambiguous") trials
+# in each star plot.
+ambiguous_response_threshold = 2
+# Fallback if a site has no qualifying ambiguous step (rare; should not
+# happen for sites in zoomin_keys).
+fallback_resampled_steps = [3, 4]
 
 # %%
 outdir = Path(outdir)
@@ -193,11 +199,16 @@ resampled_palette_simplified = (
 )
 
 star_plot_kwargs = dict(
-    controlled_resampled_steps=controlled_resampled_steps,
     figsize=(4, 4),
     include_phonemes=False,
     resampled_palette=resampled_palette_simplified,
     textgrid_dir=textgrid_dir,
+)
+
+# Per-site ambiguous-step lookup. Keyed by
+# (subject, phoneme_pair, word_end) -> tuple[int, ...].
+ambig_steps = paper_data.get_ambiguous_resampled_steps(
+    ambiguous_response_threshold=ambiguous_response_threshold
 )
 
 # %%
@@ -251,6 +262,10 @@ with PdfPages(combined_pdf_path) as pdf:
         phoneme_pair = row["phoneme_pair"]
         word_end = row["word_end"]
 
+        site_steps = ambig_steps.get(
+            (subject, phoneme_pair, word_end), fallback_resampled_steps
+        )
+
         try:
             fb = zoomin_hga(
                 paper_data,
@@ -259,13 +274,16 @@ with PdfPages(combined_pdf_path) as pdf:
                 phoneme_pair,
                 word_end,
                 title=False,
+                controlled_resampled_steps=list(site_steps),
                 **star_plot_kwargs,
             )
             phon_auc = row.get("phon_roc_auc")
             behav_auc = row.get("behav_roc_auc")
             behav_imp = row.get("behav_roc_auc_improvement")
+            steps_str = ",".join(str(s) for s in site_steps)
             fb.fig.suptitle(
-                f"{subject} elec {electrode_idx} · {phoneme_pair} · {word_end}\n"
+                f"{subject} elec {electrode_idx} · {phoneme_pair} · {word_end} "
+                f"· ambig steps {{{steps_str}}}\n"
                 f"acoustic AUC={phon_auc:.3f}  "
                 f"behav AUC={behav_auc:.3f}  "
                 f"Δ behav AUC={behav_imp:+.3f}",
