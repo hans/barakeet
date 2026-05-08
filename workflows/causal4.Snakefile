@@ -1040,6 +1040,7 @@ rule star_plots:
         params_id = "|".join(ALL_NEUROMETRICS_PARAMS)
 
     run:
+        params = NEUROMETRICS_PARAMS_GRID[wildcards.params_id]
         outdir = Path(output.notebook).parent
         run_notebook(
             str(input.notebook),
@@ -1049,7 +1050,7 @@ rule star_plots:
                 neurometrics_dir=str(Path(input.neurometrics_sentinel).parent),
                 textgrid_dir="textgrids",
                 outdir=str(outdir),
-                controlled_resampled_steps=[3, 4],
+                ambiguous_response_threshold=params["ambiguous_response_threshold"],
             ),
         )
 
