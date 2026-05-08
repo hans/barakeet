@@ -231,6 +231,219 @@ if ac_brain_frames:
     print(f"Written: {_ac_out}  ({len(ac_brain_df)} rows × {ac_brain_df.width} cols)")
 
 # %% [markdown]
+# ----
+# ## 3  Behavior (full / with-control) — raw peak diff AUC
+#
+# Reads `behavior_decoding_single_electrode/*/scores.parquet` (full + baseline model
+# rows), pairs them per fold on shared window keys, and computes
+# `diff = full_roc_auc − baseline_roc_auc`.  Peak window per site = argmax of
+# fold-mean diff.
+#
+# **Window decision:** smin ∈ [0, 290] with per-`word_end` offset cap — identical to
+# the HGA-only search (`_filter_window_expr()`).  Chance = 0.0 for diff (not 0.5).
+
+# %%
+_beh_full_score_paths = sorted(
+    ROOT.glob("behavior_decoding_single_electrode/*/scores.parquet")
+)
+beh_full_peak_frames: dict[str, pl.DataFrame] = {}
+_BEH_FULL_JOIN_KEYS = ["subject", "phoneme_pair", "word_end", "smin", "smax", "fold"]
+
+for _p in _beh_full_score_paths:
+    _subject = _p.parent.name
+    _df = (
+        pl.read_parquet(_p)
+        .with_columns(
+            pl.col("word_end")
+            .replace_strict(_OFFSET_SAMPLES, default=None)
+            .alias("_smax_limit")
+        )
+        .filter(_filter_window_expr())
+        .drop("_smax_limit")
+    )
+
+    _full = _df.filter(pl.col("model") == "full")
+    _base = (
+        _df.filter(pl.col("model") == "baseline")
+        .select(_BEH_FULL_JOIN_KEYS + ["test_roc_auc"])
+        .rename({"test_roc_auc": "baseline_roc_auc"})
+    )
+    _paired = (
+        _full.join(_base, on=_BEH_FULL_JOIN_KEYS, how="inner")
+        .with_columns((pl.col("test_roc_auc") - pl.col("baseline_roc_auc")).alias("diff"))
+    )
+
+    _win_stats = (
+        _paired.group_by(WINDOW_KEYS_BEHAV)
+        .agg(
+            pl.col("diff").mean().alias("fold_mean_diff"),
+            pl.col("diff").std().alias("fold_std_diff"),
+            pl.col("test_roc_auc").mean().alias("fold_mean_full"),
+            pl.col("baseline_roc_auc").mean().alias("fold_mean_baseline"),
+            pl.col("diff").len().alias("n_folds"),
+        )
+    )
+
+    _peak = (
+        _win_stats.group_by(SITE_KEYS_BEHAV)
+        .agg(
+            pl.col("fold_mean_diff").max().alias("peak_diff"),
+            pl.col("smin").get(pl.col("fold_mean_diff").arg_max()).alias("peak_smin"),
+            pl.col("smax").get(pl.col("fold_mean_diff").arg_max()).alias("peak_smax"),
+            pl.col("fold_std_diff").get(pl.col("fold_mean_diff").arg_max()).alias("peak_fold_std"),
+            pl.col("fold_mean_full").get(pl.col("fold_mean_diff").arg_max()).alias("peak_full_roc_auc"),
+            pl.col("n_folds").get(pl.col("fold_mean_diff").arg_max()).alias("n_folds"),
+        )
+        .with_columns(
+            (
+                pl.col("peak_diff")
+                / (
+                    pl.max_horizontal(pl.col("peak_fold_std"), pl.lit(1e-6))
+                    / pl.col("n_folds").cast(pl.Float64).sqrt()
+                )
+            ).alias("fold_tstat")
+        )
+    )
+
+    beh_full_peak_frames[_subject] = _peak
+    _n = len(_peak)
+    _t = _peak["fold_tstat"].to_numpy()
+    _d = _peak["peak_diff"].to_numpy()
+    print(
+        f"{_subject}: {_n} sites  |  "
+        f"diff  median={np.median(_d):.3f}  max={_d.max():.3f}  "
+        f">0: {int((_d > 0).sum())}/{_n}  "
+        f"fold_tstat >2.13: {int((_t > 2.13).sum())}/{_n}"
+    )
+    for _pp in sorted(_peak["phoneme_pair"].unique().to_list()):
+        _sub = _peak.filter(pl.col("phoneme_pair") == _pp)
+        _sd = _sub["peak_diff"].to_numpy()
+        print(
+            f"  {_pp} ({len(_sub)} sites):  "
+            f"diff median={np.median(_sd):.3f}  max={_sd.max():.3f}  "
+            f"full-AUC median={_sub['peak_full_roc_auc'].median():.3f}"
+        )
+
+# %%
+if beh_full_peak_frames:
+    subjects = sorted(beh_full_peak_frames)
+    phoneme_pairs = sorted(
+        pl.concat(list(beh_full_peak_frames.values()))["phoneme_pair"].unique().to_list()
+    )
+    colors = {"bm": "#4C8BE2", "dn": "#E26B4C", "pb": "#4CE28B"}
+
+    fig, axes = plt.subplots(
+        len(subjects), 2, figsize=(12, 4 * len(subjects)), squeeze=False
+    )
+
+    for row, subject in enumerate(subjects):
+        df = beh_full_peak_frames[subject]
+
+        ax = axes[row, 0]
+        for pp in phoneme_pairs:
+            diffs = df.filter(pl.col("phoneme_pair") == pp)["peak_diff"].to_numpy()
+            ax.hist(diffs, bins=15, alpha=0.6, label=pp, color=colors.get(pp))
+        ax.axvline(0, color="k", lw=0.8, ls="--", label="0 (chance)")
+        ax.axvline(0.1, color="k", lw=0.8, ls=":", label="diff=0.10")
+        ax.set_xlabel("peak fold-mean diff AUC (full − baseline)")
+        ax.set_ylabel("sites")
+        ax.set_title(f"{subject} — behavior full peak diff")
+        ax.legend(fontsize=8)
+
+        ax2 = axes[row, 1]
+        for pp in phoneme_pairs:
+            sub = df.filter(pl.col("phoneme_pair") == pp)
+            peak_ms = smin_to_ms(sub["peak_smin"].to_numpy())
+            ax2.hist(peak_ms, bins=15, alpha=0.6, label=pp, color=colors.get(pp))
+        ax2.axvline(0, color="k", lw=0.8, ls="--", label="word onset")
+        ax2.set_xlabel("peak window onset (ms post word onset)")
+        ax2.set_ylabel("sites")
+        ax2.set_title(f"{subject} — behavior full peak timing")
+        ax2.legend(fontsize=8)
+
+    fig.tight_layout()
+    plt.show()
+
+# %% [markdown]
+# ### Interactive: filter by peak diff → inspect timing distribution
+
+# %%
+import ipywidgets as _widgets_s3
+from IPython.display import display as _display_s3
+
+_beh_full_colors = {"bm": "#4C8BE2", "dn": "#E26B4C", "pb": "#4CE28B"}
+
+
+def _make_full_timing_draw(pp_arr, diff_arr, ms_arr, phoneme_pairs, subject, out):
+    def draw(diff_min):
+        mask = diff_arr >= diff_min
+        with out:
+            out.clear_output(wait=True)
+            fig, ax = plt.subplots(figsize=(9, 3))
+            for pp in phoneme_pairs:
+                sel = mask & (pp_arr == pp)
+                if sel.any():
+                    ax.hist(
+                        ms_arr[sel], bins=25, alpha=0.65,
+                        label=f"{pp} (n={sel.sum()})", color=_beh_full_colors.get(pp),
+                    )
+            ax.axvline(0, color="k", lw=1.0, ls="--", label="word onset")
+            ax.set_xlabel("peak window onset (ms post word onset)")
+            ax.set_ylabel("sites")
+            ax.set_title(
+                f"{subject} — peak timing  "
+                f"({mask.sum()}/{len(mask)} sites,  diff ≥ {diff_min:.2f})"
+            )
+            ax.legend(fontsize=8)
+            plt.tight_layout()
+            plt.show()
+    return draw
+
+
+for _subject in sorted(beh_full_peak_frames):
+    _df = beh_full_peak_frames[_subject]
+    _pp_arr   = _df["phoneme_pair"].to_numpy()
+    _diff_arr = _df["peak_diff"].to_numpy()
+    _ms_arr   = smin_to_ms(_df["peak_smin"].to_numpy())
+    _pps      = sorted(_df["phoneme_pair"].unique().to_list())
+    _diff_max = round(float(_diff_arr.max()), 2)
+
+    _slider = _widgets_s3.FloatSlider(
+        value=0.0, min=0.0, max=_diff_max, step=0.01,
+        description="min diff:",
+        continuous_update=True,
+        style={"description_width": "80px"},
+        layout=_widgets_s3.Layout(width="500px"),
+    )
+    _out = _widgets_s3.Output()
+    _draw = _make_full_timing_draw(_pp_arr, _diff_arr, _ms_arr, _pps, _subject, _out)
+
+    _slider.observe(lambda change, d=_draw: d(change["new"]), names="value")
+    _draw(0.0)
+
+    _display_s3(_widgets_s3.VBox([
+        _widgets_s3.HTML(f"<b style='font-size:14px'>{_subject}</b>"),
+        _slider,
+        _out,
+    ]))
+
+# %%
+beh_full_brain_frames: list[pl.DataFrame] = []
+if beh_full_peak_frames:
+    for _subject, _peak in sorted(beh_full_peak_frames.items()):
+        _elec_df = get_electrode_df(_subject)
+        _elec_tmp = _elec_df.reset_index()[["electrode_idx", "x", "y", "z", "roi"]]
+        _elec_tmp["roi"] = _elec_tmp["roi"].astype(str)
+        _elec_pl = pl.from_pandas(_elec_tmp)
+        beh_full_brain_frames.append(_peak.join(_elec_pl, on="electrode_idx", how="left"))
+
+    beh_full_brain_df = pl.concat(beh_full_brain_frames)
+    _beh_full_out = ROOT / "brain_plot_behav_full_tstats.parquet"
+    beh_full_brain_df.write_parquet(_beh_full_out)
+    print(f"Written: {_beh_full_out}  ({len(beh_full_brain_df)} rows × {beh_full_brain_df.width} cols)")
+    print(beh_full_brain_df.schema)
+
+# %% [markdown]
 # ## 4  Behavior HGA-only — raw peak ROC-AUC
 #
 # For every subject with a `scores.parquet`, compute the per-site peak
@@ -537,7 +750,228 @@ if brain_frames:
 
 # %% [markdown]
 # ----
-# ## 6  Threshold sweep — Jaccard, enrichment, concordance over AUC space
+# ## 6  Ganong (full / with-control) — raw peak diff AUC
+#
+# Reads `ganong_decoding_single_electrode/*/scores.parquet`, pairs full vs baseline
+# per fold, and computes `diff = full_roc_auc − baseline_roc_auc`.
+#
+# **Window decision:** smin ≥ POD_samples[phoneme\_pair] (per-phoneme floor; a Ganong
+# effect cannot precede the point of disambiguation) and smax ≤ 290.
+# At tmin=−0.4 s, sfreq=100 Hz: bm → 68 samples, dn → 70 samples, pb → 61 samples.
+# Matches `_filter_ganong_window()` in `src/models/causal6_aggregates.py`.
+
+# %%
+from src.stimuli import POD_dict as _POD_DICT
+
+_GANONG_PEAK_SEARCH_SMAX = _config["analysis"]["decoding"]["peak_search_smax"]
+# POD floor per phoneme pair (bm=68, dn=70, pb=61 at sfreq=100, tmin=-0.4s)
+_GANONG_POD_SAMPLES: dict[str, int] = {
+    pp: int((pod_s - EPOCH_TMIN) * EPOCH_SFREQ)
+    for pp, pod_s in _POD_DICT.items()
+}
+_GANONG_SITE_KEYS = ["subject", "electrode_idx", "phoneme_pair"]
+_GANONG_WINDOW_KEYS = _GANONG_SITE_KEYS + ["smin", "smax"]
+_GANONG_JOIN_KEYS = ["subject", "phoneme_pair", "smin", "smax", "fold"]
+
+ganong_peak_frames: dict[str, pl.DataFrame] = {}
+
+for _p in sorted(ROOT.glob("ganong_decoding_single_electrode/*/scores.parquet")):
+    _subject = _p.parent.name
+    _df = (
+        pl.read_parquet(_p)
+        .with_columns(
+            pl.col("phoneme_pair")
+            .replace_strict(_GANONG_POD_SAMPLES, default=None)
+            .alias("_smin_floor")
+        )
+        .filter(
+            (pl.col("smin") >= pl.col("_smin_floor"))
+            & (pl.col("smax") <= _GANONG_PEAK_SEARCH_SMAX)
+        )
+        .drop("_smin_floor")
+    )
+
+    _full_g = _df.filter(pl.col("model") == "full")
+    _base_g = (
+        _df.filter(pl.col("model") == "baseline")
+        .select(_GANONG_JOIN_KEYS + ["test_roc_auc"])
+        .rename({"test_roc_auc": "baseline_roc_auc"})
+    )
+    _paired_g = (
+        _full_g.join(_base_g, on=_GANONG_JOIN_KEYS, how="inner")
+        .with_columns((pl.col("test_roc_auc") - pl.col("baseline_roc_auc")).alias("diff"))
+    )
+
+    _win_stats_g = (
+        _paired_g.group_by(_GANONG_WINDOW_KEYS)
+        .agg(
+            pl.col("diff").mean().alias("fold_mean_diff"),
+            pl.col("diff").std().alias("fold_std_diff"),
+            pl.col("test_roc_auc").mean().alias("fold_mean_full"),
+            pl.col("baseline_roc_auc").mean().alias("fold_mean_baseline"),
+            pl.col("diff").len().alias("n_folds"),
+        )
+    )
+
+    _peak_g = (
+        _win_stats_g.group_by(_GANONG_SITE_KEYS)
+        .agg(
+            pl.col("fold_mean_diff").max().alias("peak_diff"),
+            pl.col("smin").get(pl.col("fold_mean_diff").arg_max()).alias("peak_smin"),
+            pl.col("smax").get(pl.col("fold_mean_diff").arg_max()).alias("peak_smax"),
+            pl.col("fold_std_diff").get(pl.col("fold_mean_diff").arg_max()).alias("peak_fold_std"),
+            pl.col("fold_mean_full").get(pl.col("fold_mean_diff").arg_max()).alias("peak_full_roc_auc"),
+            pl.col("n_folds").get(pl.col("fold_mean_diff").arg_max()).alias("n_folds"),
+        )
+        .with_columns(
+            (
+                pl.col("peak_diff")
+                / (
+                    pl.max_horizontal(pl.col("peak_fold_std"), pl.lit(1e-6))
+                    / pl.col("n_folds").cast(pl.Float64).sqrt()
+                )
+            ).alias("fold_tstat")
+        )
+    )
+
+    ganong_peak_frames[_subject] = _peak_g
+    _n = len(_peak_g)
+    _t = _peak_g["fold_tstat"].to_numpy()
+    _d = _peak_g["peak_diff"].to_numpy()
+    print(
+        f"{_subject}: {_n} sites  |  "
+        f"diff  median={np.median(_d):.3f}  max={_d.max():.3f}  "
+        f">0: {int((_d > 0).sum())}/{_n}  "
+        f"fold_tstat >2.13: {int((_t > 2.13).sum())}/{_n}"
+    )
+    for _pp in sorted(_peak_g["phoneme_pair"].unique().to_list()):
+        _sub = _peak_g.filter(pl.col("phoneme_pair") == _pp)
+        _sd = _sub["peak_diff"].to_numpy()
+        print(
+            f"  {_pp} ({len(_sub)} sites):  "
+            f"diff median={np.median(_sd):.3f}  max={_sd.max():.3f}  "
+            f"full-AUC median={_sub['peak_full_roc_auc'].median():.3f}"
+        )
+
+# %%
+if ganong_peak_frames:
+    subjects = sorted(ganong_peak_frames)
+    phoneme_pairs = sorted(
+        pl.concat(list(ganong_peak_frames.values()))["phoneme_pair"].unique().to_list()
+    )
+    colors = {"bm": "#4C8BE2", "dn": "#E26B4C", "pb": "#4CE28B"}
+
+    fig, axes = plt.subplots(
+        len(subjects), 2, figsize=(12, 4 * len(subjects)), squeeze=False
+    )
+
+    for row, subject in enumerate(subjects):
+        df = ganong_peak_frames[subject]
+
+        ax = axes[row, 0]
+        for pp in phoneme_pairs:
+            diffs = df.filter(pl.col("phoneme_pair") == pp)["peak_diff"].to_numpy()
+            ax.hist(diffs, bins=15, alpha=0.6, label=pp, color=colors.get(pp))
+        ax.axvline(0, color="k", lw=0.8, ls="--", label="0 (chance)")
+        ax.axvline(0.1, color="k", lw=0.8, ls=":", label="diff=0.10")
+        ax.set_xlabel("peak fold-mean diff AUC (full − baseline)")
+        ax.set_ylabel("sites")
+        ax.set_title(f"{subject} — Ganong peak diff")
+        ax.legend(fontsize=8)
+
+        ax2 = axes[row, 1]
+        for pp in phoneme_pairs:
+            sub = df.filter(pl.col("phoneme_pair") == pp)
+            peak_ms = smin_to_ms(sub["peak_smin"].to_numpy())
+            ax2.hist(peak_ms, bins=15, alpha=0.6, label=pp, color=colors.get(pp))
+        ax2.axvline(0, color="k", lw=0.8, ls="--", label="word onset")
+        ax2.set_xlabel("peak window onset (ms post word onset)")
+        ax2.set_ylabel("sites")
+        ax2.set_title(f"{subject} — Ganong peak timing")
+        ax2.legend(fontsize=8)
+
+    fig.tight_layout()
+    plt.show()
+
+# %%
+ganong_brain_frames_list: list[pl.DataFrame] = []
+if ganong_peak_frames:
+    for _subject, _peak in sorted(ganong_peak_frames.items()):
+        _elec_df = get_electrode_df(_subject)
+        _elec_tmp = _elec_df.reset_index()[["electrode_idx", "x", "y", "z", "roi"]]
+        _elec_tmp["roi"] = _elec_tmp["roi"].astype(str)
+        _elec_pl = pl.from_pandas(_elec_tmp)
+        ganong_brain_frames_list.append(_peak.join(_elec_pl, on="electrode_idx", how="left"))
+
+    ganong_brain_df = pl.concat(ganong_brain_frames_list)
+    _ganong_out = ROOT / "brain_plot_ganong_tstats.parquet"
+    ganong_brain_df.write_parquet(_ganong_out)
+    print(f"Written: {_ganong_out}  ({len(ganong_brain_df)} rows × {ganong_brain_df.width} cols)")
+    print(ganong_brain_df.schema)
+
+# %% [markdown]
+# ### Interactive: filter by Ganong peak diff → inspect timing distribution
+
+# %%
+_ganong_colors = {"bm": "#4C8BE2", "dn": "#E26B4C", "pb": "#4CE28B"}
+
+
+def _make_ganong_timing_draw(pp_arr, diff_arr, ms_arr, phoneme_pairs, subject, out):
+    def draw(diff_min):
+        mask = diff_arr >= diff_min
+        with out:
+            out.clear_output(wait=True)
+            fig, ax = plt.subplots(figsize=(9, 3))
+            for pp in phoneme_pairs:
+                sel = mask & (pp_arr == pp)
+                if sel.any():
+                    ax.hist(
+                        ms_arr[sel], bins=25, alpha=0.65,
+                        label=f"{pp} (n={sel.sum()})", color=_ganong_colors.get(pp),
+                    )
+            ax.axvline(0, color="k", lw=1.0, ls="--", label="word onset")
+            ax.set_xlabel("peak window onset (ms post word onset)")
+            ax.set_ylabel("sites")
+            ax.set_title(
+                f"{subject} — Ganong peak timing  "
+                f"({mask.sum()}/{len(mask)} sites,  diff ≥ {diff_min:.2f})"
+            )
+            ax.legend(fontsize=8)
+            plt.tight_layout()
+            plt.show()
+    return draw
+
+
+for _subject in sorted(ganong_peak_frames):
+    _df = ganong_peak_frames[_subject]
+    _pp_arr   = _df["phoneme_pair"].to_numpy()
+    _diff_arr = _df["peak_diff"].to_numpy()
+    _ms_arr   = smin_to_ms(_df["peak_smin"].to_numpy())
+    _pps      = sorted(_df["phoneme_pair"].unique().to_list())
+    _diff_max = round(float(_diff_arr.max()), 2)
+
+    _slider = widgets.FloatSlider(
+        value=0.0, min=0.0, max=_diff_max, step=0.01,
+        description="min diff:",
+        continuous_update=True,
+        style={"description_width": "80px"},
+        layout=widgets.Layout(width="500px"),
+    )
+    _out = widgets.Output()
+    _draw = _make_ganong_timing_draw(_pp_arr, _diff_arr, _ms_arr, _pps, _subject, _out)
+
+    _slider.observe(lambda change, d=_draw: d(change["new"]), names="value")
+    _draw(0.0)
+
+    display(widgets.VBox([
+        widgets.HTML(f"<b style='font-size:14px'>{_subject}</b>"),
+        _slider,
+        _out,
+    ]))
+
+# %% [markdown]
+# ----
+# ## 7  Threshold sweep — Jaccard, enrichment, concordance over AUC space
 #
 # Sweeps a grid of (acoustic_auc_threshold, behav_auc_threshold) and computes
 # four summary statistics at each point.  No fixed threshold assumption —
@@ -666,7 +1100,7 @@ plt.show()
 
 # %% [markdown]
 # ----
-# ## 7  Contingency + provisional star plots — sites passing both thresholds
+# ## 8  Contingency + provisional star plots — sites passing both thresholds
 #
 # Cross-filter `brain_plot_acoustic_tstats.parquet` (section 2) and
 # `brain_plot_behav_tstats.parquet` (section 5) by AUC thresholds, identify
@@ -1057,7 +1491,7 @@ print(f"Written {_n_pages} pages → {_aonly_out}")
 
 # %% [markdown]
 # ----
-# ## 8  Behavior HGA-only — on-the-fly significance  *(expensive — run last)*
+# ## 9  Behavior HGA-only — on-the-fly significance  *(expensive — run last)*
 #
 # Runs `fold_tstat_aggregate` + `null_standardized_peak_test` for every
 # subject that has both `scores.parquet` and `null_scores.parquet`.
