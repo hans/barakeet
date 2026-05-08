@@ -371,11 +371,14 @@ SEARCHLIGHTS = {}
 for target, loader4, loader6 in tqdm(load_spec):
     causal4_result = _normalize_types(loader4(ROOTS["causal4"], subjects)) if loader4 else None
     causal6_result = _normalize_types(loader6(ROOTS["causal6"], subjects)) if loader6 else None
-    SEARCHLIGHTS[target] = {
-        "causal4": causal4_result,
-        "causal6": causal6_result,
-    }
 
+    SEARCHLIGHTS[target] = {}
+    if loader4 is not None:
+        SEARCHLIGHTS[target]["causal4"] = causal4_result
+    if loader6 is not None:
+        SEARCHLIGHTS[target]["causal6"] = causal6_result
+
+# %%
 PEAKS = {
     kind: {p: derive_peaks(df, PEAK_CRITERION[kind], SITE_COLS[kind])
            for p, df in pipelines.items()}
@@ -516,14 +519,38 @@ def plot_peak_window_scatter(peaks: dict[str, pl.DataFrame], site_cols: list[str
             for row in (0, 1):
                 axes[row, col].set_title(f"{a} vs {b}: no shared sites")
             continue
-        scatter_with_unity(
-            axes[0, col], joined["smin_a"].to_numpy(), joined["smin_b"].to_numpy(),
-            f"{a} smin", f"{b} smin", f"{kind} peak smin",
+
+        color_vals = np.maximum(
+            joined[f"{criterion}_a"].to_numpy(),
+            joined[f"{criterion}_b"].to_numpy(),
         )
-        scatter_with_unity(
-            axes[1, col], joined["smax_a"].to_numpy(), joined["smax_b"].to_numpy(),
-            f"{a} smax", f"{b} smax", f"{kind} peak smax",
-        )
+        norm = plt.Normalize(vmin=color_vals.min(), vmax=color_vals.max())
+        cmap = plt.cm.viridis
+
+        for ax_row, (xkey, ykey, xlabel, ylabel, title) in zip(
+            [axes[0, col], axes[1, col]],
+            [
+                ("smin_a", "smin_b", f"{a} smin", f"{b} smin", f"{kind} peak smin"),
+                ("smax_a", "smax_b", f"{a} smax", f"{b} smax", f"{kind} peak smax"),
+            ],
+        ):
+            x = joined[xkey].to_numpy()
+            y = joined[ykey].to_numpy()
+            sc = ax_row.scatter(x, y, s=10, alpha=0.3,
+                                c=color_vals, cmap=cmap, norm=norm)
+            lo = float(np.nanmin([x.min(), y.min()]))
+            hi = float(np.nanmax([x.max(), y.max()]))
+            ax_row.plot([lo, hi], [lo, hi], "k--", lw=0.75, alpha=0.5)
+            mask = ~(np.isnan(x) | np.isnan(y))
+            if mask.sum() >= 3:
+                r, _ = pearsonr(x[mask], y[mask])
+                ax_row.set_title(f"{title}\nr={r:.3f}, n={int(mask.sum())}")
+            else:
+                ax_row.set_title(f"{title}\n(n={int(mask.sum())})")
+            ax_row.set_xlabel(xlabel)
+            ax_row.set_ylabel(ylabel)
+            plt.colorbar(sc, ax=ax_row, label=f"max {criterion}", fraction=0.04)
+
     fig.suptitle(f"{kind}: peak window agreement")
     fig.tight_layout()
     plt.show()
@@ -696,7 +723,7 @@ def print_window_grid_summary(searchlights: dict[str, pl.DataFrame], kind: str) 
 
 def print_selection_bias(
     peaks: dict[str, pl.DataFrame], site_cols: list[str], criterion: str, kind: str,
-    thresholds: tuple[float, ...] = (0.55, 0.6, 0.65),
+    thresholds: tuple[float, ...] = (0.55, 0.6, 0.65, 0.7, 0.75, 0.8),
 ) -> None:
     pipes = [p for p, df in peaks.items() if not df.is_empty()]
     pairs = [(a, b) for a, b in PIPELINE_PAIRS if a in pipes and b in pipes]
