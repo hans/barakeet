@@ -437,9 +437,12 @@ def zoomin_hga(
     figsize=(5.25, 4),
     vline_extent=1.25,
     title=False,
+    highlight_windows=True,
 ):
     """
     hide_bottom: skip xticks and xlabel; because it's going to be stacked into a vertical figure
+    highlight_windows: shade the phonetic decoding window on the top (unambiguous)
+        panel and the behavioral decoding window on the bottom (ambiguous) panel
     """
     assert set(controlled_resampled_steps).isdisjoint({1, 6}), (
         "Violated plotting assumption"
@@ -680,8 +683,17 @@ def zoomin_hga(
         test_smin=plot_phon_smin,
         test_smax=plot_phon_smax,
     )
-    # axs[0].axvspan(highlight_phon_times[0], highlight_phon_times[-1], color="gray", alpha=0.3)
-    # axs[0].axvspan(highlight_behav_times[0], highlight_behav_times[-1], color="yellow", alpha=0.3)
+    if highlight_windows:
+        # phonetic decoding window on the unambiguous (top) panel,
+        # behavioral decoding window on the ambiguous (bottom) panel.
+        axs[0].axvspan(
+            highlight_phon_times[0], highlight_phon_times[-1],
+            color="blue", alpha=0.2, zorder=0,
+        )
+        axs[1].axvspan(
+            highlight_behav_times[0], highlight_behav_times[-1],
+            color="orange", alpha=0.2, zorder=0,
+        )
 
     fb.stage("controlled")
 

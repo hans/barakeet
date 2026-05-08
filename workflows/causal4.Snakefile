@@ -1015,6 +1015,54 @@ rule A_neurometrics:
         )
 
 
+rule star_plots:
+    """
+    Render HGA `zoomin_hga` star plots for all significant electrodes
+    (the join of phon_peaks_df × behav_peaks_df from prepare_neurometrics).
+    Produces a combined multi-page PDF and one PDF per site.
+    """
+    input:
+        all_epochs = expand(
+            "outputs/epochs_preprocessed/{subject}_epo.fif",
+            subject=config["data"]["subjects"]
+        ),
+        # Sentinel: prepare_neurometrics_sweep is done
+        neurometrics_sentinel = "outputs/causal4/prepare_neurometrics/{params_id}/zoomin_keys.parquet",
+        notebook = "notebooks/causal4/star_plots.py",
+
+    output:
+        notebook = "outputs/causal4/star_plots/{params_id}/notebook.ipynb",
+        keys = "outputs/causal4/star_plots/{params_id}/star_plot_keys.csv",
+        combined_pdf = "outputs/causal4/star_plots/{params_id}/star_plots_all.pdf",
+        failures = "outputs/causal4/star_plots/{params_id}/star_plot_failures.csv",
+
+    wildcard_constraints:
+        params_id = "|".join(ALL_NEUROMETRICS_PARAMS)
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                all_epochs=list(input.all_epochs),
+                neurometrics_dir=str(Path(input.neurometrics_sentinel).parent),
+                textgrid_dir="textgrids",
+                outdir=str(outdir),
+                controlled_resampled_steps=[3, 4],
+            ),
+        )
+
+
+rule star_plots_all:
+    """Render star plots for every neurometrics param combination."""
+    input:
+        expand(
+            "outputs/causal4/star_plots/{params_id}/star_plots_all.pdf",
+            params_id=ALL_NEUROMETRICS_PARAMS,
+        )
+
+
 rule neurometrics_sweep_all:
     """Run the full prepare_neurometrics + A_neurometrics sweep over all param combinations."""
     input:
