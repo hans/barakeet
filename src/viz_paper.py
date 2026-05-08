@@ -688,11 +688,11 @@ def zoomin_hga(
         # behavioral decoding window on the ambiguous (bottom) panel.
         axs[0].axvspan(
             highlight_phon_times[0], highlight_phon_times[-1],
-            color="blue", alpha=0.2, zorder=0,
+            color="blue", alpha=0.15,
         )
         axs[1].axvspan(
             highlight_behav_times[0], highlight_behav_times[-1],
-            color="orange", alpha=0.2, zorder=0,
+            color="orange", alpha=0.15,
         )
 
     fb.stage("controlled")
