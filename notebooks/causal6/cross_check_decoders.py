@@ -14,16 +14,16 @@
 # ---
 
 # %% [markdown]
-# # Cross-check decoding results: causal4 / causal5 / causal6
+# # Cross-check decoding results: causal4 vs causal6
 #
 # Answers two questions, per decoder type:
 #   1. How much do the per-electrode decoding results agree across pipelines?
 #   2. For sites where they disagree, what explains the drift?
 #
-# Coverage rule:
-#   - Acoustic                — causal4 vs causal5 vs causal6
-#   - Behavior-with-control   — causal4 vs causal5 vs causal6
-#   - Behavior-HGA-only       — causal5 vs causal6 only (causal4 never ran this)
+# Pipelines compared: causal4 (legacy) vs causal6 (current). Decoder types:
+# acoustic and behavior-with-control. (causal4 never ran HGA-only.) causal5
+# loaders were dropped because we never plot it; bring them back from git
+# history if you need a three-way comparison again.
 #
 # Comparison axes per decoder: per-site peak ROC-AUC, peak-window (smin, smax),
 # and the full searchlight AUC map. Debug section shows top-disagreement sites
@@ -48,7 +48,6 @@ from sklearn.metrics import roc_auc_score
 
 # %% tags=["parameters"]
 causal4_root = "outputs/causal4"
-causal5_root = "outputs/causal5"
 causal6_root = "outputs/causal6"
 
 top_n_disagreements = 20
@@ -58,14 +57,12 @@ epoch_sfreq = 100
 
 # Pipeline pairs to plot. We treat causal6 as the trusted reference (better CV
 # scheme + tuned regularization → lower-variance per-fold estimates) and use it
-# to validate causal4's small claimed effect sizes. causal5 stays loaded for
-# coverage context but is not plotted.
+# to validate causal4's small claimed effect sizes.
 PIPELINE_PAIRS = [("causal4", "causal6")]
 
 # %%
 ROOTS = {
     "causal4": Path(causal4_root),
-    "causal5": Path(causal5_root),
     "causal6": Path(causal6_root),
 }
 
@@ -85,10 +82,6 @@ GLOB_TARGETS = {
     "causal4": [
         "behavior_decoding_single_electrode_acoustic/*",
         "behavior_decoding_single_electrode_summarize/*",
-    ],
-    "causal5": [
-        "behavior_decoding_single_electrode_summarize/*",
-        "behavior_decoding_single_electrode_hga_only_summarize/*",
     ],
     "causal6": [
         "acoustic_decoding_single_electrode/*",
@@ -144,7 +137,7 @@ subjects = union  # loaders skip per-subject paths that don't exist, so union is
 # **Behavior-HGA-only searchlight**: adds `word_end`; column `roc_auc`
 #
 # For each pipeline we pick the cheapest source of per-fold AUC:
-# - causal5 / causal6 have cached fold-level parquets — read directly.
+# - causal6 has cached fold-level parquets — read directly.
 # - causal4 requires deriving AUC from trial-level `all_outcomes.parquet` /
 #   `A-predictions.parquet` via sklearn.
 
@@ -222,18 +215,6 @@ def load_acoustic_searchlight_causal4(root: Path, subjects: list[str]) -> pl.Dat
     return pl.concat(frames)
 
 
-def load_acoustic_searchlight_causal5(root: Path) -> pl.DataFrame:
-    """causal5 acoustic fold-level AUC — prewritten by acoustic_decoding_peaks."""
-    p = root / "acoustic_decoding_peaks" / "phon_roc_auc_searchlight_df.parquet"
-    if not p.exists():
-        return _empty([("subject", pl.Utf8)])
-    return (
-        pl.read_parquet(p)
-        .rename({"phon_roc_auc": "roc_auc"})
-        .select(["subject", "electrode_idx", "phoneme_pair", "smin", "smax", "fold", "roc_auc"])
-    )
-
-
 def load_acoustic_searchlight_causal6(root: Path, subjects: list[str]) -> pl.DataFrame:
     """causal6 acoustic fold-level AUC — `scores.parquet` already stores it."""
     frames = []
@@ -262,8 +243,8 @@ def load_behavior_ctrl_searchlight_from_predictions(
 ) -> pl.DataFrame:
     """Derive per-fold baseline/full AUC from trial-level `A-predictions.parquet`.
 
-    Used for causal4 (no cached searchlight) and as a fallback for causal5.
-    Concatenates late and early prediction files if both exist.
+    Used for causal4 (no cached searchlight). Concatenates late and early
+    prediction files if both exist.
     """
     frames = []
     for p in paths:
@@ -292,38 +273,6 @@ def load_behavior_ctrl_searchlight_from_predictions(
 
 
 def load_behavior_ctrl_searchlight_causal4(root: Path, subjects: list[str]) -> pl.DataFrame:
-    paths = []
-    for subj in subjects:
-        base = root / "behavior_decoding_single_electrode_summarize" / subj
-        paths += [base / "A-predictions.parquet", base / "A_early-predictions.parquet"]
-    return load_behavior_ctrl_searchlight_from_predictions(paths)
-
-
-def load_behavior_ctrl_searchlight_causal5(root: Path, subjects: list[str]) -> pl.DataFrame:
-    """Prefer the cached fold-level parquet from prepare_neurometrics."""
-    cached = root / "prepare_neurometrics" / "behav_roc_auc_searchlight_df.parquet"
-    if cached.exists():
-        df = pl.read_parquet(cached)
-        # Column names differ: behav_roc_auc (full), behav_roc_auc_baseline
-        renames = {}
-        if "behav_roc_auc" in df.columns:
-            renames["behav_roc_auc"] = "roc_auc_full"
-        if "behav_roc_auc_baseline" in df.columns:
-            renames["behav_roc_auc_baseline"] = "roc_auc_baseline"
-        if "behav_roc_auc_improvement" in df.columns:
-            renames["behav_roc_auc_improvement"] = "roc_auc_improvement"
-        df = df.rename(renames)
-        if "roc_auc_improvement" not in df.columns and {"roc_auc_full", "roc_auc_baseline"} <= set(df.columns):
-            df = df.with_columns(
-                (pl.col("roc_auc_full") - pl.col("roc_auc_baseline")).alias("roc_auc_improvement")
-            )
-        keep = [
-            "subject", "electrode_idx", "phoneme_pair", "word_end",
-            "smin", "smax", "fold",
-            "roc_auc_full", "roc_auc_baseline", "roc_auc_improvement",
-        ]
-        return df.select([c for c in keep if c in df.columns])
-    # Fallback: derive from trial-level predictions
     paths = []
     for subj in subjects:
         base = root / "behavior_decoding_single_electrode_summarize" / subj
@@ -367,32 +316,6 @@ def load_behavior_ctrl_searchlight_causal6(root: Path, subjects: list[str]) -> p
 # ### Behavior-HGA-only searchlight loaders
 
 # %%
-def load_behavior_hga_searchlight_causal5(root: Path, subjects: list[str]) -> pl.DataFrame:
-    """causal5 HGA-only writes A_results.csv per subject with per-fold full_roc_auc.
-
-    The CSV is written via pandas `to_csv` without `index=False`, so the first
-    column is an unnamed pandas index — strip it via `index_col=0`.
-    """
-    frames = []
-    for subj in subjects:
-        p = root / "behavior_decoding_single_electrode_hga_only_summarize" / subj / "A_results.csv"
-        if not p.exists():
-            continue
-        pdf = pd.read_csv(p, index_col=0)
-        # causal5 HGA-only uses `population` as a stringified electrode_idx
-        if "population" in pdf.columns and "electrode_idx" not in pdf.columns:
-            pdf["electrode_idx"] = pdf["population"].astype(int)
-        pdf = pdf.rename(columns={"full_roc_auc": "roc_auc"})
-        keep = [
-            "subject", "electrode_idx", "phoneme_pair", "word_end",
-            "smin", "smax", "fold", "roc_auc",
-        ]
-        frames.append(pl.from_pandas(pdf[[c for c in keep if c in pdf.columns]]))
-    if not frames:
-        return _empty([("subject", pl.Utf8)])
-    return pl.concat(frames)
-
-
 def load_behavior_hga_searchlight_causal6(root: Path, subjects: list[str]) -> pl.DataFrame:
     frames = []
     for subj in subjects:
@@ -454,16 +377,13 @@ PEAK_CRITERION = {
 # %%
 ACOUSTIC = {
     "causal4": _normalize_types(load_acoustic_searchlight_causal4(ROOTS["causal4"], subjects)),
-    "causal5": _normalize_types(load_acoustic_searchlight_causal5(ROOTS["causal5"])),
     "causal6": _normalize_types(load_acoustic_searchlight_causal6(ROOTS["causal6"], subjects)),
 }
 BEHAV_CTRL = {
     "causal4": _normalize_types(load_behavior_ctrl_searchlight_causal4(ROOTS["causal4"], subjects)),
-    "causal5": _normalize_types(load_behavior_ctrl_searchlight_causal5(ROOTS["causal5"], subjects)),
     "causal6": _normalize_types(load_behavior_ctrl_searchlight_causal6(ROOTS["causal6"], subjects)),
 }
 BEHAV_HGA = {
-    "causal5": _normalize_types(load_behavior_hga_searchlight_causal5(ROOTS["causal5"], subjects)),
     "causal6": _normalize_types(load_behavior_hga_searchlight_causal6(ROOTS["causal6"], subjects)),
 }
 
@@ -948,8 +868,8 @@ run_comparison("behavior_ctrl")
 # ### Behavior-HGA-only
 #
 # Skipped: causal4 never ran HGA-only behavior decoding, and we've restricted
-# `PIPELINE_PAIRS` to causal4 vs causal6. The loaders above still populate
-# `BEHAV_HGA` for causal5/causal6 if you ever need it.
+# `PIPELINE_PAIRS` to causal4 vs causal6. `BEHAV_HGA` is still populated for
+# causal6 if a single-pipeline view is ever useful.
 
 # %% [markdown]
 # ## 4. Highlight-electrode drill-in
