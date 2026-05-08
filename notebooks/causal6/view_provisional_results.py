@@ -809,15 +809,17 @@ def _provisional_star_plot(
     textgrid_dir=_TEXTGRID_DIR,
     epoch_tmin=EPOCH_TMIN,
     epoch_sfreq=EPOCH_SFREQ,
-    figsize=(6.5, 5.0),
+    figsize=(6.5, 7.5),
 ):
-    """Two-panel provisional HGA star plot (no prepare_neurometrics required).
+    """Three-panel provisional HGA star plot (no prepare_neurometrics required).
 
     Top: unambiguous trials (resampled 1 & 6); acoustic window shaded if
     phon_smin/phon_smax supplied.
-    Bottom: within-completion controlled ambiguous trials (behaviorally-defined
+    Middle: within-completion controlled ambiguous trials (behaviorally-defined
     steps from ambig_steps), split by response; behavioral window shaded if
     behav_smin/behav_smax supplied.
+    Bottom: all trials within word_end (no step filter), split by response —
+    reflects what the decoder actually evaluates on.
     """
     ep = epochs_dict[subject]
     times = ep.times
@@ -834,7 +836,14 @@ def _provisional_star_plot(
         .squeeze(1)
     )
 
-    fig, (ax_top, ax_bot) = plt.subplots(2, 1, figsize=figsize, sharex=True)
+    fig, (ax_top, ax_mid, ax_bot) = plt.subplots(3, 1, figsize=figsize, sharex=True)
+
+    _bhv_col = (
+        "behavior_dummy_forced"
+        if "behavior_dummy_forced" in md_pp.columns
+        else "behavior_categorical"
+    )
+    _bhv_colors = ["#762a83", "#1b7837"]
 
     # ── Top: unambiguous ───────────────────────────────────────────────
     _step_colors = {1: "#2166ac", 6: "#d73027"}
@@ -857,20 +866,40 @@ def _provisional_star_plot(
     )
     ax_top.legend(fontsize=7, loc="upper left", framealpha=0.7)
 
-    # ── Bottom: controlled ambiguous (within-completion) ───────────────
+    # ── Middle: controlled ambiguous (within-completion) ──────────────
     amb = ambig_steps.get((subject, phoneme_pair, word_end), [3, 4])
     we_amb_mask = (md_pp["word_end"] == word_end) & md_pp["resampled"].isin(amb)
 
-    _bhv_col = (
-        "behavior_dummy_forced"
-        if "behavior_dummy_forced" in md_pp.columns
-        else "behavior_categorical"
-    )
-    _bhv_colors = ["#762a83", "#1b7837"]
     for _i, _bhv_val in enumerate(
         sorted(md_pp.loc[we_amb_mask, _bhv_col].dropna().unique())
     ):
         mask = we_amb_mask & (md_pp[_bhv_col] == _bhv_val)
+        if not mask.any():
+            continue
+        tr = hga[mask.values]
+        m = tr.mean(0)
+        se = tr.std(0) / np.sqrt(mask.sum())
+        color = _bhv_colors[_i % len(_bhv_colors)]
+        ax_mid.plot(times, m, color=color, lw=1.5,
+                    label=f"resp={_bhv_val}  (n={mask.sum()})")
+        ax_mid.fill_between(times, m - se, m + se, color=color, alpha=0.18)
+    if behav_smin is not None:
+        t_behav = np.array([behav_smin, behav_smax]) / epoch_sfreq + epoch_tmin
+        ax_mid.axvspan(*t_behav, color="#f4a582", alpha=0.25, label="behavioral window")
+    ax_mid.axhline(0, color="k", lw=0.5, ls=":")
+    ax_mid.set_ylabel("HGA (z)")
+    ax_mid.set_title(
+        f"Controlled ambiguous — {word_end}  (steps {amb})", fontsize=9
+    )
+    ax_mid.legend(fontsize=7, loc="upper left", framealpha=0.7)
+
+    # ── Bottom: all trials within word_end (decoder view) ─────────────
+    we_all_mask = md_pp["word_end"] == word_end
+
+    for _i, _bhv_val in enumerate(
+        sorted(md_pp.loc[we_all_mask, _bhv_col].dropna().unique())
+    ):
+        mask = we_all_mask & (md_pp[_bhv_col] == _bhv_val)
         if not mask.any():
             continue
         tr = hga[mask.values]
@@ -887,12 +916,12 @@ def _provisional_star_plot(
     ax_bot.set_ylabel("HGA (z)")
     ax_bot.set_xlabel("Time (s, post word onset)")
     ax_bot.set_title(
-        f"Controlled ambiguous — {word_end}  (steps {amb})", fontsize=9
+        f"All trials — {word_end}  (decoder view)", fontsize=9
     )
     ax_bot.legend(fontsize=7, loc="upper left", framealpha=0.7)
 
     # ── TextGrid ────────────────────────────────────────────────────────
-    for _ax in (ax_top, ax_bot):
+    for _ax in (ax_top, ax_mid, ax_bot):
         try:
             add_textgrid(_ax, textgrid_dir=textgrid_dir,
                          textgrid_file=f"11_{word_end}_dn_002.TextGrid",
