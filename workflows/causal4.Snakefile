@@ -1032,7 +1032,7 @@ rule star_plots:
 
     output:
         notebook = "outputs/causal4/star_plots/{params_id}/notebook.ipynb",
-        keys = "outputs/causal4/star_plots/{params_id}/star_plot_keys.csv",
+        star_keys = "outputs/causal4/star_plots/{params_id}/star_plot_keys.csv",
         combined_pdf = "outputs/causal4/star_plots/{params_id}/star_plots_all.pdf",
         failures = "outputs/causal4/star_plots/{params_id}/star_plot_failures.csv",
 
@@ -1051,6 +1051,7 @@ rule star_plots:
                 textgrid_dir="textgrids",
                 outdir=str(outdir),
                 ambiguous_response_threshold=params["ambiguous_response_threshold"],
+                fallback_resampled_steps=(3, 4),
             ),
         )
 
