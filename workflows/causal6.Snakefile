@@ -344,11 +344,14 @@ rule reg_lambda_sweep:
         fold_variance   = "outputs/causal6/reg_lambda_sweep/sweep_fold_variance.parquet",
         seed_comparison = "outputs/causal6/reg_lambda_sweep/sweep_seed_comparison.parquet"
 
+    resources:
+        gpu = 1
+
     run:
         outdir = Path(output.notebook).parent
         tuning_subject = Path(input.winner).read_text().strip()
 
-        run_notebook(
+        run_notebook_with_gpu(
             str(input.notebook),
             str(output.notebook),
             parameters=dict(
@@ -368,6 +371,8 @@ rule reg_lambda_sweep:
                 tol=C6["tol"],
                 max_iter=C6["max_iter"],
             ),
+            wildcards=wildcards,
+            resources=resources,
         )
 
 
@@ -400,9 +405,12 @@ rule acoustic_decoding_single_electrode:
         predictions  = "outputs/causal6/acoustic_decoding_single_electrode/{subject}/predictions.parquet",
         coefficients = "outputs/causal6/acoustic_decoding_single_electrode/{subject}/coefficients.parquet",
 
+    resources:
+        gpu = 1
+
     run:
         outdir = Path(output.notebook).parent
-        run_notebook(
+        run_notebook_with_gpu(
             str(input.notebook),
             str(output.notebook),
             parameters=dict(
@@ -421,6 +429,8 @@ rule acoustic_decoding_single_electrode:
                 tol=C6["tol"],
                 max_iter=C6["max_iter"],
             ),
+            wildcards=wildcards,
+            resources=resources,
         )
 
 
@@ -438,9 +448,12 @@ rule behavior_decoding_single_electrode:
         predictions  = "outputs/causal6/behavior_decoding_single_electrode/{subject}/predictions.parquet",
         coefficients = "outputs/causal6/behavior_decoding_single_electrode/{subject}/coefficients.parquet",
 
+    resources:
+        gpu = 1
+
     run:
         outdir = Path(output.notebook).parent
-        run_notebook(
+        run_notebook_with_gpu(
             str(input.notebook),
             str(output.notebook),
             parameters=dict(
@@ -460,6 +473,8 @@ rule behavior_decoding_single_electrode:
                 tol=C6["tol"],
                 max_iter=C6["max_iter"],
             ),
+            wildcards=wildcards,
+            resources=resources,
         )
 
 
@@ -477,9 +492,12 @@ rule behavior_decoding_single_electrode_hga_only:
         predictions  = "outputs/causal6/behavior_decoding_single_electrode_hga_only/{subject}/predictions.parquet",
         coefficients = "outputs/causal6/behavior_decoding_single_electrode_hga_only/{subject}/coefficients.parquet",
 
+    resources:
+        gpu = 1
+
     run:
         outdir = Path(output.notebook).parent
-        run_notebook(
+        run_notebook_with_gpu(
             str(input.notebook),
             str(output.notebook),
             parameters=dict(
@@ -498,6 +516,8 @@ rule behavior_decoding_single_electrode_hga_only:
                 tol=C6["tol"],
                 max_iter=C6["max_iter"],
             ),
+            wildcards=wildcards,
+            resources=resources,
         )
 
 
@@ -1102,9 +1122,12 @@ rule ganong_decoding_single_electrode:
         predictions  = "outputs/causal6/ganong_decoding_single_electrode/{subject}/predictions.parquet",
         coefficients = "outputs/causal6/ganong_decoding_single_electrode/{subject}/coefficients.parquet",
 
+    resources:
+        gpu = 1
+
     run:
         outdir = Path(output.notebook).parent
-        run_notebook(
+        run_notebook_with_gpu(
             str(input.notebook),
             str(output.notebook),
             parameters=dict(
@@ -1124,6 +1147,8 @@ rule ganong_decoding_single_electrode:
                 tol=C6["tol"],
                 max_iter=C6["max_iter"],
             ),
+            wildcards=wildcards,
+            resources=resources,
         )
 
 
@@ -1141,9 +1166,12 @@ rule ganong_decoding_single_electrode_hga_only:
         predictions  = "outputs/causal6/ganong_decoding_single_electrode_hga_only/{subject}/predictions.parquet",
         coefficients = "outputs/causal6/ganong_decoding_single_electrode_hga_only/{subject}/coefficients.parquet",
 
+    resources:
+        gpu = 1
+
     run:
         outdir = Path(output.notebook).parent
-        run_notebook(
+        run_notebook_with_gpu(
             str(input.notebook),
             str(output.notebook),
             parameters=dict(
@@ -1162,6 +1190,8 @@ rule ganong_decoding_single_electrode_hga_only:
                 tol=C6["tol"],
                 max_iter=C6["max_iter"],
             ),
+            wildcards=wildcards,
+            resources=resources,
         )
 
 
