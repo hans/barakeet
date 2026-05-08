@@ -62,6 +62,7 @@ from src.models.causal6_aggregates import (
     FLAVORS_BEHAVIOR_WITH_CONTROL,
     SITE_KEYS_BEHAVIOR_WITH_CONTROL,
     aggregate_behavior_with_control,
+    behavior_null_smax,
     preagg_behavior_with_control_null,
 )
 
@@ -112,6 +113,8 @@ epochs.metadata = add_metadata_features(epochs.metadata)
 
 max_sample = epochs.times.shape[0]
 windows = make_windows(min_sample, max_sample, window_size, stride)
+_null_smax = behavior_null_smax(epoch_tmin, epoch_sfreq, behav_peak_post_offset_s, peak_search_smax)
+windows = windows[(windows[:, 0] >= peak_search_smin) & (windows[:, 1] <= _null_smax)]
 
 # %% [markdown]
 # ## Stage 1 — permutations across all speech-responsive electrodes.

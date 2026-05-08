@@ -261,6 +261,21 @@ def _behavior_offset_samples(
     }
 
 
+def behavior_null_smax(
+    epoch_tmin: float,
+    epoch_sfreq: float,
+    behav_peak_post_offset_s: float,
+    global_peak_search_smax: int,
+) -> int:
+    """Tightest smax needed for behavior null permutations.
+
+    Equals min(global_peak_search_smax, max per-word-end offset cap),
+    matching the filter applied in aggregate_behavior_{hga_only,with_control}.
+    """
+    offset_samples = _behavior_offset_samples(epoch_tmin, epoch_sfreq, behav_peak_post_offset_s)
+    return min(global_peak_search_smax, max(offset_samples.values()))
+
+
 def aggregate_behavior_with_control(
     real_scores: pl.DataFrame,
     null_scores: pl.DataFrame,

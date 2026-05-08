@@ -1164,6 +1164,7 @@ rule ganong_decoding_null:
 
                 epoch_tmin=config["analysis"]["epoch_tmin"],
                 epoch_sfreq=config["analysis"]["epoch_sfreq"],
+                behav_peak_post_offset_s=config["analysis"]["behav_peak_post_offset_s"],
                 peak_search_smax=config["analysis"]["decoding"]["peak_search_smax"],
 
                 reg_lambda=_load_reg_lambda(input.winners, "ganong_full"),
@@ -1219,6 +1220,7 @@ rule ganong_decoding_hga_only_null:
 
                 epoch_tmin=config["analysis"]["epoch_tmin"],
                 epoch_sfreq=config["analysis"]["epoch_sfreq"],
+                behav_peak_post_offset_s=config["analysis"]["behav_peak_post_offset_s"],
                 peak_search_smax=config["analysis"]["decoding"]["peak_search_smax"],
 
                 reg_lambda=_load_reg_lambda(input.winners, "ganong_hga_only"),

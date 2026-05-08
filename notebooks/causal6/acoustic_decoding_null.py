@@ -110,6 +110,7 @@ epochs.metadata = add_metadata_features(epochs.metadata)
 
 max_sample = epochs.times.shape[0]
 windows = make_windows(min_sample, max_sample, window_size, stride)
+windows = windows[(windows[:, 0] >= peak_search_smin) & (windows[:, 1] <= peak_search_smax)]
 
 # %% [markdown]
 # ## Stage 1 — permutations across all speech-responsive electrodes.

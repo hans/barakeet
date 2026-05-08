@@ -49,6 +49,7 @@ from src.models.causal6_aggregates import (
     FLAVORS_GANONG_HGA_ONLY,
     SITE_KEYS_GANONG_HGA_ONLY,
     aggregate_ganong_hga_only,
+    behavior_null_smax,
     preagg_ganong_hga_only_null,
 )
 
@@ -65,6 +66,7 @@ stride = 2
 
 epoch_tmin = -0.4
 epoch_sfreq = 100
+behav_peak_post_offset_s = 0.2
 peak_search_smax = 290
 
 reg_lambda = 1.0
@@ -96,6 +98,8 @@ epochs.metadata = add_metadata_features(epochs.metadata)
 
 max_sample = epochs.times.shape[0]
 windows = make_windows(min_sample, max_sample, window_size, stride)
+_null_smax = behavior_null_smax(epoch_tmin, epoch_sfreq, behav_peak_post_offset_s, peak_search_smax)
+windows = windows[windows[:, 1] <= _null_smax]
 
 # %% [markdown]
 # ## Stage 1 — permutations across all speech-responsive electrodes.
