@@ -51,15 +51,16 @@ causal4_root = "outputs/causal4"
 causal5_root = "outputs/causal5"
 causal6_root = "outputs/causal6"
 
-subjects = [
-    "EC183", "EC195", "EC212", "EC235", "EC237",
-    "EC243", "EC260", "EC266", "EC282", "EC296",
-]
-
 top_n_disagreements = 20
 behav_peak_post_offset_s = 0.2
 epoch_tmin = -0.4
 epoch_sfreq = 100
+
+# Pipeline pairs to plot. We treat causal6 as the trusted reference (better CV
+# scheme + tuned regularization → lower-variance per-fold estimates) and use it
+# to validate causal4's small claimed effect sizes. causal5 stays loaded for
+# coverage context but is not plotted.
+PIPELINE_PAIRS = [("causal4", "causal6")]
 
 # %%
 ROOTS = {
@@ -70,6 +71,67 @@ ROOTS = {
 
 for name, root in ROOTS.items():
     print(f"{name}: {root}  (exists={root.exists()})")
+
+# %% [markdown]
+# ### Subject discovery
+#
+# Discover subjects from each pipeline's per-subject directories rather than
+# hard-coding a list. Then verify that the relevant pipelines (those in
+# `PIPELINE_PAIRS`) produce the same subject set — divergence is surfaced
+# explicitly so we don't silently drop subjects from a comparison.
+
+# %%
+GLOB_TARGETS = {
+    "causal4": [
+        "behavior_decoding_single_electrode_acoustic/*",
+        "behavior_decoding_single_electrode_summarize/*",
+    ],
+    "causal5": [
+        "behavior_decoding_single_electrode_summarize/*",
+        "behavior_decoding_single_electrode_hga_only_summarize/*",
+    ],
+    "causal6": [
+        "acoustic_decoding_single_electrode/*",
+        "behavior_decoding_single_electrode/*",
+        "behavior_decoding_single_electrode_hga_only/*",
+    ],
+}
+
+
+def _discover_subjects(root: Path, patterns: list[str]) -> set[str]:
+    out: set[str] = set()
+    for pat in patterns:
+        for p in root.glob(pat):
+            if p.is_dir():
+                out.add(p.name)
+    return out
+
+
+DISCOVERED = {
+    p: sorted(_discover_subjects(ROOTS[p], pats))
+    for p, pats in GLOB_TARGETS.items() if p in ROOTS
+}
+
+print("Discovered subjects per pipeline:")
+for pipe, ss in DISCOVERED.items():
+    print(f"  {pipe}: {len(ss)} → {ss}")
+
+relevant = sorted({p for pair in PIPELINE_PAIRS for p in pair})
+relevant_sets = {p: set(DISCOVERED.get(p, [])) for p in relevant}
+inter = sorted(set.intersection(*relevant_sets.values())) if relevant_sets else []
+union = sorted(set.union(*relevant_sets.values())) if relevant_sets else []
+print(f"\nRelevant pipelines {relevant}:")
+print(f"  intersection ({len(inter)}): {inter}")
+print(f"  union        ({len(union)}): {union}")
+for p, s in relevant_sets.items():
+    only = sorted(s - set(inter))
+    if only:
+        print(f"  only in {p}: {only}")
+if relevant and not all(s == relevant_sets[relevant[0]] for s in relevant_sets.values()):
+    print("\n⚠ relevant pipelines disagree on subject coverage — comparisons will inner-join, "
+          "so divergent subjects are silently dropped at the peak/scatter level.")
+
+subjects = union  # loaders skip per-subject paths that don't exist, so union is safe
 
 # %% [markdown]
 # ## 1. Loaders
@@ -505,8 +567,9 @@ def scatter_with_unity(ax, x, y, xlabel, ylabel, title):
 
 
 def plot_peak_auc_scatter(peaks: dict[str, pl.DataFrame], site_cols: list[str], criterion: str, kind: str):
+    """Peak-AUC scatter; points colored by subject so single-subject drift is visible."""
     pipes = [p for p, df in peaks.items() if not df.is_empty()]
-    pairs = list(combinations(pipes, 2))
+    pairs = [(a, b) for a, b in PIPELINE_PAIRS if a in pipes and b in pipes]
     if not pairs:
         return
     fig, axes = plt.subplots(1, len(pairs), figsize=(5 * len(pairs), 5), squeeze=False)
@@ -515,22 +578,27 @@ def plot_peak_auc_scatter(peaks: dict[str, pl.DataFrame], site_cols: list[str], 
         if joined.empty:
             ax.set_title(f"{a} vs {b}: no shared sites")
             continue
-        scatter_with_unity(
-            ax,
-            joined[f"{criterion}_a"].to_numpy(),
-            joined[f"{criterion}_b"].to_numpy(),
-            f"{a} {criterion}",
-            f"{b} {criterion}",
-            f"{kind} peak AUC",
-        )
-    fig.suptitle(f"{kind}: peak AUC agreement")
+        x = joined[f"{criterion}_a"].to_numpy()
+        y = joined[f"{criterion}_b"].to_numpy()
+        for subj, sub in joined.groupby("subject"):
+            ax.scatter(sub[f"{criterion}_a"], sub[f"{criterion}_b"], s=14, alpha=0.65, label=subj)
+        lo = float(np.nanmin([x.min(), y.min()]))
+        hi = float(np.nanmax([x.max(), y.max()]))
+        ax.plot([lo, hi], [lo, hi], "k--", lw=0.75, alpha=0.5)
+        mask = ~(np.isnan(x) | np.isnan(y))
+        r = pearsonr(x[mask], y[mask])[0] if mask.sum() >= 3 else float("nan")
+        ax.set_title(f"{kind} peak AUC\nr={r:.3f}, n={int(mask.sum())}")
+        ax.set_xlabel(f"{a} {criterion}")
+        ax.set_ylabel(f"{b} {criterion}")
+        ax.legend(fontsize=7, ncol=2, loc="best")
+    fig.suptitle(f"{kind}: peak AUC agreement (color = subject)")
     fig.tight_layout()
     plt.show()
 
 
 def plot_peak_window_scatter(peaks: dict[str, pl.DataFrame], site_cols: list[str], criterion: str, kind: str):
     pipes = [p for p, df in peaks.items() if not df.is_empty()]
-    pairs = list(combinations(pipes, 2))
+    pairs = [(a, b) for a, b in PIPELINE_PAIRS if a in pipes and b in pipes]
     if not pairs:
         return
     fig, axes = plt.subplots(2, len(pairs), figsize=(5 * len(pairs), 8), squeeze=False)
@@ -559,7 +627,7 @@ def searchlight_per_site_correlation(
     """For each pipeline pair, return a DataFrame of per-site Pearson r across windows."""
     out = {}
     pipes = [p for p, df in searchlights.items() if not df.is_empty()]
-    for a, b in combinations(pipes, 2):
+    for a, b in [(x, y) for x, y in PIPELINE_PAIRS if x in pipes and y in pipes]:
         fold_mean_a = searchlights[a].group_by(site_cols + ["smin", "smax"]).agg(pl.col(criterion).mean())
         fold_mean_b = searchlights[b].group_by(site_cols + ["smin", "smax"]).agg(pl.col(criterion).mean())
         joined = fold_mean_a.join(
@@ -611,7 +679,7 @@ def disagreement_table(
     """Rank sites per pipeline pair by |Δpeak criterion|; attach searchlight r."""
     out = {}
     pipes = [p for p, df in peaks.items() if not df.is_empty()]
-    for a, b in combinations(pipes, 2):
+    for a, b in [(x, y) for x, y in PIPELINE_PAIRS if x in pipes and y in pipes]:
         joined = pair_peaks(peaks[a], peaks[b], site_cols, criterion)
         if joined.empty:
             out[(a, b)] = joined
@@ -685,6 +753,148 @@ def plot_top_disagreement_heatmaps(
             plt.show()
 
 
+# %% [markdown]
+# ### Extra diagnostics for the causal4 vs causal6 question
+#
+# The four functions below answer questions the headline scatter can't:
+# - **window-grid summary**: silent grid mismatch makes the inner-join drop
+#   non-shared windows; we print it explicitly so we know what fraction of
+#   the search space is even comparable.
+# - **selection-bias check**: causal4 only ran behavior decoding on
+#   acoustically selected sites, so the inner-join already restricts to
+#   that subset. This block reports how many "high-AUC in causal6" sites
+#   were never tested in causal4 at all.
+# - **Bland–Altman & paired histograms**: a scatter with r≈0.7 hides
+#   systematic bias and regression-to-mean. These two views show whether
+#   causal6's distribution is shifted (and by how much) at matched sites.
+# - **peak fold-std**: causal6 should produce tighter per-fold estimates;
+#   if so, that's empirical evidence the methodological upgrade is real
+#   and lends weight to causal6 where the two pipelines disagree.
+
+# %%
+def print_window_grid_summary(searchlights: dict[str, pl.DataFrame], kind: str) -> None:
+    pipes = [p for p, df in searchlights.items() if not df.is_empty()]
+    grids = {p: set(map(tuple, searchlights[p].select(["smin", "smax"]).unique().rows())) for p in pipes}
+    print(f"\n--- {kind}: window-grid ---")
+    for p, g in grids.items():
+        print(f"  {p}: {len(g)} unique (smin,smax)")
+    pairs = [(a, b) for a, b in PIPELINE_PAIRS if a in pipes and b in pipes]
+    for a, b in pairs:
+        shared = grids[a] & grids[b]
+        union = grids[a] | grids[b]
+        print(f"  {a} ∩ {b} = {len(shared)} / union {len(union)} "
+              f"(only-{a}={len(grids[a] - grids[b])}, only-{b}={len(grids[b] - grids[a])})")
+
+
+def print_selection_bias(
+    peaks: dict[str, pl.DataFrame], site_cols: list[str], criterion: str, kind: str,
+    thresholds: tuple[float, ...] = (0.55, 0.6, 0.65),
+) -> None:
+    pipes = [p for p, df in peaks.items() if not df.is_empty()]
+    pairs = [(a, b) for a, b in PIPELINE_PAIRS if a in pipes and b in pipes]
+    if not pairs:
+        return
+    print(f"\n--- {kind}: selection-bias check ---")
+    for a, b in pairs:
+        a_sites = peaks[a].select(site_cols)
+        b_sites = peaks[b].select(site_cols)
+        for thr in thresholds:
+            a_hi = peaks[a].filter(pl.col(criterion) >= thr)
+            b_hi = peaks[b].filter(pl.col(criterion) >= thr)
+            a_in_b = a_hi.select(site_cols).join(b_sites, on=site_cols, how="inner").height
+            b_in_a = b_hi.select(site_cols).join(a_sites, on=site_cols, how="inner").height
+            print(
+                f"  thr ≥{thr:.2f}: {a}={a_hi.height} (of which {a_in_b} in {b}'s coverage); "
+                f"{b}={b_hi.height} (of which {b_in_a} in {a}'s coverage; "
+                f"so {b_hi.height - b_in_a} {b}-high sites were never tested in {a})"
+            )
+
+
+def plot_bland_altman_and_paired_hist(
+    peaks: dict[str, pl.DataFrame], site_cols: list[str], criterion: str, kind: str,
+) -> None:
+    """Two rows: top = Bland–Altman (mean vs Δ); bottom = paired histograms."""
+    pipes = [p for p, df in peaks.items() if not df.is_empty()]
+    pairs = [(a, b) for a, b in PIPELINE_PAIRS if a in pipes and b in pipes]
+    if not pairs:
+        return
+    fig, axes = plt.subplots(2, len(pairs), figsize=(5 * len(pairs), 8), squeeze=False)
+    for col, (a, b) in enumerate(pairs):
+        joined = pair_peaks(peaks[a], peaks[b], site_cols, criterion)
+        ax_ba, ax_h = axes[0, col], axes[1, col]
+        if joined.empty:
+            ax_ba.set_title("(no shared sites)"); ax_h.set_title("(no shared sites)")
+            continue
+        x = joined[f"{criterion}_a"].to_numpy()
+        y = joined[f"{criterion}_b"].to_numpy()
+        delta = x - y
+        mean_xy = (x + y) / 2.0
+        med = float(np.nanmedian(delta)); sd = float(np.nanstd(delta))
+        ax_ba.scatter(mean_xy, delta, s=10, alpha=0.5)
+        ax_ba.axhline(0, color="k", lw=0.5)
+        ax_ba.axhline(med, color="tomato", lw=1.0, label=f"median Δ = {med:+.3f}")
+        ax_ba.axhline(med + 1.96 * sd, color="tomato", lw=0.6, ls="--")
+        ax_ba.axhline(med - 1.96 * sd, color="tomato", lw=0.6, ls="--",
+                      label=f"±1.96 sd ({sd:.3f})")
+        ax_ba.set_xlabel(f"mean {criterion}")
+        ax_ba.set_ylabel(f"{a} − {b}")
+        ax_ba.set_title(f"{kind} Bland–Altman  n={len(delta)}")
+        ax_ba.legend(fontsize=8)
+
+        bins = 30
+        ax_h.hist(x, bins=bins, alpha=0.55,
+                  label=f"{a}  med={np.nanmedian(x):.3f}")
+        ax_h.hist(y, bins=bins, alpha=0.55,
+                  label=f"{b}  med={np.nanmedian(y):.3f}")
+        chance = 0.5 if criterion == "roc_auc" else 0.0
+        ax_h.axvline(chance, color="k", lw=0.5, ls="--")
+        ax_h.set_xlabel(criterion)
+        ax_h.set_ylabel("matched sites")
+        ax_h.set_title(f"{kind} matched-site peak {criterion}")
+        ax_h.legend(fontsize=8)
+    fig.tight_layout()
+    plt.show()
+
+
+def plot_peak_fold_std(
+    searchlights: dict[str, pl.DataFrame], peaks: dict[str, pl.DataFrame],
+    site_cols: list[str], criterion: str, kind: str,
+) -> None:
+    """At each pipeline's own peak window, fold-std distribution. Lower = tighter."""
+    pipes = [p for p, df in searchlights.items() if not df.is_empty()]
+    pairs = [(a, b) for a, b in PIPELINE_PAIRS if a in pipes and b in pipes]
+    if not pairs:
+        return
+
+    def _fold_std_at_peak(name: str) -> pl.DataFrame:
+        pk = peaks[name].select(site_cols + ["smin", "smax"])
+        sl = searchlights[name].join(pk, on=site_cols + ["smin", "smax"], how="inner")
+        return (
+            sl.group_by(site_cols)
+              .agg(pl.col(criterion).std().alias("fold_std"))
+        )
+
+    fig, axes = plt.subplots(1, len(pairs), figsize=(5 * len(pairs), 4), squeeze=False)
+    for ax, (a, b) in zip(axes[0], pairs):
+        fa = _fold_std_at_peak(a).rename({"fold_std": "fold_std_a"})
+        fb = _fold_std_at_peak(b).rename({"fold_std": "fold_std_b"})
+        joined = fa.join(fb, on=site_cols, how="inner").to_pandas()
+        if joined.empty:
+            ax.set_title(f"{a} vs {b}: no shared sites"); continue
+        hi = float(np.nanmax([joined["fold_std_a"].max(), joined["fold_std_b"].max()]))
+        bins = np.linspace(0, hi, 30)
+        ax.hist(joined["fold_std_a"], bins=bins, alpha=0.55,
+                label=f"{a}  med={joined['fold_std_a'].median():.3f}")
+        ax.hist(joined["fold_std_b"], bins=bins, alpha=0.55,
+                label=f"{b}  med={joined['fold_std_b'].median():.3f}")
+        ax.set_xlabel("fold-std at peak window")
+        ax.set_ylabel("matched sites")
+        ax.set_title(f"{kind}: per-fold variability at each pipeline's own peak")
+        ax.legend(fontsize=8)
+    fig.tight_layout()
+    plt.show()
+
+
 # %%
 def run_comparison(kind: str, n_show_heatmaps: int = 5):
     print(f"\n====================  {kind}  ====================")
@@ -693,8 +903,13 @@ def run_comparison(kind: str, n_show_heatmaps: int = 5):
     searchlights = SEARCHLIGHTS[kind]
     peaks = PEAKS[kind]
 
+    print_window_grid_summary(searchlights, kind)
+    print_selection_bias(peaks, site_cols, criterion, kind)
+
     plot_peak_auc_scatter(peaks, site_cols, criterion, kind)
     plot_peak_window_scatter(peaks, site_cols, criterion, kind)
+    plot_bland_altman_and_paired_hist(peaks, site_cols, criterion, kind)
+    plot_peak_fold_std(searchlights, peaks, site_cols, criterion, kind)
 
     corrs = searchlight_per_site_correlation(searchlights, site_cols, criterion)
     plot_searchlight_correlation_histograms(corrs, kind)
@@ -732,13 +947,114 @@ run_comparison("behavior_ctrl")
 # %% [markdown]
 # ### Behavior-HGA-only
 #
-# causal4 never ran this variant, so the comparison is causal5 vs causal6 only.
-
-# %%
-run_comparison("behavior_hga")
+# Skipped: causal4 never ran HGA-only behavior decoding, and we've restricted
+# `PIPELINE_PAIRS` to causal4 vs causal6. The loaders above still populate
+# `BEHAV_HGA` for causal5/causal6 if you ever need it.
 
 # %% [markdown]
-# ## 4. Notes on expected differences
+# ## 4. Highlight-electrode drill-in
+#
+# The most direct test of "are causal4's small effects real?" is a fold-level
+# look at the electrodes that causal4's `A_neurometrics` highlighted: if their
+# claimed peak AUC comes from one anomalous fold, that's the smoking gun. For
+# each named site, we plot:
+# - side-by-side (smin, smax) searchlight heatmap with each pipeline's peak
+#   starred,
+# - per-fold AUC at each pipeline's own peak window (so you can see whether the
+#   peak is consistent across folds or driven by a single outlier),
+# - a small text summary of (smin, smax, fold-mean, fold-std).
+
+# %%
+def inspect_site(
+    kind: str, subject: str, electrode_idx: int, phoneme_pair: str,
+    word_end: str | None = None,
+):
+    site_cols = SITE_COLS[kind]
+    criterion = PEAK_CRITERION[kind]
+    site_values: dict[str, object] = {
+        "subject": subject, "electrode_idx": int(electrode_idx),
+        "phoneme_pair": phoneme_pair,
+    }
+    if "word_end" in site_cols:
+        if word_end is None:
+            print(f"word_end required for {kind}"); return
+        site_values["word_end"] = word_end
+
+    label = " ".join(f"{k}={v}" for k, v in site_values.items())
+    print(f"\n=== {kind}  {label} ===")
+
+    sls = SEARCHLIGHTS[kind]; peaks = PEAKS[kind]
+    pipes = [p for p, df in sls.items() if not df.is_empty()]
+    pairs = [(a, b) for a, b in PIPELINE_PAIRS if a in pipes and b in pipes]
+
+    def _site_filter(df):
+        for k, v in site_values.items():
+            df = df.filter(pl.col(k) == v)
+        return df
+
+    for a, b in pairs:
+        # Print per-pipeline peak summaries
+        for name in (a, b):
+            row = _site_filter(peaks[name])
+            if row.is_empty():
+                print(f"  {name}: site not present"); continue
+            r = row.to_pandas().iloc[0]
+            sl_at_peak = _site_filter(sls[name]).filter(
+                (pl.col("smin") == int(r["smin"])) & (pl.col("smax") == int(r["smax"]))
+            )
+            folds = sl_at_peak.select(criterion).to_numpy().flatten()
+            print(
+                f"  {name}: peak (smin={int(r['smin'])}, smax={int(r['smax'])})  "
+                f"{criterion}={r[criterion]:.3f}  "
+                f"folds n={len(folds)}, mean={np.nanmean(folds):.3f}, std={np.nanstd(folds):.3f}, "
+                f"min={np.nanmin(folds):.3f}, max={np.nanmax(folds):.3f}"
+            )
+
+        # Side-by-side heatmaps + per-fold strip
+        fig = plt.figure(figsize=(13, 5.5))
+        gs = fig.add_gridspec(2, 2, height_ratios=[3, 1], hspace=0.45, wspace=0.25)
+        for col, name in enumerate((a, b)):
+            ax_h = fig.add_subplot(gs[0, col])
+            plot_searchlight_heatmap(ax_h, sls[name], site_values, site_cols, criterion, name)
+            row = _site_filter(peaks[name])
+            if not row.is_empty():
+                r = row.to_pandas().iloc[0]
+                ax_h.plot(int(r["smin"]), int(r["smax"]), "r*", markersize=14)
+
+            ax_f = fig.add_subplot(gs[1, col])
+            if not row.is_empty():
+                sl_at_peak = (
+                    _site_filter(sls[name]).filter(
+                        (pl.col("smin") == int(r["smin"])) & (pl.col("smax") == int(r["smax"]))
+                    ).sort("fold")
+                )
+                folds = sl_at_peak.select("fold").to_numpy().flatten()
+                aucs = sl_at_peak.select(criterion).to_numpy().flatten()
+                ax_f.bar(folds, aucs, color="steelblue")
+                chance = 0.5 if criterion == "roc_auc" else 0.0
+                ax_f.axhline(chance, color="k", lw=0.5, ls="--")
+                ax_f.set_xlabel("fold")
+                ax_f.set_ylabel(criterion)
+                ax_f.set_title(f"{name}: per-fold AUC at peak")
+        fig.suptitle(label)
+        plt.show()
+
+
+# %% [markdown]
+# ### causal4-highlighted electrodes
+# Sourced from `notebooks/causal4/A_neurometrics.py`. If causal6 reproduces
+# the peak window and per-fold consistency, the causal4 effect survives;
+# if causal6's fold-mean drops or its peak shifts, treat the causal4 result
+# as overstated.
+
+# %%
+inspect_site("acoustic",      subject="EC250", electrode_idx=185, phoneme_pair="dn")
+inspect_site("behavior_ctrl", subject="EC250", electrode_idx=185, phoneme_pair="dn", word_end="desolate")
+inspect_site("acoustic",      subject="EC278", electrode_idx=38,  phoneme_pair="dn")
+inspect_site("behavior_ctrl", subject="EC278", electrode_idx=38,  phoneme_pair="dn", word_end="necessary")
+
+# %% [markdown]
+# ## 5. Notes on expected differences
 #
 # Before chasing down every disagreement, keep in mind these structural
 # differences between pipelines that will produce real, non-bug AUC drift:
