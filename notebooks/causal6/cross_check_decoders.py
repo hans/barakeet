@@ -44,7 +44,8 @@ import numpy as np
 import pandas as pd
 import polars as pl
 from scipy.stats import pearsonr
-from sklearn.metrics import roc_auc_score
+
+from src.viz_paper import pl_roc_auc
 
 # %% tags=["parameters"]
 causal4_root = "outputs/causal4"
@@ -142,28 +143,11 @@ subjects = union  # loaders skip per-subject paths that don't exist, so union is
 #   `A-predictions.parquet` via sklearn.
 
 # %%
-def _compute_roc_auc_per_group(
-    df: pd.DataFrame,
-    group_cols: list[str],
-    target_col: str,
-    proba_col: str,
-    roc_auc_name: str,
-) -> pl.DataFrame:
-    """Compute ROC-AUC per group from trial-level predictions.
-
-    Rows where a group has only one class get NaN (undefined AUC).
-    """
-    records = []
-    for keys, sub in df.groupby(group_cols, sort=False):
-        y = sub[target_col].to_numpy()
-        if np.unique(y).size < 2:
-            auc = np.nan
-        else:
-            auc = roc_auc_score(y, sub[proba_col].to_numpy())
-        row = dict(zip(group_cols, keys if isinstance(keys, tuple) else (keys,)))
-        row[roc_auc_name] = auc
-        records.append(row)
-    return pl.from_pandas(pd.DataFrame(records))
+# Per-fold AUC is computed via the canonical rank-based polars helper
+# `pl_roc_auc` (src/viz_paper.py:1645). Same Mann–Whitney U identity, same
+# tie-handling as sklearn — but as a single polars query per call, so the
+# tens-of-thousands of (subject, electrode, smin, smax, fold) groups are
+# scored without a Python-per-group loop.
 
 
 def _empty(schema: list[tuple[str, pl.DataType]]) -> pl.DataFrame:
@@ -194,16 +178,16 @@ def load_acoustic_searchlight_causal4(root: Path, subjects: list[str]) -> pl.Dat
         p = root / "behavior_decoding_single_electrode_acoustic" / subj / "all_outcomes.parquet"
         if not p.exists():
             continue
-        pdf = pd.read_parquet(p)
-        if len(pdf) == 0:
+        df = pl.read_parquet(p)
+        if df.is_empty():
             continue
         # binary target encoding (causal5 uses `== 1`); match that
-        pdf["decoder_target"] = (pdf["decoder_target"] == 1).astype(np.int8)
-        auc = _compute_roc_auc_per_group(
-            pdf,
-            group_cols=["subject", "electrode_idx", "phoneme_pair", "smin", "smax", "fold"],
+        df = df.with_columns((pl.col("decoder_target") == 1).cast(pl.Int8).alias("decoder_target"))
+        auc = pl_roc_auc(
+            df=df,
             target_col="decoder_target",
             proba_col="decoder_proba",
+            group_cols=["subject", "electrode_idx", "phoneme_pair", "smin", "smax", "fold"],
             roc_auc_name="roc_auc",
         )
         frames.append(auc)
@@ -244,27 +228,30 @@ def load_behavior_ctrl_searchlight_from_predictions(
     """Derive per-fold baseline/full AUC from trial-level `A-predictions.parquet`.
 
     Used for causal4 (no cached searchlight). Concatenates late and early
-    prediction files if both exist.
+    prediction files if both exist. Mirrors the full+baseline join pattern
+    used in `notebooks/causal4/A_neurometrics.py` (~line 531).
     """
+    group_cols = [
+        "subject", "electrode_idx", "phoneme_pair", "word_end",
+        "smin", "smax", "fold",
+    ]
     frames = []
     for p in paths:
         if not p.exists():
             continue
-        pdf = pd.read_parquet(p)
-        if len(pdf) == 0:
+        df = pl.read_parquet(p)
+        if df.is_empty():
             continue
-        pdf["decoder_target"] = pdf["decoder_target"].astype(np.int8)
-        group_cols = [
-            "subject", "electrode_idx", "phoneme_pair", "word_end",
-            "smin", "smax", "fold",
-        ]
-        full = _compute_roc_auc_per_group(
-            pdf, group_cols, "decoder_target", "full_decoder_proba", "roc_auc_full"
+        df = df.with_columns(pl.col("decoder_target").cast(pl.Int8))
+        full = pl_roc_auc(
+            df=df, target_col="decoder_target", proba_col="full_decoder_proba",
+            group_cols=group_cols, roc_auc_name="roc_auc_full",
         )
-        base = _compute_roc_auc_per_group(
-            pdf, group_cols, "decoder_target", "baseline_decoder_proba", "roc_auc_baseline"
+        base = pl_roc_auc(
+            df=df, target_col="decoder_target", proba_col="baseline_decoder_proba",
+            group_cols=group_cols, roc_auc_name="roc_auc_baseline",
         )
-        frames.append(full.join(base, on=group_cols, how="left"))
+        frames.append(full.join(base, on=group_cols, how="inner"))
     if not frames:
         return _empty([("subject", pl.Utf8)])
     return pl.concat(frames).with_columns(
