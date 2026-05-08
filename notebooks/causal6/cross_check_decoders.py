@@ -798,7 +798,7 @@ def plot_top_disagreement_heatmaps(
 # %% [markdown]
 # ### Extra diagnostics for the causal4 vs causal6 question
 #
-# The four functions below answer questions the headline scatter can't:
+# The functions below answer questions the headline scatter can't:
 # - **window-grid summary**: silent grid mismatch makes the inner-join drop
 #   non-shared windows; we print it explicitly so we know what fraction of
 #   the search space is even comparable.
@@ -809,9 +809,6 @@ def plot_top_disagreement_heatmaps(
 # - **Bland–Altman & paired histograms**: a scatter with r≈0.7 hides
 #   systematic bias and regression-to-mean. These two views show whether
 #   causal6's distribution is shifted (and by how much) at matched sites.
-# - **peak fold-std**: causal6 should produce tighter per-fold estimates;
-#   if so, that's empirical evidence the methodological upgrade is real
-#   and lends weight to causal6 where the two pipelines disagree.
 
 # %%
 def print_window_grid_summary(searchlights: dict[str, pl.DataFrame], kind: str) -> None:
@@ -898,45 +895,6 @@ def plot_bland_altman_and_paired_hist(
     plt.show()
 
 
-def plot_peak_fold_std(
-    searchlights: dict[str, pl.DataFrame], peaks: dict[str, pl.DataFrame],
-    site_cols: list[str], criterion: str, kind: str,
-) -> None:
-    """At each pipeline's own peak window, fold-std distribution. Lower = tighter."""
-    pipes = [p for p, df in searchlights.items() if not df.is_empty()]
-    pairs = [(a, b) for a, b in PIPELINE_PAIRS if a in pipes and b in pipes]
-    if not pairs:
-        return
-
-    def _fold_std_at_peak(name: str) -> pl.DataFrame:
-        pk = peaks[name].select(site_cols + ["smin", "smax"])
-        sl = searchlights[name].join(pk, on=site_cols + ["smin", "smax"], how="inner")
-        return (
-            sl.group_by(site_cols)
-              .agg(pl.col(criterion).std().alias("fold_std"))
-        )
-
-    fig, axes = plt.subplots(1, len(pairs), figsize=(5 * len(pairs), 4), squeeze=False)
-    for ax, (a, b) in zip(axes[0], pairs):
-        fa = _fold_std_at_peak(a).rename({"fold_std": "fold_std_a"})
-        fb = _fold_std_at_peak(b).rename({"fold_std": "fold_std_b"})
-        joined = fa.join(fb, on=site_cols, how="inner").to_pandas()
-        if joined.empty:
-            ax.set_title(f"{a} vs {b}: no shared sites"); continue
-        hi = float(np.nanmax([joined["fold_std_a"].max(), joined["fold_std_b"].max()]))
-        bins = np.linspace(0, hi, 30)
-        ax.hist(joined["fold_std_a"], bins=bins, alpha=0.55,
-                label=f"{a}  med={joined['fold_std_a'].median():.3f}")
-        ax.hist(joined["fold_std_b"], bins=bins, alpha=0.55,
-                label=f"{b}  med={joined['fold_std_b'].median():.3f}")
-        ax.set_xlabel("fold-std at peak window")
-        ax.set_ylabel("matched sites")
-        ax.set_title(f"{kind}: per-fold variability at each pipeline's own peak")
-        ax.legend(fontsize=8)
-    fig.tight_layout()
-    plt.show()
-
-
 # %%
 def run_comparison(kind: str, n_show_heatmaps: int = 5):
     print(f"\n====================  {kind}  ====================")
@@ -951,7 +909,6 @@ def run_comparison(kind: str, n_show_heatmaps: int = 5):
     plot_peak_auc_scatter(peaks, site_cols, criterion, kind)
     plot_peak_window_scatter(peaks, site_cols, criterion, kind)
     plot_bland_altman_and_paired_hist(peaks, site_cols, criterion, kind)
-    plot_peak_fold_std(searchlights, peaks, site_cols, criterion, kind)
 
     corrs = searchlight_per_site_correlation(searchlights, site_cols, criterion)
     plot_searchlight_correlation_histograms(corrs, kind)
