@@ -247,12 +247,29 @@ _beh_full_score_paths = sorted(
     ROOT.glob("behavior_decoding_single_electrode/*/scores.parquet")
 )
 beh_full_peak_frames: dict[str, pl.DataFrame] = {}
-_BEH_FULL_JOIN_KEYS = ["subject", "phoneme_pair", "word_end", "smin", "smax", "fold"]
+# Baseline rows carry sentinel smin=-1/smax=-1 (not window-specific), so we
+# pair first (joining on group-level keys only), then apply the window filter.
+_BEH_FULL_FOLD_KEYS = ["subject", "phoneme_pair", "word_end", "fold"]
 
 for _p in _beh_full_score_paths:
     _subject = _p.parent.name
-    _df = (
-        pl.read_parquet(_p)
+    _raw = pl.read_parquet(_p)
+
+    _full = _raw.filter(pl.col("model") == "full").drop("model")
+    _base = (
+        _raw.filter(pl.col("model") == "baseline")
+        .drop("model", "electrode_idx", "smin", "smax")
+        .rename({"test_roc_auc": "baseline_roc_auc"})
+    )
+    # Join baseline onto every (electrode, window) row for the matching fold.
+    _paired = (
+        _full.rename({"test_roc_auc": "full_roc_auc"})
+        .join(_base, on=_BEH_FULL_FOLD_KEYS, how="left")
+        .with_columns((pl.col("full_roc_auc") - pl.col("baseline_roc_auc")).alias("diff"))
+    )
+    # Now apply the window filter (smin/smax are real values from the full rows).
+    _paired = (
+        _paired
         .with_columns(
             pl.col("word_end")
             .replace_strict(_OFFSET_SAMPLES, default=None)
@@ -262,23 +279,12 @@ for _p in _beh_full_score_paths:
         .drop("_smax_limit")
     )
 
-    _full = _df.filter(pl.col("model") == "full")
-    _base = (
-        _df.filter(pl.col("model") == "baseline")
-        .select(_BEH_FULL_JOIN_KEYS + ["test_roc_auc"])
-        .rename({"test_roc_auc": "baseline_roc_auc"})
-    )
-    _paired = (
-        _full.join(_base, on=_BEH_FULL_JOIN_KEYS, how="inner")
-        .with_columns((pl.col("test_roc_auc") - pl.col("baseline_roc_auc")).alias("diff"))
-    )
-
     _win_stats = (
         _paired.group_by(WINDOW_KEYS_BEHAV)
         .agg(
             pl.col("diff").mean().alias("fold_mean_diff"),
             pl.col("diff").std().alias("fold_std_diff"),
-            pl.col("test_roc_auc").mean().alias("fold_mean_full"),
+            pl.col("full_roc_auc").mean().alias("fold_mean_full"),
             pl.col("baseline_roc_auc").mean().alias("fold_mean_baseline"),
             pl.col("diff").len().alias("n_folds"),
         )
@@ -771,14 +777,26 @@ _GANONG_POD_SAMPLES: dict[str, int] = {
 }
 _GANONG_SITE_KEYS = ["subject", "electrode_idx", "phoneme_pair"]
 _GANONG_WINDOW_KEYS = _GANONG_SITE_KEYS + ["smin", "smax"]
-_GANONG_JOIN_KEYS = ["subject", "phoneme_pair", "smin", "smax", "fold"]
+# Baseline rows have sentinel smin=-1/smax=-1, so join on group-level keys only.
+_GANONG_FOLD_KEYS = ["subject", "phoneme_pair", "fold"]
 
 ganong_peak_frames: dict[str, pl.DataFrame] = {}
 
 for _p in sorted(ROOT.glob("ganong_decoding_single_electrode/*/scores.parquet")):
     _subject = _p.parent.name
-    _df = (
-        pl.read_parquet(_p)
+    _raw = pl.read_parquet(_p)
+
+    _full_g = _raw.filter(pl.col("model") == "full").drop("model")
+    _base_g = (
+        _raw.filter(pl.col("model") == "baseline")
+        .drop("model", "electrode_idx", "smin", "smax")
+        .rename({"test_roc_auc": "baseline_roc_auc"})
+    )
+    # Pair first, then apply POD-floor window filter on real smin/smax values.
+    _paired_g = (
+        _full_g.rename({"test_roc_auc": "full_roc_auc"})
+        .join(_base_g, on=_GANONG_FOLD_KEYS, how="left")
+        .with_columns((pl.col("full_roc_auc") - pl.col("baseline_roc_auc")).alias("diff"))
         .with_columns(
             pl.col("phoneme_pair")
             .replace_strict(_GANONG_POD_SAMPLES, default=None)
@@ -791,23 +809,12 @@ for _p in sorted(ROOT.glob("ganong_decoding_single_electrode/*/scores.parquet"))
         .drop("_smin_floor")
     )
 
-    _full_g = _df.filter(pl.col("model") == "full")
-    _base_g = (
-        _df.filter(pl.col("model") == "baseline")
-        .select(_GANONG_JOIN_KEYS + ["test_roc_auc"])
-        .rename({"test_roc_auc": "baseline_roc_auc"})
-    )
-    _paired_g = (
-        _full_g.join(_base_g, on=_GANONG_JOIN_KEYS, how="inner")
-        .with_columns((pl.col("test_roc_auc") - pl.col("baseline_roc_auc")).alias("diff"))
-    )
-
     _win_stats_g = (
         _paired_g.group_by(_GANONG_WINDOW_KEYS)
         .agg(
             pl.col("diff").mean().alias("fold_mean_diff"),
             pl.col("diff").std().alias("fold_std_diff"),
-            pl.col("test_roc_auc").mean().alias("fold_mean_full"),
+            pl.col("full_roc_auc").mean().alias("fold_mean_full"),
             pl.col("baseline_roc_auc").mean().alias("fold_mean_baseline"),
             pl.col("diff").len().alias("n_folds"),
         )
