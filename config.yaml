@@ -17,6 +17,13 @@ analysis:
   epoch_sfreq: 100
   epoch_tmin: -0.4
 
+  # Speech-responsive screen (causal6). See notebooks/causal6/find_speech_responsive.py
+  # for the full criterion and motivation. Tuning for these values is documented
+  # in scripts/refined_speech_responsive.py.
+  speech_responsive:
+    post_tmax_s: 0.6
+    t_threshold: 7.0
+
   phon_response_peak_threshold: 0.65
   behav_response_peak_threshold: 0.01
   ambiguous_response_threshold: 2

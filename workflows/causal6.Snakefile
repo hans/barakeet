@@ -17,7 +17,7 @@
 #
 # Pipeline overview:
 #
-#   find_speech_responsive (from causal5)
+#   find_speech_responsive (refined screen — see notebooks/causal6/find_speech_responsive.py)
 #       │
 #       ├─► select_tuning_subject
 #       │       Ranks subjects by ambiguous (phoneme_pair, word_end) tuple count;
@@ -246,6 +246,41 @@ rule causal6_all:
         "outputs/causal6/ganong_decoding_hga_only_summarize/peak_summary_all.parquet",
 
 
+rule find_speech_responsive:
+    """Causal6 speech-responsive screen.
+
+    Replaces causal5's screen (paired t-test on the full [0, tmax] post-window,
+    one-sided t > 7) with a refined criterion: paired t-test on a short
+    [0, post_tmax_s] post-window, two-sided |t| > t_threshold. Motivation +
+    diagnostics: notebooks/causal6/find_speech_responsive.py header and
+    scripts/refined_speech_responsive.py.
+
+    Output schema matches causal5/find_speech_responsive so downstream readers
+    keep working unchanged; the `speech_responsive` boolean now reflects the
+    refined criterion.
+    """
+    input:
+        epochs   = "outputs/epochs_preprocessed/{subject}_epo.fif",
+        notebook = "notebooks/causal6/find_speech_responsive.py",
+
+    output:
+        notebook = "outputs/causal6/find_speech_responsive/{subject}.ipynb",
+        results  = "outputs/causal6/find_speech_responsive/{subject}_results.csv",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                epochs_path=input.epochs,
+                outdir=str(outdir),
+                post_tmax_s=config["analysis"]["speech_responsive"]["post_tmax_s"],
+                t_threshold=config["analysis"]["speech_responsive"]["t_threshold"],
+            ),
+        )
+
+
 rule select_tuning_subject:
     """Pick the subject whose behavior has the most ambiguous-step signal.
 
@@ -294,7 +329,7 @@ rule reg_lambda_sweep:
             subject=config["data"]["subjects"],
         ),
         electrodes_glob = expand(
-            "outputs/causal5/find_speech_responsive/{subject}_results.csv",
+            "outputs/causal6/find_speech_responsive/{subject}_results.csv",
             subject=config["data"]["subjects"],
         ),
         winner   = "outputs/causal6/select_tuning_subject/tuning_subject.txt",
@@ -318,7 +353,7 @@ rule reg_lambda_sweep:
             str(output.notebook),
             parameters=dict(
                 epochs_path=f"outputs/epochs_preprocessed/{tuning_subject}_epo.fif",
-                electrodes_path=f"outputs/causal5/find_speech_responsive/{tuning_subject}_results.csv",
+                electrodes_path=f"outputs/causal6/find_speech_responsive/{tuning_subject}_results.csv",
                 outdir=str(outdir),
 
                 min_sample=config["analysis"]["decoding"]["min_sample"],
@@ -355,7 +390,7 @@ rule acoustic_decoding_single_electrode:
     """Acoustic searchlight — GPU-batched replacement for causal5's rule."""
     input:
         epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
-        electrodes = "outputs/causal5/find_speech_responsive/{subject}_results.csv",
+        electrodes = "outputs/causal6/find_speech_responsive/{subject}_results.csv",
         winners    = REG_LAMBDA_WINNERS,
         notebook   = "notebooks/causal6/acoustic_decoding_single_electrode.py",
 
@@ -393,7 +428,7 @@ rule behavior_decoding_single_electrode:
     """Behavior decoding with resampled control — GPU-batched replacement."""
     input:
         epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
-        electrodes = "outputs/causal5/find_speech_responsive/{subject}_results.csv",
+        electrodes = "outputs/causal6/find_speech_responsive/{subject}_results.csv",
         winners    = REG_LAMBDA_WINNERS,
         notebook   = "notebooks/causal6/behavior_decoding_single_electrode.py",
 
@@ -432,7 +467,7 @@ rule behavior_decoding_single_electrode_hga_only:
     """Behavior decoding, HGA only — GPU-batched replacement."""
     input:
         epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
-        electrodes = "outputs/causal5/find_speech_responsive/{subject}_results.csv",
+        electrodes = "outputs/causal6/find_speech_responsive/{subject}_results.csv",
         winners    = REG_LAMBDA_WINNERS,
         notebook   = "notebooks/causal6/behavior_decoding_single_electrode_hga_only.py",
 
@@ -480,7 +515,7 @@ rule acoustic_decoding_null:
     """Per-subject acoustic permutation-null refits with two-stage adaptive K."""
     input:
         epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
-        electrodes = "outputs/causal5/find_speech_responsive/{subject}_results.csv",
+        electrodes = "outputs/causal6/find_speech_responsive/{subject}_results.csv",
         winners    = REG_LAMBDA_WINNERS,
         scores     = "outputs/causal6/acoustic_decoding_single_electrode/{subject}/scores.parquet",
         notebook   = "notebooks/causal6/acoustic_decoding_null.py",
@@ -534,7 +569,7 @@ rule behavior_decoding_single_electrode_null:
     """Per-subject behavior-with-control permutation-null refits with two-stage adaptive K."""
     input:
         epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
-        electrodes = "outputs/causal5/find_speech_responsive/{subject}_results.csv",
+        electrodes = "outputs/causal6/find_speech_responsive/{subject}_results.csv",
         winners    = REG_LAMBDA_WINNERS,
         scores     = "outputs/causal6/behavior_decoding_single_electrode/{subject}/scores.parquet",
         notebook   = "notebooks/causal6/behavior_decoding_single_electrode_null.py",
@@ -591,7 +626,7 @@ rule behavior_decoding_single_electrode_hga_only_null:
     """Per-subject behavior-HGA-only permutation-null refits with two-stage adaptive K."""
     input:
         epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
-        electrodes = "outputs/causal5/find_speech_responsive/{subject}_results.csv",
+        electrodes = "outputs/causal6/find_speech_responsive/{subject}_results.csv",
         winners    = REG_LAMBDA_WINNERS,
         scores     = "outputs/causal6/behavior_decoding_single_electrode_hga_only/{subject}/scores.parquet",
         notebook   = "notebooks/causal6/behavior_decoding_single_electrode_hga_only_null.py",
@@ -1057,7 +1092,7 @@ rule ganong_decoding_single_electrode:
     """Ganong decoding with resampled control — GPU-batched, pooled across completions."""
     input:
         epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
-        electrodes = "outputs/causal5/find_speech_responsive/{subject}_results.csv",
+        electrodes = "outputs/causal6/find_speech_responsive/{subject}_results.csv",
         winners    = REG_LAMBDA_WINNERS,
         notebook   = "notebooks/causal6/ganong_decoding_single_electrode.py",
 
@@ -1096,7 +1131,7 @@ rule ganong_decoding_single_electrode_hga_only:
     """Ganong decoding, HGA only — GPU-batched, pooled across completions."""
     input:
         epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
-        electrodes = "outputs/causal5/find_speech_responsive/{subject}_results.csv",
+        electrodes = "outputs/causal6/find_speech_responsive/{subject}_results.csv",
         winners    = REG_LAMBDA_WINNERS,
         notebook   = "notebooks/causal6/ganong_decoding_single_electrode_hga_only.py",
 
@@ -1134,7 +1169,7 @@ rule ganong_decoding_null:
     """Per-subject ganong-with-control permutation-null refits with two-stage adaptive K."""
     input:
         epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
-        electrodes = "outputs/causal5/find_speech_responsive/{subject}_results.csv",
+        electrodes = "outputs/causal6/find_speech_responsive/{subject}_results.csv",
         winners    = REG_LAMBDA_WINNERS,
         scores     = "outputs/causal6/ganong_decoding_single_electrode/{subject}/scores.parquet",
         notebook   = "notebooks/causal6/ganong_decoding_null.py",
@@ -1190,7 +1225,7 @@ rule ganong_decoding_hga_only_null:
     """Per-subject ganong-HGA-only permutation-null refits with two-stage adaptive K."""
     input:
         epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
-        electrodes = "outputs/causal5/find_speech_responsive/{subject}_results.csv",
+        electrodes = "outputs/causal6/find_speech_responsive/{subject}_results.csv",
         winners    = REG_LAMBDA_WINNERS,
         scores     = "outputs/causal6/ganong_decoding_single_electrode_hga_only/{subject}/scores.parquet",
         notebook   = "notebooks/causal6/ganong_decoding_hga_only_null.py",
@@ -1392,7 +1427,7 @@ rule prepare_neurometrics:
             subject=config["data"]["subjects"],
         ),
         electrode_paths = expand(
-            "outputs/causal5/find_speech_responsive/{subject}_results.csv",
+            "outputs/causal6/find_speech_responsive/{subject}_results.csv",
             subject=config["data"]["subjects"],
         ),
 

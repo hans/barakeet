@@ -58,6 +58,11 @@ behav_peak_post_offset_s = 0.2
 epoch_tmin = -0.4
 epoch_sfreq = 100
 
+# Headline-decoder reference for the speech-responsive coverage check below
+# (section 0). Points at causal4's prepare_neurometrics outputs which apply
+# the paper's phon/behav peak thresholds.
+neurometrics_ref_root = "outputs/causal4/prepare_neurometrics/p65_b5_a3"
+
 # Pipeline pairs to plot. We treat causal6 as the trusted reference (better CV
 # scheme + tuned regularization → lower-variance per-fold estimates) and use it
 # to validate causal4's small claimed effect sizes.
@@ -132,19 +137,27 @@ subjects = union  # loaders skip per-subject paths that don't exist, so union is
 # %% [markdown]
 # ## 0. Speech-responsive screen comparison
 #
-# The decoding coverage asymmetry (~700 sites differ in each direction) traces
-# back here: causal4 uses an amplitude-threshold criterion (max|epoch| > 0.3
-# after baselining, averaged evoked), while causal5/causal6 uses a paired
-# t-test across all epochs (pre- vs post-onset mean, t > 7) and overrides the
-# amplitude flag with that result. Both are per-subject; causal6 imports its
-# electrode lists directly from `outputs/causal5/find_speech_responsive/`.
+# Three screens, three criteria — same paired-t machinery in c5/c6 but with
+# different windows and sidedness:
 #
-# This section loads both screens, shows their per-subject counts, and
-# breaks down the 4-way agreement (both / only-causal4 / only-causal5 / neither).
+# | screen  | criterion                                                                |
+# |---------|--------------------------------------------------------------------------|
+# | causal4 | `max\|baselined evoked\|` in `[0, 0.9s]` > 0.3 (directionless)             |
+# | causal5 | paired t-test, post=`[0, tmax]`, **t > 7** (one-sided, full window)      |
+# | causal6 | paired t-test, post=`[0, post_tmax_s]`, **\|t\| > t_threshold** (refined) |
+#
+# The c5→c6 change addresses two failure modes of the c5 screen documented in
+# `scripts/refined_speech_responsive.py`: long-window dilution of transient
+# responses (the population the paper is built on) and one-sidedness silently
+# dropping suppression. After the c6 re-run, this section provides the audit:
+# coverage of the headline acoustic + behavior decoder sets by each screen.
 
 # %%
-causal5_speech_resp_root = Path("outputs/causal5/find_speech_responsive")
-causal4_speech_resp_root = ROOTS["causal4"] / "find_speech_responsive"
+SR_ROOTS = {
+    "causal4": ROOTS["causal4"] / "find_speech_responsive",
+    "causal5": Path("outputs/causal5/find_speech_responsive"),
+    "causal6": Path("outputs/causal6/find_speech_responsive"),
+}
 
 
 def load_speech_responsive(root: Path, subjects: list[str]) -> pl.DataFrame:
@@ -156,7 +169,8 @@ def load_speech_responsive(root: Path, subjects: list[str]) -> pl.DataFrame:
         df = pl.read_csv(p)
         keep = ["subject", "electrode_idx", "speech_responsive"]
         optional = ["speech_responsive_test_value", "speech_responsive_tval",
-                    "speech_responsive_ttest"]
+                    "speech_responsive_ttest", "speech_responsive_t_full",
+                    "speech_responsive_post_tmax_s"]
         keep += [c for c in optional if c in df.columns]
         frames.append(df.select(keep).with_columns(
             pl.col("speech_responsive").cast(pl.Boolean)
@@ -168,73 +182,112 @@ def load_speech_responsive(root: Path, subjects: list[str]) -> pl.DataFrame:
     return pl.concat(frames, how="diagonal")
 
 
-sr_c4 = load_speech_responsive(causal4_speech_resp_root, subjects)
-sr_c5 = load_speech_responsive(causal5_speech_resp_root, subjects)
+SR = {label: load_speech_responsive(root, subjects) for label, root in SR_ROOTS.items()}
 
 # %%
 print("Speech-responsive electrode counts (all electrodes loaded):")
-for label, df in [("causal4", sr_c4), ("causal5/6", sr_c5)]:
+for label, df in SR.items():
     if df.is_empty():
-        print(f"  {label}: (no data)")
+        print(f"  {label}: (no data — re-run rule {label}/find_speech_responsive)")
         continue
     n_resp = df.filter(pl.col("speech_responsive")).height
     n_total = df.height
     print(f"  {label}: {n_resp} / {n_total} = {n_resp/n_total:.1%}")
 
+
 # %%
-if not sr_c4.is_empty() and not sr_c5.is_empty():
+def _pairwise_agreement(a: pl.DataFrame, b: pl.DataFrame, label_a: str, label_b: str):
+    """Print 4-way overall + per-subject agreement between two screens."""
+    if a.is_empty() or b.is_empty():
+        print(f"\n[skip] pairwise {label_a} vs {label_b}: one side missing")
+        return
     site_cols_sr = ["subject", "electrode_idx"]
-    joined_sr = (
-        sr_c4.select(site_cols_sr + ["speech_responsive"])
-        .rename({"speech_responsive": "sr_c4"})
+    joined = (
+        a.select(site_cols_sr + ["speech_responsive"]).rename({"speech_responsive": "sr_a"})
         .join(
-            sr_c5.select(site_cols_sr + ["speech_responsive"])
-            .rename({"speech_responsive": "sr_c5"}),
+            b.select(site_cols_sr + ["speech_responsive"]).rename({"speech_responsive": "sr_b"}),
             on=site_cols_sr, how="outer",
         )
-        .with_columns([
-            pl.col("sr_c4").fill_null(False),
-            pl.col("sr_c5").fill_null(False),
-        ])
+        .with_columns([pl.col("sr_a").fill_null(False), pl.col("sr_b").fill_null(False)])
     )
-    both    = joined_sr.filter( pl.col("sr_c4") &  pl.col("sr_c5")).height
-    only_c4 = joined_sr.filter( pl.col("sr_c4") & ~pl.col("sr_c5")).height
-    only_c5 = joined_sr.filter(~pl.col("sr_c4") &  pl.col("sr_c5")).height
-    neither = joined_sr.filter(~pl.col("sr_c4") & ~pl.col("sr_c5")).height
-    total   = joined_sr.height
-    print("\n4-way agreement (all shared electrode slots):")
-    print(f"  both responsive  : {both:5d}  ({both/total:.1%})")
-    print(f"  only causal4     : {only_c4:5d}  ({only_c4/total:.1%})")
-    print(f"  only causal5/6   : {only_c5:5d}  ({only_c5/total:.1%})")
-    print(f"  neither          : {neither:5d}  ({neither/total:.1%})")
+    both    = joined.filter( pl.col("sr_a") &  pl.col("sr_b")).height
+    only_a  = joined.filter( pl.col("sr_a") & ~pl.col("sr_b")).height
+    only_b  = joined.filter(~pl.col("sr_a") &  pl.col("sr_b")).height
+    neither = joined.filter(~pl.col("sr_a") & ~pl.col("sr_b")).height
+    total   = joined.height
+    print(f"\n4-way agreement {label_a} vs {label_b} (all shared slots):")
+    print(f"  both responsive : {both:5d}  ({both/total:.1%})")
+    print(f"  only {label_a:<10}: {only_a:5d}  ({only_a/total:.1%})")
+    print(f"  only {label_b:<10}: {only_b:5d}  ({only_b/total:.1%})")
+    print(f"  neither         : {neither:5d}  ({neither/total:.1%})")
 
-    # Per-subject breakdown
-    print("\nPer-subject breakdown (both / only-c4 / only-c5 / neither):")
-    for subj, grp in joined_sr.group_by("subject", maintain_order=True):
-        b  = grp.filter( pl.col("sr_c4") &  pl.col("sr_c5")).height
-        c4 = grp.filter( pl.col("sr_c4") & ~pl.col("sr_c5")).height
-        c5 = grp.filter(~pl.col("sr_c4") &  pl.col("sr_c5")).height
-        n  = grp.filter(~pl.col("sr_c4") & ~pl.col("sr_c5")).height
-        print(f"  {subj[0]:>6}:  both={b:3d}  only_c4={c4:3d}  only_c5={c5:3d}  neither={n:3d}")
+    print(f"\nPer-subject (both / only-{label_a} / only-{label_b} / neither):")
+    for subj, grp in joined.group_by("subject", maintain_order=True):
+        b_  = grp.filter( pl.col("sr_a") &  pl.col("sr_b")).height
+        oa  = grp.filter( pl.col("sr_a") & ~pl.col("sr_b")).height
+        ob  = grp.filter(~pl.col("sr_a") &  pl.col("sr_b")).height
+        n_  = grp.filter(~pl.col("sr_a") & ~pl.col("sr_b")).height
+        print(f"  {subj[0]:>6}:  both={b_:3d}  only_{label_a}={oa:3d}  "
+              f"only_{label_b}={ob:3d}  neither={n_:3d}")
+    return joined
 
-    # If causal5 wrote test values, show the distribution at disagreement sites
-    if "speech_responsive_test_value" in sr_c5.columns:
-        disagreement = joined_sr.filter(pl.col("sr_c4") != pl.col("sr_c5"))
-        if not disagreement.is_empty():
-            with_vals = disagreement.join(
-                sr_c5.select(["subject", "electrode_idx", "speech_responsive_test_value"]),
-                on=["subject", "electrode_idx"], how="left",
-            )
-            print("\nAmplitude test values at disagreement sites (causal5 criterion):")
-            for group_label, filt in [
-                ("only_causal4 (c4=T, c5=F)", with_vals.filter( pl.col("sr_c4") & ~pl.col("sr_c5"))),
-                ("only_causal5 (c4=F, c5=T)", with_vals.filter(~pl.col("sr_c4") &  pl.col("sr_c5"))),
-            ]:
-                vals = filt["speech_responsive_test_value"].drop_nulls().to_numpy()
-                if len(vals):
-                    print(f"  {group_label}: n={len(vals)}, "
-                          f"med={np.nanmedian(vals):.3f}, "
-                          f"min={vals.min():.3f}, max={vals.max():.3f}")
+
+# Headline comparison: c4 (paper baseline) vs c6 (current screen)
+joined_46 = _pairwise_agreement(SR["causal4"], SR["causal6"], "causal4", "causal6")
+
+# What the c5 → c6 change actually did
+joined_56 = _pairwise_agreement(SR["causal5"], SR["causal6"], "causal5", "causal6")
+
+# %% [markdown]
+# ### Coverage of paper headline decoder sets
+#
+# The strongest test of a screen is whether it admits the sites that actually
+# decode. This block joins each screen against causal4's `phon_peaks_df` (n=64
+# acoustic decoders @ AUC ≥ 0.65) and `behav_peaks_df` (n=58 behavior decoders
+# clearing the improvement threshold), reporting how many headline sites each
+# screen catches. A screen that drops headline sites is silently capping the
+# paper's effective n.
+
+# %%
+def _load_paper_sites(path: Path) -> pl.DataFrame:
+    if not path.exists():
+        return pl.DataFrame()
+    df = pl.read_parquet(path)
+    return df.with_columns(pl.col("subject").cast(pl.Utf8)).select(
+        ["subject", "electrode_idx"]
+    ).unique()
+
+
+phon_sites = _load_paper_sites(Path(neurometrics_ref_root) / "phon_peaks_df.parquet")
+behav_sites = _load_paper_sites(Path(neurometrics_ref_root) / "behav_peaks_df.parquet")
+
+
+def _coverage(headline: pl.DataFrame, screen: pl.DataFrame, label: str) -> tuple[int, int]:
+    """Return (n_headline, n_caught) for this screen."""
+    if headline.is_empty() or screen.is_empty():
+        return (headline.height, 0)
+    flagged = (
+        screen.filter(pl.col("speech_responsive"))
+        .select(["subject", "electrode_idx"]).unique()
+    )
+    caught = headline.join(flagged, on=["subject", "electrode_idx"], how="inner").height
+    return (headline.height, caught)
+
+
+for headline_label, headline in [("acoustic decoders (phon_peaks_df)", phon_sites),
+                                 ("behavior decoders (behav_peaks_df)", behav_sites)]:
+    if headline.is_empty():
+        print(f"\n{headline_label}: (no headline reference at {neurometrics_ref_root}; "
+              f"skip)")
+        continue
+    print(f"\nCoverage of {headline_label}  (n={headline.height}):")
+    for label, screen in SR.items():
+        n_total, n_caught = _coverage(headline, screen, label)
+        if n_total == 0:
+            continue
+        missed = n_total - n_caught
+        suffix = "" if screen.is_empty() else f"  ({n_caught/n_total:.1%}, missed {missed})"
+        print(f"  {label}: {n_caught}/{n_total}{suffix}")
 
 # %% [markdown]
 # ## 1. Loaders
