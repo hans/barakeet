@@ -201,9 +201,20 @@ star_plot_kwargs = dict(
 )
 
 # %%
-sig_keys = zoomin_keys.unique(
-    ["subject", "electrode_idx", "phoneme_pair", "word_end"]
-).sort(["subject", "electrode_idx", "phoneme_pair", "word_end"])
+# Pull in behav_roc_auc (zoomin_keys only has phon_roc_auc and the improvement)
+# and sort by behavioral decoding strength so the strongest behavioral sites
+# appear first in the combined PDF.
+sig_keys = (
+    zoomin_keys.join(
+        behav_peaks_df.select(
+            ["subject", "electrode_idx", "phoneme_pair", "word_end", "behav_roc_auc"]
+        ),
+        on=["subject", "electrode_idx", "phoneme_pair", "word_end"],
+        how="left",
+    )
+    .unique(["subject", "electrode_idx", "phoneme_pair", "word_end"])
+    .sort("behav_roc_auc_improvement", descending=True, nulls_last=True)
+)
 
 sig_keys.to_pandas().to_csv(outdir / "star_plot_keys.csv", index=False)
 print(f"Rendering star plots for {sig_keys.height} sites")
@@ -247,8 +258,18 @@ with PdfPages(combined_pdf_path) as pdf:
                 electrode_idx,
                 phoneme_pair,
                 word_end,
-                title=True,
+                title=False,
                 **star_plot_kwargs,
+            )
+            phon_auc = row.get("phon_roc_auc")
+            behav_auc = row.get("behav_roc_auc")
+            behav_imp = row.get("behav_roc_auc_improvement")
+            fb.fig.suptitle(
+                f"{subject} elec {electrode_idx} · {phoneme_pair} · {word_end}\n"
+                f"acoustic AUC={phon_auc:.3f}  "
+                f"behav AUC={behav_auc:.3f}  "
+                f"Δ behav AUC={behav_imp:+.3f}",
+                fontsize=10,
             )
         except Exception as exc:
             tb = traceback.format_exc()
