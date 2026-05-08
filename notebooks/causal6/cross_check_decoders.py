@@ -375,19 +375,20 @@ PEAK_CRITERION = {
 # ### Build all tables
 
 # %%
-ACOUSTIC = {
-    "causal4": _normalize_types(load_acoustic_searchlight_causal4(ROOTS["causal4"], subjects)),
-    "causal6": _normalize_types(load_acoustic_searchlight_causal6(ROOTS["causal6"], subjects)),
-}
-BEHAV_CTRL = {
-    "causal4": _normalize_types(load_behavior_ctrl_searchlight_causal4(ROOTS["causal4"], subjects)),
-    "causal6": _normalize_types(load_behavior_ctrl_searchlight_causal6(ROOTS["causal6"], subjects)),
-}
-BEHAV_HGA = {
-    "causal6": _normalize_types(load_behavior_hga_searchlight_causal6(ROOTS["causal6"], subjects)),
-}
+load_spec = [
+    ("acoustic", load_acoustic_searchlight_causal4, load_acoustic_searchlight_causal6),
+    ("behavior_ctrl", load_behavior_ctrl_searchlight_causal4, load_behavior_ctrl_searchlight_causal6),
+    ("behavior_hga", None, load_behavior_hga_searchlight_causal6),
+]
+SEARCHLIGHTS = {}
+for target, loader4, loader6 in tqdm(load_spec):
+    causal4_result = _normalize_types(loader4(ROOTS["causal4"], subjects)) if loader4 else None
+    causal6_result = _normalize_types(loader6(ROOTS["causal6"], subjects)) if loader6 else None
+    SEARCHLIGHTS[target] = {
+        "causal4": causal4_result,
+        "causal6": causal6_result,
+    }
 
-SEARCHLIGHTS = {"acoustic": ACOUSTIC, "behavior_ctrl": BEHAV_CTRL, "behavior_hga": BEHAV_HGA}
 PEAKS = {
     kind: {p: derive_peaks(df, PEAK_CRITERION[kind], SITE_COLS[kind])
            for p, df in pipelines.items()}
