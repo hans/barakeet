@@ -484,8 +484,17 @@ PEAK_CRITERION = {
 # config keys `analysis.decoding.acoustic_peak_search_{smin,smax}`):
 #   `smin ≥ 50` AND `smax ≤ 75`.
 #
-# Behavior-decoder restrictions are not yet applied here — add when the
-# behavior cross-check is the focus.
+# **Behavior — causal4** (`notebooks/causal4/prepare_neurometrics.py`):
+#   `smin > causal4_acoustic_peak.smax` (per-site; behavior window must START
+#   after acoustic window ends — sites without a causal4 acoustic peak are
+#   dropped via inner join) AND
+#   `smax ≤ word_end_offset_sample + 20` (per word_end; window must END within
+#   200ms post word offset).
+#
+# **Behavior — causal6** (`notebooks/causal6/view_provisional_results.py`):
+#   `smin ≥ 50` (= `_AC_PEAK_SEARCH_SMIN`, shared with acoustic) AND
+#   `smax ≤ word_end_offset_sample + 20` (per word_end) AND
+#   `smax ≤ 290` (`_PEAK_SEARCH_SMAX`).
 
 # %%
 EPOCH_TMIN = -0.4
@@ -505,6 +514,18 @@ with open("config.yaml") as _f:
     _config = yaml.safe_load(_f)
 _C6_AC_SMIN = _config["analysis"]["decoding"]["acoustic_peak_search_smin"]
 _C6_AC_SMAX = _config["analysis"]["decoding"]["acoustic_peak_search_smax"]
+
+# Behavior smax cap = word_end_offset_sample + 0.2s (in samples). Same in both
+# pipelines: causal4 adds `+ 20` to word_end_offset_sample, causal6 uses
+# `_behavior_offset_samples(EPOCH_TMIN, EPOCH_SFREQ, 0.2)`.
+_WORD_END_TO_BEHAV_SMAX: dict[str, int] = {
+    word_end: int((offset_s + 0.2 - EPOCH_TMIN) * EPOCH_SFREQ)
+    for word_end, offset_s in OFFSET_DICT.items()
+}
+
+# causal6 behavior: hardcoded in view_provisional_results.py (not in config).
+_C6_BEHAV_SMIN = _C6_AC_SMIN  # `_filter_window_expr` uses _AC_PEAK_SEARCH_SMIN
+_C6_BEHAV_SMAX = 290           # _PEAK_SEARCH_SMAX
 
 
 def _restrict_acoustic_causal4(searchlight: pl.DataFrame) -> pl.DataFrame:
@@ -534,17 +555,77 @@ def _restrict_acoustic_causal6(searchlight: pl.DataFrame) -> pl.DataFrame:
     )
 
 
+def _word_end_behav_caps_df() -> pl.DataFrame:
+    return pl.DataFrame({
+        "word_end": list(_WORD_END_TO_BEHAV_SMAX.keys()),
+        "_smax_cap": list(_WORD_END_TO_BEHAV_SMAX.values()),
+    })
+
+
+def _restrict_behavior_ctrl_causal4(searchlight: pl.DataFrame) -> pl.DataFrame:
+    """smin > causal4 acoustic peak smax (per-site) AND smax ≤ word_end + 20.
+
+    Looks up the causal4 acoustic peaks from the in-progress `PEAKS` dict; this
+    is safe because the build loop processes acoustic before behavior_ctrl.
+    Sites without a causal4 acoustic peak are dropped (inner join), matching
+    causal4's production behavior.
+    """
+    if searchlight.is_empty():
+        return searchlight
+    ac_peaks = PEAKS.get("acoustic", {}).get("causal4")
+    if ac_peaks is None or ac_peaks.is_empty():
+        # Acoustic peaks not yet built — fall through (build-loop ordering bug).
+        return searchlight.head(0)
+    ac_smax = (
+        ac_peaks.select(["subject", "electrode_idx", "phoneme_pair", "smax"])
+        .rename({"smax": "_smax_phon"})
+    )
+    return (
+        searchlight
+        .join(ac_smax, on=["subject", "electrode_idx", "phoneme_pair"], how="inner")
+        .join(_word_end_behav_caps_df(), on="word_end", how="left")
+        .filter(
+            (pl.col("smin") > pl.col("_smax_phon"))
+            & (pl.col("smax") <= pl.col("_smax_cap"))
+        )
+        .drop(["_smax_phon", "_smax_cap"])
+    )
+
+
+def _restrict_behavior_ctrl_causal6(searchlight: pl.DataFrame) -> pl.DataFrame:
+    """smin ≥ 50 AND smax ≤ word_end + 0.2s AND smax ≤ 290."""
+    if searchlight.is_empty():
+        return searchlight
+    return (
+        searchlight
+        .join(_word_end_behav_caps_df(), on="word_end", how="left")
+        .filter(
+            (pl.col("smin") >= _C6_BEHAV_SMIN)
+            & (pl.col("smax") <= pl.col("_smax_cap"))
+            & (pl.col("smax") <= _C6_BEHAV_SMAX)
+        )
+        .drop("_smax_cap")
+    )
+
+
 # (kind, pipeline) → callable that filters the searchlight before argmax.
 # Missing key = no filter (use full searchlight grid).
 PEAK_WINDOW_FILTERS: dict[tuple[str, str], callable] = {
     ("acoustic", "causal4"): _restrict_acoustic_causal4,
     ("acoustic", "causal6"): _restrict_acoustic_causal6,
+    ("behavior_ctrl", "causal4"): _restrict_behavior_ctrl_causal4,
+    ("behavior_ctrl", "causal6"): _restrict_behavior_ctrl_causal6,
 }
 
 print("Acoustic peak-search restrictions:")
 print(f"  causal4: smin ≥ {_C4_AC_SMIN_MIN}, "
       f"smax ≤ {_PP_TO_MAX_WORD_END_SAMPLE} (per phoneme_pair)")
 print(f"  causal6: smin ≥ {_C6_AC_SMIN}, smax ≤ {_C6_AC_SMAX}")
+print("Behavior peak-search restrictions:")
+print(f"  causal4: smin > causal4_acoustic_peak.smax (per-site), "
+      f"smax ≤ {_WORD_END_TO_BEHAV_SMAX} (per word_end)")
+print(f"  causal6: smin ≥ {_C6_BEHAV_SMIN}, "
+      f"smax ≤ {_WORD_END_TO_BEHAV_SMAX} (per word_end), smax ≤ {_C6_BEHAV_SMAX}")
 
 # %% [markdown]
 # ### Build all tables
