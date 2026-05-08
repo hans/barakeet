@@ -403,6 +403,7 @@ def _make_full_timing_draw(pp_arr, diff_arr, ms_arr, phoneme_pairs, subject, out
             ax.legend(fontsize=8)
             plt.tight_layout()
             plt.show()
+            plt.close(fig)
     return draw
 
 
@@ -589,6 +590,7 @@ def _make_timing_draw(pp_arr, auc_arr, ms_arr, phoneme_pairs, subject, out):
             ax.legend(fontsize=8)
             plt.tight_layout()
             plt.show()
+            plt.close(fig)
     return draw
 
 
@@ -946,6 +948,7 @@ def _make_ganong_timing_draw(pp_arr, diff_arr, ms_arr, phoneme_pairs, subject, o
             ax.legend(fontsize=8)
             plt.tight_layout()
             plt.show()
+            plt.close(fig)
     return draw
 
 
