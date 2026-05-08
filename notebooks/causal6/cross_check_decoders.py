@@ -984,7 +984,8 @@ def plot_bland_altman_and_paired_hist(
 
 
 # %%
-def run_comparison(kind: str, n_show_heatmaps: int = 5):
+def run_comparison(kind: str, n_show_heatmaps: int = 5,
+                   peak_thresholds=(0.55, 0.6, 0.65, 0.7, 0.75, 0.8)):
     print(f"\n====================  {kind}  ====================")
     site_cols = SITE_COLS[kind]
     criterion = PEAK_CRITERION[kind]
@@ -992,7 +993,7 @@ def run_comparison(kind: str, n_show_heatmaps: int = 5):
     peaks = PEAKS[kind]
 
     print_window_grid_summary(searchlights, kind)
-    print_selection_bias(peaks, site_cols, criterion, kind)
+    print_selection_bias(peaks, site_cols, criterion, kind, thresholds=peak_thresholds)
 
     plot_peak_auc_scatter(peaks, site_cols, criterion, kind)
     plot_peak_window_scatter(peaks, site_cols, criterion, kind)
@@ -1029,7 +1030,7 @@ run_comparison("acoustic")
 # causal6's `behavior_decoding_single_electrode_summarize`.
 
 # %%
-run_comparison("behavior_ctrl")
+run_comparison("behavior_ctrl", peak_thresholds=(0.0, 0.05, 0.1, 0.15, 0.2))
 
 # %% [markdown]
 # ### Behavior-HGA-only
