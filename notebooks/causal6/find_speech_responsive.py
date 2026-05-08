@@ -63,6 +63,7 @@ outdir = "."
 post_tmax_s = 0.6     # post-onset window for the t-test, in seconds
 t_threshold = 7.0     # |t| threshold (≈ p < 1e-10 at typical n_trials)
 
+# %%
 # Legacy amplitude diagnostic (causal4 criterion). Kept as a column for the
 # cross-check; not used in the final boolean.
 amp_threshold = 0.3
