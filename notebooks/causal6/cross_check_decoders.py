@@ -43,8 +43,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import polars as pl
+import yaml
 from scipy.stats import pearsonr
 
+from src.stimuli import OFFSET_DICT, WORD_END_TO_PHONEME_PAIR
 from src.viz_paper import pl_roc_auc
 
 # %% tags=["parameters"]
@@ -466,6 +468,85 @@ PEAK_CRITERION = {
 }
 
 # %% [markdown]
+# ### Peak-search window restrictions (per pipeline)
+#
+# Each pipeline's production code restricts which (smin, smax) windows are
+# eligible to be the per-site argmax. Without applying these here we'd be
+# computing peaks over the full searchlight grid, which doesn't match what
+# either pipeline reports.
+#
+# **Acoustic — causal4** (`notebooks/causal4/prepare_neurometrics.py`):
+#   `smin ≥ 40` (≥ word onset) AND
+#   `smax ≤ max(word_end_offset_sample)` per phoneme_pair (window must end by
+#   the latest word offset for that phoneme_pair).
+#
+# **Acoustic — causal6** (`notebooks/causal6/view_provisional_results.py`,
+# config keys `analysis.decoding.acoustic_peak_search_{smin,smax}`):
+#   `smin ≥ 50` AND `smax ≤ 75`.
+#
+# Behavior-decoder restrictions are not yet applied here — add when the
+# behavior cross-check is the focus.
+
+# %%
+EPOCH_TMIN = -0.4
+EPOCH_SFREQ = 100
+
+# causal4 acoustic: smin floor and per-phoneme_pair smax cap
+_C4_AC_SMIN_MIN = int((0.0 - EPOCH_TMIN) * EPOCH_SFREQ)  # 40
+
+_PP_TO_MAX_WORD_END_SAMPLE: dict[str, int] = {}
+for _word_end, _offset_s in OFFSET_DICT.items():
+    _pp = WORD_END_TO_PHONEME_PAIR[_word_end]
+    _sample = int((_offset_s - EPOCH_TMIN) * EPOCH_SFREQ)
+    _PP_TO_MAX_WORD_END_SAMPLE[_pp] = max(_PP_TO_MAX_WORD_END_SAMPLE.get(_pp, 0), _sample)
+
+# causal6 acoustic: smin floor and smax cap from config.yaml
+with open("config.yaml") as _f:
+    _config = yaml.safe_load(_f)
+_C6_AC_SMIN = _config["analysis"]["decoding"]["acoustic_peak_search_smin"]
+_C6_AC_SMAX = _config["analysis"]["decoding"]["acoustic_peak_search_smax"]
+
+
+def _restrict_acoustic_causal4(searchlight: pl.DataFrame) -> pl.DataFrame:
+    if searchlight.is_empty():
+        return searchlight
+    pp_caps = pl.DataFrame({
+        "phoneme_pair": list(_PP_TO_MAX_WORD_END_SAMPLE.keys()),
+        "_smax_cap": list(_PP_TO_MAX_WORD_END_SAMPLE.values()),
+    })
+    return (
+        searchlight
+        .join(pp_caps, on="phoneme_pair", how="left")
+        .filter(
+            (pl.col("smin") >= _C4_AC_SMIN_MIN)
+            & (pl.col("smax") <= pl.col("_smax_cap"))
+        )
+        .drop("_smax_cap")
+    )
+
+
+def _restrict_acoustic_causal6(searchlight: pl.DataFrame) -> pl.DataFrame:
+    if searchlight.is_empty():
+        return searchlight
+    return searchlight.filter(
+        (pl.col("smin") >= _C6_AC_SMIN)
+        & (pl.col("smax") <= _C6_AC_SMAX)
+    )
+
+
+# (kind, pipeline) → callable that filters the searchlight before argmax.
+# Missing key = no filter (use full searchlight grid).
+PEAK_WINDOW_FILTERS: dict[tuple[str, str], callable] = {
+    ("acoustic", "causal4"): _restrict_acoustic_causal4,
+    ("acoustic", "causal6"): _restrict_acoustic_causal6,
+}
+
+print("Acoustic peak-search restrictions:")
+print(f"  causal4: smin ≥ {_C4_AC_SMIN_MIN}, "
+      f"smax ≤ {_PP_TO_MAX_WORD_END_SAMPLE} (per phoneme_pair)")
+print(f"  causal6: smin ≥ {_C6_AC_SMIN}, smax ≤ {_C6_AC_SMAX}")
+
+# %% [markdown]
 # ### Build all tables
 
 # %%
@@ -486,16 +567,22 @@ for target, loader4, loader6 in tqdm(load_spec):
         SEARCHLIGHTS[target]["causal6"] = causal6_result
 
 # %%
-PEAKS = {
-    kind: {p: derive_peaks(df, PEAK_CRITERION[kind], SITE_COLS[kind])
-           for p, df in pipelines.items()}
-    for kind, pipelines in SEARCHLIGHTS.items()
-}
+PEAKS = {}
+for kind, pipelines in SEARCHLIGHTS.items():
+    PEAKS[kind] = {}
+    for p, df in pipelines.items():
+        wf = PEAK_WINDOW_FILTERS.get((kind, p))
+        df_for_peaks = wf(df) if wf is not None else df
+        PEAKS[kind][p] = derive_peaks(df_for_peaks, PEAK_CRITERION[kind], SITE_COLS[kind])
 
 for kind in SEARCHLIGHTS:
     print(f"\n{kind}:")
     for p, df in SEARCHLIGHTS[kind].items():
-        print(f"  {p}: {df.height} searchlight rows, {PEAKS[kind][p].height} sites")
+        wf = PEAK_WINDOW_FILTERS.get((kind, p))
+        n_eligible = wf(df).height if wf is not None else df.height
+        n_total = df.height
+        restr = "" if wf is None else f" (peak-eligible: {n_eligible})"
+        print(f"  {p}: {n_total} searchlight rows{restr}, {PEAKS[kind][p].height} sites")
 
 # %% [markdown]
 # ## 2. Coverage summary
@@ -751,17 +838,18 @@ def plot_searchlight_heatmap(
         .agg(pl.col(criterion).mean().alias("auc"))
         .to_pandas()
     )
-    pivot = fold_mean.pivot(index="smax", columns="smin", values="auc").sort_index()
-    pivot = pivot[sorted(pivot.columns)]
-    im = ax.imshow(
-        pivot.values, origin="lower", aspect="auto",
-        extent=[pivot.columns.min(), pivot.columns.max(), pivot.index.min(), pivot.index.max()],
-        vmin=0.4, vmax=1.0, cmap="viridis",
+    # scatter with square markers: imshow on the full NaN-padded pivot renders
+    # blank because the searchlight only tests specific (smin,smax) pairs, not
+    # the full Cartesian product — colored pixels are too small to see.
+    sc = ax.scatter(
+        fold_mean["smin"], fold_mean["smax"],
+        c=fold_mean["auc"], cmap="viridis", vmin=0.4, vmax=1.0,
+        s=18, marker="s", linewidths=0,
     )
     ax.set_xlabel("smin")
     ax.set_ylabel("smax")
     ax.set_title(title)
-    plt.colorbar(im, ax=ax, fraction=0.04)
+    plt.colorbar(sc, ax=ax, fraction=0.04)
 
 
 def plot_top_disagreement_heatmaps(
