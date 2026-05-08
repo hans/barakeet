@@ -270,4 +270,4 @@ def get_ambiguous_resampled_steps(
         .agg(pl.col("resampled"))
         .rows_by_key(["subject", "phoneme_pair", "word_end"], unique=True)
     )
-    return {key: xs for key, (xs,) in ret.items()}
+    return {key: list(xs[0]) for key, (xs,) in ret.items()}
