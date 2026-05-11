@@ -731,6 +731,9 @@ rule behavior_decoding_single_electrode_summarize:
         peak_summary_tstat_tfce       = "outputs/causal6/behavior_decoding_single_electrode_summarize/{subject}/peak_summary_tstat_tfce.parquet",
         peak_predictions              = "outputs/causal6/behavior_decoding_single_electrode_summarize/{subject}/peak_predictions.parquet",
 
+    resources:
+        mem_gb = 300
+
     run:
         outdir = Path(output.notebook).parent
         run_notebook(
@@ -770,6 +773,9 @@ rule behavior_decoding_single_electrode_hga_only_summarize:
         peak_summary_foldmean_tfce    = "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/{subject}/peak_summary_foldmean_tfce.parquet",
         peak_summary_tstat_tfce       = "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/{subject}/peak_summary_tstat_tfce.parquet",
         peak_predictions              = "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/{subject}/peak_predictions.parquet",
+
+    resources:
+        mem_gb = 300
 
     run:
         outdir = Path(output.notebook).parent
@@ -1327,6 +1333,9 @@ rule ganong_decoding_summarize:
         peak_summary     = "outputs/causal6/ganong_decoding_summarize/{subject}/peak_summary.parquet",
         peak_predictions = "outputs/causal6/ganong_decoding_summarize/{subject}/peak_predictions.parquet",
 
+    resources:
+        mem_gb = 300
+
     run:
         outdir = Path(output.notebook).parent
         run_notebook(
@@ -1357,6 +1366,9 @@ rule ganong_decoding_hga_only_summarize:
         notebook         = "outputs/causal6/ganong_decoding_hga_only_summarize/{subject}/notebook.ipynb",
         peak_summary     = "outputs/causal6/ganong_decoding_hga_only_summarize/{subject}/peak_summary.parquet",
         peak_predictions = "outputs/causal6/ganong_decoding_hga_only_summarize/{subject}/peak_predictions.parquet",
+
+    resources:
+        mem_gb = 300
 
     run:
         outdir = Path(output.notebook).parent
