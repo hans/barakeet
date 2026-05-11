@@ -2,30 +2,37 @@
 # cluster-generic status callback. Called as `status.sh <jobid>`; must print
 # exactly one of: running, success, failed.
 #
-# qstat sees queued+running jobs. Once a job exits, it disappears from qstat
-# and (after a short delay) appears in qacct with an exit_status field.
-#
-# Accounting lag on this cluster can exceed 60 s, so we must not declare
-# failure the moment qacct is silent — that causes Snakemake to delete good
-# output files and restart the job. Instead we record when the job first
-# disappears from qstat (marker file) and keep returning `running` until
-# qacct catches up. Only after WAIT_SECS without qacct recording the job do
-# we declare failure, which handles OOM kills that never appear in qacct.
+# Primary signal: sentinel file written by the job's EXIT trap (see submit.sh).
+# qacct is not reliable on this cluster so we use it only as a fallback.
+# If neither sentinel nor qacct shows up within WAIT_SECS of the job leaving
+# qstat, we declare failure (handles OOM kills that never write a sentinel).
 
 set -uo pipefail
 
-WAIT_SECS=300   # seconds to wait for qacct before declaring failure
+WAIT_SECS=300
 MARKER_DIR=/tmp/snakemake_status_markers
+SENTINEL_DIR="$PWD/.snakemake/sge_sentinels"
 
 jobid="$1"
 marker="$MARKER_DIR/$jobid"
+sentinel="$SENTINEL_DIR/$jobid"
 
+# 1. Sentinel written by the job's EXIT trap — most reliable signal.
+if [ -f "$sentinel" ]; then
+    exit_code=$(cat "$sentinel")
+    rm -f "$sentinel" "$marker"
+    [ "$exit_code" = "0" ] && echo success || echo failed
+    exit 0
+fi
+
+# 2. Job still visible in qstat — genuinely running or queued.
 if qstat -j "$jobid" >/dev/null 2>&1; then
     rm -f "$marker"
     echo running
     exit 0
 fi
 
+# 3. Job gone from qstat, no sentinel yet — try qacct (may be slow/absent).
 exit_status=$(qacct -j "$jobid" 2>/dev/null | awk '/^exit_status/ {print $2; exit}')
 if [ -n "$exit_status" ]; then
     rm -f "$marker"
@@ -33,8 +40,8 @@ if [ -n "$exit_status" ]; then
     exit 0
 fi
 
-# qacct hasn't caught up yet. Stamp the marker file on first miss and keep
-# returning `running` until WAIT_SECS elapses.
+# 4. Nothing yet — stamp a marker on first miss, return `running` until
+#    WAIT_SECS elapses (handles OOM kills that bypass the EXIT trap).
 mkdir -p "$MARKER_DIR"
 if [ ! -f "$marker" ]; then
     date +%s > "$marker"
@@ -47,7 +54,7 @@ now=$(date +%s)
 elapsed=$((now - started))
 if [ "$elapsed" -ge "$WAIT_SECS" ]; then
     rm -f "$marker"
-    echo "status.sh: job $jobid absent from qacct after ${elapsed}s — declaring failed" >&2
+    echo "status.sh: job $jobid absent from sentinel+qacct after ${elapsed}s — declaring failed" >&2
     echo failed
     exit 0
 fi

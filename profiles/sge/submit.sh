@@ -15,6 +15,12 @@
 #
 # We also absolutize relative -o paths, since SGE resolves them against
 # $HOME rather than the submit cwd.
+#
+# Sentinel files: we wrap the job script (received on stdin from the
+# cluster-generic executor) with an EXIT trap that writes the job's exit
+# code to .snakemake/sge_sentinels/$JOB_ID on the shared filesystem.
+# status.sh reads this file instead of relying on qacct, which does not
+# record jobs on this cluster.
 
 set -euo pipefail
 
@@ -22,6 +28,9 @@ set -euo pipefail
 # which otherwise caps virtual address space below what CUDA needs for
 # init (driver/unified-memory VA reservations).
 SUBMIT_JOB_BIN="${BARAKEET_SUBMIT_JOB:-submit_job.alt}"
+
+SENTINEL_DIR="$PWD/.snakemake/sge_sentinels"
+mkdir -p "$SENTINEL_DIR"
 
 new_args=()
 gpu_count=0
@@ -52,7 +61,27 @@ if [ "$has_queue" -eq 0 ]; then
     fi
 fi
 
-output=$("$SUBMIT_JOB_BIN" "${extra_args[@]}" "${new_args[@]}" 2>&1)
+# Wrap the job script with a sentinel-writing EXIT trap.
+# cluster-generic pipes the jobscript to stdin; we prepend a preamble and
+# pass the combined script back to submit_job.alt via a temp file.
+tmpscript=$(mktemp /tmp/snakemake_wrapped_XXXXXX.sh)
+trap 'rm -f "$tmpscript"' EXIT
+
+# Preamble: register EXIT trap using the absolute sentinel dir baked in at
+# submit time. $JOB_ID is set by SGE inside the running job environment.
+cat > "$tmpscript" << PREAMBLE
+#!/bin/bash
+_snak_write_sentinel() {
+    local ec=\$?
+    echo "\$ec" > "${SENTINEL_DIR}/\$JOB_ID"
+}
+trap '_snak_write_sentinel' EXIT
+PREAMBLE
+
+# Append the original job script (everything from stdin).
+cat >> "$tmpscript"
+
+output=$("$SUBMIT_JOB_BIN" "${extra_args[@]}" "${new_args[@]}" < "$tmpscript" 2>&1)
 echo "$output" >&2
 
 jobid=$(echo "$output" | grep -oE 'Your job [0-9]+' | awk '{print $3}' | tail -n 1)
