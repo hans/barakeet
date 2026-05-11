@@ -31,6 +31,7 @@ dependencies = [
     "ploomber>=0.23",
     "ploomber-engine>=0.0.31",
     "ipykernel>=6.29",  # kernel used by ploomber_engine for notebook execution
+    "iprogress>=0.4",
 ]
 
 [project.optional-dependencies]
@@ -55,7 +56,16 @@ markers = [
     "integration: requires preprocessed EC248 epochs on disk; slow; skipped by default",
 ]
 
+[tool.uv.sources]
+torch = { index = "pytorch-cu118" }
+
+[[tool.uv.index]]
+name = "pytorch-cu118"
+url = "https://download.pytorch.org/whl/cu118"
+explicit = true
+
 [dependency-groups]
 dev = [
     "pynvml>=13.0.1",
+    "snakemake-executor-plugin-cluster-generic>=1.0.9",
 ]
