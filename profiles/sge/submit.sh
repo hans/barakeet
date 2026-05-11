@@ -18,6 +18,11 @@
 
 set -euo pipefail
 
+# submit_job.alt is the local variant without the GPU-branch `ulimit -v`,
+# which otherwise caps virtual address space below what CUDA needs for
+# init (driver/unified-memory VA reservations).
+SUBMIT_JOB_BIN="${BARAKEET_SUBMIT_JOB:-submit_job.alt}"
+
 new_args=()
 gpu_count=0
 has_queue=0
@@ -47,7 +52,7 @@ if [ "$has_queue" -eq 0 ]; then
     fi
 fi
 
-output=$(submit_job "${extra_args[@]}" "${new_args[@]}" 2>&1)
+output=$("$SUBMIT_JOB_BIN" "${extra_args[@]}" "${new_args[@]}" 2>&1)
 echo "$output" >&2
 
 jobid=$(echo "$output" | grep -oE 'Your job [0-9]+' | awk '{print $3}' | tail -n 1)
