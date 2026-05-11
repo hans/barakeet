@@ -107,10 +107,17 @@ import pynvml
 import time
 import fcntl
 
+# Set BARAKEET_GPU_LOCK=0 when something else is already pinning GPUs for us
+# (e.g. SGE's `-l gpu=N` populating CUDA_VISIBLE_DEVICES). In that case
+# select_gpu_device is a no-op and the child process inherits whatever
+# CUDA_VISIBLE_DEVICES the parent had.
+USE_GPU_LOCK = os.environ.get("BARAKEET_GPU_LOCK", "1") not in ("0", "false", "False")
+
+
 def select_gpu_device(wildcards, resources):
     """Pick a free GPU and create a claim file. Returns (gpu_id_str, claim_file_path)
-    or (None, None) when the rule does not request a GPU."""
-    if resources.gpu == 0:
+    or (None, None) when the rule does not request a GPU or the lock is disabled."""
+    if resources.gpu == 0 or not USE_GPU_LOCK:
         return None, None
 
     lock_dir = "/tmp/snakemake_gpu_locks"
@@ -191,7 +198,8 @@ def run_notebook_gpu(input_path, output_path, parameters, gpu_device):
 
     try:
         env = os.environ.copy()
-        env["CUDA_VISIBLE_DEVICES"] = str(gpu_device)
+        if gpu_device is not None:
+            env["CUDA_VISIBLE_DEVICES"] = str(gpu_device)
         helper = Path(workflow.basedir) / "_gpu_notebook_runner.py"
         subprocess.run(
             [sys.executable, str(helper), str(input_path), str(output_path), params_path],
