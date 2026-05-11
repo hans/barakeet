@@ -608,7 +608,8 @@ rule behavior_decoding_single_electrode_null:
         escalation_log  = "outputs/causal6/behavior_decoding_single_electrode_null/{subject}/escalation_log.parquet",
 
     resources:
-        gpu = 1
+        gpu = 1,
+        mem_gb = 100
 
     run:
         outdir = Path(output.notebook).parent
@@ -665,7 +666,8 @@ rule behavior_decoding_single_electrode_hga_only_null:
         escalation_log  = "outputs/causal6/behavior_decoding_single_electrode_hga_only_null/{subject}/escalation_log.parquet",
 
     resources:
-        gpu = 1
+        gpu = 1,
+        mem_gb = 100
 
     run:
         outdir = Path(output.notebook).parent
