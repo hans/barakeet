@@ -1134,6 +1134,7 @@ import pandas as pd
 import re as _re_s7
 from matplotlib.backends.backend_pdf import PdfPages
 from src.data import add_metadata_features, get_ambiguous_resampled_steps as _get_ambig_steps
+from src.stimuli import OFFSET_DICT as _OFFSET_DICT
 from src.viz_paper import add_textgrid
 
 _TEXTGRID_DIR = "data/stimuli/textgrid"
@@ -1412,6 +1413,7 @@ def _provisional_star_plot(
         except Exception:
             pass
 
+    ax_top.set_xlim(0.0, _OFFSET_DICT.get(word_end, 1.0) + 0.1)
     fig.tight_layout()
     return fig
 
