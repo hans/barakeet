@@ -14,16 +14,26 @@
 # ---
 
 # %% [markdown]
-# # Cross-check decoding results: causal4 vs causal6
+# # Cross-check decoding results: causal4 vs two causal6 runs
 #
-# Answers two questions, per decoder type:
-#   1. How much do the per-electrode decoding results agree across pipelines?
-#   2. For sites where they disagree, what explains the drift?
+# Three pipelines, two comparisons:
 #
-# Pipelines compared: causal4 (legacy) vs causal6 (current). Decoder types:
-# acoustic and behavior-with-control. (causal4 never ran HGA-only.) causal5
-# loaders were dropped because we never plot it; bring them back from git
-# history if you need a three-way comparison again.
+# | label             | branch / SR screen                                        | role                            |
+# |-------------------|-----------------------------------------------------------|---------------------------------|
+# | `causal4`         | legacy pipeline (paper baseline)                          | paper-reference comparison      |
+# | `causal6`         | `causal6` branch — reads **causal5's** SR screen          | trusted-reference causal6 run   |
+# | `causal6_new_sr`  | this branch — refined SR screen `[0, 0.6s], \|t\| > 7`    | adds sites; tests SR change     |
+#
+# Between the two causal6 runs the only meaningful change is the SR screen
+# (and the per-rule `electrodes=` input wiring). Decoder code, CV scheme,
+# regularization, and seeds are unchanged. So:
+#
+#   - **Shared electrodes** between the causal6 runs should have near-identical
+#     per-fold AUC. Drift on shared sites is a bug or hidden nondeterminism.
+#   - **Added electrodes** (in `causal6_new_sr` but not in `causal6`) are the
+#     headline interest: the user wants their AUC distribution characterized,
+#     and (where causal4 also tested them) their causal4 AUC shown, to check
+#     whether they're sites the legacy screen wrongly dropped.
 #
 # Comparison axes per decoder: per-site peak ROC-AUC, peak-window (smin, smax),
 # and the full searchlight AUC map. Debug section shows top-disagreement sites
@@ -44,7 +54,8 @@ import numpy as np
 import pandas as pd
 import polars as pl
 import yaml
-from scipy.stats import pearsonr
+from scipy.stats import ks_2samp, pearsonr
+from tqdm.auto import tqdm
 
 from src.stimuli import OFFSET_DICT, WORD_END_TO_PHONEME_PAIR
 from src.viz_paper import pl_roc_auc
@@ -52,6 +63,12 @@ from src.viz_paper import pl_roc_auc
 # %% tags=["parameters"]
 causal4_root = "outputs/causal4"
 causal6_root = "outputs/causal6"
+# `causal6_new_sr` = this branch's run with the refined SR screen. Both causal6
+# roots default to the same path so the parameters cell stays compact — point
+# them at the two relevant local dirs at run time (e.g.
+# ~/freesurfer_subjects/barakeet/causal6_pipeline and
+# ~/freesurfer_subjects/barakeet/causal6_speech_responsive_pipeline).
+causal6_new_sr_root = "outputs/causal6"
 
 top_n_disagreements = 20
 behav_peak_post_offset_s = 0.2
@@ -65,14 +82,23 @@ neurometrics_ref_root = "outputs/causal4/prepare_neurometrics/p65_b5_a3"
 
 # Pipeline pairs to plot. We treat causal6 as the trusted reference (better CV
 # scheme + tuned regularization → lower-variance per-fold estimates) and use it
-# to validate causal4's small claimed effect sizes.
-PIPELINE_PAIRS = [("causal4", "causal6")]
+# to validate causal4's small claimed effect sizes. The (causal6,
+# causal6_new_sr) pair is the SR-screen reproducibility check.
+PIPELINE_PAIRS = [
+    ("causal4", "causal6"),
+    ("causal6", "causal6_new_sr"),
+]
 
 # %%
 ROOTS = {
     "causal4": Path(causal4_root),
     "causal6": Path(causal6_root),
+    "causal6_new_sr": Path(causal6_new_sr_root),
 }
+
+if ROOTS["causal6"] == ROOTS["causal6_new_sr"]:
+    print("⚠ causal6_root == causal6_new_sr_root — comparing a directory to itself. "
+          "Override one of the parameters to point at the other pipeline run.")
 
 for name, root in ROOTS.items():
     print(f"{name}: {root}  (exists={root.exists()})")
@@ -86,16 +112,18 @@ for name, root in ROOTS.items():
 # explicitly so we don't silently drop subjects from a comparison.
 
 # %%
+_CAUSAL6_GLOBS = [
+    "acoustic_decoding_single_electrode/*",
+    "behavior_decoding_single_electrode/*",
+    "behavior_decoding_single_electrode_hga_only/*",
+]
 GLOB_TARGETS = {
     "causal4": [
         "behavior_decoding_single_electrode_acoustic/*",
         "behavior_decoding_single_electrode_summarize/*",
     ],
-    "causal6": [
-        "acoustic_decoding_single_electrode/*",
-        "behavior_decoding_single_electrode/*",
-        "behavior_decoding_single_electrode_hga_only/*",
-    ],
+    "causal6": _CAUSAL6_GLOBS,
+    "causal6_new_sr": _CAUSAL6_GLOBS,
 }
 
 
@@ -137,26 +165,33 @@ subjects = union  # loaders skip per-subject paths that don't exist, so union is
 # %% [markdown]
 # ## 0. Speech-responsive screen comparison
 #
-# Three screens, three criteria — same paired-t machinery in c5/c6 but with
-# different windows and sidedness:
+# Three screens drive an actual pipeline run here:
 #
-# | screen  | criterion                                                                |
-# |---------|--------------------------------------------------------------------------|
-# | causal4 | `max\|baselined evoked\|` in `[0, 0.9s]` > 0.3 (directionless)             |
-# | causal5 | paired t-test, post=`[0, tmax]`, **t > 7** (one-sided, full window)      |
-# | causal6 | paired t-test, post=`[0, post_tmax_s]`, **\|t\| > t_threshold** (refined) |
+# | screen          | criterion                                                                | role                                |
+# |-----------------|--------------------------------------------------------------------------|-------------------------------------|
+# | causal4         | `max\|baselined evoked\|` in `[0, 0.9s]` > 0.3 (directionless)             | drives the causal4 decoders         |
+# | causal6         | paired t-test, post=`[0, tmax]`, **t > 7** (one-sided, full window)      | causal5's SR file, consumed by `causal6` |
+# | causal6_new_sr  | paired t-test, post=`[0, post_tmax_s]`, **\|t\| > t_threshold** (refined) | drives the `causal6_new_sr` decoders |
 #
-# The c5→c6 change addresses two failure modes of the c5 screen documented in
-# `scripts/refined_speech_responsive.py`: long-window dilution of transient
-# responses (the population the paper is built on) and one-sidedness silently
-# dropping suppression. After the c6 re-run, this section provides the audit:
-# coverage of the headline acoustic + behavior decoder sets by each screen.
+# The c5→`causal6_new_sr` change addresses two failure modes of the c5 screen
+# documented in `scripts/refined_speech_responsive.py`: long-window dilution of
+# transient responses (the population the paper is built on) and one-sidedness
+# silently dropping suppression. This section audits:
+#   1. Coverage of the headline acoustic + behavior decoder sets by each screen.
+#   2. The pairwise overlap between the SR file the `causal6` pipeline read
+#      (causal5's) and the refined SR file the `causal6_new_sr` pipeline read.
+#      This is what determines which electrodes the two runs share.
 
 # %%
 SR_ROOTS = {
     "causal4": ROOTS["causal4"] / "find_speech_responsive",
-    "causal5": Path("outputs/causal5/find_speech_responsive"),
-    "causal6": Path("outputs/causal6/find_speech_responsive"),
+    # The `causal6` decoder run consumed causal5's SR file directly (the
+    # workflow on the `causal6` branch wired
+    # `electrodes=outputs/causal5/find_speech_responsive/...`). We use the
+    # `causal6` label so coverage rows below align with the decoder-pipeline
+    # labels and don't duplicate the same file under two keys.
+    "causal6": Path("outputs/causal5/find_speech_responsive"),
+    "causal6_new_sr": ROOTS["causal6_new_sr"] / "find_speech_responsive",
 }
 
 
@@ -232,11 +267,15 @@ def _pairwise_agreement(a: pl.DataFrame, b: pl.DataFrame, label_a: str, label_b:
     return joined
 
 
-# Headline comparison: c4 (paper baseline) vs c6 (current screen)
-joined_46 = _pairwise_agreement(SR["causal4"], SR["causal6"], "causal4", "causal6")
+# Paper-baseline reference: causal4's amplitude screen vs each causal6 SR file
+joined_46 = _pairwise_agreement(SR["causal4"], SR["causal6"], "causal4", "causal6 (c5 SR)")
+joined_4new = _pairwise_agreement(SR["causal4"], SR["causal6_new_sr"], "causal4", "causal6_new_sr")
 
-# What the c5 → c6 change actually did
-joined_56 = _pairwise_agreement(SR["causal5"], SR["causal6"], "causal5", "causal6")
+# What the legacy → refined SR change actually did. The `causal6` run consumed
+# causal5's SR file (see SR_ROOTS comment) so this comparison directly
+# characterizes the SR change that distinguishes the two decoder runs.
+joined_66 = _pairwise_agreement(SR["causal6"], SR["causal6_new_sr"],
+                                "causal6 (c5 SR)", "causal6_new_sr (refined)")
 
 # %% [markdown]
 # ### Coverage of paper headline decoder sets
@@ -662,12 +701,15 @@ def _restrict_behavior_ctrl_causal6(searchlight: pl.DataFrame) -> pl.DataFrame:
 
 
 # (kind, pipeline) → callable that filters the searchlight before argmax.
-# Missing key = no filter (use full searchlight grid).
+# Missing key = no filter (use full searchlight grid). The two causal6 runs
+# share config.yaml and the same restriction logic.
 PEAK_WINDOW_FILTERS: dict[tuple[str, str], callable] = {
     ("acoustic", "causal4"): _restrict_acoustic_causal4,
     ("acoustic", "causal6"): _restrict_acoustic_causal6,
+    ("acoustic", "causal6_new_sr"): _restrict_acoustic_causal6,
     ("behavior_ctrl", "causal4"): _restrict_behavior_ctrl_causal4,
     ("behavior_ctrl", "causal6"): _restrict_behavior_ctrl_causal6,
+    ("behavior_ctrl", "causal6_new_sr"): _restrict_behavior_ctrl_causal6,
 }
 
 print("Acoustic peak-search restrictions:")
@@ -684,21 +726,30 @@ print(f"  causal6: smin ≥ {_C6_BEHAV_SMIN}, "
 # ### Build all tables
 
 # %%
-load_spec = [
-    ("acoustic", load_acoustic_searchlight_causal4, load_acoustic_searchlight_causal6),
-    ("behavior_ctrl", load_behavior_ctrl_searchlight_causal4, load_behavior_ctrl_searchlight_causal6),
-    ("behavior_hga", None, load_behavior_hga_searchlight_causal6),
+# (kind → {pipeline_label → loader_fn}). Both causal6 runs use the same loader
+# (parquet schemas are identical); only the root differs and that's passed in
+# at call time.
+load_spec: list[tuple[str, dict[str, callable]]] = [
+    ("acoustic", {
+        "causal4":        load_acoustic_searchlight_causal4,
+        "causal6":        load_acoustic_searchlight_causal6,
+        "causal6_new_sr": load_acoustic_searchlight_causal6,
+    }),
+    ("behavior_ctrl", {
+        "causal4":        load_behavior_ctrl_searchlight_causal4,
+        "causal6":        load_behavior_ctrl_searchlight_causal6,
+        "causal6_new_sr": load_behavior_ctrl_searchlight_causal6,
+    }),
+    ("behavior_hga", {
+        "causal6":        load_behavior_hga_searchlight_causal6,
+        "causal6_new_sr": load_behavior_hga_searchlight_causal6,
+    }),
 ]
 SEARCHLIGHTS = {}
-for target, loader4, loader6 in tqdm(load_spec):
-    causal4_result = _normalize_types(loader4(ROOTS["causal4"], subjects)) if loader4 else None
-    causal6_result = _normalize_types(loader6(ROOTS["causal6"], subjects)) if loader6 else None
-
+for target, loaders in tqdm(load_spec):
     SEARCHLIGHTS[target] = {}
-    if loader4 is not None:
-        SEARCHLIGHTS[target]["causal4"] = causal4_result
-    if loader6 is not None:
-        SEARCHLIGHTS[target]["causal6"] = causal6_result
+    for pipe, loader in loaders.items():
+        SEARCHLIGHTS[target][pipe] = _normalize_types(loader(ROOTS[pipe], subjects))
 
 # %%
 PEAKS = {}
@@ -1261,12 +1312,253 @@ run_comparison("behavior_ctrl", peak_thresholds=(0.0, 0.05, 0.1, 0.15, 0.2))
 # %% [markdown]
 # ### Behavior-HGA-only
 #
-# Skipped: causal4 never ran HGA-only behavior decoding, and we've restricted
-# `PIPELINE_PAIRS` to causal4 vs causal6. `BEHAV_HGA` is still populated for
-# causal6 if a single-pipeline view is ever useful.
+# Causal4 never ran HGA-only behavior decoding, so its pair is dropped
+# automatically. The plots below show only the (causal6, causal6_new_sr) pair.
+
+# %%
+run_comparison("behavior_hga")
 
 # %% [markdown]
-# ## 4. Highlight-electrode drill-in
+# ## 4. SR-screen reproducibility check
+#
+# **The headline check this notebook is for.** Between the two causal6 runs the
+# only meaningful pipeline change is the SR file each consumed. Decoder code,
+# CV scheme, regularization, and seeds are unchanged (`git diff causal6..HEAD`).
+# So on electrodes the two runs share, per-site peak AUC should be identical
+# up to floating-point noise (GPU dispatch can introduce sub-ε drift). Anything
+# else points at hidden nondeterminism that needs investigating.
+#
+# This block reports per-decoder: site overlap, the Δ-summary (`max|Δ|`,
+# `mean|Δ|`, counts above several drift thresholds), and a scatter of paired
+# peak AUC. The full set of agreement diagnostics for this pair are already
+# rendered by `run_comparison` above (since the pair is in `PIPELINE_PAIRS`) —
+# this section just calls out the numerical sanity check explicitly.
+
+# %%
+def reproducibility_summary(
+    peaks: dict[str, pl.DataFrame], site_cols: list[str], criterion: str,
+    drift_thresholds: tuple[float, ...] = (1e-6, 1e-4, 1e-3, 1e-2),
+    pipe_a: str = "causal6", pipe_b: str = "causal6_new_sr",
+) -> pd.DataFrame:
+    """Δpeak summary on shared sites between two pipelines."""
+    if pipe_a not in peaks or pipe_b not in peaks:
+        return pd.DataFrame()
+    if peaks[pipe_a].is_empty() or peaks[pipe_b].is_empty():
+        return pd.DataFrame()
+    joined = pair_peaks(peaks[pipe_a], peaks[pipe_b], site_cols, criterion)
+    if joined.empty:
+        return pd.DataFrame()
+    a = joined[f"{criterion}_a"].to_numpy()
+    b = joined[f"{criterion}_b"].to_numpy()
+    delta = a - b
+    abs_d = np.abs(delta)
+    sa = joined.assign(_w_eq=(joined["smin_a"] == joined["smin_b"]) & (joined["smax_a"] == joined["smax_b"]))
+    summary = {
+        "n_shared": len(joined),
+        "max|Δ|":   float(np.nanmax(abs_d)),
+        "mean|Δ|":  float(np.nanmean(abs_d)),
+        "median|Δ|": float(np.nanmedian(abs_d)),
+        "same_peak_window_pct": float(sa["_w_eq"].mean() * 100.0),
+    }
+    for thr in drift_thresholds:
+        summary[f"|Δ|>{thr:g}"] = int((abs_d > thr).sum())
+    return pd.DataFrame([summary])
+
+
+for kind in SEARCHLIGHTS:
+    site_cols = SITE_COLS[kind]
+    criterion = PEAK_CRITERION[kind]
+    print(f"\n--- {kind}: Δpeak on shared sites (causal6 vs causal6_new_sr) ---")
+    summary = reproducibility_summary(PEAKS[kind], site_cols, criterion)
+    if summary.empty:
+        print("  (one or both pipelines unavailable)")
+        continue
+    print(summary.to_string(index=False))
+
+print(
+    "\nInterpretation: shared-site Δpeak should be ≲ 1e-4 across all decoder kinds "
+    "(GPU/cuBLAS dispatch can introduce sub-ε drift even with identical seeds). "
+    "Anything above ~1e-2 indicates real divergence — investigate before trusting "
+    "either run."
+)
+
+
+# %% [markdown]
+# ## 5. Electrodes added by the refined SR
+#
+# The refined SR screen admits sites the legacy (causal5) screen dropped. The
+# user wants:
+#   1. **Are the added sites decoder-positive?** — overlay peak-AUC histograms
+#      for added vs shared sites within `causal6_new_sr`.
+#   2. **Did causal4 also see signal at these sites?** — where causal4 tested
+#      them, plot causal4's peak AUC at the added sites vs the shared baseline.
+#      If causal4 saw clear signal there, the legacy screen was leaving sites
+#      on the table.
+#
+# `behavior_hga` is included for plot 1 only (causal4 never ran HGA-only).
+
+# %%
+def _site_set(peaks_df: pl.DataFrame, site_cols: list[str]) -> set[tuple]:
+    if peaks_df.is_empty():
+        return set()
+    return set(map(tuple, peaks_df.select(site_cols).unique().rows()))
+
+
+def _sites_to_filter_df(sites: set[tuple], site_cols: list[str]) -> pl.DataFrame:
+    if not sites:
+        return pl.DataFrame(schema={c: pl.Utf8 if c != "electrode_idx" else pl.Int64
+                                    for c in site_cols})
+    cols = list(zip(*sites))
+    data = {c: list(cols[i]) for i, c in enumerate(site_cols)}
+    return pl.DataFrame(data)
+
+
+def added_sites_summary(
+    peaks: dict[str, pl.DataFrame], site_cols: list[str], criterion: str,
+    legacy: str = "causal6", new: str = "causal6_new_sr",
+    auc_thresholds: tuple[float, ...] = (0.55, 0.6, 0.65, 0.7, 0.75),
+) -> dict[str, object]:
+    out: dict[str, object] = {}
+    if legacy not in peaks or new not in peaks:
+        return out
+    legacy_sites = _site_set(peaks[legacy], site_cols)
+    new_sites = _site_set(peaks[new], site_cols)
+    added = new_sites - legacy_sites
+    dropped = legacy_sites - new_sites
+    shared = new_sites & legacy_sites
+    out["n_legacy"] = len(legacy_sites)
+    out["n_new"] = len(new_sites)
+    out["n_added"] = len(added)
+    out["n_dropped"] = len(dropped)
+    out["n_shared"] = len(shared)
+    if added:
+        added_df = (
+            peaks[new]
+            .join(_sites_to_filter_df(added, site_cols), on=site_cols, how="inner")
+            .to_pandas()
+        )
+        out["added_auc"] = added_df[criterion].to_numpy()
+        out["added_df"] = added_df
+        for thr in auc_thresholds:
+            out[f"added_above_{thr:g}"] = int((added_df[criterion] >= thr).sum())
+    if shared:
+        shared_auc = (
+            peaks[new]
+            .join(_sites_to_filter_df(shared, site_cols), on=site_cols, how="inner")
+            .select(criterion).to_numpy().flatten()
+        )
+        out["shared_auc"] = shared_auc
+    if dropped:
+        dropped_df = (
+            peaks[legacy]
+            .join(_sites_to_filter_df(dropped, site_cols), on=site_cols, how="inner")
+            .to_pandas()
+        )
+        out["dropped_auc"] = dropped_df[criterion].to_numpy()
+        out["dropped_df"] = dropped_df
+    return out
+
+
+def plot_added_vs_shared_hist(summary: dict[str, object], criterion: str, kind: str):
+    if not summary or summary.get("n_added", 0) == 0:
+        return
+    added = summary.get("added_auc")
+    shared = summary.get("shared_auc")
+    if added is None or shared is None:
+        return
+    fig, ax = plt.subplots(figsize=(7, 4))
+    # Shared on count axis (much larger n); added as scaled histogram so the
+    # comparison is by shape, not count.
+    ax.hist(shared, bins=30, alpha=0.5, color="steelblue", density=True,
+            label=f"shared n={len(shared)}  med={np.nanmedian(shared):.3f}")
+    ax.hist(added, bins=30, alpha=0.6, color="tomato", density=True,
+            label=f"added  n={len(added)}  med={np.nanmedian(added):.3f}")
+    chance = 0.5 if criterion == "roc_auc" else 0.0
+    ax.axvline(chance, color="k", lw=0.5, ls="--", label="chance")
+    if len(added) >= 5 and len(shared) >= 5:
+        ks = ks_2samp(added, shared)
+        title = f"{kind}: added (refined SR) vs shared peak {criterion}  KS p={ks.pvalue:.3g}"
+    else:
+        title = f"{kind}: added (refined SR) vs shared peak {criterion}"
+    ax.set_xlabel(f"peak {criterion} (in causal6_new_sr)")
+    ax.set_ylabel("density")
+    ax.set_title(title)
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    plt.show()
+
+
+def plot_causal4_at_added(
+    peaks: dict[str, pl.DataFrame], summary: dict[str, object],
+    site_cols: list[str], criterion: str, kind: str,
+):
+    if not summary or "added_df" not in summary:
+        return
+    if "causal4" not in peaks or peaks["causal4"].is_empty():
+        print(f"  [{kind}] causal4 peaks unavailable; skipping causal4-at-added plot")
+        return
+    added_df = summary["added_df"]
+    added_keys = _sites_to_filter_df(
+        set(map(tuple, added_df[site_cols].itertuples(index=False, name=None))),
+        site_cols,
+    )
+    causal4_at_added = (
+        peaks["causal4"]
+        .join(added_keys, on=site_cols, how="inner")
+        .select(criterion).to_numpy().flatten()
+    )
+    n_tested = len(causal4_at_added)
+    n_added = len(added_df)
+    if n_tested == 0:
+        print(f"  [{kind}] none of the {n_added} added sites were tested in causal4 — skipping plot")
+        return
+    causal4_at_shared = (
+        peaks["causal4"]
+        .join(_sites_to_filter_df(
+            set(map(tuple, peaks["causal6_new_sr"].select(site_cols).unique().rows())) &
+            set(map(tuple, peaks["causal6"].select(site_cols).unique().rows())),
+            site_cols,
+        ), on=site_cols, how="inner")
+        .select(criterion).to_numpy().flatten()
+    )
+    fig, ax = plt.subplots(figsize=(7, 4))
+    ax.hist(causal4_at_shared, bins=30, alpha=0.5, color="steelblue", density=True,
+            label=f"shared sites  n={len(causal4_at_shared)}  med={np.nanmedian(causal4_at_shared):.3f}")
+    ax.hist(causal4_at_added, bins=30, alpha=0.6, color="tomato", density=True,
+            label=f"added sites   n={n_tested} of {n_added}  med={np.nanmedian(causal4_at_added):.3f}")
+    chance = 0.5 if criterion == "roc_auc" else 0.0
+    ax.axvline(chance, color="k", lw=0.5, ls="--", label="chance")
+    ax.set_xlabel(f"causal4 peak {criterion}")
+    ax.set_ylabel("density")
+    ax.set_title(f"{kind}: causal4 AUC at added vs shared sites")
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    plt.show()
+
+
+for kind in SEARCHLIGHTS:
+    site_cols = SITE_COLS[kind]
+    criterion = PEAK_CRITERION[kind]
+    print(f"\n=== {kind}: refined-SR site delta ===")
+    summary = added_sites_summary(PEAKS[kind], site_cols, criterion)
+    if not summary:
+        print("  (one or both pipelines unavailable)")
+        continue
+    print(f"  causal6={summary['n_legacy']}   causal6_new_sr={summary['n_new']}   "
+          f"shared={summary['n_shared']}   added={summary['n_added']}   dropped={summary['n_dropped']}")
+    if "added_auc" in summary:
+        thr_keys = [k for k in summary if k.startswith("added_above_")]
+        print(f"  median added peak {criterion}: {np.nanmedian(summary['added_auc']):.3f}")
+        for k in thr_keys:
+            print(f"  added with peak ≥ {k.split('_')[-1]}: {summary[k]} / {summary['n_added']}")
+    if summary.get("n_added", 0) > 0:
+        plot_added_vs_shared_hist(summary, criterion, kind)
+        if kind != "behavior_hga":
+            plot_causal4_at_added(PEAKS[kind], summary, site_cols, criterion, kind)
+
+
+# %% [markdown]
+# ## 6. Highlight-electrode drill-in
 #
 # The most direct test of "are causal4's small effects real?" is a fold-level
 # look at the electrodes that causal4's `A_neurometrics` highlighted: if their
@@ -1368,7 +1660,7 @@ inspect_site("acoustic",      subject="EC278", electrode_idx=38,  phoneme_pair="
 inspect_site("behavior_ctrl", subject="EC278", electrode_idx=38,  phoneme_pair="dn", word_end="necessary")
 
 # %% [markdown]
-# ## 5. Notes on expected differences
+# ## 7. Notes on expected differences
 #
 # Before chasing down every disagreement, keep in mind these structural
 # differences between pipelines that will produce real, non-bug AUC drift:
@@ -1395,3 +1687,9 @@ inspect_site("behavior_ctrl", subject="EC278", electrode_idx=38,  phoneme_pair="
 # - **Significance**: only causal6 writes per-site permutation p/q-values
 #   (`significance_all.parquet`). Not used here; see
 #   `notebooks/causal6/significance_aggregate.py`.
+# - **causal6 vs causal6_new_sr**: these share decoder code, CV scheme, seeds,
+#   and regularization (`git diff causal6..HEAD` covers only the SR rule and
+#   the `electrodes=` wiring). The only legitimate diff is **set membership**:
+#   sites the new SR admits or drops. Per-site AUC on shared sites should be
+#   identical up to GPU-dispatch FP drift (~1e-5 or smaller). Section 4's
+#   summary surfaces any larger drift explicitly.
