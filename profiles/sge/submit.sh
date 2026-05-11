@@ -7,22 +7,39 @@
 # it, mirror to stderr (preserved in the snakemake log), and emit only the
 # integer job id.
 #
+# Queue routing lives here (not in the profile) because snakemake's
+# default-resources YAML does not reliably evaluate Python expressions
+# across resources in v9.x. We pick the queue from the -g (gpu count) arg:
+# any -g >0 → skull-gpu, otherwise → skull-batch.q. An explicit -q in the
+# caller's args overrides this.
+#
 # Snakemake appends the jobscript path as the final positional argument;
-# submit_job already treats trailing positionals as the command to run, so
-# no further argument shuffling is needed here.
+# submit_job already treats trailing positionals as the command to run.
 
 set -euo pipefail
 
-# Ensure the -o log directory exists; qsub will reject the job otherwise.
+gpu_count=0
+has_queue=0
 prev=""
 for arg in "$@"; do
-    if [ "$prev" = "-o" ]; then
-        mkdir -p "$(dirname "$arg")" 2>/dev/null || true
-    fi
+    case "$prev" in
+        -g) gpu_count="$arg" ;;
+        -q) has_queue=1 ;;
+        -o) mkdir -p "$(dirname "$arg")" 2>/dev/null || true ;;
+    esac
     prev="$arg"
 done
 
-output=$(submit_job "$@" 2>&1)
+extra_args=()
+if [ "$has_queue" -eq 0 ]; then
+    if [ "$gpu_count" -gt 0 ]; then
+        extra_args+=(-q skull-gpu)
+    else
+        extra_args+=(-q skull-batch.q)
+    fi
+fi
+
+output=$(submit_job "${extra_args[@]}" "$@" 2>&1)
 echo "$output" >&2
 
 jobid=$(echo "$output" | grep -oE 'Your job [0-9]+' | awk '{print $3}' | tail -n 1)
