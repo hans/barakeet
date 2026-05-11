@@ -32,6 +32,7 @@ dependencies = [
     "ploomber-engine>=0.0.31",
     "ipykernel>=6.29",  # kernel used by ploomber_engine for notebook execution
     "iprogress>=0.4",
+    "ipywidgets>=8.1.8",
 ]
 
 [project.optional-dependencies]
