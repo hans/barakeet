@@ -586,17 +586,24 @@ PEAK_CRITERION = {
 #   200ms post word offset).
 #
 # **Behavior — causal6** (this notebook, NOT the production pipeline):
-#   `smin > causal6_acoustic_peak.smax` (per-site) AND
-#   `smax ≤ word_end_offset_sample + 20` (per word_end) AND
+#   Per-site gate on the site's acoustic peak quality:
+#     - acoustic peak AUC ≥ 0.6  → smin > causal6_acoustic_peak.smax
+#     - else                     → smin ≥ 50  (the production smin floor)
+#   AND `smax ≤ word_end_offset_sample + 20` (per word_end) AND
 #   `smax ≤ 290` (`_PEAK_SEARCH_SMAX`).
 #
-#   The production causal6 only enforces `smin ≥ 50`; we apply the stricter
-#   per-site post-acoustic constraint here so the cross-pipeline fixed-window
-#   scatter is apples-to-apples with causal4. Without it, causal6's behavior
-#   argmax can land inside the acoustic window on sites where causal4 must
-#   search post-acoustic, which is a window-eligibility difference masquerading
-#   as a decoder-quality difference (plus winner's-curse inflation on the
-#   wider grid).
+#   The threshold gate matters because causal6 runs acoustic decoding on every
+#   SR electrode — non-acoustically-selective sites still get an "acoustic
+#   peak" via argmax, but it's a ~0.51 AUC pick at a random smax. Using that
+#   noise smax to filter behavior smin silently drops valid behavior windows.
+#   Causal4 doesn't have this problem because its behavior decoder was only
+#   fit on AS sites upstream — for symmetry we threshold there too, but it's
+#   near-redundant.
+#
+#   The production causal6 only enforces `smin ≥ 50`; this gated restriction
+#   is stricter for AS sites and identical to production for non-AS sites.
+#   It mirrors causal4's theoretical prior (behavior follows acoustic) only
+#   where that prior is meaningful.
 
 # %%
 EPOCH_TMIN = -0.4
@@ -664,15 +671,32 @@ def _word_end_behav_caps_df() -> pl.DataFrame:
     })
 
 
-def _make_post_acoustic_behavior_restrictor(
-    pipe: str, extra_smax_cap: int | None = None,
-):
-    """smin > `pipe`'s acoustic peak smax (per-site), smax ≤ word_end + 20,
-    optionally smax ≤ `extra_smax_cap`.
+_ACOUSTIC_PEAK_MIN_AUC = 0.6  # below this, treat the acoustic peak as noise
 
-    Looks up `pipe`'s acoustic peaks from the in-progress `PEAKS` dict; this
-    is safe because the build loop processes acoustic before behavior_ctrl.
-    Sites without an acoustic peak for `pipe` are dropped (inner join).
+
+def _make_post_acoustic_behavior_restrictor(
+    pipe: str,
+    extra_smax_cap: int | None = None,
+    acoustic_min_auc: float = _ACOUSTIC_PEAK_MIN_AUC,
+    fallback_smin: int | None = None,
+):
+    """Per-site behavior peak-eligibility, gated by the site's acoustic peak quality.
+
+    For each (subject, electrode, phoneme_pair):
+      - acoustic peak AUC ≥ `acoustic_min_auc`  → eligible smin > acoustic_smax
+      - else and `fallback_smin` is given       → eligible smin ≥ fallback_smin
+      - else                                    → site dropped
+
+    Smax always capped per word_end at word_end+0.2s; `extra_smax_cap` adds a
+    global ceiling on top.
+
+    The threshold gate exists because causal6 runs acoustic decoding on *every*
+    SR electrode, so the per-site acoustic argmax for non-acoustically-selective
+    sites is just a noise pick (~0.51 AUC at some random smax). Using that
+    noise smax to filter behavior smin would silently exclude valid behavior
+    windows. Causal4's behavior decoder was only fit on acoustically-selected
+    sites in production, so this issue didn't arise there — but symmetric
+    thresholding makes the per-pipeline behavior here apples-to-apples.
     """
     def _restrict(searchlight: pl.DataFrame) -> pl.DataFrame:
         if searchlight.is_empty():
@@ -681,22 +705,47 @@ def _make_post_acoustic_behavior_restrictor(
         if ac_peaks is None or ac_peaks.is_empty():
             # Acoustic peaks not yet built — fall through (build-loop ordering bug).
             return searchlight.head(0)
-        ac_smax = (
-            ac_peaks.select(["subject", "electrode_idx", "phoneme_pair", "smax"])
+
+        real_ac = ac_peaks.filter(pl.col("roc_auc") >= acoustic_min_auc)
+        real_smax = (
+            real_ac.select(["subject", "electrode_idx", "phoneme_pair", "smax"])
             .rename({"smax": "_smax_phon"})
         )
-        out = (
+        caps = _word_end_behav_caps_df()
+
+        with_real = (
             searchlight
-            .join(ac_smax, on=["subject", "electrode_idx", "phoneme_pair"], how="inner")
-            .join(_word_end_behav_caps_df(), on="word_end", how="left")
+            .join(real_smax, on=["subject", "electrode_idx", "phoneme_pair"], how="inner")
+            .join(caps, on="word_end", how="left")
             .filter(
                 (pl.col("smin") > pl.col("_smax_phon"))
                 & (pl.col("smax") <= pl.col("_smax_cap"))
             )
+            .drop(["_smax_phon", "_smax_cap"])
         )
+
+        if fallback_smin is None:
+            out = with_real
+        else:
+            without_real = (
+                searchlight
+                .join(
+                    real_smax.select(["subject", "electrode_idx", "phoneme_pair"]),
+                    on=["subject", "electrode_idx", "phoneme_pair"],
+                    how="anti",
+                )
+                .join(caps, on="word_end", how="left")
+                .filter(
+                    (pl.col("smin") >= fallback_smin)
+                    & (pl.col("smax") <= pl.col("_smax_cap"))
+                )
+                .drop("_smax_cap")
+            )
+            out = pl.concat([with_real, without_real])
+
         if extra_smax_cap is not None:
             out = out.filter(pl.col("smax") <= extra_smax_cap)
-        return out.drop(["_smax_phon", "_smax_cap"])
+        return out
     return _restrict
 
 
@@ -707,12 +756,22 @@ PEAK_WINDOW_FILTERS: dict[tuple[str, str], callable] = {
     ("acoustic", "causal4"): _restrict_acoustic_causal4,
     ("acoustic", "causal6"): _restrict_acoustic_causal6,
     ("acoustic", "causal6_new_sr"): _restrict_acoustic_causal6,
+    # causal4: no fallback — matches its production "drop sites without an AS
+    # acoustic peak" behavior. In practice the threshold is near-redundant for
+    # causal4 since behavior_decoding was already only fit on AS sites upstream.
     ("behavior_ctrl", "causal4"):
         _make_post_acoustic_behavior_restrictor("causal4"),
+    # causal6: fall back to production smin floor (_C6_AC_SMIN = 50) for sites
+    # whose acoustic peak is noise — so we don't silently drop their valid
+    # behavior windows just because the acoustic argmax landed at a random smax.
     ("behavior_ctrl", "causal6"):
-        _make_post_acoustic_behavior_restrictor("causal6", extra_smax_cap=_C6_BEHAV_SMAX),
+        _make_post_acoustic_behavior_restrictor(
+            "causal6", extra_smax_cap=_C6_BEHAV_SMAX, fallback_smin=_C6_AC_SMIN,
+        ),
     ("behavior_ctrl", "causal6_new_sr"):
-        _make_post_acoustic_behavior_restrictor("causal6_new_sr", extra_smax_cap=_C6_BEHAV_SMAX),
+        _make_post_acoustic_behavior_restrictor(
+            "causal6_new_sr", extra_smax_cap=_C6_BEHAV_SMAX, fallback_smin=_C6_AC_SMIN,
+        ),
 }
 
 print("Acoustic peak-search restrictions:")
@@ -720,11 +779,12 @@ print(f"  causal4: smin ≥ {_C4_AC_SMIN_MIN}, "
       f"smax ≤ {_PP_TO_MAX_WORD_END_SAMPLE} (per phoneme_pair)")
 print(f"  causal6: smin ≥ {_C6_AC_SMIN}, smax ≤ {_C6_AC_SMAX}")
 print("Behavior peak-search restrictions:")
-print(f"  causal4: smin > causal4_acoustic_peak.smax (per-site), "
-      f"smax ≤ {_WORD_END_TO_BEHAV_SMAX} (per word_end)")
-print(f"  causal6: smin > causal6_acoustic_peak.smax (per-site), "
-      f"smax ≤ {_WORD_END_TO_BEHAV_SMAX} (per word_end), smax ≤ {_C6_BEHAV_SMAX}  "
-      f"[overrides production smin ≥ {_C6_AC_SMIN}; see markdown above]")
+print(f"  acoustic_peak quality gate: AUC ≥ {_ACOUSTIC_PEAK_MIN_AUC} → per-site "
+      f"smin > acoustic_smax; below → fallback smin floor (if any) or drop")
+print(f"  causal4: real-AS → smin > acoustic_smax, sub-threshold → DROP; "
+      f"smax ≤ {_WORD_END_TO_BEHAV_SMAX}")
+print(f"  causal6: real-AS → smin > acoustic_smax, sub-threshold → smin ≥ {_C6_AC_SMIN}; "
+      f"smax ≤ {_WORD_END_TO_BEHAV_SMAX}, smax ≤ {_C6_BEHAV_SMAX}")
 
 # %% [markdown]
 # ### Build all tables
@@ -772,6 +832,25 @@ for kind in SEARCHLIGHTS:
         n_total = df.height
         restr = "" if wf is None else f" (peak-eligible: {n_eligible})"
         print(f"  {p}: {n_total} searchlight rows{restr}, {PEAKS[kind][p].height} sites")
+
+# %%
+# Acoustic-peak quality buckets — gates which sites use per-site vs fallback
+# behavior smin. AUC ≥ _ACOUSTIC_PEAK_MIN_AUC = real acoustic peak; below = noise.
+print(f"\nAcoustic peak quality (gate for behavior_ctrl smin restriction, "
+      f"threshold AUC = {_ACOUSTIC_PEAK_MIN_AUC}):")
+for p, ac_peaks in PEAKS.get("acoustic", {}).items():
+    if ac_peaks.is_empty():
+        continue
+    n_total = ac_peaks.height
+    n_real = ac_peaks.filter(pl.col("roc_auc") >= _ACOUSTIC_PEAK_MIN_AUC).height
+    n_noise = n_total - n_real
+    med = float(ac_peaks.select(pl.col("roc_auc").median()).item())
+    p55 = ac_peaks.filter(pl.col("roc_auc") >= 0.55).height
+    p65 = ac_peaks.filter(pl.col("roc_auc") >= 0.65).height
+    p75 = ac_peaks.filter(pl.col("roc_auc") >= 0.75).height
+    print(f"  {p}: {n_real}/{n_total} real-AS ({n_real/n_total:.1%}), "
+          f"{n_noise} sub-threshold (use fallback or drop) | median AUC={med:.3f} | "
+          f"≥0.55={p55}, ≥0.65={p65}, ≥0.75={p75}")
 
 # %% [markdown]
 # ## 2. Coverage summary
