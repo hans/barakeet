@@ -1167,6 +1167,34 @@ if not (_ac_path.exists() and _beh_path.exists()):
 _ac_pd = pl.read_parquet(_ac_path).to_pandas()
 _beh_pd = pl.read_parquet(_beh_path).to_pandas()
 
+_beh_full_path = ROOT / "brain_plot_behav_full_tstats.parquet"
+_beh_full_pd = pl.read_parquet(_beh_full_path).to_pandas() if _beh_full_path.exists() else None
+
+
+def _sp_behav_hga_auc(subject, electrode_idx, phoneme_pair, word_end):
+    mask = (
+        (_beh_pd["subject"] == subject)
+        & (_beh_pd["electrode_idx"] == electrode_idx)
+        & (_beh_pd["phoneme_pair"] == phoneme_pair)
+        & (_beh_pd["word_end"] == word_end)
+    )
+    rows = _beh_pd[mask]
+    return float(rows["peak_auc"].iloc[0]) if len(rows) > 0 else None
+
+
+def _sp_behav_full_diff(subject, electrode_idx, phoneme_pair, word_end):
+    if _beh_full_pd is None:
+        return None
+    mask = (
+        (_beh_full_pd["subject"] == subject)
+        & (_beh_full_pd["electrode_idx"] == electrode_idx)
+        & (_beh_full_pd["phoneme_pair"] == phoneme_pair)
+        & (_beh_full_pd["word_end"] == word_end)
+    )
+    rows = _beh_full_pd[mask]
+    return float(rows["peak_diff"].iloc[0]) if len(rows) > 0 else None
+
+
 acoustic_passes = _ac_pd[_ac_pd.peak_auc >= acoustic_auc_threshold].copy()
 behav_passes    = _beh_pd[_beh_pd.peak_auc >= behav_auc_threshold].copy()
 
@@ -1254,6 +1282,9 @@ def _provisional_star_plot(
     epoch_tmin=EPOCH_TMIN,
     epoch_sfreq=EPOCH_SFREQ,
     figsize=(6.5, 7.5),
+    acoustic_peak_auc=None,
+    behav_full_peak_diff=None,
+    behav_hga_peak_auc=None,
 ):
     """Three-panel provisional HGA star plot (no prepare_neurometrics required).
 
@@ -1305,9 +1336,17 @@ def _provisional_star_plot(
         ax_top.axvspan(*t_phon, color="#4dac26", alpha=0.14, label="acoustic window")
     ax_top.axhline(0, color="k", lw=0.5, ls=":")
     ax_top.set_ylabel("HGA (z)")
-    ax_top.set_title(
-        f"{subject}  e{electrode_idx}  {phoneme_pair} — unambiguous", fontsize=9
-    )
+    _metric_parts = []
+    if acoustic_peak_auc is not None:
+        _metric_parts.append(f"ac={acoustic_peak_auc:.3f}")
+    if behav_full_peak_diff is not None:
+        _metric_parts.append(f"beh_diff={behav_full_peak_diff:.3f}")
+    if behav_hga_peak_auc is not None:
+        _metric_parts.append(f"beh_hga={behav_hga_peak_auc:.3f}")
+    _top_title = f"{subject}  e{electrode_idx}  {phoneme_pair} — unambiguous"
+    if _metric_parts:
+        _top_title += "\n" + "  |  ".join(_metric_parts)
+    ax_top.set_title(_top_title, fontsize=9)
     ax_top.legend(fontsize=7, loc="upper left", framealpha=0.7)
 
     # ── Middle: controlled ambiguous (within-completion) ──────────────
@@ -1402,6 +1441,12 @@ else:
                     behav_smax=int(_row["peak_smax_behav"]),
                     textgrid_dir=_TEXTGRID_DIR,
                     ambig_steps=ambig_steps,
+                    acoustic_peak_auc=float(_row["peak_auc_phon"]),
+                    behav_full_peak_diff=_sp_behav_full_diff(
+                        _row["subject"], int(_row["electrode_idx"]),
+                        _row["phoneme_pair_behav"], _row["word_end"],
+                    ),
+                    behav_hga_peak_auc=float(_row["peak_auc_behav"]),
                 )
                 _pdf.savefig(_fig)
                 plt.close(_fig)
@@ -1439,6 +1484,11 @@ with PdfPages(_bonly_out) as _pdf:
                 ambig_steps=ambig_steps,
                 behav_smin=int(_row["peak_smin_behav"]),
                 behav_smax=int(_row["peak_smax_behav"]),
+                behav_full_peak_diff=_sp_behav_full_diff(
+                    _row["subject"], int(_row["electrode_idx"]),
+                    _row["phoneme_pair_behav"], _row["word_end"],
+                ),
+                behav_hga_peak_auc=float(_row["peak_auc_behav"]),
             )
             _pdf.savefig(_fig)
             plt.close(_fig)
@@ -1491,6 +1541,13 @@ with PdfPages(_aonly_out) as _pdf:
                     ambig_steps=ambig_steps,
                     phon_smin=int(_row["peak_smin_phon"]),
                     phon_smax=int(_row["peak_smax_phon"]),
+                    acoustic_peak_auc=float(_row["peak_auc_phon"]),
+                    behav_full_peak_diff=_sp_behav_full_diff(
+                        _subj, int(_row["electrode_idx"]), _pp, _we,
+                    ),
+                    behav_hga_peak_auc=_sp_behav_hga_auc(
+                        _subj, int(_row["electrode_idx"]), _pp, _we,
+                    ),
                 )
                 _pdf.savefig(_fig)
                 plt.close(_fig)
