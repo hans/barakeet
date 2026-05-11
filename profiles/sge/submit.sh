@@ -13,20 +13,28 @@
 # any -g >0 → skull-gpu, otherwise → skull-batch.q. An explicit -q in the
 # caller's args overrides this.
 #
-# Snakemake appends the jobscript path as the final positional argument;
-# submit_job already treats trailing positionals as the command to run.
+# We also absolutize relative -o paths, since SGE resolves them against
+# $HOME rather than the submit cwd.
 
 set -euo pipefail
 
+new_args=()
 gpu_count=0
 has_queue=0
 prev=""
 for arg in "$@"; do
+    if [ "$prev" = "-o" ]; then
+        case "$arg" in
+            /*) ;;
+            *) arg="$PWD/$arg" ;;
+        esac
+        mkdir -p "$(dirname "$arg")" 2>/dev/null || true
+    fi
     case "$prev" in
         -g) gpu_count="$arg" ;;
         -q) has_queue=1 ;;
-        -o) mkdir -p "$(dirname "$arg")" 2>/dev/null || true ;;
     esac
+    new_args+=("$arg")
     prev="$arg"
 done
 
@@ -39,7 +47,7 @@ if [ "$has_queue" -eq 0 ]; then
     fi
 fi
 
-output=$(submit_job "${extra_args[@]}" "$@" 2>&1)
+output=$(submit_job "${extra_args[@]}" "${new_args[@]}" 2>&1)
 echo "$output" >&2
 
 jobid=$(echo "$output" | grep -oE 'Your job [0-9]+' | awk '{print $3}' | tail -n 1)
