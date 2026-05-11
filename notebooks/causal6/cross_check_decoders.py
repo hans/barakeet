@@ -1,14 +1,16 @@
+# -*- coding: utf-8 -*-
 # ---
 # jupyter:
 #   jupytext:
+#     custom_cell_magics: kql
 #     formats: ipynb,py:percent
 #     text_representation:
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.11.2
 #   kernelspec:
-#     display_name: Python 3
+#     display_name: barakeet
 #     language: python
 #     name: python3
 # ---
@@ -61,14 +63,14 @@ from src.stimuli import OFFSET_DICT, WORD_END_TO_PHONEME_PAIR
 from src.viz_paper import pl_roc_auc
 
 # %% tags=["parameters"]
-causal4_root = "outputs/causal4"
-causal6_root = "outputs/causal6"
+causal4_root = "~/u/projects/barakeet/outputs/causal4"
+causal6_root = "~/u/projects/barakeet/outputs/causal6"
 # `causal6_new_sr` = this branch's run with the refined SR screen. Both causal6
 # roots default to the same path so the parameters cell stays compact — point
 # them at the two relevant local dirs at run time (e.g.
 # ~/freesurfer_subjects/barakeet/causal6_pipeline and
 # ~/freesurfer_subjects/barakeet/causal6_speech_responsive_pipeline).
-causal6_new_sr_root = "outputs/causal6"
+causal6_new_sr_root = "~/u/projects/barakeet-speech-responsive/outputs/causal6"
 
 top_n_disagreements = 20
 behav_peak_post_offset_s = 0.2
@@ -78,7 +80,7 @@ epoch_sfreq = 100
 # Headline-decoder reference for the speech-responsive coverage check below
 # (section 0). Points at causal4's prepare_neurometrics outputs which apply
 # the paper's phon/behav peak thresholds.
-neurometrics_ref_root = "outputs/causal4/prepare_neurometrics/p65_b5_a3"
+neurometrics_ref_root = "~/u/projects/barakeet/outputs/causal4/prepare_neurometrics/p65_b5_a3"
 
 # Pipeline pairs to plot. We treat causal6 as the trusted reference (better CV
 # scheme + tuned regularization → lower-variance per-fold estimates) and use it
@@ -91,9 +93,9 @@ PIPELINE_PAIRS = [
 
 # %%
 ROOTS = {
-    "causal4": Path(causal4_root),
-    "causal6": Path(causal6_root),
-    "causal6_new_sr": Path(causal6_new_sr_root),
+    "causal4": Path(causal4_root).expanduser(),
+    "causal6": Path(causal6_root).expanduser(),
+    "causal6_new_sr": Path(causal6_new_sr_root).expanduser(),
 }
 
 if ROOTS["causal6"] == ROOTS["causal6_new_sr"]:
@@ -190,7 +192,7 @@ SR_ROOTS = {
     # `electrodes=outputs/causal5/find_speech_responsive/...`). We use the
     # `causal6` label so coverage rows below align with the decoder-pipeline
     # labels and don't duplicate the same file under two keys.
-    "causal6": Path("outputs/causal5/find_speech_responsive"),
+    "causal6": ROOTS["causal6"].parent / "causal5" / "find_speech_responsive",
     "causal6_new_sr": ROOTS["causal6_new_sr"] / "find_speech_responsive",
 }
 
@@ -297,8 +299,8 @@ def _load_paper_sites(path: Path) -> pl.DataFrame:
     ).unique()
 
 
-phon_sites = _load_paper_sites(Path(neurometrics_ref_root) / "phon_peaks_df.parquet")
-behav_sites = _load_paper_sites(Path(neurometrics_ref_root) / "behav_peaks_df.parquet")
+phon_sites = _load_paper_sites(Path(neurometrics_ref_root).expanduser() / "phon_peaks_df.parquet")
+behav_sites = _load_paper_sites(Path(neurometrics_ref_root).expanduser() / "behav_peaks_df.parquet")
 
 
 def _coverage(headline: pl.DataFrame, screen: pl.DataFrame, label: str) -> tuple[int, int]:
