@@ -384,6 +384,12 @@ def load_acoustic_searchlight_causal4(root: Path, subjects: list[str]) -> pl.Dat
         df = pl.read_parquet(p)
         if df.is_empty():
             continue
+        # all_outcomes.parquet contains both `categorical_acoustic_cue` and
+        # `subject_specific_acoustics` rows; canonical usage filters to the
+        # categorical measure (causal5/acoustic_decoding_peaks.py:106). Without
+        # this filter, pl_roc_auc pools classifier and regressor outputs into
+        # a single AUC per group, producing meaningless values.
+        df = df.filter(pl.col("measure") == "categorical_acoustic_cue")
         # binary target encoding (causal5 uses `== 1`); match that
         df = df.with_columns((pl.col("decoder_target") == 1).cast(pl.Int8).alias("decoder_target"))
         auc = pl_roc_auc(
