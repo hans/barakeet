@@ -27,11 +27,13 @@ cluster-generic-status-cmd: profiles/sge/status.sh
 cluster-generic-cancel-cmd: qdel
 
 # Defaults applied to every rule. Override per-rule via `resources:` blocks.
-# Rules that already set `gpu = 1` (the causal6 GPU rules) override this.
+# Rules that already set `gpu = 1` (the causal6 GPU rules) override `gpu`,
+# and the `queue` expression then routes them to skull-gpu; CPU-only rules
+# stay on skull-batch.q.
 default-resources:
   - mem_gb=10
-  - queue=skull-batch.q
   - gpu=0
+  - queue=("skull-gpu" if gpu > 0 else "skull-batch.q")
 
 jobs: 20
 latency-wait: 60
