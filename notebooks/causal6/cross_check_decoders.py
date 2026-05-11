@@ -583,10 +583,18 @@ PEAK_CRITERION = {
 #   `smax ≤ word_end_offset_sample + 20` (per word_end; window must END within
 #   200ms post word offset).
 #
-# **Behavior — causal6** (`notebooks/causal6/view_provisional_results.py`):
-#   `smin ≥ 50` (= `_AC_PEAK_SEARCH_SMIN`, shared with acoustic) AND
+# **Behavior — causal6** (this notebook, NOT the production pipeline):
+#   `smin > causal6_acoustic_peak.smax` (per-site) AND
 #   `smax ≤ word_end_offset_sample + 20` (per word_end) AND
 #   `smax ≤ 290` (`_PEAK_SEARCH_SMAX`).
+#
+#   The production causal6 only enforces `smin ≥ 50`; we apply the stricter
+#   per-site post-acoustic constraint here so the cross-pipeline fixed-window
+#   scatter is apples-to-apples with causal4. Without it, causal6's behavior
+#   argmax can land inside the acoustic window on sites where causal4 must
+#   search post-acoustic, which is a window-eligibility difference masquerading
+#   as a decoder-quality difference (plus winner's-curse inflation on the
+#   wider grid).
 
 # %%
 EPOCH_TMIN = -0.4
@@ -615,8 +623,8 @@ _WORD_END_TO_BEHAV_SMAX: dict[str, int] = {
     for word_end, offset_s in OFFSET_DICT.items()
 }
 
-# causal6 behavior: hardcoded in view_provisional_results.py (not in config).
-_C6_BEHAV_SMIN = _C6_AC_SMIN  # `_filter_window_expr` uses _AC_PEAK_SEARCH_SMIN
+# causal6 behavior: production uses _C6_AC_SMIN; we override to a stricter
+# per-site post-acoustic prior to mirror causal4 (see markdown above).
 _C6_BEHAV_SMAX = 290           # _PEAK_SEARCH_SMAX
 
 
@@ -654,50 +662,40 @@ def _word_end_behav_caps_df() -> pl.DataFrame:
     })
 
 
-def _restrict_behavior_ctrl_causal4(searchlight: pl.DataFrame) -> pl.DataFrame:
-    """smin > causal4 acoustic peak smax (per-site) AND smax ≤ word_end + 20.
+def _make_post_acoustic_behavior_restrictor(
+    pipe: str, extra_smax_cap: int | None = None,
+):
+    """smin > `pipe`'s acoustic peak smax (per-site), smax ≤ word_end + 20,
+    optionally smax ≤ `extra_smax_cap`.
 
-    Looks up the causal4 acoustic peaks from the in-progress `PEAKS` dict; this
+    Looks up `pipe`'s acoustic peaks from the in-progress `PEAKS` dict; this
     is safe because the build loop processes acoustic before behavior_ctrl.
-    Sites without a causal4 acoustic peak are dropped (inner join), matching
-    causal4's production behavior.
+    Sites without an acoustic peak for `pipe` are dropped (inner join).
     """
-    if searchlight.is_empty():
-        return searchlight
-    ac_peaks = PEAKS.get("acoustic", {}).get("causal4")
-    if ac_peaks is None or ac_peaks.is_empty():
-        # Acoustic peaks not yet built — fall through (build-loop ordering bug).
-        return searchlight.head(0)
-    ac_smax = (
-        ac_peaks.select(["subject", "electrode_idx", "phoneme_pair", "smax"])
-        .rename({"smax": "_smax_phon"})
-    )
-    return (
-        searchlight
-        .join(ac_smax, on=["subject", "electrode_idx", "phoneme_pair"], how="inner")
-        .join(_word_end_behav_caps_df(), on="word_end", how="left")
-        .filter(
-            (pl.col("smin") > pl.col("_smax_phon"))
-            & (pl.col("smax") <= pl.col("_smax_cap"))
+    def _restrict(searchlight: pl.DataFrame) -> pl.DataFrame:
+        if searchlight.is_empty():
+            return searchlight
+        ac_peaks = PEAKS.get("acoustic", {}).get(pipe)
+        if ac_peaks is None or ac_peaks.is_empty():
+            # Acoustic peaks not yet built — fall through (build-loop ordering bug).
+            return searchlight.head(0)
+        ac_smax = (
+            ac_peaks.select(["subject", "electrode_idx", "phoneme_pair", "smax"])
+            .rename({"smax": "_smax_phon"})
         )
-        .drop(["_smax_phon", "_smax_cap"])
-    )
-
-
-def _restrict_behavior_ctrl_causal6(searchlight: pl.DataFrame) -> pl.DataFrame:
-    """smin ≥ 50 AND smax ≤ word_end + 0.2s AND smax ≤ 290."""
-    if searchlight.is_empty():
-        return searchlight
-    return (
-        searchlight
-        .join(_word_end_behav_caps_df(), on="word_end", how="left")
-        .filter(
-            (pl.col("smin") >= _C6_BEHAV_SMIN)
-            & (pl.col("smax") <= pl.col("_smax_cap"))
-            & (pl.col("smax") <= _C6_BEHAV_SMAX)
+        out = (
+            searchlight
+            .join(ac_smax, on=["subject", "electrode_idx", "phoneme_pair"], how="inner")
+            .join(_word_end_behav_caps_df(), on="word_end", how="left")
+            .filter(
+                (pl.col("smin") > pl.col("_smax_phon"))
+                & (pl.col("smax") <= pl.col("_smax_cap"))
+            )
         )
-        .drop("_smax_cap")
-    )
+        if extra_smax_cap is not None:
+            out = out.filter(pl.col("smax") <= extra_smax_cap)
+        return out.drop(["_smax_phon", "_smax_cap"])
+    return _restrict
 
 
 # (kind, pipeline) → callable that filters the searchlight before argmax.
@@ -707,9 +705,12 @@ PEAK_WINDOW_FILTERS: dict[tuple[str, str], callable] = {
     ("acoustic", "causal4"): _restrict_acoustic_causal4,
     ("acoustic", "causal6"): _restrict_acoustic_causal6,
     ("acoustic", "causal6_new_sr"): _restrict_acoustic_causal6,
-    ("behavior_ctrl", "causal4"): _restrict_behavior_ctrl_causal4,
-    ("behavior_ctrl", "causal6"): _restrict_behavior_ctrl_causal6,
-    ("behavior_ctrl", "causal6_new_sr"): _restrict_behavior_ctrl_causal6,
+    ("behavior_ctrl", "causal4"):
+        _make_post_acoustic_behavior_restrictor("causal4"),
+    ("behavior_ctrl", "causal6"):
+        _make_post_acoustic_behavior_restrictor("causal6", extra_smax_cap=_C6_BEHAV_SMAX),
+    ("behavior_ctrl", "causal6_new_sr"):
+        _make_post_acoustic_behavior_restrictor("causal6_new_sr", extra_smax_cap=_C6_BEHAV_SMAX),
 }
 
 print("Acoustic peak-search restrictions:")
@@ -719,8 +720,9 @@ print(f"  causal6: smin ≥ {_C6_AC_SMIN}, smax ≤ {_C6_AC_SMAX}")
 print("Behavior peak-search restrictions:")
 print(f"  causal4: smin > causal4_acoustic_peak.smax (per-site), "
       f"smax ≤ {_WORD_END_TO_BEHAV_SMAX} (per word_end)")
-print(f"  causal6: smin ≥ {_C6_BEHAV_SMIN}, "
-      f"smax ≤ {_WORD_END_TO_BEHAV_SMAX} (per word_end), smax ≤ {_C6_BEHAV_SMAX}")
+print(f"  causal6: smin > causal6_acoustic_peak.smax (per-site), "
+      f"smax ≤ {_WORD_END_TO_BEHAV_SMAX} (per word_end), smax ≤ {_C6_BEHAV_SMAX}  "
+      f"[overrides production smin ≥ {_C6_AC_SMIN}; see markdown above]")
 
 # %% [markdown]
 # ### Build all tables
