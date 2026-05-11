@@ -30,12 +30,12 @@ cluster-generic-cancel-cmd: qdel
 # based on the -g count, since snakemake 9.x default-resources does not
 # evaluate cross-resource Python expressions.
 default-resources:
-  - mem_gb=10
+  - mem_gb=32
   - gpu=0
 
 jobs: 20
 latency-wait: 60
-restart-times: 1
+restart-times: 0
 keep-going: True
 rerun-incomplete: True
 printshellcmds: True
