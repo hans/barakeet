@@ -1226,7 +1226,8 @@ rule ganong_decoding_null:
         escalation_log  = "outputs/causal6/ganong_decoding_null/{subject}/escalation_log.parquet",
 
     resources:
-        gpu = 1
+        gpu = 1,
+        mem_gb = 100
 
     run:
         outdir = Path(output.notebook).parent
@@ -1282,7 +1283,8 @@ rule ganong_decoding_hga_only_null:
         escalation_log  = "outputs/causal6/ganong_decoding_hga_only_null/{subject}/escalation_log.parquet",
 
     resources:
-        gpu = 1
+        gpu = 1,
+        mem_gb = 100
 
     run:
         outdir = Path(output.notebook).parent
