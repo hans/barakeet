@@ -117,7 +117,7 @@ causal6:
   # max-stat-corrected p-values).
   n_permutations_stage1: 1000
   n_permutations_stage2: 9000
-  escalate_corrected_p_max: 0.20
+  escalate_corrected_p_max: 0.10
   permutation_seed: 0          # base RNG seed; stage 1 uses [seed, seed+K1),
                                # stage 2 uses [seed+K1, seed+K1+K2).
   permutation_chunk_size: 10   # permutations fit per GPU call
