@@ -28,7 +28,7 @@ from dataclasses import dataclass
 
 import polars as pl
 
-from src.models.significance import fold_tstat_aggregate
+from src.models.significance import fold_tstat_aggregate, null_standardized_peak_test, tfce_1d_per_site
 
 
 @dataclass(frozen=True)
@@ -701,3 +701,75 @@ def preagg_ganong_with_control_null(
         pair_base_keys=["subject", "phoneme_pair"],
         std_floor=std_floor,
     )
+
+
+# ---------------------------------------------------------------------------
+# TFCE-enhanced peak test
+# ---------------------------------------------------------------------------
+
+
+def tfce_enhanced_peak_test(
+    real_agg: pl.DataFrame,
+    null_agg: pl.DataFrame,
+    *,
+    site_keys: list[str],
+    flavor: FlavorSpec,
+    perm_key: str = "permutation_idx",
+    window_keys: list[str] | None = None,
+) -> pl.DataFrame:
+    """Apply optional TFCE along windows then run null_standardized_peak_test.
+
+    Mirrors the per-flavor logic in ``stage1_gate``
+    (``src.models.causal6_adaptive_null``) for use in provisional-significance
+    notebook sections.  Pass a ``FlavorSpec`` whose ``apply_tfce`` and
+    ``tfce_threshold`` fields decide whether TFCE runs and at what floor.
+
+    Args:
+        real_agg: per-(site, window) statistics from ``aggregate_<decoder>``.
+        null_agg: per-(site, window, perm) statistics from the same aggregator.
+        site_keys: site-identifier columns (no window or perm cols).
+        flavor: one entry from a ``FLAVORS_*`` list — selects the stat column
+            and TFCE behaviour.
+        perm_key: permutation-index column in ``null_agg``.
+        window_keys: window-identifier columns; defaults to ``["smin", "smax"]``.
+
+    Returns:
+        Peak summary DataFrame from ``null_standardized_peak_test``: one row
+        per site with ``site_keys + [peak_smin, peak_smax, real_statistic,
+        p_value, n_permutations]``.
+    """
+    wk = window_keys or ["smin", "smax"]
+    stat_col = flavor.stat_col
+
+    if flavor.apply_tfce:
+        real_in = real_agg.select(site_keys + wk + [stat_col]).rename(
+            {stat_col: "statistic"}
+        )
+        null_in = null_agg.select(site_keys + wk + [perm_key, stat_col]).rename(
+            {stat_col: "statistic"}
+        )
+        real_for_test = tfce_1d_per_site(
+            real_in, site_keys=site_keys, window_keys=wk,
+            stat_col="statistic", threshold=flavor.tfce_threshold,
+        )
+        null_for_test = tfce_1d_per_site(
+            null_in, site_keys=site_keys, window_keys=wk,
+            perm_key=perm_key, stat_col="statistic",
+            threshold=flavor.tfce_threshold,
+        )
+        test_stat_col = "statistic"
+    else:
+        real_for_test = real_agg.select(site_keys + wk + [stat_col]).with_columns(
+            pl.col(stat_col).cast(pl.Float64)
+        )
+        null_for_test = null_agg.select(
+            site_keys + wk + [perm_key, stat_col]
+        ).with_columns(pl.col(stat_col).cast(pl.Float64))
+        test_stat_col = stat_col
+
+    peaks, _ = null_standardized_peak_test(
+        real_for_test, null_for_test,
+        site_keys=site_keys, window_keys=wk,
+        perm_key=perm_key, stat_col=test_stat_col,
+    )
+    return peaks

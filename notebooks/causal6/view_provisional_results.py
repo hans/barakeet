@@ -1858,3 +1858,181 @@ _plot_subject_grid(
     x_chance=0.0,
     title_prefix="behav-with-control",
 )
+
+# %% [markdown]
+# ----
+# ## 10  Behavior — TFCE-enhanced significance  *(expensive — run last)*
+#
+# Repeats the behavior aggregation from section 9 but applies Threshold-Free
+# Cluster Enhancement (TFCE) along the window axis before the max-stat
+# permutation test.  TFCE rewards statistics that span multiple adjacent
+# windows; isolated single-window spikes receive less credit.
+#
+# **Acoustic is excluded** — the acoustic search window is narrow enough that
+# cluster extent is not informative (see ``FLAVORS_ACOUSTIC`` in
+# ``causal6_aggregates.py``).
+#
+# Flavors used:
+#  - behavior-with-control: ``fold_mean``, TFCE threshold=0.0
+#    (diff is centered at 0; matches ``FLAVORS_BEHAVIOR_WITH_CONTROL[2]``)
+#  - behavior HGA-only: ``fold_mean``, TFCE threshold=0.5
+#    (raw AUC; windows below chance excluded; matches ``FLAVORS_BEHAVIOR_HGA_ONLY[2]``)
+#
+# **Requires null permutations** in the respective ``*_null/`` directories.
+
+# %%
+from src.models.causal6_aggregates import (
+    SITE_KEYS_BEHAVIOR_HGA_ONLY,
+    FLAVORS_BEHAVIOR_HGA_ONLY,
+    FLAVORS_BEHAVIOR_WITH_CONTROL,
+    FlavorSpec,
+    aggregate_behavior_hga_only,
+    tfce_enhanced_peak_test,
+)
+
+_TFCE_FLAVOR_BEHAV_CTRL = next(
+    f for f in FLAVORS_BEHAVIOR_WITH_CONTROL if f.apply_tfce and f.stat_col == "fold_mean"
+)
+_TFCE_FLAVOR_BEHAV_HGA = next(
+    f for f in FLAVORS_BEHAVIOR_HGA_ONLY if f.apply_tfce and f.stat_col == "fold_mean"
+)
+# Acoustic fold_mean is raw AUC (chance=0.5), same threshold as HGA-only.
+# Not in FLAVORS_ACOUSTIC because the production pipeline omits TFCE there;
+# defined here for provisional validation that TFCE recovers known true positives.
+_TFCE_FLAVOR_ACOUSTIC = FlavorSpec("fold_mean", apply_tfce=True, tfce_threshold=0.5)
+
+# %%
+# ---------- Acoustic + TFCE ----------
+ac_tfce_frames: dict[str, pl.DataFrame] = {}
+
+for null_path in sorted(ac_null_dir.glob("*/null_scores.parquet")):
+    subject = null_path.parent.name
+    scores_path = ac_score_dir / subject / "scores.parquet"
+    if not scores_path.exists():
+        print(f"[acoustic TFCE] {subject}: null exists but no real scores — skipping.")
+        continue
+
+    print(f"[acoustic TFCE] {subject}: aggregating …", end=" ", flush=True)
+
+    real_scores = pl.read_parquet(scores_path)
+    null_scores = pl.read_parquet(null_path)
+
+    real_agg, null_agg = aggregate_acoustic(
+        real_scores, null_scores,
+        target=_AC_TARGET,
+        peak_search_smin=_AC_PEAK_SEARCH_SMIN,
+        peak_search_smax=_AC_PEAK_SEARCH_SMAX,
+    )
+    del real_scores, null_scores
+    gc.collect()
+
+    peaks = tfce_enhanced_peak_test(
+        real_agg, null_agg,
+        site_keys=SITE_KEYS_ACOUSTIC,
+        flavor=_TFCE_FLAVOR_ACOUSTIC,
+    )
+    del null_agg
+    gc.collect()
+
+    ac_tfce_frames[subject] = peaks
+    _report_peaks(subject, peaks, stat_label="TFCE fold-mean AUC")
+
+_plot_subject_grid(
+    ac_tfce_frames,
+    x_label="peak TFCE(fold_mean AUC)",
+    x_chance=0.0,
+    title_prefix="acoustic TFCE",
+)
+
+# %%
+# ---------- Behavior with-control + TFCE ----------
+beh_full_tfce_frames: dict[str, pl.DataFrame] = {}
+
+for null_path in sorted(behav_full_null_dir.glob("*/null_scores.parquet")):
+    subject = null_path.parent.name
+    scores_path = behav_full_score_dir / subject / "scores.parquet"
+    if not scores_path.exists():
+        print(f"[behav-ctrl TFCE] {subject}: null exists but no real scores — skipping.")
+        continue
+
+    print(f"[behav-ctrl TFCE] {subject}: aggregating …", end=" ", flush=True)
+
+    real_scores = pl.read_parquet(scores_path)
+    null_scores = pl.read_parquet(null_path)
+
+    real_agg, null_agg = aggregate_behavior_with_control(
+        real_scores, null_scores,
+        epoch_tmin=EPOCH_TMIN,
+        epoch_sfreq=EPOCH_SFREQ,
+        behav_peak_post_offset_s=_BEHAV_POST_OFFSET_S,
+        peak_search_smin=_PEAK_SEARCH_SMIN,
+        peak_search_smax=_PEAK_SEARCH_SMAX,
+    )
+    del real_scores, null_scores
+    gc.collect()
+
+    peaks = tfce_enhanced_peak_test(
+        real_agg, null_agg,
+        site_keys=SITE_KEYS_BEHAVIOR_WITH_CONTROL,
+        flavor=_TFCE_FLAVOR_BEHAV_CTRL,
+    )
+    del null_agg
+    gc.collect()
+
+    beh_full_tfce_frames[subject] = peaks
+    _report_peaks(subject, peaks, stat_label="TFCE fold-mean diff")
+
+_plot_subject_grid(
+    beh_full_tfce_frames,
+    x_label="peak TFCE(fold_mean diff)",
+    x_chance=0.0,
+    title_prefix="behav-with-control TFCE",
+)
+
+# %%
+# ---------- Behavior HGA-only + TFCE ----------
+beh_hga_null_dir = ROOT / "behavior_decoding_single_electrode_hga_only_null"
+beh_hga_score_dir = ROOT / "behavior_decoding_single_electrode_hga_only"
+
+beh_hga_tfce_frames: dict[str, pl.DataFrame] = {}
+
+for null_path in sorted(beh_hga_null_dir.glob("*/null_scores.parquet")):
+    subject = null_path.parent.name
+    scores_path = beh_hga_score_dir / subject / "scores.parquet"
+    if not scores_path.exists():
+        print(f"[behav-hga TFCE] {subject}: null exists but no real scores — skipping.")
+        continue
+
+    print(f"[behav-hga TFCE] {subject}: aggregating …", end=" ", flush=True)
+
+    real_scores = pl.read_parquet(scores_path).filter(pl.col("model") == "full")
+    null_scores = pl.read_parquet(null_path)
+
+    real_agg, null_agg = aggregate_behavior_hga_only(
+        real_scores, null_scores,
+        epoch_tmin=EPOCH_TMIN,
+        epoch_sfreq=EPOCH_SFREQ,
+        behav_peak_post_offset_s=_BEHAV_POST_OFFSET_S,
+        peak_search_smin=_PEAK_SEARCH_SMIN,
+        peak_search_smax=_PEAK_SEARCH_SMAX,
+    )
+    del real_scores, null_scores
+    gc.collect()
+
+    peaks = tfce_enhanced_peak_test(
+        real_agg, null_agg,
+        site_keys=SITE_KEYS_BEHAVIOR_HGA_ONLY,
+        flavor=_TFCE_FLAVOR_BEHAV_HGA,
+    )
+    del null_agg
+    gc.collect()
+
+    beh_hga_tfce_frames[subject] = peaks
+    _report_peaks(subject, peaks, stat_label="TFCE fold-mean AUC")
+
+_plot_subject_grid(
+    beh_hga_tfce_frames,
+    x_label="peak TFCE(fold_mean AUC)",
+    x_chance=0.0,
+    title_prefix="behav-HGA-only TFCE",
+)
