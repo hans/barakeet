@@ -200,6 +200,7 @@ if borderline_keys and n_permutations_stage2 > 0:
             pl.scan_parquet(spill_dir / "*.parquet"),
             borderline_keys,
             site_keys=SITE_KEYS_BEHAVIOR_WITH_CONTROL,
+            baseline_site_keys=["subject", "phoneme_pair", "word_end"],
         ).collect()
     null_stage2 = preagg_behavior_with_control_null(null_stage2_raw, real_scores)
     del null_stage2_raw

@@ -6,6 +6,8 @@ helper-style of tests/test_significance.py.
 """
 from __future__ import annotations
 
+from typing import Sequence
+
 import numpy as np
 import polars as pl
 import pytest
@@ -15,7 +17,13 @@ from src.models.causal6_adaptive_null import (
     min_pointwise_p_per_site,
     stage1_gate,
 )
-from src.models.causal6_aggregates import FlavorSpec
+from src.models.causal6_aggregates import (
+    FlavorSpec,
+    SITE_KEYS_BEHAVIOR_WITH_CONTROL,
+    SITE_KEYS_GANONG_WITH_CONTROL,
+    preagg_behavior_with_control_null,
+    preagg_ganong_with_control_null,
+)
 from src.models.significance import null_standardized_peak_test
 
 
@@ -404,6 +412,246 @@ def test_stage1_gate_handles_float32_stat_inputs():
         "real_at_peak", "n_permutations", "escalated",
     } | set(SITE_KEYS)
     assert expected_cols.issubset(set(gate_log.columns))
+
+
+# -----------------------------------------------------------------------------
+# Paired-decoder baseline-row handling
+# -----------------------------------------------------------------------------
+
+
+def _make_paired_spill(
+    *,
+    electrode_idxs: Sequence[int] = (0, 1),
+    phoneme_pairs: Sequence[str] = ("dn", "bm"),
+    word_ends: Sequence[str] = ("necessary",),
+    n_perms: int = 2,
+    n_folds: int = 2,
+    smins: Sequence[int] = (0, 5),
+    auc_seed: int = 0,
+    include_word_end: bool = True,
+) -> pl.DataFrame:
+    """Build a synthetic spill-like null frame with model='full' and
+    model='baseline' rows, mirroring what
+    ``_run_behavior_core_permutations`` writes when ``with_control=True``.
+
+    Baseline rows use the same sentinels production code uses:
+    electrode_idx=-1, smin=-1, smax=-1.
+    """
+    rng = np.random.default_rng(auc_seed)
+    rows: list[dict] = []
+    for pp in phoneme_pairs:
+        for we in word_ends:
+            for eidx in electrode_idxs:
+                for smin in smins:
+                    for perm in range(n_perms):
+                        for fold in range(n_folds):
+                            row = {
+                                "subject": "S0",
+                                "electrode_idx": eidx,
+                                "phoneme_pair": pp,
+                                "smin": smin,
+                                "smax": smin + 10,
+                                "fold": fold,
+                                "permutation_idx": perm,
+                                "test_roc_auc": float(rng.uniform(0.4, 0.7)),
+                                "model": "full",
+                            }
+                            if include_word_end:
+                                row["word_end"] = we
+                            rows.append(row)
+            # Baseline shared across electrodes/windows; sentinel rows.
+            for perm in range(n_perms):
+                for fold in range(n_folds):
+                    row = {
+                        "subject": "S0",
+                        "electrode_idx": -1,
+                        "phoneme_pair": pp,
+                        "smin": -1,
+                        "smax": -1,
+                        "fold": fold,
+                        "permutation_idx": perm,
+                        "test_roc_auc": float(rng.uniform(0.4, 0.6)),
+                        "model": "baseline",
+                    }
+                    if include_word_end:
+                        row["word_end"] = we
+                    rows.append(row)
+    return pl.DataFrame(rows)
+
+
+def test_filter_null_to_borderline_retains_baseline_rows_behavior_with_control():
+    """When ``baseline_site_keys`` is provided, baseline rows (model='baseline',
+    sentinel electrode_idx=-1) must be retained for every (subject,
+    phoneme_pair, word_end) tuple represented in borderline_keys — not
+    dropped by the site_keys semi-join.
+
+    Regression: previously the semi-join keyed on site_keys (which includes
+    electrode_idx) silently dropped every baseline row, because baseline
+    electrode_idx=-1 is never in any borderline tuple. Downstream
+    ``_pair_full_baseline`` left-join then produced NULL baseline_roc_auc
+    → NULL diff → NULL fold_mean_diff, and ``null_standardized_peak_test``
+    silently filters NULL/NaN rows out — so escalated sites ran at
+    K=K1 instead of K1+K2.
+    """
+    spill = _make_paired_spill()
+    site_keys = SITE_KEYS_BEHAVIOR_WITH_CONTROL
+
+    # Borderline: only (S0, 0, dn, necessary). Electrode 1 not escalated.
+    # phoneme_pair=bm not escalated for any electrode.
+    borderline = {("S0", 0, "dn", "necessary")}
+
+    out = filter_null_to_borderline(
+        spill, borderline,
+        site_keys=site_keys,
+        baseline_site_keys=["subject", "phoneme_pair", "word_end"],
+    )
+
+    full_kept = out.filter(pl.col("model") == "full")
+    full_sites = set(
+        full_kept.select(["electrode_idx", "phoneme_pair", "word_end"])
+        .unique().iter_rows()
+    )
+    assert full_sites == {(0, "dn", "necessary")}, (
+        f"full-model rows leaked outside borderline tuples: {full_sites}"
+    )
+
+    base_kept = out.filter(pl.col("model") == "baseline")
+    assert base_kept.height > 0, "baseline rows must be retained for paired decoders"
+    base_sites = set(
+        base_kept.select(["phoneme_pair", "word_end"]).unique().iter_rows()
+    )
+    # phoneme_pair=bm should be dropped (not in any borderline tuple after
+    # stripping electrode_idx).
+    assert base_sites == {("dn", "necessary")}, (
+        f"baseline rows kept for non-borderline (pp, we): {base_sites}"
+    )
+    assert (base_kept["electrode_idx"] == -1).all()
+
+
+def test_filter_null_to_borderline_retains_baseline_rows_ganong_with_control():
+    """ganong_with_control: site_keys has no word_end, so baseline_site_keys
+    is (subject, phoneme_pair). Same retention contract as behavior_with_control.
+    """
+    # No word_end dimension in ganong site_keys.
+    spill = _make_paired_spill(word_ends=(None,), include_word_end=False)
+    site_keys = SITE_KEYS_GANONG_WITH_CONTROL
+
+    borderline = {("S0", 0, "dn"), ("S0", 1, "bm")}
+
+    out = filter_null_to_borderline(
+        spill, borderline,
+        site_keys=site_keys,
+        baseline_site_keys=["subject", "phoneme_pair"],
+    )
+
+    full_sites = set(
+        out.filter(pl.col("model") == "full")
+        .select(["electrode_idx", "phoneme_pair"]).unique().iter_rows()
+    )
+    assert full_sites == {(0, "dn"), (1, "bm")}
+
+    base_sites = set(
+        out.filter(pl.col("model") == "baseline")
+        .select(["phoneme_pair"]).unique().iter_rows()
+    )
+    # Both phoneme_pairs appear in borderline (under different electrodes),
+    # so both baselines must be kept.
+    assert base_sites == {("dn",), ("bm",)}, (
+        f"ganong baseline retention wrong: {base_sites}"
+    )
+
+
+def test_filter_null_to_borderline_lazy_path_with_baseline():
+    """LazyFrame path must behave identically when baseline_site_keys is set —
+    the production notebooks scan_parquet → filter → collect.
+    """
+    spill = _make_paired_spill()
+    site_keys = SITE_KEYS_BEHAVIOR_WITH_CONTROL
+    borderline = {("S0", 0, "dn", "necessary")}
+
+    eager = filter_null_to_borderline(
+        spill, borderline,
+        site_keys=site_keys,
+        baseline_site_keys=["subject", "phoneme_pair", "word_end"],
+    )
+    lazy = filter_null_to_borderline(
+        spill.lazy(), borderline,
+        site_keys=site_keys,
+        baseline_site_keys=["subject", "phoneme_pair", "word_end"],
+    )
+    assert isinstance(lazy, pl.LazyFrame)
+    collected = lazy.collect()
+    assert collected.height == eager.height
+    # Same model-row counts and same (model, electrode_idx, phoneme_pair, word_end)
+    # tuples.
+    eager_keys = set(
+        eager.select(["model", "electrode_idx", "phoneme_pair", "word_end"])
+        .unique().iter_rows()
+    )
+    lazy_keys = set(
+        collected.select(["model", "electrode_idx", "phoneme_pair", "word_end"])
+        .unique().iter_rows()
+    )
+    assert eager_keys == lazy_keys
+
+
+def test_filter_then_preagg_behavior_with_control_no_null_diff():
+    """End-to-end: filtered output fed through
+    ``preagg_behavior_with_control_null`` must produce non-NULL
+    ``fold_mean_diff`` for every row. This is the actual bug symptom:
+    NULL diffs from a left-join on missing baselines propagate through
+    to ``null_standardized_peak_test`` which silently drops them.
+    """
+    spill = _make_paired_spill(n_perms=3, n_folds=3, smins=(0, 5, 10))
+
+    # Build a matching real_scores frame (same schema as spill but no
+    # permutation_idx column).
+    real_scores = spill.drop("permutation_idx").unique(
+        subset=["subject", "electrode_idx", "phoneme_pair", "word_end",
+                "smin", "smax", "fold", "model"]
+    )
+
+    borderline = {
+        ("S0", 0, "dn", "necessary"),
+        ("S0", 1, "bm", "necessary"),
+    }
+    filtered = filter_null_to_borderline(
+        spill, borderline,
+        site_keys=SITE_KEYS_BEHAVIOR_WITH_CONTROL,
+        baseline_site_keys=["subject", "phoneme_pair", "word_end"],
+    )
+    preagg = preagg_behavior_with_control_null(filtered, real_scores)
+
+    n_null = preagg["fold_mean_diff"].null_count()
+    assert n_null == 0, (
+        f"preagg produced {n_null}/{preagg.height} NULL fold_mean_diff rows; "
+        f"baseline pairing failed downstream of filter_null_to_borderline"
+    )
+    # And the preagg must actually cover the borderline (site, window) tuples.
+    assert preagg.height > 0
+
+
+def test_filter_then_preagg_ganong_with_control_no_null_diff():
+    """Same end-to-end check for ganong_with_control (no word_end in site_keys)."""
+    spill = _make_paired_spill(
+        word_ends=(None,), include_word_end=False, n_perms=3, n_folds=3, smins=(0, 5, 10),
+    )
+    real_scores = spill.drop("permutation_idx").unique(
+        subset=["subject", "electrode_idx", "phoneme_pair",
+                "smin", "smax", "fold", "model"]
+    )
+
+    borderline = {("S0", 0, "dn"), ("S0", 1, "bm")}
+    filtered = filter_null_to_borderline(
+        spill, borderline,
+        site_keys=SITE_KEYS_GANONG_WITH_CONTROL,
+        baseline_site_keys=["subject", "phoneme_pair"],
+    )
+    preagg = preagg_ganong_with_control_null(filtered, real_scores)
+    n_null = preagg["fold_mean_diff"].null_count()
+    assert n_null == 0, (
+        f"ganong preagg produced {n_null}/{preagg.height} NULL fold_mean_diff rows"
+    )
 
 
 def test_filter_null_to_borderline_empty_set():
