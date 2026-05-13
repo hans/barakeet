@@ -241,8 +241,9 @@ if ac_brain_frames:
 # `diff = full_roc_auc − baseline_roc_auc`.  Peak window per site = argmax of
 # fold-mean diff.
 #
-# **Window decision:** smin ∈ [0, 290] with per-`word_end` offset cap — identical to
-# the HGA-only search (`_filter_window_expr()`).  Chance = 0.0 for diff (not 0.5).
+# **Window decision:** smin ≥ `acoustic_peak_search_smin` (=50, ≥100ms post onset),
+# smax ≤ min(per-`word_end` offset cap, 290) — identical to the HGA-only search
+# (`_filter_window_expr()`). Chance = 0.0 for diff (not 0.5).
 
 # %%
 _beh_full_score_paths = sorted(
