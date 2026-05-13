@@ -1883,18 +1883,20 @@ _plot_subject_grid(
 
 # %% [markdown]
 # ----
-# ## 10  Behavior — TFCE-enhanced significance  *(expensive — run last)*
+# ## 10  Acoustic + Behavior — TFCE-enhanced significance  *(expensive — run last)*
 #
-# Repeats the behavior aggregation from section 9 but applies Threshold-Free
-# Cluster Enhancement (TFCE) along the window axis before the max-stat
-# permutation test.  TFCE rewards statistics that span multiple adjacent
+# Repeats the section 9 aggregation for all three decoders but applies
+# Threshold-Free Cluster Enhancement (TFCE) along the window axis before the
+# max-stat permutation test.  TFCE rewards statistics that span multiple adjacent
 # windows; isolated single-window spikes receive less credit.
 #
-# **Acoustic is excluded** — the acoustic search window is narrow enough that
-# cluster extent is not informative (see ``FLAVORS_ACOUSTIC`` in
-# ``causal6_aggregates.py``).
+# Acoustic TFCE is included here for validation (known true positives should
+# survive); it is omitted from the production flavor list (``FLAVORS_ACOUSTIC``)
+# because the search window is narrow enough that cluster credit rarely changes
+# the ranking.
 #
 # Flavors used:
+#  - acoustic: ``fold_mean``, TFCE threshold=0.5 (raw AUC, above-chance windows)
 #  - behavior-with-control: ``fold_mean``, TFCE threshold=0.0
 #    (diff is centered at 0; matches ``FLAVORS_BEHAVIOR_WITH_CONTROL[2]``)
 #  - behavior HGA-only: ``fold_mean``, TFCE threshold=0.5
