@@ -1677,6 +1677,53 @@ with PdfPages(_aonly_out) as _pdf:
                 print(f"  skipped {_subj} e{int(_row['electrode_idx'])} {_we}: {_e}")
 print(f"Written {_n_pages} pages → {_aonly_out}")
 
+# %%
+# Top-K behavior HGA-only sites (raw peak AUC, no baseline control, no acoustic
+# requirement).  Thresholds on HGA-only AUC only; acoustic + behav-with-control
+# metrics are shown as annotations in the title where available.
+if _beh_pd is not None:
+    _beh_hga_top = (
+        _beh_pd.sort_values("peak_auc", ascending=False)
+        .groupby(["subject", "electrode_idx"], observed=True, as_index=False)
+        .first()
+        .head(_TOP_K)
+    )
+    print(f"Top {_TOP_K} behavior HGA-only sites by peak AUC:")
+    print(_beh_hga_top[["subject", "electrode_idx", "phoneme_pair",
+                         "word_end", "peak_auc"]].to_string(index=False))
+
+    _hga_only_out = ROOT / "provisional_star_plots_hga_only.pdf"
+    with PdfPages(_hga_only_out) as _pdf:
+        for _, _row in _beh_hga_top.iterrows():
+            if _row["subject"] not in epochs_dict:
+                continue
+            try:
+                _full_diff, _full_diff_pct = _sp_behav_full_diff(
+                    _row["subject"], int(_row["electrode_idx"]),
+                    _row["phoneme_pair"], _row["word_end"],
+                )
+                _fig = _provisional_star_plot(
+                    subject=_row["subject"],
+                    electrode_idx=int(_row["electrode_idx"]),
+                    phoneme_pair=_row["phoneme_pair"],
+                    word_end=_row["word_end"],
+                    epochs_dict=epochs_dict,
+                    ambig_steps=ambig_steps,
+                    behav_smin=int(_row["peak_smin"]),
+                    behav_smax=int(_row["peak_smax"]),
+                    behav_hga_peak_auc=float(_row["peak_auc"]),
+                    behav_hga_peak_auc_pct=float(_row["peak_auc_pct"]),
+                    behav_full_peak_diff=_full_diff,
+                    behav_full_peak_diff_pct=_full_diff_pct,
+                )
+                _pdf.savefig(_fig)
+                plt.close(_fig)
+            except Exception as _e:
+                print(f"  skipped {_row['subject']} e{int(_row['electrode_idx'])}: {_e}")
+    print(f"Written {len(_beh_hga_top)} pages → {_hga_only_out}")
+else:
+    print("brain_plot_behav_tstats.parquet not found — run section 5 first.")
+
 # %% [markdown]
 # ----
 # ## 9  Acoustic + behavior-with-control — on-the-fly significance  *(expensive — run last)*
