@@ -6,9 +6,9 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.1
 #   kernelspec:
-#     display_name: Python 3
+#     display_name: barakeet
 #     language: python
 #     name: python3
 # ---
@@ -758,6 +758,28 @@ if brain_frames:
 
     fig.tight_layout()
     plt.show()
+
+# %% [markdown]
+# ----
+# ## 5.5 Compare controlled behavior vs. HGA-only behavior
+#
+# Do the top sites under the controlled behavior decoding measure also get selected under the HGA-only behavior measure?
+# This is important to us in the interim because the nulls from the controlled behavior decoding have a bug in them.
+# So for interim results we need to go with HGA-only.
+
+# %%
+beh_comp = (
+    pl.concat(beh_peak_frames.values())
+    .join(pl.concat(beh_full_peak_frames.values()),
+          on=SITE_KEYS_BEHAV, how="inner", suffix="_full")
+)
+
+# %%
+beh_comp.to_pandas()[["peak_auc", "peak_diff"]].query("peak_diff > 0 and peak_auc > 0.5").corr()
+
+# %%
+sns.lmplot(data=beh_comp.to_pandas().query("peak_diff > 0 and peak_auc > 0.5"),
+           x="peak_auc", y="peak_diff", hue="phoneme_pair", scatter_kws=dict(alpha=0.3))
 
 # %% [markdown]
 # ----
