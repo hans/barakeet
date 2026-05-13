@@ -185,6 +185,7 @@ if borderline_keys and n_permutations_stage2 > 0:
             pl.scan_parquet(spill_dir / "*.parquet"),
             borderline_keys,
             site_keys=SITE_KEYS_GANONG_WITH_CONTROL,
+            baseline_site_keys=["subject", "phoneme_pair"],
         ).collect()
     null_stage2 = preagg_ganong_with_control_null(null_stage2_raw, real_scores)
     del null_stage2_raw

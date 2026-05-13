@@ -408,6 +408,8 @@ def filter_null_to_borderline(
     borderline_keys: set[tuple],
     *,
     site_keys: Sequence[str],
+    baseline_site_keys: Sequence[str] | None = None,
+    model_col: str = "model",
 ) -> pl.DataFrame | pl.LazyFrame:
     """Filter raw null_scores to rows whose ``site_keys`` tuple is in ``borderline_keys``.
 
@@ -422,6 +424,23 @@ def filter_null_to_borderline(
     apply this filter lazily, and only collect the (much smaller) result —
     avoiding the full-null materialization that triggers OOMs on
     high-electrode-count subjects.
+
+    For paired (``with_control``) decoders the spill contains both
+    ``model='full'`` rows (one per electrode×window×perm×fold) and
+    ``model='baseline'`` rows (one per perm×fold, with sentinel
+    ``electrode_idx=-1``, ``smin=-1``, ``smax=-1``). The site_keys
+    semi-join drops every baseline row because ``electrode_idx=-1`` is
+    never in any borderline tuple — silently NULL'ing
+    ``baseline_roc_auc`` in the downstream ``_pair_full_baseline``
+    left-join and effectively capping escalated sites at K=K1.
+
+    Pass ``baseline_site_keys`` (a strict subset of ``site_keys``, the
+    same keys ``_pair_full_baseline`` joins full↔baseline on — i.e.
+    ``[subject, phoneme_pair, word_end]`` for behavior_with_control or
+    ``[subject, phoneme_pair]`` for ganong_with_control) to opt into
+    paired-aware filtering: rows where ``model_col == 'baseline'`` go
+    through a separate semi-join on the reduced keys, and the two
+    partitions are concatenated.
     """
     site_keys = list(site_keys)
     is_lazy = isinstance(null_scores, pl.LazyFrame)
@@ -437,6 +456,37 @@ def filter_null_to_borderline(
         target_dtype = schema[sk]
         if keys_df.schema[sk] != target_dtype:
             keys_df = keys_df.with_columns(pl.col(sk).cast(target_dtype))
-    if isinstance(null_scores, pl.LazyFrame):
-        return null_scores.join(keys_df.lazy(), on=site_keys, how="semi")
-    return null_scores.join(keys_df, on=site_keys, how="semi")
+
+    if baseline_site_keys is None:
+        if is_lazy:
+            return null_scores.join(keys_df.lazy(), on=site_keys, how="semi")
+        return null_scores.join(keys_df, on=site_keys, how="semi")
+
+    baseline_site_keys = list(baseline_site_keys)
+    missing = [k for k in baseline_site_keys if k not in site_keys]
+    if missing:
+        raise ValueError(
+            f"baseline_site_keys must be a subset of site_keys; "
+            f"unknown keys: {missing}"
+        )
+    if model_col not in schema:
+        raise ValueError(
+            f"baseline_site_keys requires a {model_col!r} column on null_scores; "
+            f"got columns {list(schema.keys())}"
+        )
+    base_keys_df = keys_df.select(baseline_site_keys).unique()
+    if is_lazy:
+        full = null_scores.filter(pl.col(model_col) == "full").join(
+            keys_df.lazy(), on=site_keys, how="semi",
+        )
+        base = null_scores.filter(pl.col(model_col) == "baseline").join(
+            base_keys_df.lazy(), on=baseline_site_keys, how="semi",
+        )
+        return pl.concat([full, base])
+    full = null_scores.filter(pl.col(model_col) == "full").join(
+        keys_df, on=site_keys, how="semi",
+    )
+    base = null_scores.filter(pl.col(model_col) == "baseline").join(
+        base_keys_df, on=baseline_site_keys, how="semi",
+    )
+    return pl.concat([full, base])

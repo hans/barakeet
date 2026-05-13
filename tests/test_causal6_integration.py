@@ -39,10 +39,18 @@ from src.models.causal6 import (
     run_ganong_with_control,
     run_ganong_with_control_permutations,
 )
+from src.models.causal6_adaptive_null import (
+    filter_null_to_borderline,
+    stage2_spill_dir,
+)
 from src.models.causal6_aggregates import (
     SITE_KEYS_BEHAVIOR_HGA_ONLY,
+    SITE_KEYS_BEHAVIOR_WITH_CONTROL,
+    SITE_KEYS_GANONG_WITH_CONTROL,
     aggregate_behavior_hga_only,
     preagg_behavior_hga_only_null,
+    preagg_behavior_with_control_null,
+    preagg_ganong_with_control_null,
 )
 from src.models.significance import null_standardized_peak_test
 
@@ -838,3 +846,125 @@ def test_ganong_peak_finder_on_real_scores(
     )
 
     assert peaks["real_statistic"].is_not_null().all()
+
+
+# ---------------------------------------------------------------------------
+# B4. Spill → filter_null_to_borderline → preagg on real data
+# ---------------------------------------------------------------------------
+
+
+def test_paired_spill_filter_preserves_baseline_behavior_with_control(
+    tmp_path, ec248_epochs, ec248_smoke_electrodes, smoke_config,
+    behavior_with_control_result,
+):
+    """Real-data reproduction of the bug: write a spill from
+    ``run_behavior_with_control_permutations``, filter with
+    ``filter_null_to_borderline``, preagg, and assert no NULL diffs.
+
+    Without ``baseline_site_keys``, baseline rows would be dropped by the
+    site_keys semi-join (their sentinel electrode_idx=-1 is never in any
+    borderline tuple), causing ``preagg_behavior_with_control_null`` to
+    emit NULL ``fold_mean_diff`` for every row. ``null_standardized_peak_test``
+    then silently filters those rows out, capping escalated sites at K1.
+    """
+    real_scores = behavior_with_control_result["scores"]
+    windows = behavior_with_control_result["windows"]
+
+    with stage2_spill_dir(tmp_path, name="spill") as spill_dir:
+        run_behavior_with_control_permutations(
+            ec248_epochs, subject="EC248",
+            electrode_idxs=ec248_smoke_electrodes,
+            windows=windows,
+            reg_lambda=smoke_config["reg_lambda"],
+            permute_seeds=[1, 2, 3],
+            permutation_chunk_size=smoke_config["permutation_chunk_size"],
+            n_folds=smoke_config["n_folds"], cv_random_state=smoke_config["cv_random_state"],
+            device=smoke_config["device"], dtype=smoke_config["dtype"],
+            tol=smoke_config["tol"], max_iter=smoke_config["max_iter"],
+            spill_dir=spill_dir,
+        )
+        # Borderline: only the first electrode, both phoneme_pairs/word_ends present.
+        scan = pl.scan_parquet(spill_dir / "*.parquet")
+        full_keys_present = (
+            scan.filter(pl.col("model") == "full")
+            .select(SITE_KEYS_BEHAVIOR_WITH_CONTROL)
+            .unique()
+            .collect()
+        )
+        first_eidx = ec248_smoke_electrodes[0]
+        borderline = set(
+            full_keys_present.filter(pl.col("electrode_idx") == first_eidx)
+            .iter_rows()
+        )
+        assert borderline, "test setup: expected at least one (subject, eidx, pp, we) tuple"
+
+        filtered = filter_null_to_borderline(
+            scan, borderline,
+            site_keys=SITE_KEYS_BEHAVIOR_WITH_CONTROL,
+            baseline_site_keys=["subject", "phoneme_pair", "word_end"],
+        ).collect()
+
+    # Baseline rows must survive — the bug dropped them.
+    base = filtered.filter(pl.col("model") == "baseline")
+    assert base.height > 0, "baseline rows dropped — filter regressed"
+    assert (base["electrode_idx"] == -1).all()
+
+    # End-to-end: preagg yields zero NULL fold_mean_diff for retained sites.
+    preagg = preagg_behavior_with_control_null(filtered, real_scores)
+    n_null = preagg["fold_mean_diff"].null_count()
+    assert n_null == 0, (
+        f"preagg emitted {n_null}/{preagg.height} NULL fold_mean_diff — "
+        f"baseline pairing failed"
+    )
+
+
+def test_paired_spill_filter_preserves_baseline_ganong_with_control(
+    tmp_path, ec248_epochs, ec248_smoke_electrodes, smoke_config,
+    ganong_with_control_result,
+):
+    """Same end-to-end check for ganong_with_control (site_keys lacks word_end)."""
+    real_scores = ganong_with_control_result["scores"]
+    windows = ganong_with_control_result["windows"]
+
+    with stage2_spill_dir(tmp_path, name="spill_ganong") as spill_dir:
+        run_ganong_with_control_permutations(
+            ec248_epochs, subject="EC248",
+            electrode_idxs=ec248_smoke_electrodes,
+            windows=windows,
+            reg_lambda=smoke_config["reg_lambda"],
+            permute_seeds=[1, 2, 3],
+            permutation_chunk_size=smoke_config["permutation_chunk_size"],
+            n_folds=smoke_config["n_folds"], cv_random_state=smoke_config["cv_random_state"],
+            device=smoke_config["device"], dtype=smoke_config["dtype"],
+            tol=smoke_config["tol"], max_iter=smoke_config["max_iter"],
+            spill_dir=spill_dir,
+        )
+        scan = pl.scan_parquet(spill_dir / "*.parquet")
+        full_keys_present = (
+            scan.filter(pl.col("model") == "full")
+            .select(SITE_KEYS_GANONG_WITH_CONTROL)
+            .unique()
+            .collect()
+        )
+        first_eidx = ec248_smoke_electrodes[0]
+        borderline = set(
+            full_keys_present.filter(pl.col("electrode_idx") == first_eidx)
+            .iter_rows()
+        )
+        assert borderline
+
+        filtered = filter_null_to_borderline(
+            scan, borderline,
+            site_keys=SITE_KEYS_GANONG_WITH_CONTROL,
+            baseline_site_keys=["subject", "phoneme_pair"],
+        ).collect()
+
+    base = filtered.filter(pl.col("model") == "baseline")
+    assert base.height > 0
+    assert (base["electrode_idx"] == -1).all()
+
+    preagg = preagg_ganong_with_control_null(filtered, real_scores)
+    n_null = preagg["fold_mean_diff"].null_count()
+    assert n_null == 0, (
+        f"ganong preagg emitted {n_null}/{preagg.height} NULL fold_mean_diff"
+    )
