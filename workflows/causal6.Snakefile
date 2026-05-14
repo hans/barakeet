@@ -56,6 +56,8 @@ def run_notebook(input_path: str, output_path: str, parameters, **kwargs):
 
     Mirrors the helper in causal5.Snakefile.
     """
+    _provision_node()
+
     import tempfile
 
     import jupytext
@@ -101,6 +103,7 @@ def run_notebook(input_path: str, output_path: str, parameters, **kwargs):
 
 
 import os
+import subprocess
 import sys
 import random
 import pynvml
@@ -112,6 +115,52 @@ import fcntl
 # select_gpu_device is a no-op and the child process inherits whatever
 # CUDA_VISIBLE_DEVICES the parent had.
 USE_GPU_LOCK = os.environ.get("BARAKEET_GPU_LOCK", "1") not in ("0", "false", "False")
+
+
+_node_provisioned = False
+
+
+def _provision_node():
+    """Ensure .venv → /tmp/uv-{branch} is set up on this node (idempotent).
+
+    Creates the branch-scoped env dir in /tmp, symlinks .venv to it if needed,
+    then runs `uv sync` once per node per process (guarded by a sentinel file
+    so subsequent rules on the same node are free). The /tmp cache dir avoids
+    hitting network/NFS for uv's package cache.
+    """
+    global _node_provisioned
+    if _node_provisioned:
+        return
+
+    branch = os.environ.get("barakeet_branch_name")
+    if not branch:
+        branch = subprocess.check_output(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=workflow.basedir, text=True,
+        ).strip()
+
+    project_root = Path(workflow.basedir).parent
+    cache_dir = Path("/tmp/jgauthier-cache-uv")
+    env_dir = Path(f"/tmp/uv-{branch}")
+    venv = project_root / ".venv"
+    sentinel = env_dir / ".provisioned"
+
+    cache_dir.mkdir(exist_ok=True)
+    env_dir.mkdir(exist_ok=True)
+
+    if not venv.exists() and not venv.is_symlink():
+        venv.symlink_to(env_dir)
+
+    if not sentinel.exists():
+        subprocess.run(
+            ["uv", "sync"],
+            cwd=project_root,
+            check=True,
+            env={**os.environ, "UV_CACHE_DIR": str(cache_dir)},
+        )
+        sentinel.touch()
+
+    _node_provisioned = True
 
 
 def select_gpu_device(wildcards, resources):
@@ -187,9 +236,6 @@ def run_notebook_gpu(input_path, output_path, parameters, gpu_device):
     the Snakemake process, so subprocess isolation is mandatory.
     """
     import json
-    import os
-    import subprocess
-    import sys
     import tempfile
 
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
@@ -201,8 +247,9 @@ def run_notebook_gpu(input_path, output_path, parameters, gpu_device):
         if gpu_device is not None:
             env["CUDA_VISIBLE_DEVICES"] = str(gpu_device)
         helper = Path(workflow.basedir) / "_gpu_notebook_runner.py"
+        venv_python = Path(workflow.basedir).parent / ".venv" / "bin" / "python"
         subprocess.run(
-            [sys.executable, str(helper), str(input_path), str(output_path), params_path],
+            [str(venv_python), str(helper), str(input_path), str(output_path), params_path],
             env=env, check=True,
         )
     finally:
@@ -211,6 +258,7 @@ def run_notebook_gpu(input_path, output_path, parameters, gpu_device):
 
 def run_notebook_with_gpu(input_path, output_path, parameters, wildcards, resources):
     """Acquire a GPU claim, run the notebook, and release the claim — even on failure."""
+    _provision_node()
     gpu_device, claim_file = select_gpu_device(wildcards, resources)
     try:
         run_notebook_gpu(input_path, output_path, parameters, gpu_device=gpu_device)
