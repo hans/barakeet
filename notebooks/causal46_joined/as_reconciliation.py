@@ -177,3 +177,102 @@ print(recon.group_by("bucket").len().sort("len", descending=True))
 
 recon.write_parquet(OUT_DIR / "reconciliation.parquet")
 print(f"Written: {OUT_DIR / 'reconciliation.parquet'}  ({recon.shape[0]} rows)")
+
+# %% [markdown]
+# ## Summary panels
+#
+# - Bucket counts per subject and phoneme_pair
+# - Loss audit: distribution of causal4 peak AUC for `causal4_only` sites
+# - Gain audit: distribution of causal6 corrected p-values for gain buckets
+# - Joint scatter: causal4 peak AUC × causal6 p-value, coloured by bucket
+
+# %%
+breakdown = (
+    recon
+    .group_by(["bucket", "subject", "phoneme_pair"])
+    .len()
+    .pivot(values="len", index=["subject", "phoneme_pair"], on="bucket")
+    .fill_null(0)
+    .sort(["subject", "phoneme_pair"])
+)
+print("Per-subject / phoneme_pair bucket breakdown:")
+print(breakdown)
+breakdown.write_csv(OUT_DIR / "bucket_breakdown.csv")
+
+# %%
+losses = recon.filter(pl.col("bucket") == "causal4_only")
+print(f"Losses: {losses.shape[0]} sites")
+print(f"  causal4_peak_auc:  min={losses['causal4_peak_auc'].min():.3f}  "
+      f"median={losses['causal4_peak_auc'].median():.3f}  "
+      f"max={losses['causal4_peak_auc'].max():.3f}")
+print(f"  count >= 0.70: {int((losses['causal4_peak_auc'] >= 0.70).sum())}  "
+      f">= 0.75: {int((losses['causal4_peak_auc'] >= 0.75).sum())}")
+
+fig, axes = plt.subplots(1, 2, figsize=(11, 4))
+axes[0].hist(
+    losses["causal4_peak_auc"].to_numpy(),
+    bins=20, color="tomato", alpha=0.8, edgecolor="k",
+)
+axes[0].axvline(0.65, color="k", lw=0.8, ls="--", label="causal4 threshold")
+axes[0].set_xlabel("causal4 peak AUC")
+axes[0].set_ylabel("losses (count)")
+axes[0].set_title(f"Loss audit — {losses.shape[0]} sites")
+axes[0].legend()
+
+gains = recon.filter(pl.col("bucket").is_in(
+    ["causal6_only_eligible", "causal6_only_newly_eligible"]
+))
+print(f"Gains: {gains.shape[0]} sites")
+print(f"  eligible:        {(gains['bucket'] == 'causal6_only_eligible').sum()}")
+print(f"  newly_eligible:  {(gains['bucket'] == 'causal6_only_newly_eligible').sum()}")
+
+for bucket, color in [
+    ("causal6_only_eligible", "steelblue"),
+    ("causal6_only_newly_eligible", "seagreen"),
+]:
+    vals = gains.filter(pl.col("bucket") == bucket)["causal6_p_value"].to_numpy()
+    axes[1].hist(vals, bins=np.linspace(0, 0.05, 21), alpha=0.6,
+                 color=color, edgecolor="k", label=bucket)
+axes[1].set_xlabel("causal6 corrected p-value")
+axes[1].set_ylabel("gains (count)")
+axes[1].set_title(f"Gain audit — {gains.shape[0]} sites")
+axes[1].legend(fontsize=8)
+
+fig.tight_layout()
+fig.savefig(OUT_DIR / "summary_audit.png", dpi=150)
+plt.close(fig)
+
+# %%
+plot_df = recon.filter(
+    pl.col("causal4_peak_auc").is_not_null()
+    | pl.col("causal6_p_value").is_not_null()
+)
+
+fig, ax = plt.subplots(figsize=(7, 5))
+bucket_colors = {
+    "both": "#3a823a",
+    "causal4_only": "#c44e4e",
+    "causal6_only_eligible": "#4a78b8",
+    "causal6_only_newly_eligible": "#2d8b8b",
+    "neither_AS": "#999999",
+}
+for bucket, color in bucket_colors.items():
+    sub = plot_df.filter(pl.col("bucket") == bucket)
+    if sub.shape[0] == 0:
+        continue
+    x = sub["causal4_peak_auc"].fill_null(np.nan).to_numpy()
+    y = sub["causal6_p_value"].fill_null(np.nan).to_numpy()
+    ax.scatter(x, y, c=color, s=18, alpha=0.55,
+               label=f"{bucket} (n={sub.shape[0]})", edgecolors="none")
+
+ax.axvline(0.65, color="k", lw=0.6, ls="--", label="causal4 AUC threshold")
+ax.axhline(0.05, color="k", lw=0.6, ls=":", label="causal6 p threshold")
+ax.set_xlabel("causal4 peak AUC")
+ax.set_ylabel("causal6 corrected p-value")
+ax.set_yscale("log")
+ax.set_title("causal4 vs causal6 — agreement & disagreement")
+ax.legend(fontsize=8, loc="best")
+fig.tight_layout()
+fig.savefig(OUT_DIR / "summary_scatter.png", dpi=150)
+plt.close(fig)
+print(f"Wrote: {OUT_DIR / 'summary_audit.png'}, {OUT_DIR / 'summary_scatter.png'}")
