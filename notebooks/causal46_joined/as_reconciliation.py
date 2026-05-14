@@ -276,3 +276,138 @@ fig.tight_layout()
 fig.savefig(OUT_DIR / "summary_scatter.png", dpi=150)
 plt.close(fig)
 print(f"Wrote: {OUT_DIR / 'summary_audit.png'}, {OUT_DIR / 'summary_scatter.png'}")
+
+# %% [markdown]
+# ## Star plot galleries — visual inspection
+#
+# Four PDFs:
+#   - losses.pdf:                bucket == "causal4_only", sort by causal4 peak AUC desc
+#   - gains_eligible.pdf:        bucket == "causal6_only_eligible", sort by causal6 AUC desc
+#   - gains_newly_eligible.pdf:  bucket == "causal6_only_newly_eligible", sort by causal6 AUC desc
+#   - both.pdf:                  random sample of 10 from "both" for sanity
+#
+# Star plot helper imported from src.viz_provisional.
+
+# %%
+import mne
+
+from src.data import add_metadata_features
+from src.stimuli import PHONEME_PAIR_TO_WORD_ENDS
+from src.viz_provisional import (
+    load_ambig_steps,
+    provisional_star_plot,
+)
+
+# Epoch files live wherever the preprocessing pipeline output them. Default is
+# <REPO>/outputs/epochs_preprocessed; override with the BARAKEET_EPOCH_DIR env
+# var if they live elsewhere on this machine.
+EPOCH_DIR = Path(os.environ.get(
+    "BARAKEET_EPOCH_DIR",
+    str(REPO / "outputs/epochs_preprocessed"),
+))
+print(f"EPOCH_DIR: {EPOCH_DIR}  (exists: {EPOCH_DIR.exists()})")
+
+needed_subjects = sorted(
+    recon.filter(pl.col("bucket").is_in([
+        "causal4_only", "causal6_only_eligible",
+        "causal6_only_newly_eligible", "both",
+    ]))["subject"].unique().to_list()
+)
+print(f"Loading epochs for {len(needed_subjects)} subjects: {needed_subjects}")
+
+epochs_dict: dict = {}
+for s in needed_subjects:
+    path = EPOCH_DIR / f"{s}_epo.fif"
+    if not path.exists():
+        print(f"  (skip {s}: {path} missing)")
+        continue
+    ep = mne.read_epochs(str(path), preload=False, verbose="WARNING")
+    ep.metadata = add_metadata_features(ep.metadata.copy())
+    epochs_dict[s] = ep
+print(f"Loaded epochs for {len(epochs_dict)} subjects: {sorted(epochs_dict)}")
+
+ambig_steps = load_ambig_steps(epochs_dict) if epochs_dict else {}
+print(f"ambig_steps: {len(ambig_steps)} (subject, phoneme_pair, word_end) keys")
+
+# %%
+def render_gallery(rows: pl.DataFrame, out_path: Path, title_prefix: str):
+    """Render one PDF: one page per (site, word_end)."""
+    if rows.shape[0] == 0:
+        print(f"  (no sites for {out_path.name})")
+        return
+    n_pages = 0
+    n_skipped = 0
+    with PdfPages(out_path) as pdf:
+        for row in rows.iter_rows(named=True):
+            if row["subject"] not in epochs_dict:
+                n_skipped += 1
+                continue
+            for we in PHONEME_PAIR_TO_WORD_ENDS.get(row["phoneme_pair"], []):
+                try:
+                    phon_smin = (
+                        int(row["causal6_smin"]) if row["causal6_smin"] is not None
+                        else (int(row["causal4_smin"]) if row["causal4_smin"] is not None else None)
+                    )
+                    phon_smax = (
+                        int(row["causal6_smax"]) if row["causal6_smax"] is not None
+                        else (int(row["causal4_smax"]) if row["causal4_smax"] is not None else None)
+                    )
+                    ac_auc = (
+                        float(row["causal6_test_roc_auc"]) if row["causal6_test_roc_auc"] is not None
+                        else (float(row["causal4_peak_auc"]) if row["causal4_peak_auc"] is not None else None)
+                    )
+                    fig = provisional_star_plot(
+                        subject=row["subject"],
+                        electrode_idx=int(row["electrode_idx"]),
+                        phoneme_pair=row["phoneme_pair"],
+                        word_end=we,
+                        epochs_dict=epochs_dict,
+                        ambig_steps=ambig_steps,
+                        phon_smin=phon_smin,
+                        phon_smax=phon_smax,
+                        acoustic_peak_auc=ac_auc,
+                    )
+                    fig.suptitle(
+                        f"{title_prefix}  |  {row['subject']} e{row['electrode_idx']} "
+                        f"{row['phoneme_pair']} -> {we}",
+                        y=1.02, fontsize=10,
+                    )
+                    pdf.savefig(fig, bbox_inches="tight")
+                    plt.close(fig)
+                    n_pages += 1
+                except Exception as ex:
+                    print(f"  star_plot failed for {row['subject']} e{row['electrode_idx']} "
+                          f"{row['phoneme_pair']} {we}: {ex}")
+                    plt.close("all")
+    print(f"Wrote {out_path.name}: {n_pages} pages  ({n_skipped} sites skipped: no epochs)")
+
+
+# %%
+losses_sorted = (
+    recon.filter(pl.col("bucket") == "causal4_only")
+         .sort("causal4_peak_auc", descending=True)
+)
+render_gallery(losses_sorted, OUT_DIR / "losses.pdf", title_prefix="LOSS")
+
+# %%
+ge_sorted = (
+    recon.filter(pl.col("bucket") == "causal6_only_eligible")
+         .sort("causal6_test_roc_auc", descending=True)
+)
+render_gallery(ge_sorted, OUT_DIR / "gains_eligible.pdf", title_prefix="GAIN(elig)")
+
+# %%
+gne_sorted = (
+    recon.filter(pl.col("bucket") == "causal6_only_newly_eligible")
+         .sort("causal6_test_roc_auc", descending=True)
+)
+render_gallery(gne_sorted, OUT_DIR / "gains_newly_eligible.pdf", title_prefix="GAIN(new)")
+
+# %%
+_both_n = recon.filter(pl.col("bucket") == "both").shape[0]
+both_sample = (
+    recon.filter(pl.col("bucket") == "both")
+         .sample(min(10, _both_n), seed=0)
+         .sort("causal6_test_roc_auc", descending=True)
+)
+render_gallery(both_sample, OUT_DIR / "both.pdf", title_prefix="BOTH")
