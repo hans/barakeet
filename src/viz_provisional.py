@@ -442,6 +442,12 @@ def provisional_star_plot(
     *,
     phon_smin: int | None = None,
     phon_smax: int | None = None,
+    phon_smin_c4: int | None = None,
+    phon_smax_c4: int | None = None,
+    phon_smin_c6: int | None = None,
+    phon_smax_c6: int | None = None,
+    phon_search_smin: int | None = None,
+    phon_search_smax: int | None = None,
     behav_smin: int | None = None,
     behav_smax: int | None = None,
     textgrid_dir: str = "data/stimuli/textgrid",
@@ -500,9 +506,25 @@ def provisional_star_plot(
         se = tr.std(0) / np.sqrt(mask.sum())
         ax_top.plot(times, m, color=color, lw=1.5, label=f"step {step}  (n={mask.sum()})")
         ax_top.fill_between(times, m - se, m + se, color=color, alpha=0.18)
+    # causal6 search-range bounds: dashed vertical lines (the maxstat correction
+    # range over which causal6 hunted for a peak).
+    if phon_search_smin is not None and phon_search_smax is not None:
+        t_search = np.array([phon_search_smin, phon_search_smax]) / epoch_sfreq + epoch_tmin
+        ax_top.axvline(t_search[0], color="k", lw=0.6, ls="--", alpha=0.5,
+                       label="causal6 search bounds")
+        ax_top.axvline(t_search[1], color="k", lw=0.6, ls="--", alpha=0.5)
+    # Generic peak window (used by other callers that don't have c4/c6 split).
     if phon_smin is not None:
         t_phon = np.array([phon_smin, phon_smax]) / epoch_sfreq + epoch_tmin
-        ax_top.axvspan(*t_phon, color="#4dac26", alpha=0.14, label="acoustic window")
+        ax_top.axvspan(*t_phon, color="#4dac26", alpha=0.18, label="acoustic peak")
+    # causal4 peak window: blue.
+    if phon_smin_c4 is not None:
+        t_c4 = np.array([phon_smin_c4, phon_smax_c4]) / epoch_sfreq + epoch_tmin
+        ax_top.axvspan(*t_c4, color="#1f78b4", alpha=0.20, label="causal4 peak")
+    # causal6 peak window: green.
+    if phon_smin_c6 is not None:
+        t_c6 = np.array([phon_smin_c6, phon_smax_c6]) / epoch_sfreq + epoch_tmin
+        ax_top.axvspan(*t_c6, color="#4dac26", alpha=0.20, label="causal6 peak")
     ax_top.axhline(0, color="k", lw=0.5, ls=":")
     ax_top.set_ylabel("HGA (z)")
 

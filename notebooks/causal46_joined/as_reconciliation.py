@@ -28,6 +28,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
+import yaml
 from matplotlib.backends.backend_pdf import PdfPages
 
 # %%
@@ -41,6 +42,14 @@ OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 CAUSAL4_AUC_THRESHOLD = 0.65
 CAUSAL6_P_THRESHOLD = 0.05
+
+# causal6's acoustic peak-search bounds (in samples post epoch_tmin). These
+# define the maxstat-correction range — the NHST p-value is corrected over
+# every window that satisfies smin >= AC_SEARCH_SMIN and smax <= AC_SEARCH_SMAX.
+_cfg = yaml.safe_load((REPO / "config.yaml").read_text())
+AC_SEARCH_SMIN = int(_cfg["analysis"]["decoding"]["acoustic_peak_search_smin"])
+AC_SEARCH_SMAX = int(_cfg["analysis"]["decoding"]["acoustic_peak_search_smax"])
+print(f"AC_SEARCH range: smin={AC_SEARCH_SMIN}, smax={AC_SEARCH_SMAX}")
 
 print(f"REPO:        {REPO}")
 print(f"CAUSAL4_DIR: {CAUSAL4_DIR}")
@@ -95,10 +104,17 @@ c6_all = c6_all.rename({
     "n_permutations": "causal6_n_perm",
     "smin": "causal6_smin",
     "smax": "causal6_smax",
+    "T_obs": "causal6_T_obs",
+    "null_q05": "causal6_null_q05",
+    "null_q50": "causal6_null_q50",
+    "null_q95": "causal6_null_q95",
+    "null_q99": "causal6_null_q99",
 }).select([
     "subject", "electrode_idx", "phoneme_pair",
     "causal6_test_roc_auc", "causal6_p_value", "causal6_n_perm",
     "causal6_smin", "causal6_smax",
+    "causal6_T_obs",
+    "causal6_null_q05", "causal6_null_q50", "causal6_null_q95", "causal6_null_q99",
 ])
 print(f"causal6 evaluated tuples: {c6_all.shape[0]}")
 print(f"causal6 significant (p<0.05): {int((c6_all['causal6_p_value'] < CAUSAL6_P_THRESHOLD).sum())}")
@@ -330,6 +346,40 @@ ambig_steps = load_ambig_steps(epochs_dict) if epochs_dict else {}
 print(f"ambig_steps: {len(ambig_steps)} (subject, phoneme_pair, word_end) keys")
 
 # %%
+def _opt_int(v):
+    return int(v) if v is not None else None
+
+
+def _opt_float(v):
+    return float(v) if v is not None else None
+
+
+def _fmt_c4_metric(row) -> str:
+    auc = _opt_float(row["causal4_peak_auc"])
+    if auc is None:
+        return "c4: N/A"
+    smin, smax = _opt_int(row["causal4_smin"]), _opt_int(row["causal4_smax"])
+    flag = " AS" if auc >= CAUSAL4_AUC_THRESHOLD else ""
+    return f"c4: AUC={auc:.3f}{flag} [{smin}-{smax}]"
+
+
+def _fmt_c6_metric(row) -> str:
+    auc = _opt_float(row["causal6_test_roc_auc"])
+    if auc is None:
+        return "c6: N/A"
+    p = _opt_float(row["causal6_p_value"])
+    T = _opt_float(row["causal6_T_obs"])
+    smin, smax = _opt_int(row["causal6_smin"]), _opt_int(row["causal6_smax"])
+    q95 = _opt_float(row["causal6_null_q95"])
+    sig = " sig" if (p is not None and p < CAUSAL6_P_THRESHOLD) else ""
+    bits = [f"c6: AUC={auc:.3f}{sig} [{smin}-{smax}]"]
+    if p is not None:
+        bits.append(f"p={p:.3f}")
+    if T is not None and q95 is not None:
+        bits.append(f"T={T:.2f} vs q95={q95:.2f}")
+    return "  ".join(bits)
+
+
 def render_gallery(rows: pl.DataFrame, out_path: Path, title_prefix: str):
     """Render one PDF: one page per (site, word_end)."""
     if rows.shape[0] == 0:
@@ -344,18 +394,6 @@ def render_gallery(rows: pl.DataFrame, out_path: Path, title_prefix: str):
                 continue
             for we in PHONEME_PAIR_TO_WORD_ENDS.get(row["phoneme_pair"], []):
                 try:
-                    phon_smin = (
-                        int(row["causal6_smin"]) if row["causal6_smin"] is not None
-                        else (int(row["causal4_smin"]) if row["causal4_smin"] is not None else None)
-                    )
-                    phon_smax = (
-                        int(row["causal6_smax"]) if row["causal6_smax"] is not None
-                        else (int(row["causal4_smax"]) if row["causal4_smax"] is not None else None)
-                    )
-                    ac_auc = (
-                        float(row["causal6_test_roc_auc"]) if row["causal6_test_roc_auc"] is not None
-                        else (float(row["causal4_peak_auc"]) if row["causal4_peak_auc"] is not None else None)
-                    )
                     fig = provisional_star_plot(
                         subject=row["subject"],
                         electrode_idx=int(row["electrode_idx"]),
@@ -363,15 +401,20 @@ def render_gallery(rows: pl.DataFrame, out_path: Path, title_prefix: str):
                         word_end=we,
                         epochs_dict=epochs_dict,
                         ambig_steps=ambig_steps,
-                        phon_smin=phon_smin,
-                        phon_smax=phon_smax,
-                        acoustic_peak_auc=ac_auc,
+                        phon_smin_c4=_opt_int(row["causal4_smin"]),
+                        phon_smax_c4=_opt_int(row["causal4_smax"]),
+                        phon_smin_c6=_opt_int(row["causal6_smin"]),
+                        phon_smax_c6=_opt_int(row["causal6_smax"]),
+                        phon_search_smin=AC_SEARCH_SMIN,
+                        phon_search_smax=AC_SEARCH_SMAX,
+                        acoustic_peak_auc=None,  # suppress redundant inline label
                     )
-                    fig.suptitle(
+                    header = (
                         f"{title_prefix}  |  {row['subject']} e{row['electrode_idx']} "
-                        f"{row['phoneme_pair']} -> {we}",
-                        y=1.02, fontsize=10,
+                        f"{row['phoneme_pair']} -> {we}  |  bucket={row['bucket']}\n"
+                        f"{_fmt_c4_metric(row)}    |    {_fmt_c6_metric(row)}"
                     )
+                    fig.suptitle(header, y=1.02, fontsize=9)
                     pdf.savefig(fig, bbox_inches="tight")
                     plt.close(fig)
                     n_pages += 1
@@ -413,6 +456,101 @@ both_sample = (
 render_gallery(both_sample, OUT_DIR / "both.pdf", title_prefix="BOTH")
 
 # %% [markdown]
+# ## NHST diagnostic — T_obs vs null T-max quantiles
+#
+# One horizontal strip per site, sorted by `causal6_T_obs` descending. Each
+# strip shows the null distribution's q05-q95 band (light grey) and q95-q99
+# band (darker grey), plus the observed `T_obs` as a marker. The vertical
+# `q95` line marks the rejection threshold (p<0.05).
+#
+# Use this to answer "why was this site a loss?": a marker just to the left
+# of its own q95 line means the site was borderline; a marker well inside the
+# null band means the per-window AUC, even at its peak, isn't unusual against
+# the maxstat-corrected null.
+#
+# For gain buckets the same plot shows the opposite story (T_obs >= q95).
+
+# %%
+def render_nhst_diagnostic(rows: pl.DataFrame, out_path: Path, title_prefix: str):
+    """Per-site strip plot of causal6 T_obs vs that site's own null quantiles."""
+    rows = rows.filter(pl.col("causal6_T_obs").is_not_null())
+    if rows.shape[0] == 0:
+        print(f"  (no sites with causal6 T_obs for {out_path.name})")
+        return
+    rows = rows.sort("causal6_T_obs", descending=True)
+    n = rows.shape[0]
+    h = max(2.5, 0.25 * n + 1.5)
+    fig, ax = plt.subplots(figsize=(8, h))
+
+    y = np.arange(n)
+    q05 = rows["causal6_null_q05"].to_numpy()
+    q50 = rows["causal6_null_q50"].to_numpy()
+    q95 = rows["causal6_null_q95"].to_numpy()
+    q99 = rows["causal6_null_q99"].to_numpy()
+    T   = rows["causal6_T_obs"].to_numpy()
+    p   = rows["causal6_p_value"].to_numpy()
+
+    for i in range(n):
+        # q05 to q95: light grey band ("null bulk")
+        ax.hlines(y=y[i], xmin=q05[i], xmax=q95[i], color="#cccccc",
+                  lw=10, alpha=0.7)
+        # q95 to q99: darker grey ("tail")
+        ax.hlines(y=y[i], xmin=q95[i], xmax=q99[i], color="#888888",
+                  lw=10, alpha=0.7)
+        # q50 tick
+        ax.scatter(q50[i], y[i], marker="|", color="#444444", s=40, zorder=3)
+        # q95 vertical short tick
+        ax.scatter(q95[i], y[i], marker="|", color="k", s=80, zorder=3)
+        # T_obs marker — red if p>=0.05 (loss / rejection), green if p<0.05
+        sig = (p[i] is not None) and (p[i] < CAUSAL6_P_THRESHOLD)
+        col = "#1b7837" if sig else "#c44e4e"
+        ax.scatter(T[i], y[i], marker="o", s=42, color=col,
+                   edgecolors="k", linewidths=0.6, zorder=4)
+
+    labels = [
+        f"{r['subject']} e{r['electrode_idx']} {r['phoneme_pair']}"
+        f"  (c4={(r['causal4_peak_auc'] or 0):.2f}, p={r['causal6_p_value']:.3f})"
+        for r in rows.iter_rows(named=True)
+    ]
+    ax.set_yticks(y)
+    ax.set_yticklabels(labels, fontsize=8)
+    ax.invert_yaxis()
+    ax.set_xlabel("T statistic (causal6 maxstat)")
+    ax.set_title(
+        f"{title_prefix}  —  T_obs vs null quantiles  (n={n} sites)\n"
+        "grey bar: null q05-q95;  darker: q95-q99;  black tick: q95 (sig threshold);  "
+        "circle: T_obs (red=p>=0.05, green=p<0.05)",
+        fontsize=9,
+    )
+    ax.axvline(0, color="k", lw=0.5, ls=":")
+    fig.tight_layout()
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Wrote {out_path.name}: {n} sites")
+
+
+# %%
+render_nhst_diagnostic(
+    recon.filter(pl.col("bucket") == "causal4_only"),
+    OUT_DIR / "losses_nhst_diagnostic.pdf",
+    title_prefix="LOSSES (causal4_only)",
+)
+
+# %%
+render_nhst_diagnostic(
+    recon.filter(pl.col("bucket") == "causal6_only_eligible"),
+    OUT_DIR / "gains_eligible_nhst_diagnostic.pdf",
+    title_prefix="GAINS eligible (causal6_only_eligible)",
+)
+
+# %%
+render_nhst_diagnostic(
+    recon.filter(pl.col("bucket") == "causal6_only_newly_eligible"),
+    OUT_DIR / "gains_newly_eligible_nhst_diagnostic.pdf",
+    title_prefix="GAINS newly eligible (causal6_only_newly_eligible)",
+)
+
+# %% [markdown]
 # ## Canonical AS-site list
 #
 # Initial canonical list = every site with `causal6_AS == True` (union of `both`,
@@ -447,7 +585,13 @@ print(canonical.group_by("bucket").len().sort("len", descending=True))
 #    losses visually compelling (clear divergence between step 1 and step 6
 #    HGA in the top panel within the shaded acoustic window)? If yes, causal6
 #    NHST may be over-conservative; consider relaxing the p threshold or
-#    keeping selected sites manually.
+#    keeping selected sites manually. The top panel shows: dashed lines =
+#    causal6 search bounds; blue shade = causal4 peak window; green shade =
+#    causal6 peak window.
+# 1a. `losses_nhst_diagnostic.pdf` — population-level view of each loss site's
+#     T_obs against its own null quantile band. Sites where T_obs sits just
+#     left of the q95 (sig) threshold are near-misses; sites deep inside the
+#     null bulk are clear non-effects despite a high observed AUC.
 # 2. Open `outputs/causal46_joined/gains_eligible.pdf` — do the gains look
 #    real? If most are noisy, causal6 NHST may have inflated power (e.g.,
 #    insufficient permutations).
