@@ -439,3 +439,25 @@ canonical.write_csv(OUT_DIR / "canonical_AS_sites.csv")
 print(f"Canonical AS sites: {canonical.shape[0]}")
 print(f"Written: {OUT_DIR / 'canonical_AS_sites.csv'}")
 print(canonical.group_by("bucket").len().sort("len", descending=True))
+
+# %% [markdown]
+# ## Review checklist for the user
+#
+# 1. Open `outputs/causal46_joined/losses.pdf` — are any of the highest-AUC
+#    losses visually compelling (clear divergence between step 1 and step 6
+#    HGA in the top panel within the shaded acoustic window)? If yes, causal6
+#    NHST may be over-conservative; consider relaxing the p threshold or
+#    keeping selected sites manually.
+# 2. Open `outputs/causal46_joined/gains_eligible.pdf` — do the gains look
+#    real? If most are noisy, causal6 NHST may have inflated power (e.g.,
+#    insufficient permutations).
+# 3. Open `outputs/causal46_joined/gains_newly_eligible.pdf` — these sites
+#    were rejected by causal4's speech-responsive pre-screen. Validating
+#    these supports dropping the pre-screen.
+# 4. Edit `outputs/causal46_joined/canonical_AS_sites.csv` manually if you
+#    want to override the default (causal6_AS = True) selection.
+# 5. The 3 absent subjects (EC248, EC250, EC253) are NOT in the canonical
+#    list. When causal6 prod is re-synced with them, re-run this notebook.
+# 6. The star-plot galleries skip silently if epoch files are not available
+#    under `<REPO>/outputs/epochs_preprocessed/`. Set `BARAKEET_EPOCH_DIR`
+#    to point at the actual epoch directory, then re-run.
