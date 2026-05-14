@@ -7,11 +7,10 @@
 # it, mirror to stderr (preserved in the snakemake log), and emit only the
 # integer job id.
 #
-# Queue routing lives here (not in the profile) because snakemake's
-# default-resources YAML does not reliably evaluate Python expressions
-# across resources in v9.x. We pick the queue from the -g (gpu count) arg:
-# any -g >0 → skull-gpu, otherwise → skull-batch.q. An explicit -q in the
-# caller's args overrides this.
+# Queue routing: the profile always passes -q {resources.queue}, which
+# defaults to skull-batch.q. GPU jobs (resources.gpu > 0) that still carry
+# the batch default are upgraded to skull-gpu here so no per-rule override is
+# needed. Any other explicit queue value is passed through unchanged.
 #
 # We also absolutize relative -o paths, since SGE resolves them against
 # $HOME rather than the submit cwd.
@@ -29,10 +28,21 @@ SUBMIT_JOB_BIN="${BARAKEET_SUBMIT_JOB:-submit_job.alt}"
 
 new_args=()
 gpu_count=0
-has_queue=0
+passed_queue=""
 abs_log=""
 prev=""
 for arg in "$@"; do
+    # Strip -q and its value from new_args; we'll add the resolved queue below.
+    if [ "$prev" = "-q" ]; then
+        passed_queue="$arg"
+        prev="$arg"
+        continue
+    fi
+    if [ "$arg" = "-q" ]; then
+        prev="$arg"
+        continue
+    fi
+
     if [ "$prev" = "-o" ]; then
         case "$arg" in
             /*) ;;
@@ -43,22 +53,25 @@ for arg in "$@"; do
     fi
     case "$prev" in
         -g) gpu_count="$arg" ;;
-        -q) has_queue=1 ;;
     esac
+
     new_args+=("$arg")
     prev="$arg"
 done
 
-extra_args=()
-if [ "$has_queue" -eq 0 ]; then
-    if [ "$gpu_count" -gt 0 ]; then
-        extra_args+=(-q skull-gpu)
-    else
-        extra_args+=(-q skull-batch.q)
-    fi
+# Resolve final queue:
+#   explicit non-default  → use as-is
+#   GPU job on batch default → upgrade to skull-gpu
+#   everything else → skull-batch.q
+if [ -n "$passed_queue" ] && [ "$passed_queue" != "skull-batch.q" ]; then
+    final_queue="$passed_queue"
+elif [ "$gpu_count" -gt 0 ]; then
+    final_queue="skull-gpu"
+else
+    final_queue="skull-batch.q"
 fi
 
-output=$("$SUBMIT_JOB_BIN" "${extra_args[@]}" "${new_args[@]}" 2>&1)
+output=$("$SUBMIT_JOB_BIN" -q "$final_queue" "${new_args[@]}" 2>&1)
 echo "$output" >&2
 
 jobid=$(echo "$output" | grep -oE 'Your job [0-9]+' | awk '{print $3}' | tail -n 1)

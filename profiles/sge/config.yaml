@@ -20,18 +20,19 @@ cluster-generic-submit-cmd: >-
   -c {threads}
   -m {resources.mem_gb}
   -g {resources.gpu}
+  -q {resources.queue}
   -o logs/sge/{rule}.{jobid}.out
   -x /bin/sh
 cluster-generic-status-cmd: profiles/sge/status.sh
 cluster-generic-cancel-cmd: qdel
 
 # Defaults applied to every rule. Override per-rule via `resources:` blocks.
-# Queue selection (skull-gpu vs skull-batch.q) is handled in submit.sh
-# based on the -g count, since snakemake 9.x default-resources does not
-# evaluate cross-resource Python expressions.
+# GPU jobs (gpu > 0) carrying the default skull-batch.q are auto-upgraded to
+# skull-gpu in submit.sh. Set queue=<other> explicitly to override for any rule.
 default-resources:
   - mem_gb=32
   - gpu=0
+  - queue=skull-batch.q
 
 jobs: 20
 latency-wait: 60
