@@ -7,6 +7,11 @@
 # it, mirror to stderr (preserved in the snakemake log), and emit only the
 # integer job id.
 #
+# Provisioning: the Snakemake-generated job script calls .venv/bin/python
+# directly, so the UV env must exist before it runs. We wrap the job script
+# with a provisioning preamble (mkdir /tmp dirs, symlink .venv, uv sync) and
+# submit the wrapper instead of the original.
+#
 # Queue routing: the profile always passes -q {resources.queue}, which
 # defaults to skull-batch.q. GPU jobs (resources.gpu > 0) that still carry
 # the batch default are upgraded to skull-gpu here so no per-rule override is
@@ -70,6 +75,34 @@ elif [ "$gpu_count" -gt 0 ]; then
 else
     final_queue="skull-batch.q"
 fi
+
+# Wrap the job script with a UV provisioning preamble.
+# The last element of new_args is the Snakemake-generated job script; it calls
+# .venv/bin/python directly, so the env must exist before it runs. We create a
+# sibling wrapper that provisions the node then execs the original.
+_project_root="$PWD"
+_job_script="${new_args[-1]}"
+unset 'new_args[-1]'
+_wrapper="${_job_script}.wrapped.sh"
+
+cat > "$_wrapper" <<EOF
+#!/bin/sh
+branch="\${barakeet_branch_name:-\$(git -C '$_project_root' rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)}"
+cache_dir=/tmp/jgauthier-cache-uv
+env_dir=/tmp/uv-"\$branch"
+venv='$_project_root/.venv'
+mkdir -p "\$cache_dir" "\$env_dir"
+if [ ! -e "\$venv" ] && [ ! -L "\$venv" ]; then
+    ln -s "\$env_dir" "\$venv"
+fi
+if [ ! -f "\$env_dir/.provisioned" ]; then
+    UV_CACHE_DIR="\$cache_dir" uv sync --directory '$_project_root' >&2
+    touch "\$env_dir/.provisioned"
+fi
+exec /bin/sh '$_job_script'
+EOF
+chmod +x "$_wrapper"
+new_args+=("$_wrapper")
 
 output=$("$SUBMIT_JOB_BIN" -q "$final_queue" "${new_args[@]}" 2>&1)
 echo "$output" >&2
