@@ -33,9 +33,9 @@ from matplotlib.backends.backend_pdf import PdfPages
 # %%
 HOME = Path(os.path.expanduser("~"))
 # Resolve REPO from this notebook's location so it works in any worktree.
-REPO = Path(__file__).resolve().parents[2]
-CAUSAL4_DIR = HOME / "freesurfer_subjects/barakeet/causal4_pipeline/prepare_neurometrics"
-CAUSAL6_DIR = HOME / "freesurfer_subjects/barakeet/causal6_speech_responsive_pipeline/acoustic_decoding_peaks"
+REPO = Path(".").resolve()
+CAUSAL4_DIR = HOME / "u/projects/barakeet/outputs/causal4/prepare_neurometrics"
+CAUSAL6_DIR = HOME / "u/projects/barakeet-speech-responsive/outputs/causal6/acoustic_decoding_peaks"
 OUT_DIR = REPO / "outputs/causal46_joined"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
