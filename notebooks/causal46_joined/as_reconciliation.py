@@ -411,3 +411,31 @@ both_sample = (
          .sort("causal6_test_roc_auc", descending=True)
 )
 render_gallery(both_sample, OUT_DIR / "both.pdf", title_prefix="BOTH")
+
+# %% [markdown]
+# ## Canonical AS-site list
+#
+# Initial canonical list = every site with `causal6_AS == True` (union of `both`,
+# `causal6_only_eligible`, `causal6_only_newly_eligible`).
+#
+# The user may overwrite `canonical_AS_sites.csv` manually after reviewing the
+# PDFs (e.g., to add back high-AUC `causal4_only` losses, or remove borderline
+# gains). Downstream notebooks (Group B/C) MUST read from this CSV.
+
+# %%
+canonical = (
+    recon.filter(pl.col("causal6_AS"))
+         .select([
+             "subject", "electrode_idx", "phoneme_pair",
+             pl.col("causal6_smin").alias("smin"),
+             pl.col("causal6_smax").alias("smax"),
+             pl.col("causal6_test_roc_auc").alias("peak_auc"),
+             pl.col("causal6_p_value").alias("p_value"),
+             "bucket",
+         ])
+         .sort(["subject", "electrode_idx", "phoneme_pair"])
+)
+canonical.write_csv(OUT_DIR / "canonical_AS_sites.csv")
+print(f"Canonical AS sites: {canonical.shape[0]}")
+print(f"Written: {OUT_DIR / 'canonical_AS_sites.csv'}")
+print(canonical.group_by("bucket").len().sort("len", descending=True))
