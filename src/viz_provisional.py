@@ -449,8 +449,11 @@ def provisional_star_plot(
     epoch_sfreq: float = EPOCH_SFREQ,
     figsize: tuple[float, float] = (6.5, 7.5),
     acoustic_peak_auc: float | None = None,
+    acoustic_peak_auc_pct: float | None = None,
     behav_full_peak_diff: float | None = None,
+    behav_full_peak_diff_pct: float | None = None,
     behav_hga_peak_auc: float | None = None,
+    behav_hga_peak_auc_pct: float | None = None,
 ) -> "plt.Figure":
     """Three-panel provisional HGA star plot (no prepare_neurometrics required).
 
@@ -502,13 +505,22 @@ def provisional_star_plot(
         ax_top.axvspan(*t_phon, color="#4dac26", alpha=0.14, label="acoustic window")
     ax_top.axhline(0, color="k", lw=0.5, ls=":")
     ax_top.set_ylabel("HGA (z)")
-    metric_parts = []
-    if acoustic_peak_auc is not None:
-        metric_parts.append(f"ac={acoustic_peak_auc:.3f}")
-    if behav_full_peak_diff is not None:
-        metric_parts.append(f"beh_diff={behav_full_peak_diff:.3f}")
-    if behav_hga_peak_auc is not None:
-        metric_parts.append(f"beh_hga={behav_hga_peak_auc:.3f}")
+
+    def _fmt(label, val, pct, fmt=".3f"):
+        if val is None:
+            return None
+        s = f"{label}={val:{fmt}}"
+        if pct is not None:
+            s += f" (p{pct:.0f})"
+        return s
+
+    metric_parts = [
+        s for s in (
+            _fmt("ac",       acoustic_peak_auc,    acoustic_peak_auc_pct),
+            _fmt("beh_diff", behav_full_peak_diff, behav_full_peak_diff_pct),
+            _fmt("beh_hga",  behav_hga_peak_auc,   behav_hga_peak_auc_pct),
+        ) if s is not None
+    ]
     top_title = f"{subject}  e{electrode_idx}  {phoneme_pair} — unambiguous"
     if metric_parts:
         top_title += "\n" + "  |  ".join(metric_parts)
