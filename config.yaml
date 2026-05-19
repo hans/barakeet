@@ -58,10 +58,10 @@ analysis:
     # elsewhere (cross-window transfer / late-window direct tests) — NOT
     # via this peak search.
     # In samples with epoch_tmin=-0.4, sfreq=100:
-    #   smin >= 50 → window starts >= 100ms post onset
-    #   smax <= 75 → window ends <= 350ms post onset
-    acoustic_peak_search_smin: 50
-    acoustic_peak_search_smax: 75
+    #   smin >= 45 → window starts >= 50ms post onset
+    #   smax <= 60 → window ends <= 200ms post onset
+    acoustic_peak_search_smin: 45
+    acoustic_peak_search_smax: 60
 
   multivariate:
     window_sizes: [10]          # 100ms at 100Hz; robustness: [5, 10, 15]
