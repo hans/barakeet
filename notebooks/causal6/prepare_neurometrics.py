@@ -94,6 +94,9 @@ phon_peaks_foldmean_maxstat = "outputs/causal6/acoustic_decoding_peaks/phon_peak
 phon_peaks_tstat_maxstat = (
     "outputs/causal6/acoustic_decoding_peaks/phon_peaks_tstat_maxstat_all.parquet"
 )
+phon_peaks_foldmean_tfce = (
+    "outputs/causal6/acoustic_decoding_peaks/phon_peaks_foldmean_tfce_all.parquet"
+)
 phon_roc_auc_searchlight_paths = sorted(
     str(p) for p in Path("outputs/causal6/acoustic_decoding_peaks").rglob(
         "*/phon_roc_auc_searchlight.parquet"
@@ -181,8 +184,8 @@ outdir.mkdir(parents=True, exist_ok=True)
 #   2. Each summarize run must emit the t-stat flavors as separate parquets
 #      (`peak_summary_tstat_maxstat.parquet`, `peak_summary_tstat_tfce.parquet`)
 #      alongside the v1 `peak_summary.parquet`. Pre-flavor runs only emit
-#      the v1 file. (Acoustic peaks don't ship TFCE — only t-stat maxstat
-#      is required there.)
+#      the v1 file. (Acoustic peaks ship tstat_maxstat + foldmean_tfce alongside
+#      the v1 foldmean_maxstat.)
 #
 #   3. Each per-subject decoder dir must have a `coefficients.parquet`
 #      (cross-window transfer in A_neurometrics needs it). Pre-coefficients
@@ -266,10 +269,12 @@ def _filter_fresh_subjects(decoder_dirs, *, decoder_label, summarize_rule, requi
             if not ok:
                 problems.append(f"summarize: {msg}")
         else:
-            # Acoustic: just require per-subject phon_peaks_tstat_maxstat.parquet
+            # Acoustic: require per-subject tstat_maxstat and foldmean_tfce parquets
             peaks_dir = d.parent.parent / "acoustic_decoding_peaks" / subj
             if not (peaks_dir / "phon_peaks_tstat_maxstat.parquet").exists():
                 problems.append("peaks: missing phon_peaks_tstat_maxstat.parquet")
+            if not (peaks_dir / "phon_peaks_foldmean_tfce.parquet").exists():
+                problems.append("peaks: missing phon_peaks_foldmean_tfce.parquet")
         if problems:
             L.warning(
                 f"[stale-filter] {decoder_label}/{subj}: EXCLUDED — "
@@ -465,7 +470,7 @@ phon_coefs_df = (
 )
 
 # %% [markdown]
-# ## Acoustic peaks (two flavors)
+# ## Acoustic peaks (three flavors)
 
 # %%
 phon_peaks_foldmean_maxstat_df = _filter_aggregator_rows(
@@ -484,6 +489,15 @@ phon_peaks_tstat_maxstat_df = _filter_aggregator_rows(
     ),
     fresh_subjects_acoustic,
     label="phon_peaks_tstat_maxstat",
+)
+
+phon_peaks_foldmean_tfce_df = _filter_aggregator_rows(
+    pl.read_parquet(phon_peaks_foldmean_tfce).with_columns(
+        pl.col("subject").cast(subject_enum),
+        pl.col("phoneme_pair").cast(phoneme_pair_enum),
+    ),
+    fresh_subjects_acoustic,
+    label="phon_peaks_foldmean_tfce",
 )
 
 # %% [markdown]
@@ -859,6 +873,7 @@ _write_pl(word_end_df, "word_end_df.parquet")
 
 _write_pl(phon_peaks_foldmean_maxstat_df, "phon_peaks_foldmean_maxstat.parquet")
 _write_pl(phon_peaks_tstat_maxstat_df, "phon_peaks_tstat_maxstat.parquet")
+_write_pl(phon_peaks_foldmean_tfce_df, "phon_peaks_foldmean_tfce.parquet")
 
 _write_pl(behav_hga_only_peaks_foldmean_maxstat_df, "behav_hga_only_peaks_foldmean_maxstat.parquet")
 _write_pl(behav_hga_only_peaks_tstat_maxstat_df, "behav_hga_only_peaks_tstat_maxstat.parquet")

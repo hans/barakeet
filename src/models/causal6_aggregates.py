@@ -76,10 +76,11 @@ SITE_KEYS_GANONG_HGA_ONLY: list[str] = [
 FLAVORS_ACOUSTIC: list[FlavorSpec] = [
     FlavorSpec("fold_mean", apply_tfce=False),
     FlavorSpec("t_stat", apply_tfce=False),
+    # fold_mean is raw AUC (chance=0.5) → integrate above chance.
+    # Included for reconciliation: tests whether TFCE cluster credit changes
+    # site counts despite the narrow window (W ≈ 3-4).
+    FlavorSpec("fold_mean", apply_tfce=True, tfce_threshold=0.5),
 ]
-# notebooks/causal6/acoustic_decoding_peaks.py:28 documents why TFCE is
-# omitted: peak-search window count is too narrow for cluster credit
-# to matter.
 
 FLAVORS_BEHAVIOR_WITH_CONTROL: list[FlavorSpec] = [
     FlavorSpec("fold_mean", apply_tfce=False),

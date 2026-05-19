@@ -280,13 +280,14 @@ rule causal6_all:
 
     For the three behavior/acoustic decoders, four peak-finding flavors are
     emitted (foldmean_maxstat, tstat_maxstat, foldmean_tfce, tstat_tfce —
-    acoustic skips TFCE since its peak-search window is already narrow).
+    acoustic ships three flavors: foldmean_maxstat, tstat_maxstat, foldmean_tfce).
     Each has its own aggregate+FDR output so downstream consumers can choose.
     """
     input:
-        # Acoustic — foldmean_maxstat (v1) + tstat_maxstat
+        # Acoustic — three flavors
         "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet",
         "outputs/causal6/acoustic_decoding_peaks/phon_peaks_tstat_maxstat_all.parquet",
+        "outputs/causal6/acoustic_decoding_peaks/phon_peaks_foldmean_tfce_all.parquet",
         # Behavior with control — four flavors
         "outputs/causal6/behavior_decoding_single_electrode_summarize/peak_summary_all.parquet",
         "outputs/causal6/behavior_decoding_single_electrode_summarize/peak_summary_tstat_maxstat_all.parquet",
@@ -863,10 +864,11 @@ rule acoustic_decoding_peaks:
         notebook     = "notebooks/causal6/acoustic_decoding_peaks.py",
 
     output:
-        notebook        = "outputs/causal6/acoustic_decoding_peaks/{subject}/notebook.ipynb",
-        peaks           = "outputs/causal6/acoustic_decoding_peaks/{subject}/phon_peaks.parquet",
-        peaks_tstat     = "outputs/causal6/acoustic_decoding_peaks/{subject}/phon_peaks_tstat_maxstat.parquet",
-        roc_auc         = "outputs/causal6/acoustic_decoding_peaks/{subject}/phon_roc_auc_searchlight.parquet",
+        notebook            = "outputs/causal6/acoustic_decoding_peaks/{subject}/notebook.ipynb",
+        peaks               = "outputs/causal6/acoustic_decoding_peaks/{subject}/phon_peaks.parquet",
+        peaks_tstat         = "outputs/causal6/acoustic_decoding_peaks/{subject}/phon_peaks_tstat_maxstat.parquet",
+        peaks_foldmean_tfce = "outputs/causal6/acoustic_decoding_peaks/{subject}/phon_peaks_foldmean_tfce.parquet",
+        roc_auc             = "outputs/causal6/acoustic_decoding_peaks/{subject}/phon_roc_auc_searchlight.parquet",
 
     run:
         outdir = Path(output.notebook).parent
@@ -999,6 +1001,33 @@ rule acoustic_decoding_peaks_aggregate_tstat_maxstat:
                 result_paths=list(input.result_paths),
                 outdir=str(outdir),
                 output_name="phon_peaks_tstat_maxstat_all.parquet",
+                fdr_alpha=config["analysis"]["fdr_alpha"],
+            ),
+        )
+
+
+rule acoustic_decoding_peaks_aggregate_foldmean_tfce:
+    """Acoustic fold-mean TFCE peaks: concatenate + BH-FDR."""
+    input:
+        notebook     = "notebooks/causal6/significance_aggregate.py",
+        result_paths = expand(
+            "outputs/causal6/acoustic_decoding_peaks/{subject}/phon_peaks_foldmean_tfce.parquet",
+            subject=config["data"]["subjects"],
+        ),
+
+    output:
+        notebook = "outputs/causal6/acoustic_decoding_peaks/aggregate_notebook_foldmean_tfce.ipynb",
+        all      = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_foldmean_tfce_all.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                result_paths=list(input.result_paths),
+                outdir=str(outdir),
+                output_name="phon_peaks_foldmean_tfce_all.parquet",
                 fdr_alpha=config["analysis"]["fdr_alpha"],
             ),
         )
@@ -1549,6 +1578,7 @@ rule prepare_neurometrics:
         ),
         phon_peaks_foldmean_maxstat   = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet",
         phon_peaks_tstat_maxstat      = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_tstat_maxstat_all.parquet",
+        phon_peaks_foldmean_tfce      = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_foldmean_tfce_all.parquet",
         phon_roc_auc_searchlight = expand(
             "outputs/causal6/acoustic_decoding_peaks/{subject}/phon_roc_auc_searchlight.parquet",
             subject=config["data"]["subjects"],
@@ -1598,6 +1628,7 @@ rule prepare_neurometrics:
         # Peak parquets keyed by flavor
         phon_peaks_foldmean_maxstat           = "outputs/causal6/prepare_neurometrics/phon_peaks_foldmean_maxstat.parquet",
         phon_peaks_tstat_maxstat              = "outputs/causal6/prepare_neurometrics/phon_peaks_tstat_maxstat.parquet",
+        phon_peaks_foldmean_tfce              = "outputs/causal6/prepare_neurometrics/phon_peaks_foldmean_tfce.parquet",
         behav_hga_only_peaks_foldmean_maxstat = "outputs/causal6/prepare_neurometrics/behav_hga_only_peaks_foldmean_maxstat.parquet",
         behav_hga_only_peaks_tstat_maxstat    = "outputs/causal6/prepare_neurometrics/behav_hga_only_peaks_tstat_maxstat.parquet",
         behav_hga_only_peaks_tstat_tfce       = "outputs/causal6/prepare_neurometrics/behav_hga_only_peaks_tstat_tfce.parquet",
@@ -1637,6 +1668,7 @@ rule prepare_neurometrics:
                 acoustic_coefficients=list(input.acoustic_coefficients),
                 phon_peaks_foldmean_maxstat=str(input.phon_peaks_foldmean_maxstat),
                 phon_peaks_tstat_maxstat=str(input.phon_peaks_tstat_maxstat),
+                phon_peaks_foldmean_tfce=str(input.phon_peaks_foldmean_tfce),
                 phon_roc_auc_searchlight_paths=list(input.phon_roc_auc_searchlight),
 
                 behav_full_scores=list(input.behav_full_scores),
