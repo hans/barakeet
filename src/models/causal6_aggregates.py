@@ -24,6 +24,7 @@ summarize notebooks orchestrate their own TFCE calls independently.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import polars as pl
@@ -774,3 +775,33 @@ def tfce_enhanced_peak_test(
         perm_key=perm_key, stat_col=test_stat_col,
     )
     return peaks
+
+
+# ---------------------------------------------------------------------------
+# ROI restriction
+# ---------------------------------------------------------------------------
+
+
+def restrict_to_rois(
+    df: pl.DataFrame,
+    electrode_dfs: list[pl.DataFrame],
+    rois: Sequence[str],
+    *,
+    site_keys: Sequence[str] = ("subject", "electrode_idx"),
+) -> tuple[pl.DataFrame, int]:
+    """Filter df to rows whose (subject, electrode_idx) lives in one of `rois`.
+
+    Args:
+        df: long-format with `site_keys` columns.
+        electrode_dfs: per-subject electrode DataFrames. Must have
+            columns `subject, electrode_idx, roi`.
+        rois: list of FreeSurfer aparc labels.
+
+    Returns:
+        (filtered_df, N_ROI). N_ROI is the count of rows in filtered_df —
+        used as the family size for BH-FDR.
+    """
+    elec = pl.concat(electrode_dfs).select(["subject", "electrode_idx", "roi"]).unique()
+    roi_keys = elec.filter(pl.col("roi").is_in(list(rois)))
+    filtered = df.join(roi_keys, on=list(site_keys), how="semi")
+    return filtered, filtered.height
