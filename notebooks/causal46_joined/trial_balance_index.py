@@ -35,7 +35,9 @@ EPOCH_DIR = REPO / "outputs/epochs_preprocessed"
 OUT_DIR = REPO / "outputs/causal46_joined"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-CANONICAL_CSV = OUT_DIR / "canonical_AS_sites.csv"
+# Canonical acoustic sites: causal6 foldmean-maxstat peaks, FDR-significant.
+# Produced by acoustic_decoding_peaks_aggregate rule in causal6.Snakefile.
+CAUSAL6_PEAKS = REPO / "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet"
 
 # K=5 is the recommended default; K=4 is the permissive companion for
 # borderline subjects; K=10 is retained as a strict-tail sanity column.
@@ -45,7 +47,14 @@ THRESHOLDS = (4, 5, 10)
 # ## Load canonical sites and discover needed subjects
 
 # %%
-canonical = pl.read_csv(CANONICAL_CSV)
+_peaks_raw = pl.read_parquet(CAUSAL6_PEAKS)
+if "significant" in _peaks_raw.columns:
+    canonical = _peaks_raw.filter(pl.col("significant"))
+else:
+    # Fallback for parquets produced before significance_aggregate added the column.
+    canonical = _peaks_raw.filter(pl.col("p_value") < 0.05)
+    print("⚠ no `significant` column — falling back to p_value < 0.05 (uncorrected)")
+
 needed_subjects = sorted(canonical["subject"].unique().to_list())
 print(f"Canonical sites: {canonical.height}  across {len(needed_subjects)} subjects")
 print(f"Subjects: {needed_subjects}")
