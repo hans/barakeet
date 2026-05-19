@@ -40,7 +40,7 @@ from src.models.causal6_aggregates import (
     _behavior_offset_samples,
     _ganong_pod_samples,
 )
-from src.stimuli import OFFSET_DICT
+from src.stimuli import OFFSET_DICT, PHONEME_PAIR_TO_WORD_ENDS
 from src.viz_paper import add_textgrid
 
 EPOCH_TMIN: float = -0.4
@@ -436,12 +436,18 @@ def provisional_star_plot(
     subject: str,
     electrode_idx: int,
     phoneme_pair: str,
-    word_end: str,
+    word_end: str | None = None,
+    *,
     epochs_dict: dict[str, "mne.Epochs"],
     ambig_steps: dict[tuple[str, str, str], list[int]],
-    *,
     phon_smin: int | None = None,
     phon_smax: int | None = None,
+    phon_smin_c4: int | None = None,
+    phon_smax_c4: int | None = None,
+    phon_smin_c6: int | None = None,
+    phon_smax_c6: int | None = None,
+    phon_search_smin: int | None = None,
+    phon_search_smax: int | None = None,
     behav_smin: int | None = None,
     behav_smax: int | None = None,
     textgrid_dir: str = "data/stimuli/textgrid",
@@ -449,8 +455,11 @@ def provisional_star_plot(
     epoch_sfreq: float = EPOCH_SFREQ,
     figsize: tuple[float, float] = (6.5, 7.5),
     acoustic_peak_auc: float | None = None,
+    acoustic_peak_auc_pct: float | None = None,
     behav_full_peak_diff: float | None = None,
+    behav_full_peak_diff_pct: float | None = None,
     behav_hga_peak_auc: float | None = None,
+    behav_hga_peak_auc_pct: float | None = None,
 ) -> "plt.Figure":
     """Three-panel provisional HGA star plot (no prepare_neurometrics required).
 
@@ -497,18 +506,43 @@ def provisional_star_plot(
         se = tr.std(0) / np.sqrt(mask.sum())
         ax_top.plot(times, m, color=color, lw=1.5, label=f"step {step}  (n={mask.sum()})")
         ax_top.fill_between(times, m - se, m + se, color=color, alpha=0.18)
+    # causal6 search-range bounds: dashed vertical lines (the maxstat correction
+    # range over which causal6 hunted for a peak).
+    if phon_search_smin is not None and phon_search_smax is not None:
+        t_search = np.array([phon_search_smin, phon_search_smax]) / epoch_sfreq + epoch_tmin
+        ax_top.axvline(t_search[0], color="k", lw=0.6, ls="--", alpha=0.5,
+                       label="causal6 search bounds")
+        ax_top.axvline(t_search[1], color="k", lw=0.6, ls="--", alpha=0.5)
+    # Generic peak window (used by other callers that don't have c4/c6 split).
     if phon_smin is not None:
         t_phon = np.array([phon_smin, phon_smax]) / epoch_sfreq + epoch_tmin
-        ax_top.axvspan(*t_phon, color="#4dac26", alpha=0.14, label="acoustic window")
+        ax_top.axvspan(*t_phon, color="#4dac26", alpha=0.18, label="acoustic peak")
+    # causal4 peak window: blue.
+    if phon_smin_c4 is not None:
+        t_c4 = np.array([phon_smin_c4, phon_smax_c4]) / epoch_sfreq + epoch_tmin
+        ax_top.axvspan(*t_c4, color="#1f78b4", alpha=0.20, label="causal4 peak")
+    # causal6 peak window: green.
+    if phon_smin_c6 is not None:
+        t_c6 = np.array([phon_smin_c6, phon_smax_c6]) / epoch_sfreq + epoch_tmin
+        ax_top.axvspan(*t_c6, color="#4dac26", alpha=0.20, label="causal6 peak")
     ax_top.axhline(0, color="k", lw=0.5, ls=":")
     ax_top.set_ylabel("HGA (z)")
-    metric_parts = []
-    if acoustic_peak_auc is not None:
-        metric_parts.append(f"ac={acoustic_peak_auc:.3f}")
-    if behav_full_peak_diff is not None:
-        metric_parts.append(f"beh_diff={behav_full_peak_diff:.3f}")
-    if behav_hga_peak_auc is not None:
-        metric_parts.append(f"beh_hga={behav_hga_peak_auc:.3f}")
+
+    def _fmt(label, val, pct, fmt=".3f"):
+        if val is None:
+            return None
+        s = f"{label}={val:{fmt}}"
+        if pct is not None:
+            s += f" (p{pct:.0f})"
+        return s
+
+    metric_parts = [
+        s for s in (
+            _fmt("ac",       acoustic_peak_auc,    acoustic_peak_auc_pct),
+            _fmt("beh_diff", behav_full_peak_diff, behav_full_peak_diff_pct),
+            _fmt("beh_hga",  behav_hga_peak_auc,   behav_hga_peak_auc_pct),
+        ) if s is not None
+    ]
     top_title = f"{subject}  e{electrode_idx}  {phoneme_pair} — unambiguous"
     if metric_parts:
         top_title += "\n" + "  |  ".join(metric_parts)
@@ -516,8 +550,16 @@ def provisional_star_plot(
     ax_top.legend(fontsize=7, loc="upper left", framealpha=0.7)
 
     # ── Middle: controlled ambiguous (within-completion) ──────────────
-    amb = ambig_steps.get((subject, phoneme_pair, word_end), [3, 4])
-    we_amb_mask = (md_pp["word_end"] == word_end) & md_pp["resampled"].isin(amb)
+    if word_end is None:
+        all_wes = PHONEME_PAIR_TO_WORD_ENDS.get(phoneme_pair, [])
+        amb_set: set[int] = set()
+        for _we in all_wes:
+            amb_set.update(ambig_steps.get((subject, phoneme_pair, _we), [3, 4]))
+        amb = sorted(amb_set) or [3, 4]
+        we_amb_mask = md_pp["resampled"].isin(amb)
+    else:
+        amb = ambig_steps.get((subject, phoneme_pair, word_end), [3, 4])
+        we_amb_mask = (md_pp["word_end"] == word_end) & md_pp["resampled"].isin(amb)
 
     for i, bhv_val in enumerate(
         sorted(md_pp.loc[we_amb_mask, bhv_col].dropna().unique())
@@ -538,12 +580,16 @@ def provisional_star_plot(
     ax_mid.axhline(0, color="k", lw=0.5, ls=":")
     ax_mid.set_ylabel("HGA (z)")
     ax_mid.set_title(
-        f"Controlled ambiguous — {word_end}  (steps {amb})", fontsize=9
+        f"Controlled ambiguous — {'all word-ends' if word_end is None else word_end}  (steps {amb})",
+        fontsize=9,
     )
     ax_mid.legend(fontsize=7, loc="upper left", framealpha=0.7)
 
-    # ── Bottom: all trials within word_end (decoder view) ─────────────
-    we_all_mask = md_pp["word_end"] == word_end
+    # ── Bottom: all trials (decoder view) ─────────────────────────────
+    if word_end is None:
+        we_all_mask = np.ones(len(md_pp), dtype=bool)
+    else:
+        we_all_mask = md_pp["word_end"] == word_end
 
     for i, bhv_val in enumerate(
         sorted(md_pp.loc[we_all_mask, bhv_col].dropna().unique())
@@ -565,20 +611,27 @@ def provisional_star_plot(
     ax_bot.set_ylabel("HGA (z)")
     ax_bot.set_xlabel("Time (s, post word onset)")
     ax_bot.set_title(
-        f"All trials — {word_end}  (decoder view)", fontsize=9
+        f"All trials — {'all word-ends' if word_end is None else word_end}  (decoder view)",
+        fontsize=9,
     )
     ax_bot.legend(fontsize=7, loc="upper left", framealpha=0.7)
 
     # ── TextGrid ────────────────────────────────────────────────────────
-    for ax in (ax_top, ax_mid, ax_bot):
-        try:
-            add_textgrid(ax, textgrid_dir=textgrid_dir,
-                         textgrid_file=f"11_{word_end}_dn_002.TextGrid",
-                         vline_extent=1.0)
-        except Exception:
-            pass
+    if word_end is not None:
+        for ax in (ax_top, ax_mid, ax_bot):
+            try:
+                add_textgrid(ax, textgrid_dir=textgrid_dir,
+                             textgrid_file=f"11_{word_end}_dn_002.TextGrid",
+                             vline_extent=1.0)
+            except Exception:
+                pass
 
-    ax_top.set_xlim(0.0, OFFSET_DICT.get(word_end, 1.0) + 0.1)
+    if word_end is None:
+        wes = PHONEME_PAIR_TO_WORD_ENDS.get(phoneme_pair, [])
+        xlim = max((OFFSET_DICT.get(we, 1.0) for we in wes), default=1.0) + 0.1
+    else:
+        xlim = OFFSET_DICT.get(word_end, 1.0) + 0.1
+    ax_top.set_xlim(0.0, xlim)
     fig.tight_layout()
     return fig
 
