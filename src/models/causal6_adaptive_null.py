@@ -403,6 +403,66 @@ def stage1_gate(
     return borderline_keys, gate_log
 
 
+def stage3_gate(
+    real_agg: pl.DataFrame,
+    null_agg: pl.DataFrame,
+    *,
+    site_keys: Sequence[str],
+    flavors: Sequence[FlavorSpec],
+    k_gate: int,
+    n_roi: int,
+    alpha: float,
+    window_keys: Sequence[str] = ("smin", "smax"),
+    perm_key: str = "permutation_idx",
+) -> tuple[set[tuple], pl.DataFrame]:
+    """Gate K-floored ROI sites for a stage-3 permutation refit.
+
+    Threshold = k_gate * alpha / n_roi. With k_gate=200, alpha=0.05,
+    n_roi=2007: threshold ≈ 5e-3. Catches sites whose current p, if true,
+    could be FDR-significant at any of the top k_gate BH ranks.
+
+    Caller must pre-restrict real_agg / null_agg to ROI sites — this
+    function does not apply the ROI filter.
+
+    Returns (refit_keys, gate_log) in the same shape as stage1_gate.
+    """
+    p_max = k_gate * alpha / n_roi
+    return stage1_gate(
+        real_agg, null_agg,
+        site_keys=site_keys, flavors=flavors,
+        p_max=p_max, window_keys=window_keys, perm_key=perm_key,
+    )
+
+
+def log_stage3_gate(
+    subject: str,
+    *,
+    n_permutations_total_pre_stage3: int,
+    n_roi: int,
+    k_gate: int,
+    alpha: float,
+    gate_log: pl.DataFrame,
+    n_refit: int,
+    print_top_k: int = 50,
+) -> None:
+    """Print a stage-3 gate summary to stdout. See ``log_stage1_gate``."""
+    threshold = k_gate * alpha / n_roi
+    print(
+        f"[{_GATE_TAG}/{subject}] stage3 K_pre={n_permutations_total_pre_stage3} "
+        f"k_gate={k_gate} N_ROI={n_roi} threshold={threshold:.2e}: "
+        f"{n_refit}/{gate_log.height} sites flagged",
+        flush=True,
+    )
+    if n_refit > 0:
+        print(
+            gate_log.filter(pl.col("escalated"))
+            .sort("min_corrected_p_global")
+            .head(print_top_k)
+            .to_pandas().to_string(index=False),
+            flush=True,
+        )
+
+
 def filter_null_to_borderline(
     null_scores: pl.DataFrame | pl.LazyFrame,
     borderline_keys: set[tuple],
