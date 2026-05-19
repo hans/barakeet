@@ -596,6 +596,10 @@ rule acoustic_decoding_null:
         winners    = REG_LAMBDA_WINNERS,
         scores     = "outputs/causal6/acoustic_decoding_single_electrode/{subject}/scores.parquet",
         notebook   = "notebooks/causal6/acoustic_decoding_null.py",
+        all_electrode_dfs = expand(
+            "outputs/causal6/find_speech_responsive/{subject}_results.csv",
+            subject=config["data"]["subjects"],
+        ),
 
     output:
         notebook        = "outputs/causal6/acoustic_decoding_null/{subject}/notebook.ipynb",
@@ -637,6 +641,12 @@ rule acoustic_decoding_null:
                 escalate_corrected_p_max=C6["escalate_corrected_p_max"],
                 permutation_seed=C6["permutation_seed"],
                 permutation_chunk_size=C6["permutation_chunk_size"],
+
+                n_permutations_stage3=C6["n_permutations_stage3"],
+                stage3_k_gate=C6["stage3_k_gate"],
+                fdr_alpha=config["analysis"]["fdr_alpha"],
+                fdr_rois=config["analysis"]["fdr_rois"],
+                electrode_dfs_paths=list(input.all_electrode_dfs),
             ),
             wildcards=wildcards,
             resources=resources,
@@ -899,6 +909,10 @@ rule acoustic_decoding_peaks_aggregate:
             "outputs/causal6/acoustic_decoding_peaks/{subject}/phon_peaks.parquet",
             subject=config["data"]["subjects"],
         ),
+        all_electrode_dfs = expand(
+            "outputs/causal6/find_speech_responsive/{subject}_results.csv",
+            subject=config["data"]["subjects"],
+        ),
 
     output:
         notebook = "outputs/causal6/acoustic_decoding_peaks/aggregate_notebook.ipynb",
@@ -914,6 +928,8 @@ rule acoustic_decoding_peaks_aggregate:
                 outdir=str(outdir),
                 output_name="phon_peaks_all.parquet",
                 fdr_alpha=config["analysis"]["fdr_alpha"],
+                fdr_rois=config["analysis"]["fdr_rois"],
+                electrode_dfs_paths=list(input.all_electrode_dfs),
             ),
         )
 
