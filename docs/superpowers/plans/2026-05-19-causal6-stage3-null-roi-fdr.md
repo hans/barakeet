@@ -103,11 +103,11 @@ The perm_idx fix gets a unit test (small, well-scoped). The stage-3 gate logic i
 
 **Files:** `src/models/causal6.py`, new test.
 
-- [ ] **Step 1.1: Read the current code** at `_fit_batched_cv_permutations` (`src/models/causal6.py` ~line 560) and confirm:
+- [x] **Step 1.1: Read the current code** at `_fit_batched_cv_permutations` (`src/models/causal6.py` ~line 560) and confirm:
   - `permute_seeds` is the input parameter listing the seeds.
   - `perm_ids = np.repeat(np.arange(chunk_start, chunk_end, dtype=np.int64), B)` is the buggy line.
 
-- [ ] **Step 1.2: Patch the line**
+- [x] **Step 1.2: Patch the line**
 
 Replace:
 ```python
@@ -123,7 +123,7 @@ perm_ids = np.repeat(seeds_chunk, B)
 
 Now `permutation_idx` carries the *seed* (which the calling notebooks already chose to be non-overlapping across stages).
 
-- [ ] **Step 1.3: Add unit test `tests/test_perm_idx_seeds.py`**
+- [x] **Step 1.3: Add unit test `tests/test_perm_idx_seeds.py`**
 
 ```python
 """Verify _fit_batched_cv_permutations writes permute_seeds as permutation_idx."""
@@ -151,7 +151,7 @@ def test_perm_idx_equals_seed():
     assert got == sorted(seeds), f"expected perm_idx ∈ {seeds}, got {got}"
 ```
 
-- [ ] **Step 1.4: Run the test**
+- [x] **Step 1.4: Run the test**
 
 ```bash
 ./.venv/bin/python -m pytest tests/test_perm_idx_seeds.py -v
@@ -159,12 +159,14 @@ def test_perm_idx_equals_seed():
 
 Expected: 1 passed.
 
-- [ ] **Step 1.5: Commit**
+- [x] **Step 1.5: Commit**
 
 ```bash
 git add src/models/causal6.py tests/test_perm_idx_seeds.py
 git commit -m "fix permutation_idx collision in _fit_batched_cv_permutations"
 ```
+
+**Landed:** commit `b13fc95` on `causal6-speech-responsive-update`.
 
 ---
 
