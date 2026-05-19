@@ -7,7 +7,8 @@ from ploomber_engine import execute_notebook
 configfile: "config.yaml"
 
 # include: "workflows/causal4.Snakefile"
-include: "workflows/causal5.Snakefile"
+# include: "workflows/causal5.Snakefile"
+include: "workflows/causal6.Snakefile"
 
 # DEFAULT_NOTEBOOKS = {run_name: run_dict if run_dict else {"notebook": run_name}
 #                      for run_name, run_dict in config["run_notebooks"].items()}
