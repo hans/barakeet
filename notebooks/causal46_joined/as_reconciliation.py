@@ -45,6 +45,10 @@ OUT_DIR.mkdir(parents=True, exist_ok=True)
 CAUSAL4_AUC_THRESHOLD = 0.65
 CAUSAL6_P_THRESHOLD = 0.05
 
+# Set False to fall back to raw foldmean maxstat (phon_peaks.parquet) instead
+# of TFCE-enhanced foldmean peaks (phon_peaks_foldmean_tfce.parquet).
+USE_TFCE_ACOUSTIC = True
+
 # causal6's acoustic peak-search bounds (in samples post epoch_tmin). These
 # define the maxstat-correction range — the NHST p-value is corrected over
 # every window that satisfies smin >= AC_SEARCH_SMIN and smax <= AC_SEARCH_SMAX.
@@ -95,7 +99,9 @@ print(f"causal4 subjects (in AS): {sorted(c4_AS['subject'].unique().to_list())}"
 # ## Load causal6 outputs
 
 # %%
-c6_paths = sorted(CAUSAL6_DIR.glob("*/phon_peaks.parquet"))
+_c6_peaks_file = "phon_peaks_foldmean_tfce.parquet" if USE_TFCE_ACOUSTIC else "phon_peaks.parquet"
+print(f"causal6 acoustic peaks flavor: {_c6_peaks_file}")
+c6_paths = sorted(CAUSAL6_DIR.glob(f"*/{_c6_peaks_file}"))
 c6_subjects_present = [p.parent.name for p in c6_paths]
 print(f"causal6 subjects in prod: {c6_subjects_present}")
 
