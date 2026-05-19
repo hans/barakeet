@@ -413,6 +413,7 @@ def render_gallery(rows: pl.DataFrame, out_path: Path, title_prefix: str):
                     phon_search_smin=AC_SEARCH_SMIN,
                     phon_search_smax=AC_SEARCH_SMAX,
                     acoustic_peak_auc=None,  # suppress redundant inline label
+                    word_end=None,
                 )
                 header = (
                     f"{title_prefix}  |  {row['subject']} e{row['electrode_idx']} "
