@@ -28,6 +28,14 @@ analysis:
   ambiguous_response_threshold: 2
 
   fdr_alpha: 0.05
+  fdr_rois:
+    - superiortemporal
+    - middletemporal
+    - supramarginal
+    - precentral
+    - parsopercularis
+    - parstriangularis
+    - caudalmiddlefrontal
 
   behav_ttest_pvalue_threshold: 0.001
 
@@ -79,3 +87,5 @@ causal6:
   escalate_corrected_p_max: 0.05    # tighter than prod 0.20 so only obvious sites escalate
   permutation_seed: 0
   permutation_chunk_size: 6
+  n_permutations_stage3: 100           # smoke-test: tiny K3
+  stage3_k_gate: 200

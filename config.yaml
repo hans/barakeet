@@ -29,6 +29,14 @@ analysis:
   ambiguous_response_threshold: 2
 
   fdr_alpha: 0.05
+  fdr_rois:
+    - superiortemporal
+    - middletemporal
+    - supramarginal
+    - precentral
+    - parsopercularis
+    - parstriangularis
+    - caudalmiddlefrontal
 
   behav_ttest_pvalue_threshold: 0.001
 
@@ -121,3 +129,5 @@ causal6:
   permutation_seed: 0          # base RNG seed; stage 1 uses [seed, seed+K1),
                                # stage 2 uses [seed+K1, seed+K1+K2).
   permutation_chunk_size: 20   # permutations fit per GPU call
+  n_permutations_stage3: 90000     # stage-3 boost — see docs/superpowers/plans/2026-05-19-causal6-stage3-null-roi-fdr.md
+  stage3_k_gate: 200               # 2× expected discovery rate ~100
