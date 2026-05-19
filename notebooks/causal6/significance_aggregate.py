@@ -24,6 +24,7 @@
 # %%
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 from statsmodels.stats.multitest import multipletests
 
@@ -32,6 +33,8 @@ result_paths = []  # list[str]; annotation stripped for ploomber static_analysis
 outdir = "."
 output_name = "significance_all.parquet"
 fdr_alpha = 0.05
+fdr_rois = []
+electrode_dfs_paths = []
 
 # %%
 outdir = Path(outdir)
@@ -41,11 +44,41 @@ dfs = [pd.read_parquet(p) for p in result_paths]
 combined = pd.concat(dfs, ignore_index=True)
 
 # %%
-_, q_values, _, _ = multipletests(
-    combined["p_value"].values, alpha=fdr_alpha, method="fdr_bh"
+# Apply ROI restriction if configured. Sites outside the family get q=NaN.
+if fdr_rois and electrode_dfs_paths:
+    import polars as pl
+    from src.models.causal6_aggregates import restrict_to_rois
+
+    electrode_dfs = [pl.from_pandas(pd.read_csv(p)) for p in electrode_dfs_paths]
+    combined_pl = pl.from_pandas(combined)
+    in_family, n_roi = restrict_to_rois(
+        combined_pl, electrode_dfs, fdr_rois,
+        site_keys=("subject", "electrode_idx"),
+    )
+    in_family_keys = set(zip(
+        in_family["subject"].to_list(),
+        in_family["electrode_idx"].to_list(),
+    ))
+    combined["in_fdr_family"] = [
+        (s, e) in in_family_keys
+        for s, e in zip(combined["subject"], combined["electrode_idx"])
+    ]
+    print(
+        f"ROI restriction: {combined['in_fdr_family'].sum()} / {len(combined)} "
+        f"rows in FDR family across {n_roi} sites"
+    )
+else:
+    combined["in_fdr_family"] = True
+
+# BH on in-family rows only; non-family rows get q=NaN.
+mask = combined["in_fdr_family"].values
+q_values = np.full(len(combined), np.nan)
+_, q_in, _, _ = multipletests(
+    combined.loc[mask, "p_value"].values, alpha=fdr_alpha, method="fdr_bh"
 )
+q_values[mask] = q_in
 combined["q_value"] = q_values
-combined["significant"] = combined["q_value"] < fdr_alpha
+combined["significant"] = (combined["q_value"] < fdr_alpha).fillna(False)
 
 # %%
 print(f"Total decoders tested: {len(combined)}")
