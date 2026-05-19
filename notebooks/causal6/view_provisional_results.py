@@ -35,8 +35,10 @@ os.environ.setdefault("POLARS_MAX_THREADS", "8")
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
+import seaborn as sns
 
 from pathlib import Path
+from tqdm.auto import tqdm
 
 from src.data import get_electrode_df
 from src.models.causal6_aggregates import SITE_KEYS_BEHAVIOR_HGA_ONLY, _behavior_offset_samples
@@ -1725,6 +1727,58 @@ else:
     print("brain_plot_behav_tstats.parquet not found — run section 5 first.")
 
 # %% [markdown]
+# ## 8.5 add star plots for behav hga only
+
+# %%
+_TOP_K_HGA = 50
+
+# Best window per electrode from HGA-only scores, ranked by peak AUC
+_hga_ranked = (
+    _beh_pd
+    .sort_values("peak_auc", ascending=False)
+    .groupby(["subject", "electrode_idx"], observed=True, as_index=False)
+    .first()
+    .head(_TOP_K_HGA)
+)
+
+# Join best acoustic AUC per electrode (across phoneme pairs) for title annotation
+_ac_best = (
+    _ac_pd
+    .sort_values("peak_auc", ascending=False)
+    .groupby(["subject", "electrode_idx"], observed=True, as_index=False)
+    .first()[["subject", "electrode_idx", "peak_auc", "peak_auc_pct"]]
+    .rename(columns={"peak_auc": "ac_auc", "peak_auc_pct": "ac_auc_pct"})
+)
+_hga_ranked = _hga_ranked.merge(_ac_best, on=["subject", "electrode_idx"], how="left").sort_values("peak_auc", ascending=False)
+
+_hga_ranked_out = ROOT / "provisional_star_plots_hga_ranked.pdf"
+with PdfPages(_hga_ranked_out) as _pdf:
+    for _, _row in tqdm(_hga_ranked.iterrows(), total=len(_hga_ranked)):
+        if _row["subject"] not in epochs_dict:
+            continue
+        try:
+            _fig = _provisional_star_plot(
+                  subject=_row["subject"],
+                  electrode_idx=int(_row["electrode_idx"]),
+                  phoneme_pair=_row["phoneme_pair"],
+                  word_end=_row["word_end"],
+                  epochs_dict=epochs_dict,
+                  ambig_steps=ambig_steps,
+                  behav_smin=int(_row["peak_smin"]),
+                  behav_smax=int(_row["peak_smax"]),
+                  acoustic_peak_auc=float(_row["ac_auc"]) if pd.notna(_row["ac_auc"]) else None,
+                  acoustic_peak_auc_pct=float(_row["ac_auc_pct"]) if pd.notna(_row["ac_auc_pct"]) else None,
+                  behav_hga_peak_auc=float(_row["peak_auc"]),
+                  behav_hga_peak_auc_pct=float(_row["peak_auc_pct"]),
+              )
+            _pdf.savefig(_fig)
+            plt.close(_fig)
+        except Exception as _e:
+            print(f"  skipped {_row['subject']} e{int(_row['electrode_idx'])}: {_e}")
+
+print(f"Written {len(_hga_ranked)} pages → {_hga_ranked_out}")
+
+# %% [markdown]
 # ----
 # ## 9  Acoustic + behavior-with-control — on-the-fly significance  *(expensive — run last)*
 #
@@ -2107,3 +2161,16 @@ _plot_subject_grid(
     x_chance=0.0,
     title_prefix="behav-HGA-only TFCE",
 )
+
+# %% [markdown]
+# ## Save TFCE outputs
+
+# %%
+import pickle
+
+with open(ROOT / "tfce_acoustic_results.pkl", "wb") as f:
+    pickle.dump(ac_tfce_frames, f)
+with open(ROOT / "tfce_behav_full_results.pkl", "wb") as f:
+    pickle.dump(beh_full_tfce_frames, f)
+with open(ROOT / "tfce_behav_hga_results.pkl", "wb") as f:
+    pickle.dump(beh_hga_tfce_frames, f)
