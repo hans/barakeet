@@ -113,8 +113,12 @@ if docker ps --format '{{.Names}}' | grep -qx "$NAME"; then
 fi
 
 # --- run flags --------------------------------------------------------------
+# Start detached (-d) so the container lifecycle is decoupled from the
+# launching terminal. All sessions (first and subsequent) attach via
+# `docker exec`, so closing any tab only drops that exec session -- the
+# container and every other agent inside it keep running.
 docker_args=(
-    run --rm -it
+    run -d --rm
     --name "$NAME"
     -v "$PWD:/workdir"
     -v "$HOME/.claude:/home/claude/.claude"      # rw -- claude writes session state here
@@ -250,7 +254,13 @@ for var in SUPERSET_WORKSPACE_NAME SUPERSET_ROOT_PATH; do
 done
 
 # --- go ---------------------------------------------------------------------
-docker "${docker_args[@]}" "$IMAGE" "${claude_argv[@]}"
+# Start the detached keepalive container (no-op if it somehow already exists).
+docker "${docker_args[@]}" "$IMAGE" sleep infinity >/dev/null
+
+# Attach an interactive claude session. Closing this terminal only drops the
+# exec -- the container (and any other exec'd agents) keep running.
+# To stop the sandbox when finished: docker stop "$NAME"
+docker exec -it "$NAME" /usr/local/bin/entrypoint.sh "${claude_argv[@]}"
 exit_code=$?
 
 # macOS: sync the (possibly refreshed) credentials file back to the keychain
