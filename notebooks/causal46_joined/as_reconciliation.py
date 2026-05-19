@@ -35,8 +35,8 @@ from matplotlib.backends.backend_pdf import PdfPages
 HOME = Path(os.path.expanduser("~"))
 # Resolve REPO from this notebook's location so it works in any worktree.
 REPO = Path(".").resolve()
-CAUSAL4_DIR = HOME / "u/projects/barakeet/outputs/causal4/prepare_neurometrics"
-CAUSAL6_DIR = HOME / "u/projects/barakeet-speech-responsive/outputs/causal6/acoustic_decoding_peaks"
+CAUSAL4_DIR = HOME / "freesurfer_subjects/barakeet/causal4_pipeline/prepare_neurometrics"
+CAUSAL6_DIR = HOME / "freesurfer_subjects/barakeet/causal6_speech_responsive_pipeline/acoustic_decoding_peaks"
 OUT_DIR = REPO / "outputs/causal46_joined"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -308,7 +308,6 @@ print(f"Wrote: {OUT_DIR / 'summary_audit.png'}, {OUT_DIR / 'summary_scatter.png'
 import mne
 
 from src.data import add_metadata_features
-from src.stimuli import PHONEME_PAIR_TO_WORD_ENDS
 from src.viz_provisional import (
     load_ambig_steps,
     provisional_star_plot,
@@ -381,7 +380,7 @@ def _fmt_c6_metric(row) -> str:
 
 
 def render_gallery(rows: pl.DataFrame, out_path: Path, title_prefix: str):
-    """Render one PDF: one page per (site, word_end)."""
+    """Render one PDF: one page per site (all word-ends combined)."""
     if rows.shape[0] == 0:
         print(f"  (no sites for {out_path.name})")
         return
@@ -392,36 +391,34 @@ def render_gallery(rows: pl.DataFrame, out_path: Path, title_prefix: str):
             if row["subject"] not in epochs_dict:
                 n_skipped += 1
                 continue
-            for we in PHONEME_PAIR_TO_WORD_ENDS.get(row["phoneme_pair"], []):
-                try:
-                    fig = provisional_star_plot(
-                        subject=row["subject"],
-                        electrode_idx=int(row["electrode_idx"]),
-                        phoneme_pair=row["phoneme_pair"],
-                        word_end=we,
-                        epochs_dict=epochs_dict,
-                        ambig_steps=ambig_steps,
-                        phon_smin_c4=_opt_int(row["causal4_smin"]),
-                        phon_smax_c4=_opt_int(row["causal4_smax"]),
-                        phon_smin_c6=_opt_int(row["causal6_smin"]),
-                        phon_smax_c6=_opt_int(row["causal6_smax"]),
-                        phon_search_smin=AC_SEARCH_SMIN,
-                        phon_search_smax=AC_SEARCH_SMAX,
-                        acoustic_peak_auc=None,  # suppress redundant inline label
-                    )
-                    header = (
-                        f"{title_prefix}  |  {row['subject']} e{row['electrode_idx']} "
-                        f"{row['phoneme_pair']} -> {we}  |  bucket={row['bucket']}\n"
-                        f"{_fmt_c4_metric(row)}    |    {_fmt_c6_metric(row)}"
-                    )
-                    fig.suptitle(header, y=1.02, fontsize=9)
-                    pdf.savefig(fig, bbox_inches="tight")
-                    plt.close(fig)
-                    n_pages += 1
-                except Exception as ex:
-                    print(f"  star_plot failed for {row['subject']} e{row['electrode_idx']} "
-                          f"{row['phoneme_pair']} {we}: {ex}")
-                    plt.close("all")
+            try:
+                fig = provisional_star_plot(
+                    subject=row["subject"],
+                    electrode_idx=int(row["electrode_idx"]),
+                    phoneme_pair=row["phoneme_pair"],
+                    epochs_dict=epochs_dict,
+                    ambig_steps=ambig_steps,
+                    phon_smin_c4=_opt_int(row["causal4_smin"]),
+                    phon_smax_c4=_opt_int(row["causal4_smax"]),
+                    phon_smin_c6=_opt_int(row["causal6_smin"]),
+                    phon_smax_c6=_opt_int(row["causal6_smax"]),
+                    phon_search_smin=AC_SEARCH_SMIN,
+                    phon_search_smax=AC_SEARCH_SMAX,
+                    acoustic_peak_auc=None,  # suppress redundant inline label
+                )
+                header = (
+                    f"{title_prefix}  |  {row['subject']} e{row['electrode_idx']} "
+                    f"{row['phoneme_pair']}  |  bucket={row['bucket']}\n"
+                    f"{_fmt_c4_metric(row)}    |    {_fmt_c6_metric(row)}"
+                )
+                fig.suptitle(header, y=1.02, fontsize=9)
+                pdf.savefig(fig, bbox_inches="tight")
+                plt.close(fig)
+                n_pages += 1
+            except Exception as ex:
+                print(f"  star_plot failed for {row['subject']} e{row['electrode_idx']} "
+                      f"{row['phoneme_pair']}: {ex}")
+                plt.close("all")
     print(f"Wrote {out_path.name}: {n_pages} pages  ({n_skipped} sites skipped: no epochs)")
 
 

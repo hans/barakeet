@@ -40,7 +40,7 @@ from src.models.causal6_aggregates import (
     _behavior_offset_samples,
     _ganong_pod_samples,
 )
-from src.stimuli import OFFSET_DICT
+from src.stimuli import OFFSET_DICT, PHONEME_PAIR_TO_WORD_ENDS
 from src.viz_paper import add_textgrid
 
 EPOCH_TMIN: float = -0.4
@@ -436,7 +436,7 @@ def provisional_star_plot(
     subject: str,
     electrode_idx: int,
     phoneme_pair: str,
-    word_end: str,
+    word_end: str | None = None,
     epochs_dict: dict[str, "mne.Epochs"],
     ambig_steps: dict[tuple[str, str, str], list[int]],
     *,
@@ -550,8 +550,16 @@ def provisional_star_plot(
     ax_top.legend(fontsize=7, loc="upper left", framealpha=0.7)
 
     # ── Middle: controlled ambiguous (within-completion) ──────────────
-    amb = ambig_steps.get((subject, phoneme_pair, word_end), [3, 4])
-    we_amb_mask = (md_pp["word_end"] == word_end) & md_pp["resampled"].isin(amb)
+    if word_end is None:
+        all_wes = PHONEME_PAIR_TO_WORD_ENDS.get(phoneme_pair, [])
+        amb_set: set[int] = set()
+        for _we in all_wes:
+            amb_set.update(ambig_steps.get((subject, phoneme_pair, _we), [3, 4]))
+        amb = sorted(amb_set) or [3, 4]
+        we_amb_mask = md_pp["resampled"].isin(amb)
+    else:
+        amb = ambig_steps.get((subject, phoneme_pair, word_end), [3, 4])
+        we_amb_mask = (md_pp["word_end"] == word_end) & md_pp["resampled"].isin(amb)
 
     for i, bhv_val in enumerate(
         sorted(md_pp.loc[we_amb_mask, bhv_col].dropna().unique())
@@ -572,12 +580,16 @@ def provisional_star_plot(
     ax_mid.axhline(0, color="k", lw=0.5, ls=":")
     ax_mid.set_ylabel("HGA (z)")
     ax_mid.set_title(
-        f"Controlled ambiguous — {word_end}  (steps {amb})", fontsize=9
+        f"Controlled ambiguous — {'all word-ends' if word_end is None else word_end}  (steps {amb})",
+        fontsize=9,
     )
     ax_mid.legend(fontsize=7, loc="upper left", framealpha=0.7)
 
-    # ── Bottom: all trials within word_end (decoder view) ─────────────
-    we_all_mask = md_pp["word_end"] == word_end
+    # ── Bottom: all trials (decoder view) ─────────────────────────────
+    if word_end is None:
+        we_all_mask = np.ones(len(md_pp), dtype=bool)
+    else:
+        we_all_mask = md_pp["word_end"] == word_end
 
     for i, bhv_val in enumerate(
         sorted(md_pp.loc[we_all_mask, bhv_col].dropna().unique())
@@ -599,20 +611,27 @@ def provisional_star_plot(
     ax_bot.set_ylabel("HGA (z)")
     ax_bot.set_xlabel("Time (s, post word onset)")
     ax_bot.set_title(
-        f"All trials — {word_end}  (decoder view)", fontsize=9
+        f"All trials — {'all word-ends' if word_end is None else word_end}  (decoder view)",
+        fontsize=9,
     )
     ax_bot.legend(fontsize=7, loc="upper left", framealpha=0.7)
 
     # ── TextGrid ────────────────────────────────────────────────────────
-    for ax in (ax_top, ax_mid, ax_bot):
-        try:
-            add_textgrid(ax, textgrid_dir=textgrid_dir,
-                         textgrid_file=f"11_{word_end}_dn_002.TextGrid",
-                         vline_extent=1.0)
-        except Exception:
-            pass
+    if word_end is not None:
+        for ax in (ax_top, ax_mid, ax_bot):
+            try:
+                add_textgrid(ax, textgrid_dir=textgrid_dir,
+                             textgrid_file=f"11_{word_end}_dn_002.TextGrid",
+                             vline_extent=1.0)
+            except Exception:
+                pass
 
-    ax_top.set_xlim(0.0, OFFSET_DICT.get(word_end, 1.0) + 0.1)
+    if word_end is None:
+        wes = PHONEME_PAIR_TO_WORD_ENDS.get(phoneme_pair, [])
+        xlim = max((OFFSET_DICT.get(we, 1.0) for we in wes), default=1.0) + 0.1
+    else:
+        xlim = OFFSET_DICT.get(word_end, 1.0) + 0.1
+    ax_top.set_xlim(0.0, xlim)
     fig.tight_layout()
     return fig
 
