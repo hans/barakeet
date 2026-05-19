@@ -47,7 +47,7 @@ CAUSAL6_P_THRESHOLD = 0.05
 
 # Set False to fall back to raw foldmean maxstat (phon_peaks.parquet) instead
 # of TFCE-enhanced foldmean peaks (phon_peaks_foldmean_tfce.parquet).
-USE_TFCE_ACOUSTIC = True
+USE_TFCE_ACOUSTIC = False
 
 # causal6's acoustic peak-search bounds (in samples post epoch_tmin). These
 # define the maxstat-correction range — the NHST p-value is corrected over
