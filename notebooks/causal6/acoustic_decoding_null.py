@@ -56,14 +56,17 @@ from src.models.causal6_adaptive_null import (
     log_stage1_gate,
     log_stage2_done,
     log_stage2_skipped,
+    log_stage3_gate,
     stage1_gate,
     stage2_spill_dir,
+    stage3_gate,
 )
 from src.models.causal6_aggregates import (
     FLAVORS_ACOUSTIC,
     SITE_KEYS_ACOUSTIC,
     aggregate_acoustic,
     preagg_acoustic_null,
+    restrict_to_rois,
 )
 
 # %% tags=["parameters"]
@@ -93,6 +96,13 @@ n_permutations_stage2 = 9000
 escalate_corrected_p_max = 0.20
 permutation_seed = 0
 permutation_chunk_size = 6
+
+# Stage-3 boost — refit sites in the BH rejection neighborhood at K3 perms.
+n_permutations_stage3 = 90000
+stage3_k_gate = 200
+fdr_alpha = 0.05
+fdr_rois = []                       # populated from config.analysis.fdr_rois
+electrode_dfs_paths = []            # all subjects' find_speech_responsive CSVs
 
 # %%
 subject = re.findall(r"(EC[\d]+)_epo", str(epochs_path))[0]
@@ -218,11 +228,119 @@ else:
     )
 
 # %% [markdown]
+# ## Stage 3 — boost K for sites in the BH rejection neighborhood
+#
+# Restricts to ROI sites, computes corrected p at K1+K2 perms, gates at
+# `p ≤ k_gate * alpha / N_ROI` (k_gate=200, threshold ≈ 5e-3 at N_ROI≈2007).
+# Refits gated sites with K3 additional perms using seeds disjoint from
+# stages 1 and 2.
+
+# %%
+if fdr_rois and electrode_dfs_paths and n_permutations_stage3 > 0:
+    electrode_dfs = [
+        pl.from_pandas(pd.read_csv(p)) for p in electrode_dfs_paths
+    ]
+    elec_pool = pl.concat([
+        e.filter(pl.col("speech_responsive"))
+         .select(["subject", "electrode_idx", "roi"])
+        for e in electrode_dfs
+    ])
+    n_roi_electrodes = elec_pool.filter(pl.col("roi").is_in(fdr_rois)).height
+    n_phoneme_pairs = epochs.metadata["phoneme_pair"].dropna().nunique()
+    n_roi = n_roi_electrodes * n_phoneme_pairs
+
+    # Re-aggregate the K1+K2 combined null before passing to gate (stage1_gate
+    # expects fold_mean / t_stat schema, not the preagg fold_mean_diff schema).
+    _, null_agg_combined = aggregate_acoustic(
+        real_scores, null_scores,
+        target=target,
+        peak_search_smin=peak_search_smin,
+        peak_search_smax=peak_search_smax,
+    )
+    real_agg_roi, _ = restrict_to_rois(real_agg, electrode_dfs, fdr_rois)
+    null_agg_roi, _ = restrict_to_rois(null_agg_combined, electrode_dfs, fdr_rois)
+
+    refit_keys, stage3_log = stage3_gate(
+        real_agg_roi, null_agg_roi,
+        site_keys=SITE_KEYS_ACOUSTIC,
+        flavors=FLAVORS_ACOUSTIC,
+        k_gate=stage3_k_gate,
+        n_roi=n_roi,
+        alpha=fdr_alpha,
+    )
+    log_stage3_gate(
+        subject,
+        n_permutations_total_pre_stage3=n_permutations_stage1 + n_permutations_stage2,
+        n_roi=n_roi,
+        k_gate=stage3_k_gate,
+        alpha=fdr_alpha,
+        gate_log=stage3_log,
+        n_refit=len(refit_keys),
+    )
+
+    if refit_keys:
+        stage3_seeds = list(range(
+            permutation_seed + n_permutations_stage1 + n_permutations_stage2,
+            permutation_seed + n_permutations_stage1 + n_permutations_stage2
+                + n_permutations_stage3,
+        ))
+        eidx_pos = SITE_KEYS_ACOUSTIC.index("electrode_idx")
+        refit_electrode_idxs = sorted({k[eidx_pos] for k in refit_keys})
+        with stage2_spill_dir(outdir, name="_stage3_spill") as spill_dir:
+            run_acoustic_searchlight_permutations(
+                epochs, subject=subject,
+                electrode_idxs=refit_electrode_idxs,
+                windows=windows,
+                reg_lambda=reg_lambda,
+                permute_seeds=stage3_seeds,
+                permutation_chunk_size=permutation_chunk_size,
+                target=target,
+                n_folds=n_folds, cv_random_state=cv_random_state,
+                device=device, dtype=torch.float32,
+                tol=tol, max_iter=max_iter,
+                spill_dir=spill_dir,
+            )
+            null_stage3_raw = filter_null_to_borderline(
+                pl.scan_parquet(spill_dir / "*.parquet"),
+                refit_keys,
+                site_keys=SITE_KEYS_ACOUSTIC,
+            ).collect()
+
+        null_stage3 = preagg_acoustic_null(null_stage3_raw, real_for_target)
+        del null_stage3_raw
+        null_scores = pl.concat([null_scores, null_stage3])
+        del null_stage3
+
+    # Add stage3_refit column to gate_log.
+    if refit_keys:
+        stage3_flag = pl.DataFrame({
+            sk: [k[SITE_KEYS_ACOUSTIC.index(sk)] for k in refit_keys]
+            for sk in SITE_KEYS_ACOUSTIC
+        }).with_columns(pl.lit(True).alias("stage3_refit"))
+    else:
+        stage3_flag = pl.DataFrame(
+            schema={sk: gate_log.schema[sk] for sk in SITE_KEYS_ACOUSTIC}
+            | {"stage3_refit": pl.Boolean}
+        )
+    gate_log = gate_log.join(
+        stage3_flag, on=SITE_KEYS_ACOUSTIC, how="left"
+    ).with_columns(pl.col("stage3_refit").fill_null(False))
+else:
+    print(
+        f"[{subject}] stage3 skipped "
+        f"(rois={bool(fdr_rois)}, paths={bool(electrode_dfs_paths)}, K3={n_permutations_stage3})",
+        flush=True,
+    )
+    gate_log = gate_log.with_columns(pl.lit(False).alias("stage3_refit"))
+
+# %% [markdown]
 # ## Outputs.
 
 # %%
 gate_log = gate_log.with_columns(
-    pl.when(pl.col("escalated"))
+    pl.when(pl.col("stage3_refit"))
+    .then(n_permutations_stage1 + n_permutations_stage2 + n_permutations_stage3)
+    .when(pl.col("escalated"))
     .then(n_permutations_stage1 + n_permutations_stage2)
     .otherwise(n_permutations_stage1)
     .alias("n_permutations")
