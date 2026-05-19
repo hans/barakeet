@@ -557,6 +557,77 @@ render_nhst_diagnostic(
 )
 
 # %% [markdown]
+# ## ROI breakdown per bucket
+#
+# Does the c4 → c6 swap change the anatomical composition of the AS list?
+# If `both` is STG-concentrated and the disagreement buckets are too, the
+# swap is anatomy-neutral. If gains drift to non-STG areas (or losses are
+# STG-concentrated), that's a substantive change to flag.
+
+# %%
+from src.data import get_electrode_df
+
+elec_frames = []
+for subj in sorted(recon["subject"].unique().to_list()):
+    df = get_electrode_df(subj).reset_index()[["electrode_idx", "roi"]]
+    df["roi"] = df["roi"].astype(str)
+    df["subject"] = subj
+    elec_frames.append(pl.from_pandas(df))
+electrode_df = pl.concat(elec_frames).select(["subject", "electrode_idx", "roi"])
+print(f"Loaded electrode metadata: {electrode_df.shape[0]} rows across "
+      f"{electrode_df['subject'].n_unique()} subjects")
+
+recon_roi = recon.join(electrode_df, on=["subject", "electrode_idx"], how="left")
+n_missing = recon_roi.filter(pl.col("roi").is_null()).shape[0]
+if n_missing:
+    print(f"WARNING: {n_missing} rows missing ROI lookup (electrode not in metadata).")
+
+# %%
+# Full per-bucket × ROI count (every ROI that appears in any bucket).
+roi_by_bucket = (
+    recon_roi
+    .group_by(["bucket", "roi"])
+    .len()
+    .pivot(values="len", index="roi", on="bucket")
+    .fill_null(0)
+    .with_columns(
+        (pl.col("both") + pl.col("causal4_only")).alias("_c4_AS_total"),
+        (pl.col("both") + pl.col("causal6_only_eligible")
+         + pl.col("causal6_only_newly_eligible")).alias("_c6_AS_total"),
+    )
+    .sort("_c6_AS_total", descending=True)
+)
+print("Per-bucket ROI count (sorted by causal6 AS total):")
+print(roi_by_bucket)
+roi_by_bucket.write_csv(OUT_DIR / "roi_breakdown.csv")
+print(f"Written: {OUT_DIR / 'roi_breakdown.csv'}")
+
+# %%
+# Compact STG-vs-other view (focuses on the downstream story).
+roi_stg = recon_roi.with_columns(
+    pl.col("roi").str.contains("(?i)superiortemporal").alias("_is_stg")
+)
+stg_summary = (
+    roi_stg
+    .filter(pl.col("bucket") != "neither_AS")
+    .group_by(["bucket", "_is_stg"])
+    .len()
+    .pivot(values="len", index="bucket", on="_is_stg")
+    .rename({"true": "STG", "false": "non-STG"})
+    .fill_null(0)
+    .with_columns(
+        (pl.col("STG") + pl.col("non-STG")).alias("total"),
+        (100.0 * pl.col("STG") / (pl.col("STG") + pl.col("non-STG")))
+            .round(1).alias("pct_STG"),
+    )
+    .sort("total", descending=True)
+)
+print("STG vs non-STG by bucket (excluding neither_AS):")
+print(stg_summary)
+stg_summary.write_csv(OUT_DIR / "roi_breakdown_stg_summary.csv")
+print(f"Written: {OUT_DIR / 'roi_breakdown_stg_summary.csv'}")
+
+# %% [markdown]
 # ## Canonical AS-site list
 #
 # Initial canonical list = every site with `causal6_AS == True` (union of `both`,
