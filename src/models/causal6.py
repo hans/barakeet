@@ -557,9 +557,8 @@ def _fit_batched_cv_permutations(
                 y_test_kbn.reshape(Kc * B, n_te),
             ).cpu().numpy()
 
-            perm_ids = np.repeat(
-                np.arange(chunk_start, chunk_end, dtype=np.int64), B
-            )
+            seeds_chunk = np.asarray(permute_seeds[chunk_start:chunk_end], dtype=np.int64)
+            perm_ids = np.repeat(seeds_chunk, B)
             prob_ids = np.tile(problem_idx, Kc)
             chunk_df = pl.DataFrame({
                 "_problem_idx": prob_ids,
