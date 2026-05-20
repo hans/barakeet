@@ -12,10 +12,15 @@
 # %% [markdown]
 # # causal46 AS-site star plots (B3 single-step + B4 matched-N across-step)
 #
-# Two HGA star-plot galleries driven by the JON-42 canonical-AS-site list
-# and trial-balance index. Uses the `provisional_star_plot` helper from
-# `as_reconciliation.py` for B3; a notebook-local `matched_n_star_plot`
-# helper for B4 (subsamples to equal-N per step × class before pooling).
+# Two HGA star-plot galleries. AS sites are read directly from the causal6
+# acoustic peaks parquet (filtered to `significant`) — that file is the
+# authority; mirrors what `trial_balance_index.py` does. The
+# (site, word_end, resampled) class counts come from
+# `trial_balance_index.csv` (JON-42 / A2).
+#
+# Uses `src.viz_provisional.provisional_star_plot` for B3; a notebook-local
+# `matched_n_star_plot` helper for B4 (subsamples to equal-N per step × class
+# before pooling).
 #
 # See `docs/superpowers/plans/2026-05-20-causal46-star-plots.md` and
 # Linear JON-43.
@@ -52,6 +57,10 @@ for d in (STAR_DIR, SINGLE_DIR, SINGLE_DIR / "per_site",
           MATCHED_DIR, MATCHED_DIR / "per_site"):
     d.mkdir(parents=True, exist_ok=True)
 
+# AS sites: causal6 foldmean-maxstat peaks, FDR-significant. Same authority
+# used by trial_balance_index.py.
+CAUSAL6_PEAKS = REPO / "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet"
+
 EPOCH_DIR = Path(os.environ.get(
     "BARAKEET_EPOCH_DIR", str(REPO / "outputs/epochs_preprocessed"),
 ))
@@ -70,24 +79,28 @@ print(f"EPOCH_DIR: {EPOCH_DIR}  (exists: {EPOCH_DIR.exists()})")
 print(f"K={K}  AC_SEARCH=[{AC_SEARCH_SMIN}, {AC_SEARCH_SMAX}]")
 
 # %% [markdown]
-# ## Load JON-42 outputs
+# ## Load AS sites (causal6 peaks) + JON-42 trial-balance outputs
 
 # %%
-canonical = pl.read_csv(OUT_DIR / "canonical_AS_sites.csv")
+_peaks_raw = pl.read_parquet(CAUSAL6_PEAKS)
+if "significant" in _peaks_raw.columns:
+    peaks = _peaks_raw.filter(pl.col("significant"))
+else:
+    peaks = _peaks_raw.filter(pl.col("p_value") < 0.05)
+    print("⚠ no `significant` column — falling back to p_value < 0.05 (uncorrected)")
+
 trial_balance = pl.read_csv(OUT_DIR / "trial_balance_index.csv")
 trial_summary = pl.read_csv(OUT_DIR / "trial_balance_summary.csv")
 
-print(f"canonical: {canonical.height} sites across "
-      f"{canonical['subject'].n_unique()} subjects")
+print(f"AS sites: {peaks.height} across {peaks['subject'].n_unique()} subjects")
 print(f"trial_balance: {trial_balance.height} rows")
 print(f"trial_summary: {trial_summary.height} (site × word_end) rows")
-print(canonical.group_by("bucket").len().sort("len", descending=True))
 
 # %% [markdown]
 # ## Load epochs
 
 # %%
-needed_subjects = sorted(canonical["subject"].unique().to_list())
+needed_subjects = sorted(peaks["subject"].unique().to_list())
 epochs_dict = load_epochs_dict(EPOCH_DIR)
 missing = set(needed_subjects) - set(epochs_dict)
 if missing:
@@ -106,10 +119,10 @@ b3_cells = (
     trial_balance
     .filter(pl.col(THRESHOLD_COL))
     .join(
-        canonical.select(["subject", "electrode_idx", "phoneme_pair",
-                          "smin", "smax", "peak_auc", "bucket"])
-                 .rename({"smin": "phon_smin", "smax": "phon_smax",
-                          "peak_auc": "acoustic_peak_auc"}),
+        peaks.select(["subject", "electrode_idx", "phoneme_pair",
+                      "smin", "smax", "test_roc_auc"])
+             .rename({"smin": "phon_smin", "smax": "phon_smax",
+                      "test_roc_auc": "acoustic_peak_auc"}),
         on=["subject", "electrode_idx", "phoneme_pair"], how="inner",
     )
     .sort(["subject", "electrode_idx", "phoneme_pair", "word_end", "resampled"])
@@ -122,9 +135,9 @@ print(b3_cells.group_by("resampled").len().sort("resampled"))
 sites_with_any_b3 = (
     b3_cells.select(["subject", "electrode_idx", "phoneme_pair"]).unique().height
 )
-print(f"Canonical sites with ≥1 B3 cell: {sites_with_any_b3}/{canonical.height}")
+print(f"AS sites with ≥1 B3 cell: {sites_with_any_b3}/{peaks.height}")
 print(f"Sites with ZERO qualifying single-step cell at K={K}: "
-      f"{canonical.height - sites_with_any_b3}")
+      f"{peaks.height - sites_with_any_b3}")
 
 # %% [markdown]
 # ## Render B3 single-step star plots
@@ -144,7 +157,7 @@ with PdfPages(b3_combined_pdf) as pdf:
     fig, ax = plt.subplots(figsize=(8.5, 11))
     ax.text(0.5, 0.6,
             f"B3 single-step star plots\nK={K}\n"
-            f"{b3_cells.height} cells across {sites_with_any_b3} sites",
+            f"{b3_cells.height} cells across {sites_with_any_b3} AS sites",
             ha="center", va="center", fontsize=18)
     ax.axis("off")
     pdf.savefig(fig)
@@ -176,9 +189,9 @@ with PdfPages(b3_combined_pdf) as pdf:
             )
             fig.suptitle(
                 f"B3 step={row['resampled']}  |  {subj} e{row['electrode_idx']} "
-                f"{row['phoneme_pair']} · {row['word_end']}  |  bucket={row['bucket']}\n"
+                f"{row['phoneme_pair']} · {row['word_end']}\n"
                 f"n_class0={row['n_class0']}  n_class1={row['n_class1']}  "
-                f"min_class={row['min_class']}",
+                f"min_class={row['min_class']}  ac={row['acoustic_peak_auc']:.3f}",
                 y=1.01, fontsize=9,
             )
             site_pdf = (
@@ -373,7 +386,7 @@ if _smoke.height == 0:
 else:
     _row = _smoke.row(0, named=True)
     _smoke_steps = [int(s) for s in _row[QUAL_COL].split(",")]
-    _smoke_can = canonical.filter(
+    _smoke_can = peaks.filter(
         (pl.col("subject") == _row["subject"])
         & (pl.col("electrode_idx") == _row["electrode_idx"])
         & (pl.col("phoneme_pair") == _row["phoneme_pair"])
@@ -405,7 +418,7 @@ else:
             phon_smax=int(_smoke_can["smax"]),
             phon_search_smin=AC_SEARCH_SMIN,
             phon_search_smax=AC_SEARCH_SMAX,
-            acoustic_peak_auc=float(_smoke_can["peak_auc"]),
+            acoustic_peak_auc=float(_smoke_can["test_roc_auc"]),
         )
         fig.savefig(MATCHED_DIR / "_smoke.pdf", bbox_inches="tight")
         plt.close(fig)
@@ -430,10 +443,10 @@ b4_per_step = (
     )
     .filter(pl.col("n_qualifying") >= 2)
     .join(
-        canonical.select(["subject", "electrode_idx", "phoneme_pair",
-                          "smin", "smax", "peak_auc", "bucket"])
-                 .rename({"smin": "phon_smin", "smax": "phon_smax",
-                          "peak_auc": "acoustic_peak_auc"}),
+        peaks.select(["subject", "electrode_idx", "phoneme_pair",
+                      "smin", "smax", "test_roc_auc"])
+             .rename({"smin": "phon_smin", "smax": "phon_smax",
+                      "test_roc_auc": "acoustic_peak_auc"}),
         on=["subject", "electrode_idx", "phoneme_pair"], how="inner",
     )
     .sort(["subject", "electrode_idx", "phoneme_pair", "word_end"])
@@ -484,8 +497,8 @@ with PdfPages(b4_combined_pdf) as pdf:
             fig.suptitle(
                 f"B4 matched-N  |  {subj} e{row['electrode_idx']} "
                 f"{row['phoneme_pair']} · {row['word_end']}  |  "
-                f"bucket={row['bucket']}  steps={steps}  "
-                f"n_per_step={row['n_per_step']}",
+                f"steps={steps}  n_per_step={row['n_per_step']}  "
+                f"ac={row['acoustic_peak_auc']:.3f}",
                 y=1.01, fontsize=9,
             )
             site_pdf = (
@@ -539,7 +552,7 @@ print(manifest.group_by("mode").len().sort("mode"))
 
 # %%
 print(f"K={K} ({THRESHOLD_COL}) — production default")
-print(f"\nCanonical sites: {canonical.height}")
+print(f"\nAS sites (causal6 significant): {peaks.height}")
 print(f"Sites with ≥1 B3 cell: {sites_with_any_b3}")
 print(
     "Sites with ≥1 B4 cell (≥2 qualifying steps): "

@@ -2,15 +2,15 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Linear:** [JON-43](https://linear.app/jonlab/issue/JON-43/star-plots-at-as-sites-single-step-matched-n-across-step), Group B items 3 & 4 of [JON-41](https://linear.app/jonlab/issue/JON-41). Depends on [JON-42](https://linear.app/jonlab/issue/JON-42) (`canonical_AS_sites.csv`, `trial_balance_index.csv`, `trial_balance_summary.csv` already under `outputs/causal46_joined/`).
+**Linear:** [JON-43](https://linear.app/jonlab/issue/JON-43/star-plots-at-as-sites-single-step-matched-n-across-step), Group B items 3 & 4 of [JON-41](https://linear.app/jonlab/issue/JON-41). AS sites come directly from `outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet` (filtered to `significant`) — the same authority `trial_balance_index.py` uses. Trial balance from [JON-42](https://linear.app/jonlab/issue/JON-42) (`trial_balance_index.csv`, `trial_balance_summary.csv` under `outputs/causal46_joined/`). Do **not** read `canonical_AS_sites.csv` — that CSV is a legacy artifact of the AS-reconciliation notebook and is not the authority.
 
-**Goal:** For every canonical AS site, render two flavors of within-completion HGA star plot driven by the JON-42 trial-balance index:
+**Goal:** For every causal6-significant AS site, render two flavors of within-completion HGA star plot driven by the JON-42 trial-balance index:
 - **B3 (single-step):** one panel per (site, word_end, resampled) where `meets_threshold_5` is True — cleanest acoustic control, partial coverage.
 - **B4 (matched-N across-step):** one panel per (site, word_end), pooling all qualifying steps after equal-N subsampling per step — broader coverage, residual step-driven-acoustic caveat.
 
 Both use the **same visual style as `notebooks/causal46_joined/as_reconciliation.py`** (the `provisional_star_plot` helper from `src.viz_provisional`). Do not switch to the older `zoomin_hga` / `PaperData` path without checking first.
 
-**Architecture:** One Jupytext percent notebook at `notebooks/causal46_joined/star_plots.py`. Loads canonical sites + trial-balance index + per-subject epochs once; renders B3 first (loop over qualifying single steps), then B4 (loop over (site, word_end), subsample, plot). Each pass writes per-site PDFs plus a combined multi-page PDF and a failures CSV. B3 reuses `provisional_star_plot` as-is via a per-call `ambig_steps` override. B4 uses a `matched_n_star_plot` helper **defined inline in the notebook** (not in `src/viz_provisional.py` — keeps `src/` untouched).
+**Architecture:** One Jupytext percent notebook at `notebooks/causal46_joined/star_plots.py`. Loads causal6 peaks + trial-balance index + per-subject epochs once; renders B3 first (loop over qualifying single steps), then B4 (loop over (site, word_end), subsample, plot). Each pass writes per-site PDFs plus a combined multi-page PDF and a failures CSV. B3 reuses `provisional_star_plot` as-is via a per-call `ambig_steps` override. B4 uses a `matched_n_star_plot` helper **defined inline in the notebook** (not in `src/viz_provisional.py` — keeps `src/` untouched).
 
 **Tech Stack:** Python, polars, mne, matplotlib. Local execution via `./.venv` (no GPU). All paths inside the notebook are resolved from `Path(".").resolve()` (same convention as `as_reconciliation.py`); the notebook works in any worktree.
 
@@ -18,8 +18,8 @@ Both use the **same visual style as `notebooks/causal46_joined/as_reconciliation
 
 ## Context
 
-- A1 (canonical sites) and A2 (trial-balance index) are done. Inputs live at:
-  - `outputs/causal46_joined/canonical_AS_sites.csv` — `subject, electrode_idx, phoneme_pair, smin, smax, peak_auc, p_value, bucket`
+- AS sites and trial balance are done. Inputs live at:
+  - `outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet` — causal6 foldmean-maxstat peaks aggregated with BH-FDR. Filter to `significant == True`; columns we use: `subject, electrode_idx, phoneme_pair, smin, smax, test_roc_auc, p_value, q_value, significant`. (`peaks` parquet is the authority — `trial_balance_index.py` reads it the same way; do not detour through `canonical_AS_sites.csv`.)
   - `outputs/causal46_joined/trial_balance_index.csv` — one row per (site × word_end × resampled): `n_class0, n_class1, n_total, min_class, meets_threshold_{4,5,10}`
   - `outputs/causal46_joined/trial_balance_summary.csv` — per (site, word_end), `qualifying_steps_{4,5,10}` as comma-joined strings + `n_qualifying_5`
 - Reference plotter: `src.viz_provisional.provisional_star_plot` (3-panel: unambiguous step 1&6 / ambiguous controlled / decoder-view). Used in `notebooks/causal46_joined/as_reconciliation.py`. **Reuse, don't reinvent.**
@@ -49,8 +49,8 @@ Both use the **same visual style as `notebooks/causal46_joined/as_reconciliation
 
 ## Inputs
 
-### Canonical sites + trial balance
-- `outputs/causal46_joined/canonical_AS_sites.csv`
+### AS sites + trial balance
+- `outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet` — filter to `significant == True` (mirror the trial_balance_index.py pattern, including its `p_value < 0.05` fallback if `significant` is absent)
 - `outputs/causal46_joined/trial_balance_index.csv`
 - `outputs/causal46_joined/trial_balance_summary.csv` (used only for the manifest pre-flight; B3/B4 derive directly from `trial_balance_index.csv`)
 
@@ -59,7 +59,7 @@ Both use the **same visual style as `notebooks/causal46_joined/as_reconciliation
 - Load with `src.viz_provisional.load_epochs_dict(EPOCH_DIR)`. Override location via `BARAKEET_EPOCH_DIR` env var (as `as_reconciliation.py` does).
 
 ### Acoustic window highlight
-- `smin`/`smax` from `canonical_AS_sites.csv` → top-panel `phon_smin_c6`/`phon_smax_c6` shade. Search-bound dashed lines from `config.yaml` `analysis.decoding.acoustic_peak_search_{smin,smax}` (same pattern as `as_reconciliation.py`).
+- `smin`/`smax` from `phon_peaks_all.parquet` → top-panel `phon_smin_c6`/`phon_smax_c6` shade. Search-bound dashed lines from `config.yaml` `analysis.decoding.acoustic_peak_search_{smin,smax}` (same pattern as `as_reconciliation.py`). `test_roc_auc` → `acoustic_peak_auc` annotation in the figure suptitle.
 
 ---
 
@@ -161,29 +161,35 @@ print(f"EPOCH_DIR: {EPOCH_DIR}  (exists: {EPOCH_DIR.exists()})")
 print(f"K={K}  AC_SEARCH=[{AC_SEARCH_SMIN}, {AC_SEARCH_SMAX}]")
 ```
 
-- [ ] **Step 1.2: Load canonical sites + trial balance**
+- [ ] **Step 1.2: Load AS sites (causal6 peaks) + trial balance**
 
 ```python
 # %% [markdown]
-# ## Load JON-42 outputs
+# ## Load AS sites + JON-42 trial-balance outputs
 
 # %%
-canonical = pl.read_csv(OUT_DIR / "canonical_AS_sites.csv")
+CAUSAL6_PEAKS = REPO / "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet"
+
+_peaks_raw = pl.read_parquet(CAUSAL6_PEAKS)
+if "significant" in _peaks_raw.columns:
+    peaks = _peaks_raw.filter(pl.col("significant"))
+else:
+    peaks = _peaks_raw.filter(pl.col("p_value") < 0.05)
+    print("⚠ no `significant` column — falling back to p_value < 0.05 (uncorrected)")
+
 trial_balance = pl.read_csv(OUT_DIR / "trial_balance_index.csv")
 trial_summary = pl.read_csv(OUT_DIR / "trial_balance_summary.csv")
 
-print(f"canonical: {canonical.height} sites across "
-      f"{canonical['subject'].n_unique()} subjects")
+print(f"AS sites: {peaks.height} across {peaks['subject'].n_unique()} subjects")
 print(f"trial_balance: {trial_balance.height} rows")
 print(f"trial_summary: {trial_summary.height} (site × word_end) rows")
-print(canonical.group_by("bucket").len().sort("len", descending=True))
 ```
 
 - [ ] **Step 1.3: Load epochs**
 
 ```python
 # %%
-needed_subjects = sorted(canonical["subject"].unique().to_list())
+needed_subjects = sorted(peaks["subject"].unique().to_list())
 epochs_dict = load_epochs_dict(EPOCH_DIR)
 missing = set(needed_subjects) - set(epochs_dict)
 if missing:
@@ -218,10 +224,10 @@ b3_cells = (
     trial_balance
     .filter(pl.col(THRESHOLD_COL))
     .join(
-        canonical.select(["subject", "electrode_idx", "phoneme_pair",
-                          "smin", "smax", "peak_auc", "bucket"])
-                 .rename({"smin": "phon_smin", "smax": "phon_smax",
-                          "peak_auc": "acoustic_peak_auc"}),
+        peaks.select(["subject", "electrode_idx", "phoneme_pair",
+                      "smin", "smax", "test_roc_auc"])
+             .rename({"smin": "phon_smin", "smax": "phon_smax",
+                      "test_roc_auc": "acoustic_peak_auc"}),
         on=["subject", "electrode_idx", "phoneme_pair"], how="inner",
     )
     .sort(["subject", "electrode_idx", "phoneme_pair", "word_end", "resampled"])
@@ -238,12 +244,12 @@ print(b3_cells.group_by("resampled").len().sort("resampled"))
 sites_with_any_b3 = (
     b3_cells.select(["subject", "electrode_idx", "phoneme_pair"]).unique().height
 )
-print(f"Canonical sites with ≥1 B3 cell: {sites_with_any_b3}/{canonical.height}")
+print(f"AS sites with ≥1 B3 cell: {sites_with_any_b3}/{peaks.height}")
 print(f"Sites with ZERO qualifying single-step cell at K={K}: "
-      f"{canonical.height - sites_with_any_b3}")
+      f"{peaks.height - sites_with_any_b3}")
 ```
 
-If this is more than ~30% of canonical sites, surface the diagnostic; the user may want to drop to K=4 before rendering. Don't auto-lower — let the user decide.
+If this is more than ~30% of AS sites, surface the diagnostic; the user may want to drop to K=4 before rendering. Don't auto-lower — let the user decide.
 
 - [ ] **Step 2.3: Commit**
 
@@ -301,9 +307,9 @@ with PdfPages(combined_pdf) as pdf:
             )
             fig.suptitle(
                 f"B3 step={row['resampled']}  |  {subj} e{row['electrode_idx']} "
-                f"{row['phoneme_pair']} · {row['word_end']}  |  bucket={row['bucket']}\n"
+                f"{row['phoneme_pair']} · {row['word_end']}\n"
                 f"n_class0={row['n_class0']}  n_class1={row['n_class1']}  "
-                f"min_class={row['min_class']}",
+                f"min_class={row['min_class']}  ac={row['acoustic_peak_auc']:.3f}",
                 y=1.01, fontsize=9,
             )
             site_pdf = (
@@ -492,7 +498,7 @@ _smoke = (
                  .sort("n_qualifying_5", descending=True).head(1)
 ).row(0, named=True)
 _smoke_steps = [int(s) for s in _smoke[QUAL_COL].split(",")]
-_smoke_row = canonical.filter(
+_smoke_row = peaks.filter(
     (pl.col("subject") == _smoke["subject"])
     & (pl.col("electrode_idx") == _smoke["electrode_idx"])
     & (pl.col("phoneme_pair") == _smoke["phoneme_pair"])
@@ -523,7 +529,7 @@ fig = matched_n_star_plot(
     phon_smax=int(_smoke_row["smax"]),
     phon_search_smin=AC_SEARCH_SMIN,
     phon_search_smax=AC_SEARCH_SMAX,
-    acoustic_peak_auc=float(_smoke_row["peak_auc"]),
+    acoustic_peak_auc=float(_smoke_row["test_roc_auc"]),
 )
 fig.savefig(MATCHED_DIR / "_smoke.pdf", bbox_inches="tight")
 plt.close(fig)
@@ -561,10 +567,10 @@ b4_per_step = (
     )
     .filter(pl.col("n_qualifying") >= 2)  # matched-N needs ≥2 steps to be meaningful
     .join(
-        canonical.select(["subject", "electrode_idx", "phoneme_pair",
-                          "smin", "smax", "peak_auc", "bucket"])
-                 .rename({"smin": "phon_smin", "smax": "phon_smax",
-                          "peak_auc": "acoustic_peak_auc"}),
+        peaks.select(["subject", "electrode_idx", "phoneme_pair",
+                      "smin", "smax", "test_roc_auc"])
+             .rename({"smin": "phon_smin", "smax": "phon_smax",
+                      "test_roc_auc": "acoustic_peak_auc"}),
         on=["subject", "electrode_idx", "phoneme_pair"], how="inner",
     )
     .sort(["subject", "electrode_idx", "phoneme_pair", "word_end"])
@@ -613,8 +619,8 @@ with PdfPages(combined_pdf) as pdf:
             fig.suptitle(
                 f"B4 matched-N  |  {subj} e{row['electrode_idx']} "
                 f"{row['phoneme_pair']} · {row['word_end']}  |  "
-                f"bucket={row['bucket']}  steps={steps}  "
-                f"n_per_step={row['n_per_step']}",
+                f"steps={steps}  n_per_step={row['n_per_step']}  "
+                f"ac={row['acoustic_peak_auc']:.3f}",
                 y=1.01, fontsize=9,
             )
             site_pdf = (
@@ -678,7 +684,7 @@ git commit -m "render B4 matched-N star plots gallery + write manifest"
 
 # %%
 print(f"K={K} ({THRESHOLD_COL}) — production default")
-print(f"\nCanonical sites: {canonical.height}")
+print(f"\nAS sites (causal6 significant): {peaks.height}")
 print(f"Sites with ≥1 B3 cell:   {sites_with_any_b3}")
 print(
     "Sites with ≥1 B4 cell (≥2 qualifying steps): "
@@ -717,7 +723,7 @@ git commit -m "add reviewer summary to causal46 star_plots notebook"
 3. `star_plot_keys.csv` row count = (B3 cells rendered) + (B4 cells rendered); `mode` column has both `single_step` and `matched_n` values.
 4. B3 cell count = `trial_balance_index.csv` rows with `meets_threshold_5` minus any subjects missing epoch files.
 5. B4 cell count = `trial_balance_summary.csv` rows with `n_qualifying_5 ≥ 2` minus any subjects missing epoch files.
-6. Visual eyeball of the smoke `_smoke.pdf` and 5 random sites from each gallery: top panel shows clear step-1 vs step-6 separation in the acoustic window for `bucket=both` sites; middle/bottom panels show response-split traces with non-zero N labelled in the legend.
+6. Visual eyeball of the smoke `_smoke.pdf` and 5 random sites from each gallery: top panel shows clear step-1 vs step-6 separation in the acoustic window for high-`acoustic_peak_auc` sites; middle/bottom panels show response-split traces with non-zero N labelled in the legend.
 
 ## Out of scope
 
