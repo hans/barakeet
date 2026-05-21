@@ -246,8 +246,7 @@ if fdr_rois and electrode_dfs_paths and n_permutations_stage3 > 0:
         for e in electrode_dfs
     ])
     n_roi_electrodes = elec_pool.filter(pl.col("roi").is_in(fdr_rois)).height
-    n_phoneme_pairs = epochs.metadata["phoneme_pair"].dropna().nunique()
-    n_roi = n_roi_electrodes * n_phoneme_pairs
+    n_roi = n_roi_electrodes
 
     # Re-aggregate the K1+K2 combined null before passing to gate (stage1_gate
     # expects fold_mean / t_stat schema, not the preagg fold_mean_diff schema).
