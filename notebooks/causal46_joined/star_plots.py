@@ -25,10 +25,10 @@
 # since they calibrate the acoustic decoder.
 #
 # Uses `src.viz_provisional.provisional_star_plot` for B3; a notebook-local
-# `matched_n_star_plot` helper for B4 (pools trials across qualifying steps
-# within a word_end, then balances behavior classes by subsampling the
-# larger class). Per-step trial counts may differ — per-step ambiguity is
-# already guaranteed by `meets_threshold_K`.
+# `matched_n_star_plot` helper for B4 (per-step class balance: at each
+# ambiguous step, draw min_class[s] of each class; concat across steps).
+# Both classes have the same step composition by construction, killing
+# within-class step-acoustic confounds.
 #
 # See `docs/superpowers/plans/2026-05-20-causal46-star-plots.md` and
 # Linear JON-43.
@@ -244,16 +244,16 @@ print(f"B3 rendered: {len(b3_manifest)} cells  |  failed: {len(b3_failures)}")
 # ## `matched_n_star_plot` — inline helper for B4
 #
 # Top: unambiguous trials at resampled 1 & 6 (acoustic anchor).
-# Bottom: within (word_end), pool trials from all `qualifying_steps`
-# (per-step trial counts allowed to differ; per-step ambiguity already
-# enforced upstream via `meets_threshold_K`), then balance the two behavior
-# classes by subsampling the larger class to `n_per_class`. Plot mean HGA
-# per class with SEM.
+# Bottom: at each ambiguous step `s` in `qualifying_steps`, subsample
+# `min_class[s]` trials per class (minority used in full; majority
+# subsampled). Concat across steps. Both classes end up with the same
+# step composition by construction — so the class-difference trace is
+# free of within-class step-acoustic confounds. Total per-class N =
+# `n_per_class = sum_s min_class[s]`. Plot mean HGA per class with SEM.
 #
 # Subsampling uses a deterministic seed for reproducibility. Raises if the
-# pool for either class is smaller than `n_per_class` — the caller computes
-# `n_per_class = min(sum n_class0, sum n_class1)` over qualifying steps, so
-# the raise indicates a counting bug.
+# per-step `min_class` summed by the caller disagrees with what the function
+# recomputes from metadata — that's a counting bug, not bad data.
 
 
 # %%
@@ -327,25 +327,35 @@ def matched_n_star_plot(
     ax_top.set_title(top_title, fontsize=9)
     ax_top.legend(fontsize=7, loc="upper left", framealpha=0.7)
 
-    # Bottom: pool across qualifying_steps within word_end, then balance
-    # classes by subsampling the larger class to n_per_class.
-    we_step_mask = (
-        (md_pp["word_end"] == word_end).values
-        & md_pp["resampled"].isin(list(qualifying_steps)).values
-    )
+    # Bottom: at each ambiguous step, draw min_class[s] of each class
+    # (minority in full; majority subsampled), then concat across steps.
+    # Both classes end up with the same step composition by construction.
     bhv_colors = ["#762a83", "#1b7837"]
-    bhv_vals = sorted(md_pp.loc[we_step_mask, bhv_col].dropna().unique())
+    we_mask = (md_pp["word_end"] == word_end).values
+    bhv_vals = sorted(md_pp.loc[we_mask, bhv_col].dropna().unique())
 
-    chosen_per_class = {}
-    for bhv in bhv_vals:
-        idxs = np.where(we_step_mask & (md_pp[bhv_col] == bhv).values)[0]
-        if len(idxs) < n_per_class:
-            raise ValueError(
-                f"class {bhv}: only {len(idxs)} trials pooled across "
-                f"steps {list(qualifying_steps)} < n_per_class={n_per_class} "
-                "(caller miscomputed the pool size)"
+    chosen_per_class: dict = {bhv: [] for bhv in bhv_vals}
+    pool_check = 0
+    for s in sorted(qualifying_steps):
+        step_mask = we_mask & (md_pp["resampled"] == s).values
+        step_idxs = {
+            bhv: np.where(step_mask & (md_pp[bhv_col] == bhv).values)[0]
+            for bhv in bhv_vals
+        }
+        n_s = min(len(v) for v in step_idxs.values())
+        pool_check += n_s
+        for bhv in bhv_vals:
+            chosen_per_class[bhv].append(
+                rng.choice(step_idxs[bhv], size=n_s, replace=False)
             )
-        chosen_per_class[bhv] = rng.choice(idxs, size=n_per_class, replace=False)
+    if pool_check != n_per_class:
+        raise ValueError(
+            f"pool size mismatch: per-step min_class summed to {pool_check}, "
+            f"caller passed n_per_class={n_per_class} (data integrity bug)"
+        )
+    chosen_per_class = {
+        bhv: np.concatenate(arrs) for bhv, arrs in chosen_per_class.items()
+    }
 
     for i, bhv in enumerate(bhv_vals):
         tr = hga[chosen_per_class[bhv]]
@@ -361,7 +371,7 @@ def matched_n_star_plot(
     ax_bot.set_ylabel("HGA (z)")
     ax_bot.set_xlabel("Time (s, post word onset)")
     ax_bot.set_title(
-        f"Class-balanced pool — steps {list(qualifying_steps)}  "
+        f"Per-step class-balanced — steps {list(qualifying_steps)}  "
         f"({n_per_class} per class)",
         fontsize=9,
     )
@@ -436,11 +446,12 @@ else:
 # %% [markdown]
 # ## B4 — class-balanced across-step cells
 #
-# Per (site, word_end), union all ambiguous steps (`is_ambiguous_step`) and
-# balance the two behavior classes in the pool. Trial counts per step may
-# differ — per-step ambiguity is already guaranteed by `is_ambiguous_step`
-# (min_class > 2, endpoints excluded). Cell included iff
-# `n_per_class = min(sum n_class0, sum n_class1) ≥ K` AND ≥ 2 ambiguous steps.
+# Per (site, word_end), for each ambiguous step `s` (`is_ambiguous_step`)
+# contribute `min_class[s]` trials per class to the cell pool (per-step
+# class balance — minority in full, majority subsampled). Total per-class N
+# = `n_per_class = sum_s min_class[s]`. Cell included iff `n_per_class ≥ K`
+# AND ≥ 2 ambiguous steps. Per-step trial counts may differ; what matters
+# is that both classes have the same step composition.
 
 # %%
 b4_per_step = (
@@ -449,12 +460,8 @@ b4_per_step = (
     .group_by(["subject", "electrode_idx", "phoneme_pair", "word_end"])
     .agg(
         pl.col("resampled").sort().alias("qualifying_steps"),
-        pl.col("n_class0").sum().alias("n_class0_pool"),
-        pl.col("n_class1").sum().alias("n_class1_pool"),
+        pl.col("min_class").sum().alias("n_per_class"),
         pl.len().alias("n_qualifying"),
-    )
-    .with_columns(
-        pl.min_horizontal("n_class0_pool", "n_class1_pool").alias("n_per_class"),
     )
     .filter((pl.col("n_qualifying") >= 2) & (pl.col("n_per_class") >= K))
     .join(

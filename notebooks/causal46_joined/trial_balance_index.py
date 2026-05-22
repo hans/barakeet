@@ -19,9 +19,10 @@
 # For every (canonical AS site, word_end), enumerate which `resampled` steps
 # are behaviorally ambiguous (per-step `is_ambiguous_step`: `min_class > 2`
 # and endpoints excluded — matches `src.data.get_ambiguous_resampled_steps`),
-# then aggregate across those ambiguous steps to compute the maximum
-# class-balanced subsample size (`n_per_class`) and per-K cell-level
-# `meets_threshold_K`. Drives Group B plotting (JON-43).
+# then aggregate across those ambiguous steps under per-step class balance:
+# each step contributes `min_class[s]` trials per class. The cell pool size
+# is `n_per_class = sum_s min_class[s]`; `meets_threshold_K = n_per_class ≥ K`
+# gates cell inclusion. Drives Group B plotting (JON-43).
 #
 # See `docs/superpowers/plans/2026-05-19-causal46-trial-balance-index.md`
 # and Linear JON-42.
@@ -183,20 +184,22 @@ all_site_we = trial_balance.select(
     ["subject", "electrode_idx", "phoneme_pair", "word_end"]
 ).unique()
 
-# Pool aggregates across ambiguous steps, per (site, word_end). `n_per_class`
-# is the maximum class-balanced subsample size over the union of ambiguous
-# steps; `meets_threshold_K = n_per_class >= K` gates cell inclusion downstream.
+# Pool aggregates across ambiguous steps, per (site, word_end). At each
+# ambiguous step `s`, the per-step class-balanced contribution is
+# `min_class[s]` per class (minority in full; majority subsampled). The cell
+# pool sums those contributions: `n_per_class = sum_s min_class[s]`. Both
+# classes have the same step composition by construction, so the
+# class0–class1 contrast is free of within-class step-acoustic confounds.
+# `meets_threshold_K = n_per_class >= K` gates cell inclusion downstream.
 pool = (
     trial_balance.filter(pl.col("is_ambiguous_step"))
     .group_by(["subject", "electrode_idx", "phoneme_pair", "word_end"])
     .agg(
         pl.col("resampled").sort().alias("ambiguous_steps"),
+        pl.col("min_class").sum().alias("n_per_class"),
         pl.col("n_class0").sum().alias("n_class0_pool"),
         pl.col("n_class1").sum().alias("n_class1_pool"),
         pl.len().alias("n_ambiguous"),
-    )
-    .with_columns(
-        pl.min_horizontal("n_class0_pool", "n_class1_pool").alias("n_per_class"),
     )
 )
 
