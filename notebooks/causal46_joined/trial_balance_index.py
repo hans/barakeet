@@ -174,7 +174,6 @@ print(f"Written: {OUT_DIR / 'trial_balance_index.csv'}")
 def _step_str(steps_list):
     return ",".join(str(s) for s in steps_list)
 
-
 # Start from all (site, word_end) combinations so empty-qualifying ones still appear.
 all_site_we = trial_balance.select(
     ["subject", "electrode_idx", "phoneme_pair", "word_end"]
@@ -194,15 +193,15 @@ for k in THRESHOLDS:
     )
 
 summary = summary.with_columns(
+    pl.col("qualifying_steps_5")
+    .list.len().fill_null(0).cast(pl.Int64)
+    .alias("n_qualifying_5"),
     *[
         pl.col(f"qualifying_steps_{k}")
         .map_elements(lambda lst: _step_str(lst) if lst is not None else "", return_dtype=pl.Utf8)
         .alias(f"qualifying_steps_{k}")
         for k in THRESHOLDS
     ],
-    pl.col("qualifying_steps_5")
-    .map_elements(lambda s: 0 if not s else len(s.split(",")), return_dtype=pl.Int64)
-    .alias("n_qualifying_5"),
 ).sort(["subject", "electrode_idx", "phoneme_pair", "word_end"])
 
 summary.write_csv(OUT_DIR / "trial_balance_summary.csv")
