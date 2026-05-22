@@ -70,9 +70,10 @@ EPOCH_DIR = Path(os.environ.get(
 ))
 
 # Production default per A2 plan; expose K so downstream can tighten/loosen.
+# K is the cell-level floor on the class-balanced subsample size (n_per_class
+# in the summary). Per-step ambiguity is gated by `is_ambiguous_step` upstream.
 K = 5
 THRESHOLD_COL = f"meets_threshold_{K}"
-QUAL_COL = f"qualifying_steps_{K}"
 
 # Acoustic search bounds (for dashed lines on the top panel).
 _cfg = yaml.safe_load((REPO / "config.yaml").read_text())
@@ -116,12 +117,15 @@ ambig_steps_default = load_ambig_steps(epochs_dict)
 print(f"ambig_steps_default: {len(ambig_steps_default)} (subject, pp, word_end) keys")
 
 # %% [markdown]
-# ## B3 — single-step cells (`meets_threshold_K`)
+# ## B3 — single-step cells (ambiguous step with min_class ≥ K)
+#
+# A single-step cell is the degenerate case of the cell-level rule: the
+# pool over a 1-step set balanced = min_class for that step.
 
 # %%
 b3_cells = (
     trial_balance
-    .filter(pl.col(THRESHOLD_COL))
+    .filter(pl.col("is_ambiguous_step") & (pl.col("min_class") >= K))
     .join(
         peaks.select(["subject", "electrode_idx", "phoneme_pair",
                       "smin", "smax", "test_roc_auc"])
@@ -384,29 +388,23 @@ def matched_n_star_plot(
 
 # %%
 _smoke = (
-    trial_summary.filter(pl.col("n_qualifying_5") >= 2)
-                 .sort("n_qualifying_5", descending=True).head(1)
+    trial_summary
+    .filter(pl.col(THRESHOLD_COL) & (pl.col("n_ambiguous") >= 2))
+    .sort("n_per_class", descending=True)
+    .head(1)
 )
 if _smoke.height == 0:
-    print(f"⚠ no (site, word_end) has n_qualifying_5 ≥ 2 — skipping smoke test")
+    print(f"⚠ no (site, word_end) passes K={K} with ≥2 ambiguous steps "
+          "— skipping smoke test")
 else:
     _row = _smoke.row(0, named=True)
-    _smoke_steps = [int(s) for s in _row[QUAL_COL].split(",")]
+    _smoke_steps = [int(s) for s in _row["ambiguous_steps"].split(",")]
     _smoke_can = peaks.filter(
         (pl.col("subject") == _row["subject"])
         & (pl.col("electrode_idx") == _row["electrode_idx"])
         & (pl.col("phoneme_pair") == _row["phoneme_pair"])
     ).row(0, named=True)
-    _smoke_pool = trial_balance.filter(
-        (pl.col("subject") == _row["subject"])
-        & (pl.col("electrode_idx") == _row["electrode_idx"])
-        & (pl.col("phoneme_pair") == _row["phoneme_pair"])
-        & (pl.col("word_end") == _row["word_end"])
-        & (pl.col("resampled").is_in(_smoke_steps))
-    )
-    _smoke_n = int(
-        min(_smoke_pool["n_class0"].sum(), _smoke_pool["n_class1"].sum())
-    )
+    _smoke_n = int(_row["n_per_class"])
     print(f"smoke: {_row['subject']} e{_row['electrode_idx']} "
           f"{_row['phoneme_pair']} · {_row['word_end']}  "
           f"steps={_smoke_steps}  n_per_class={_smoke_n}")
@@ -434,18 +432,16 @@ else:
 # %% [markdown]
 # ## B4 — class-balanced across-step cells
 #
-# Per (site, word_end), union all qualifying steps and balance the two
-# behavior classes in the pool. Per-step ambiguity is already guaranteed by
-# `meets_threshold_K`; trial counts per step are allowed to differ.
-# n_per_class = min(sum n_class0 over qualifying steps,
-#                   sum n_class1 over qualifying steps).
-# Drop cells with <2 qualifying steps — across-step pooling is meaningless
-# with one step.
+# Per (site, word_end), union all ambiguous steps (`is_ambiguous_step`) and
+# balance the two behavior classes in the pool. Trial counts per step may
+# differ — per-step ambiguity is already guaranteed by `is_ambiguous_step`
+# (min_class > 2, endpoints excluded). Cell included iff
+# `n_per_class = min(sum n_class0, sum n_class1) ≥ K` AND ≥ 2 ambiguous steps.
 
 # %%
 b4_per_step = (
     trial_balance
-    .filter(pl.col(THRESHOLD_COL))
+    .filter(pl.col("is_ambiguous_step"))
     .group_by(["subject", "electrode_idx", "phoneme_pair", "word_end"])
     .agg(
         pl.col("resampled").sort().alias("qualifying_steps"),
@@ -456,7 +452,7 @@ b4_per_step = (
     .with_columns(
         pl.min_horizontal("n_class0_pool", "n_class1_pool").alias("n_per_class"),
     )
-    .filter(pl.col("n_qualifying") >= 2)
+    .filter((pl.col("n_qualifying") >= 2) & (pl.col("n_per_class") >= K))
     .join(
         peaks.select(["subject", "electrode_idx", "phoneme_pair",
                       "smin", "smax", "test_roc_auc"])
@@ -466,7 +462,7 @@ b4_per_step = (
     )
     .sort(["subject", "electrode_idx", "phoneme_pair", "word_end"])
 )
-print(f"B4 cells (K={K}, ≥2 qualifying steps): {b4_per_step.height}")
+print(f"B4 cells (K={K}, ≥2 ambiguous steps, n_per_class ≥ K): {b4_per_step.height}")
 print("n_per_class distribution:")
 print(b4_per_step.group_by("n_per_class").len().sort("n_per_class"))
 
@@ -481,7 +477,7 @@ b4_combined_pdf = MATCHED_DIR / "star_plots_all.pdf"
 with PdfPages(b4_combined_pdf) as pdf:
     fig, ax = plt.subplots(figsize=(8.5, 11))
     ax.text(0.5, 0.6,
-            f"B4 class-balanced star plots\nK={K}  (≥2 qualifying steps)\n"
+            f"B4 class-balanced star plots\nK={K}  (≥2 ambiguous steps)\n"
             f"{b4_per_step.height} (site × word_end) cells",
             ha="center", va="center", fontsize=18)
     ax.axis("off")
@@ -570,7 +566,7 @@ print(f"K={K} ({THRESHOLD_COL}) — production default")
 print(f"\nAS sites (causal6 significant): {peaks.height}")
 print(f"Sites with ≥1 B3 cell: {sites_with_any_b3}")
 print(
-    "Sites with ≥1 B4 cell (≥2 qualifying steps): "
+    "Sites with ≥1 B4 cell (≥2 ambiguous steps, n_per_class ≥ K): "
     f"{b4_per_step.select(['subject','electrode_idx','phoneme_pair']).unique().height}"
 )
 print(f"\nB3 cells rendered: {sum(1 for m in b3_manifest if m['status']=='rendered')}")

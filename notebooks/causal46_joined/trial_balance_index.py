@@ -17,8 +17,11 @@
 # # Within-completion trial-balance index
 #
 # For every (canonical AS site, word_end), enumerate which `resampled` steps
-# have enough trials of each `behavior_dummy_forced` class for within-step
-# perceptual contrasts. Drives Group B plotting (JON-43).
+# are behaviorally ambiguous (per-step `is_ambiguous_step`: `min_class > 2`
+# and endpoints excluded — matches `src.data.get_ambiguous_resampled_steps`),
+# then aggregate across those ambiguous steps to compute the maximum
+# class-balanced subsample size (`n_per_class`) and per-K cell-level
+# `meets_threshold_K`. Drives Group B plotting (JON-43).
 #
 # See `docs/superpowers/plans/2026-05-19-causal46-trial-balance-index.md`
 # and Linear JON-42.
@@ -100,6 +103,10 @@ assert all_md.filter(pl.col("word_end").is_null()).height == 0, "found nulls in 
 # across all electrodes of the same subject in the cross-join below.
 
 # %%
+# Per-step `is_ambiguous_step` mirrors `src.data.get_ambiguous_resampled_steps`
+# (`min_class > 2`, endpoints excluded). It says "this step elicited both
+# responses non-trivially", nothing about sample size — sample-size gating
+# happens at the cell level via `meets_threshold_K` on the pooled balanced N.
 counts = (
     all_md
     .group_by(["subject", "phoneme_pair", "word_end", "resampled"])
@@ -111,15 +118,14 @@ counts = (
     .with_columns(
         pl.min_horizontal("n_class0", "n_class1").alias("min_class"),
     )
-)
-for k in THRESHOLDS:
-    counts = counts.with_columns(
+    .with_columns(
         (
-            (pl.col("min_class") >= k)
+            (pl.col("min_class") > 2)
             & (~pl.col("resampled").is_in([1, 6]))
-        ).alias(f"meets_threshold_{k}")
+        ).alias("is_ambiguous_step"),
     )
-counts = counts.sort(["subject", "phoneme_pair", "word_end", "resampled"])
+    .sort(["subject", "phoneme_pair", "word_end", "resampled"])
+)
 
 print(f"counts table: {counts.height} rows")
 print(counts.head(12))
@@ -128,21 +134,19 @@ counts.write_csv(OUT_DIR / "trial_counts_by_subject.csv")
 print(f"Written: {OUT_DIR / 'trial_counts_by_subject.csv'}")
 
 # %%
-# How does qualifying-step count vary by threshold?
-for k in (4, 5, 10):
-    qual = (
-        counts.filter(pl.col(f"meets_threshold_{k}"))
-        .group_by(["subject", "phoneme_pair", "word_end"])
-        .agg(
-            pl.col("resampled").sort().alias("qualifying_steps"),
-            pl.len().alias("n_qualifying"),
-        )
-        .sort(["subject", "phoneme_pair", "word_end"])
+# How many ambiguous steps (M-passing) per (subject, pp, word_end)?
+amb_per_we = (
+    counts.filter(pl.col("is_ambiguous_step"))
+    .group_by(["subject", "phoneme_pair", "word_end"])
+    .agg(
+        pl.col("resampled").sort().alias("ambiguous_steps"),
+        pl.len().alias("n_ambiguous"),
     )
-    print(f"\n=== threshold K={k} ===")
-    print(f"(subject, pp, word_end) tuples with ≥1 qualifying step: {qual.height}")
-    print(f"distribution of n_qualifying:")
-    print(qual.group_by("n_qualifying").len().sort("n_qualifying"))
+    .sort(["subject", "phoneme_pair", "word_end"])
+)
+print(f"(subject, pp, word_end) with ≥1 ambiguous step: {amb_per_we.height}")
+print("distribution of n_ambiguous:")
+print(amb_per_we.group_by("n_ambiguous").len().sort("n_ambiguous"))
 
 # %% [markdown]
 # ## Cross with canonical AS sites
@@ -175,35 +179,52 @@ def _step_str(steps_list):
     return ",".join(str(s) for s in steps_list)
 
 
-# Start from all (site, word_end) combinations so empty-qualifying ones still appear.
+# Start from all (site, word_end) combinations so cells with zero ambiguous steps still appear.
 all_site_we = trial_balance.select(
     ["subject", "electrode_idx", "phoneme_pair", "word_end"]
 ).unique()
 
-summary = all_site_we
-for k in THRESHOLDS:
-    grouped = (
-        trial_balance.filter(pl.col(f"meets_threshold_{k}"))
-        .group_by(["subject", "electrode_idx", "phoneme_pair", "word_end"])
-        .agg(pl.col("resampled").sort().alias(f"qualifying_steps_{k}"))
+# Pool aggregates across ambiguous steps, per (site, word_end). `n_per_class`
+# is the maximum class-balanced subsample size over the union of ambiguous
+# steps; `meets_threshold_K = n_per_class >= K` gates cell inclusion downstream.
+pool = (
+    trial_balance.filter(pl.col("is_ambiguous_step"))
+    .group_by(["subject", "electrode_idx", "phoneme_pair", "word_end"])
+    .agg(
+        pl.col("resampled").sort().alias("ambiguous_steps"),
+        pl.col("n_class0").sum().alias("n_class0_pool"),
+        pl.col("n_class1").sum().alias("n_class1_pool"),
+        pl.len().alias("n_ambiguous"),
     )
-    summary = summary.join(
-        grouped,
+    .with_columns(
+        pl.min_horizontal("n_class0_pool", "n_class1_pool").alias("n_per_class"),
+    )
+)
+
+summary = (
+    all_site_we
+    .join(
+        pool,
         on=["subject", "electrode_idx", "phoneme_pair", "word_end"],
         how="left",
     )
-
-summary = summary.with_columns(
-    *[
-        pl.col(f"qualifying_steps_{k}")
+    .with_columns(
+        pl.col("n_class0_pool").fill_null(0),
+        pl.col("n_class1_pool").fill_null(0),
+        pl.col("n_per_class").fill_null(0),
+        pl.col("n_ambiguous").fill_null(0),
+    )
+    .with_columns(
+        pl.col("ambiguous_steps")
         .map_elements(lambda lst: _step_str(lst) if lst is not None else "", return_dtype=pl.Utf8)
-        .alias(f"qualifying_steps_{k}")
-        for k in THRESHOLDS
-    ],
-    pl.col("qualifying_steps_5")
-    .map_elements(lambda s: 0 if not s else len(s.split(",")), return_dtype=pl.Int64)
-    .alias("n_qualifying_5"),
-).sort(["subject", "electrode_idx", "phoneme_pair", "word_end"])
+        .alias("ambiguous_steps"),
+        *[
+            (pl.col("n_per_class") >= k).alias(f"meets_threshold_{k}")
+            for k in THRESHOLDS
+        ],
+    )
+    .sort(["subject", "electrode_idx", "phoneme_pair", "word_end"])
+)
 
 summary.write_csv(OUT_DIR / "trial_balance_summary.csv")
 print(f"Written: {OUT_DIR / 'trial_balance_summary.csv'}")
@@ -244,11 +265,10 @@ ref_df = pl.DataFrame(
     orient="row",
 )
 
-# Replicate the oracle's logic: min_class > 2, exclude endpoints.
+# `is_ambiguous_step` is defined as `min_class > 2 AND resampled ∉ {1, 6}` —
+# i.e., exactly the oracle's condition.
 ours_df = (
-    counts.filter(
-        (pl.col("min_class") > 2) & (~pl.col("resampled").is_in([1, 6]))
-    )
+    counts.filter(pl.col("is_ambiguous_step"))
     .group_by(["subject", "phoneme_pair", "word_end"])
     .agg(pl.col("resampled").sort().alias("_ours"))
 )
@@ -275,27 +295,28 @@ print(f"✓ matches get_ambiguous_resampled_steps on all "
 # ## Summary for downstream consumers
 #
 # - `trial_balance_index.csv` — long format, one row per
-#   (canonical_site, word_end, resampled). Most plotting code wants this:
-#   filter by `meets_threshold_K` for whatever K the plot tolerates.
-# - `trial_balance_summary.csv` — compact per-(site, word_end) view.
-#   Faster to skim by eye.
+#   (canonical_site, word_end, resampled). Carries per-step `is_ambiguous_step`
+#   (min_class > 2, endpoints excluded). No K threshold lives at this level.
+# - `trial_balance_summary.csv` — per (site, word_end). Columns:
+#   `ambiguous_steps` (comma-joined), `n_ambiguous`, `n_class0_pool`,
+#   `n_class1_pool`, `n_per_class` (= max class-balanced subsample size over
+#   the union of ambiguous steps), and `meets_threshold_K` for K ∈ {4, 5, 10}.
 # - `trial_counts_by_subject.csv` — electrode-agnostic raw counts.
 #   Useful for sanity checks but not for plotting.
 #
-# Recommended default for Group B (JON-43): use `meets_threshold_5`.
-# For real perceptual responses K=4–5 is usually sufficient. Drop to K=4 if
-# K=5 leaves too many (site, word_end) tuples with zero qualifying steps;
-# raise to K=10 only if trace SEMs at K=5 look implausibly tight.
+# Cell inclusion rule downstream (B3 and B4): a (site, word_end) cell
+# qualifies iff `meets_threshold_K`. B4 additionally requires `n_ambiguous ≥ 2`.
+# Recommended default for Group B (JON-43): K=5. Drop to K=4 if K=5 leaves too
+# many cells dark; raise to K=10 only if SEMs look implausibly tight.
 
 # %%
-n_sites = canonical.height
-for k in (4, 5, 10):
-    col = f"qualifying_steps_{k}"
-    n_any = summary.filter(pl.col(col).str.len_chars() > 0).height
+for k in THRESHOLDS:
+    col = f"meets_threshold_{k}"
+    n_any = summary.filter(pl.col(col)).height
     n_two_plus = summary.filter(
-        pl.col(col).str.count_matches(",") >= 1
+        pl.col(col) & (pl.col("n_ambiguous") >= 2)
     ).height
     print(
-        f"K={k:2d}: (site×word_end) with ≥1 qualifying step: {n_any:4d}/{summary.height}; "
-        f"with ≥2 qualifying steps: {n_two_plus:4d}/{summary.height}"
+        f"K={k:2d}: (site×word_end) with n_per_class ≥ K: {n_any:4d}/{summary.height}; "
+        f"and ≥2 ambiguous steps: {n_two_plus:4d}/{summary.height}"
     )
