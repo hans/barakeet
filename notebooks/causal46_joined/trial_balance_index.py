@@ -178,7 +178,6 @@ print(f"Written: {OUT_DIR / 'trial_balance_index.csv'}")
 def _step_str(steps_list):
     return ",".join(str(s) for s in steps_list)
 
-
 # Start from all (site, word_end) combinations so cells with zero ambiguous steps still appear.
 all_site_we = trial_balance.select(
     ["subject", "electrode_idx", "phoneme_pair", "word_end"]

@@ -98,7 +98,7 @@ if [ "${CLAUDE_SANDBOX_MOUNT_SYMLINKS:-1}" = "1" ]; then
         case "$target" in "$PWD"|"$PWD"/*|"$pwd_real"|"$pwd_real"/*) continue ;; esac
         [ -e "$target" ] || continue
         link_target_modes+=("$target|$(symlink_mount_mode "$target")")
-    done < <(find "$PWD" \( -path "$PWD/.git" -o -name ".venv" -o -name "venv" -o -name "node_modules" \) -prune -o -type l -print0 2>/dev/null)
+    done < <(find "$PWD" \( -path "$PWD/.git" -o -name ".venv" -o -name ".venv-container" -o -name "venv" -o -name "node_modules" \) -prune -o -type l -print0 2>/dev/null)
     if [ "${#link_target_modes[@]}" -gt 0 ]; then
         while IFS='|' read -r target mode; do
             docker_args+=(-v "$target:$target:$mode")
