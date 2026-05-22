@@ -7,6 +7,10 @@
 #       format_name: percent
 #       format_version: '1.3'
 #       jupytext_version: 1.19.1
+#   kernelspec:
+#     display_name: barakeet
+#     language: python
+#     name: python3
 # ---
 
 # %% [markdown]
@@ -70,7 +74,7 @@ EPOCH_DIR = Path(os.environ.get(
 ))
 
 # Production default per A2 plan; expose K so downstream can tighten/loosen.
-K = 5
+K = 4
 THRESHOLD_COL = f"meets_threshold_{K}"
 QUAL_COL = f"qualifying_steps_{K}"
 
