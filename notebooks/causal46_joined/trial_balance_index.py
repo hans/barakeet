@@ -114,7 +114,10 @@ counts = (
 )
 for k in THRESHOLDS:
     counts = counts.with_columns(
-        (pl.col("min_class") >= k).alias(f"meets_threshold_{k}")
+        (
+            (pl.col("min_class") >= k)
+            & (~pl.col("resampled").is_in([1, 6]))
+        ).alias(f"meets_threshold_{k}")
     )
 counts = counts.sort(["subject", "phoneme_pair", "word_end", "resampled"])
 

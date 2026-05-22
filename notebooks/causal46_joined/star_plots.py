@@ -10,17 +10,21 @@
 # ---
 
 # %% [markdown]
-# # causal46 AS-site star plots (B3 single-step + B4 matched-N across-step)
+# # causal46 AS-site star plots (B3 single-step + B4 class-balanced across-step)
 #
 # Two HGA star-plot galleries. AS sites are read directly from the causal6
 # acoustic peaks parquet (filtered to `significant`) — that file is the
 # authority; mirrors what `trial_balance_index.py` does. The
 # (site, word_end, resampled) class counts come from
-# `trial_balance_index.csv` (JON-42 / A2).
+# `trial_balance_index.csv` (JON-42 / A2). Endpoint steps 1 and 6 are
+# excluded from qualifying-step sets upstream (in `trial_balance_index.py`)
+# since they calibrate the acoustic decoder.
 #
 # Uses `src.viz_provisional.provisional_star_plot` for B3; a notebook-local
-# `matched_n_star_plot` helper for B4 (subsamples to equal-N per step × class
-# before pooling).
+# `matched_n_star_plot` helper for B4 (pools trials across qualifying steps
+# within a word_end, then balances behavior classes by subsampling the
+# larger class). Per-step trial counts may differ — per-step ambiguity is
+# already guaranteed by `meets_threshold_K`.
 #
 # See `docs/superpowers/plans/2026-05-20-causal46-star-plots.md` and
 # Linear JON-43.
@@ -210,7 +214,7 @@ with PdfPages(b3_combined_pdf) as pdf:
                 "mode": "single_step",
                 "resampled_step": row["resampled"],
                 "qualifying_steps": "",
-                "n_per_step": int(row["min_class"]),
+                "n_per_class": int(row["min_class"]),
                 "n_total": int(row["n_total"]),
                 "threshold_K": K,
                 "status": "rendered",
@@ -232,14 +236,16 @@ print(f"B3 rendered: {len(b3_manifest)} cells  |  failed: {len(b3_failures)}")
 # ## `matched_n_star_plot` — inline helper for B4
 #
 # Top: unambiguous trials at resampled 1 & 6 (acoustic anchor).
-# Bottom: within (word_end), for each step in `qualifying_steps`, subsample to
-# `n_per_step` trials of each behavior class; pool subsamples; plot mean HGA
+# Bottom: within (word_end), pool trials from all `qualifying_steps`
+# (per-step trial counts allowed to differ; per-step ambiguity already
+# enforced upstream via `meets_threshold_K`), then balance the two behavior
+# classes by subsampling the larger class to `n_per_class`. Plot mean HGA
 # per class with SEM.
 #
-# Subsampling uses a deterministic seed for reproducibility. Raises if any
-# (qualifying step × class) lacks `n_per_step` trials — the caller computes
-# n_per_step = min over (qualifying steps × classes) of min_class, so the
-# raise indicates a counting bug, not bad data.
+# Subsampling uses a deterministic seed for reproducibility. Raises if the
+# pool for either class is smaller than `n_per_class` — the caller computes
+# `n_per_class = min(sum n_class0, sum n_class1)` over qualifying steps, so
+# the raise indicates a counting bug.
 
 
 # %%
@@ -251,7 +257,7 @@ def matched_n_star_plot(
     qualifying_steps,
     *,
     epochs_dict,
-    n_per_step,
+    n_per_class,
     phon_smin=None,
     phon_smax=None,
     phon_search_smin=None,
@@ -313,42 +319,42 @@ def matched_n_star_plot(
     ax_top.set_title(top_title, fontsize=9)
     ax_top.legend(fontsize=7, loc="upper left", framealpha=0.7)
 
-    # Bottom: matched-N pooled across qualifying_steps within word_end.
-    we_mask = (md_pp["word_end"] == word_end).values
+    # Bottom: pool across qualifying_steps within word_end, then balance
+    # classes by subsampling the larger class to n_per_class.
+    we_step_mask = (
+        (md_pp["word_end"] == word_end).values
+        & md_pp["resampled"].isin(list(qualifying_steps)).values
+    )
     bhv_colors = ["#762a83", "#1b7837"]
-    bhv_vals = sorted(md_pp.loc[we_mask, bhv_col].dropna().unique())
+    bhv_vals = sorted(md_pp.loc[we_step_mask, bhv_col].dropna().unique())
 
-    pooled = {bhv: [] for bhv in bhv_vals}
-    for step in qualifying_steps:
-        step_mask = we_mask & (md_pp["resampled"] == step).values
-        for bhv in bhv_vals:
-            cell_mask = step_mask & (md_pp[bhv_col] == bhv).values
-            idxs = np.where(cell_mask)[0]
-            if len(idxs) < n_per_step:
-                raise ValueError(
-                    f"step {step} class {bhv}: only {len(idxs)} trials < "
-                    f"n_per_step={n_per_step} (caller picked too large an N)"
-                )
-            chosen = rng.choice(idxs, size=n_per_step, replace=False)
-            pooled[bhv].append(hga[chosen])
+    chosen_per_class = {}
+    for bhv in bhv_vals:
+        idxs = np.where(we_step_mask & (md_pp[bhv_col] == bhv).values)[0]
+        if len(idxs) < n_per_class:
+            raise ValueError(
+                f"class {bhv}: only {len(idxs)} trials pooled across "
+                f"steps {list(qualifying_steps)} < n_per_class={n_per_class} "
+                "(caller miscomputed the pool size)"
+            )
+        chosen_per_class[bhv] = rng.choice(idxs, size=n_per_class, replace=False)
 
     for i, bhv in enumerate(bhv_vals):
-        tr = np.concatenate(pooled[bhv], axis=0)
+        tr = hga[chosen_per_class[bhv]]
         m = tr.mean(0)
         se = tr.std(0) / np.sqrt(tr.shape[0])
         color = bhv_colors[i % len(bhv_colors)]
         ax_bot.plot(
             times, m, color=color, lw=1.5,
-            label=f"resp={bhv}  (n={tr.shape[0]} "
-                  f"= {n_per_step}×{len(qualifying_steps)} steps)",
+            label=f"resp={bhv}  (n={tr.shape[0]})",
         )
         ax_bot.fill_between(times, m - se, m + se, color=color, alpha=0.18)
     ax_bot.axhline(0, color="k", lw=0.5, ls=":")
     ax_bot.set_ylabel("HGA (z)")
     ax_bot.set_xlabel("Time (s, post word onset)")
     ax_bot.set_title(
-        f"Matched-N pooled — steps {list(qualifying_steps)}  "
-        f"({n_per_step} per (step × class))",
+        f"Class-balanced pool — steps {list(qualifying_steps)}  "
+        f"({n_per_class} per class)",
         fontsize=9,
     )
     ax_bot.legend(fontsize=7, loc="upper left", framealpha=0.7)
@@ -391,18 +397,19 @@ else:
         & (pl.col("electrode_idx") == _row["electrode_idx"])
         & (pl.col("phoneme_pair") == _row["phoneme_pair"])
     ).row(0, named=True)
+    _smoke_pool = trial_balance.filter(
+        (pl.col("subject") == _row["subject"])
+        & (pl.col("electrode_idx") == _row["electrode_idx"])
+        & (pl.col("phoneme_pair") == _row["phoneme_pair"])
+        & (pl.col("word_end") == _row["word_end"])
+        & (pl.col("resampled").is_in(_smoke_steps))
+    )
     _smoke_n = int(
-        trial_balance.filter(
-            (pl.col("subject") == _row["subject"])
-            & (pl.col("electrode_idx") == _row["electrode_idx"])
-            & (pl.col("phoneme_pair") == _row["phoneme_pair"])
-            & (pl.col("word_end") == _row["word_end"])
-            & (pl.col("resampled").is_in(_smoke_steps))
-        )["min_class"].min()
+        min(_smoke_pool["n_class0"].sum(), _smoke_pool["n_class1"].sum())
     )
     print(f"smoke: {_row['subject']} e{_row['electrode_idx']} "
           f"{_row['phoneme_pair']} · {_row['word_end']}  "
-          f"steps={_smoke_steps}  n_per_step={_smoke_n}")
+          f"steps={_smoke_steps}  n_per_class={_smoke_n}")
     if _row["subject"] not in epochs_dict:
         print(f"  ⚠ epochs missing for {_row['subject']} — skipping smoke")
     else:
@@ -413,7 +420,7 @@ else:
             word_end=_row["word_end"],
             qualifying_steps=_smoke_steps,
             epochs_dict=epochs_dict,
-            n_per_step=_smoke_n,
+            n_per_class=_smoke_n,
             phon_smin=int(_smoke_can["smin"]),
             phon_smax=int(_smoke_can["smax"]),
             phon_search_smin=AC_SEARCH_SMIN,
@@ -425,11 +432,15 @@ else:
         print(f"Wrote {MATCHED_DIR / '_smoke.pdf'} — eyeball before the full gallery.")
 
 # %% [markdown]
-# ## B4 — matched-N across-step cells
+# ## B4 — class-balanced across-step cells
 #
-# Per (site, word_end), gather qualifying steps + the per-step n_per_step.
-# n_per_step = min over (qualifying steps × classes) of n_class{0,1}.
-# Drop cells with <2 qualifying steps — matched-N is meaningless with one step.
+# Per (site, word_end), union all qualifying steps and balance the two
+# behavior classes in the pool. Per-step ambiguity is already guaranteed by
+# `meets_threshold_K`; trial counts per step are allowed to differ.
+# n_per_class = min(sum n_class0 over qualifying steps,
+#                   sum n_class1 over qualifying steps).
+# Drop cells with <2 qualifying steps — across-step pooling is meaningless
+# with one step.
 
 # %%
 b4_per_step = (
@@ -438,8 +449,12 @@ b4_per_step = (
     .group_by(["subject", "electrode_idx", "phoneme_pair", "word_end"])
     .agg(
         pl.col("resampled").sort().alias("qualifying_steps"),
-        pl.col("min_class").min().alias("n_per_step"),
+        pl.col("n_class0").sum().alias("n_class0_pool"),
+        pl.col("n_class1").sum().alias("n_class1_pool"),
         pl.len().alias("n_qualifying"),
+    )
+    .with_columns(
+        pl.min_horizontal("n_class0_pool", "n_class1_pool").alias("n_per_class"),
     )
     .filter(pl.col("n_qualifying") >= 2)
     .join(
@@ -452,11 +467,11 @@ b4_per_step = (
     .sort(["subject", "electrode_idx", "phoneme_pair", "word_end"])
 )
 print(f"B4 cells (K={K}, ≥2 qualifying steps): {b4_per_step.height}")
-print("n_per_step distribution:")
-print(b4_per_step.group_by("n_per_step").len().sort("n_per_step"))
+print("n_per_class distribution:")
+print(b4_per_step.group_by("n_per_class").len().sort("n_per_class"))
 
 # %% [markdown]
-# ## Render B4 matched-N star plots
+# ## Render B4 class-balanced star plots
 
 # %%
 b4_failures: list[dict] = []
@@ -466,7 +481,7 @@ b4_combined_pdf = MATCHED_DIR / "star_plots_all.pdf"
 with PdfPages(b4_combined_pdf) as pdf:
     fig, ax = plt.subplots(figsize=(8.5, 11))
     ax.text(0.5, 0.6,
-            f"B4 matched-N star plots\nK={K}  (≥2 qualifying steps)\n"
+            f"B4 class-balanced star plots\nK={K}  (≥2 qualifying steps)\n"
             f"{b4_per_step.height} (site × word_end) cells",
             ha="center", va="center", fontsize=18)
     ax.axis("off")
@@ -487,7 +502,7 @@ with PdfPages(b4_combined_pdf) as pdf:
                 word_end=row["word_end"],
                 qualifying_steps=steps,
                 epochs_dict=epochs_dict,
-                n_per_step=int(row["n_per_step"]),
+                n_per_class=int(row["n_per_class"]),
                 phon_smin=int(row["phon_smin"]),
                 phon_smax=int(row["phon_smax"]),
                 phon_search_smin=AC_SEARCH_SMIN,
@@ -495,9 +510,9 @@ with PdfPages(b4_combined_pdf) as pdf:
                 acoustic_peak_auc=float(row["acoustic_peak_auc"]),
             )
             fig.suptitle(
-                f"B4 matched-N  |  {subj} e{row['electrode_idx']} "
+                f"B4 class-balanced  |  {subj} e{row['electrode_idx']} "
                 f"{row['phoneme_pair']} · {row['word_end']}  |  "
-                f"steps={steps}  n_per_step={row['n_per_step']}  "
+                f"steps={steps}  n_per_class={row['n_per_class']}  "
                 f"ac={row['acoustic_peak_auc']:.3f}",
                 y=1.01, fontsize=9,
             )
@@ -514,11 +529,11 @@ with PdfPages(b4_combined_pdf) as pdf:
                 "electrode_idx": row["electrode_idx"],
                 "phoneme_pair": row["phoneme_pair"],
                 "word_end": row["word_end"],
-                "mode": "matched_n",
+                "mode": "class_balanced",
                 "resampled_step": None,
                 "qualifying_steps": ",".join(str(s) for s in steps),
-                "n_per_step": int(row["n_per_step"]),
-                "n_total": int(row["n_per_step"] * len(steps) * 2),
+                "n_per_class": int(row["n_per_class"]),
+                "n_total": int(row["n_per_class"] * 2),
                 "threshold_K": K,
                 "status": "rendered",
             })
