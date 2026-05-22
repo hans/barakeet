@@ -55,6 +55,8 @@ from src.viz_provisional import (
     provisional_star_plot,
 )
 
+from _within_completion import extract_hga, resolve_behavior_col
+
 # %%
 REPO = Path(".").resolve()
 OUT_DIR = REPO / "outputs/causal46_joined"
@@ -279,21 +281,12 @@ def matched_n_star_plot(
         rng = np.random.default_rng(0)
     ep = epochs_dict[subject]
     md = ep.metadata
-    bhv_col = (
-        "behavior_dummy_forced"
-        if "behavior_dummy_forced" in md.columns
-        else "behavior_categorical"
-    )
+    bhv_col = resolve_behavior_col(md)
 
     pp_mask = (md["phoneme_pair"] == phoneme_pair).values
     ep_pp = ep[pp_mask]
     md_pp = md[pp_mask].reset_index(drop=True)
-    hga = (
-        ep_pp.copy()
-        .apply_baseline((None, 0))
-        .get_data(picks=[electrode_idx])
-        .squeeze(1)
-    )
+    hga = extract_hga(ep_pp, electrode_idx)
     times = ep.times
 
     fig, (ax_top, ax_bot) = plt.subplots(2, 1, figsize=figsize, sharex=True)
