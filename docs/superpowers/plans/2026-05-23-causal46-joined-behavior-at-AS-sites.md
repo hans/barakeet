@@ -156,6 +156,24 @@ rule causal46_joined_all:
 
 ---
 
+## Handoff boundary
+
+Tasks A–C are CPU-only and self-contained: write code, write tests, syntax-check, commit. **Subagent does these end-to-end** and reports back when all three have green tests.
+
+Tasks D and E require the user's GPU + epochs data + the causal6 acoustic pipeline already run to completion (`outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet` must exist). **Hand back to the user after C** with the exact `uv run snakemake` invocations from D below. Do not attempt D or E from a sandboxed worker.
+
+If D surfaces a wiring bug, the user pings the subagent again with the failure; otherwise E runs straight through. The three CPU tasks are logically independent — each gets its own commit. The user-side tasks are sequential (D before E).
+
+| Task | Where it runs | Commit boundary |
+|---|---|---|
+| A. Checkpoint + AS-filter notebook + test | Subagent (CPU) | One commit |
+| B. Copy 8 decoder/null notebooks | Subagent (CPU) | One commit |
+| C. `workflows/causal46_joined.Snakefile` (parses + dry-run builds DAG) | Subagent (CPU) | One commit |
+| D. Smoke test on one subject (one rule per layer at K=100) | **User** (GPU) | — |
+| E. Production run | **User** (GPU) | — |
+
+---
+
 ## Tasks
 
 ### A. Checkpoint + AS-filter notebook
@@ -188,15 +206,37 @@ Acceptance: a `diff -u notebooks/causal6/X.py notebooks/causal46_joined/X.py` sh
 4. Copy-paste the 22 rules from causal6.Snakefile with the 5 prefix/path/parameter changes listed under "Joined rule pattern" above. Each rule is mechanical; no logic changes.
 5. Define `rule causal46_joined_all`.
 
-### D. Smoke test on one subject
-1. Run the checkpoint on production data: `uv run snakemake --snakefile workflows/causal46_joined.Snakefile outputs/causal46_joined/electrodes_as_filtered/subjects_with_as.txt`.
-2. Sanity-check: per-subject CSV `acoustic_significant` count matches the count of unique AS electrodes from `phon_peaks_all.parquet`.
-3. Run `joined_behavior_decoding_single_electrode_null` for one AS-positive subject (e.g., EC282) at smoke K (`--config causal6.n_permutations_stage1=100 causal6.n_permutations_stage2=100 causal6.n_permutations_stage3=100`).
+### D. Smoke test on one subject — **user runs, not the subagent**
+After tasks A–C are committed, the user runs these on their GPU box and reports results back. The subagent only re-engages if a step fails.
+
+1. Run the checkpoint on production data:
+   ```
+   uv run snakemake --snakefile workflows/causal46_joined.Snakefile \
+       --configfile config.yaml \
+       outputs/causal46_joined/electrodes_as_filtered/subjects_with_as.txt
+   ```
+2. Sanity-check (CPU-only, runs anywhere):
+   ```
+   uv run python -c "
+   import polars as pl
+   phon = pl.read_parquet('outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet').filter(pl.col('p_value') < 0.05)
+   per_subj = phon.group_by('subject').agg(pl.col('electrode_idx').n_unique().alias('as_n'))
+   print(per_subj.sort('subject'))
+   "
+   ```
+   Per-subject CSV `acoustic_significant.sum()` must match per_subj.as_n per subject.
+3. Smoke one decoder+null at K=100:
+   ```
+   uv run snakemake --snakefile workflows/causal46_joined.Snakefile \
+       --configfile config.yaml \
+       --config causal6.n_permutations_stage1=100 causal6.n_permutations_stage2=100 causal6.n_permutations_stage3=100 \
+       outputs/causal46_joined/behavior_decoding_single_electrode_null/EC282/null_scores.parquet
+   ```
 4. Run the corresponding aggregate; confirm `electrode_q_value`/`electrode_significant` columns appear and family size matches AS-in-ROIs from the manifest.
 
-### E. Production run
+### E. Production run — **user runs**
 After D passes:
-1. `uv run snakemake --snakefile workflows/causal46_joined.Snakefile causal46_joined_all`.
+1. `uv run snakemake --snakefile workflows/causal46_joined.Snakefile --configfile config.yaml causal46_joined_all`.
 2. Burns the same GPU budget per AS electrode as causal6 per speech-responsive electrode, but at ~1/4 the electrode count (rough estimate; depends on AS rate). Expected wall time ≈ 25-30% of the causal6 behavior/ganong null re-run.
 
 ---
