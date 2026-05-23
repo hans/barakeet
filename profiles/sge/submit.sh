@@ -104,7 +104,7 @@ EOF
 chmod +x "$_wrapper"
 new_args+=("$_wrapper")
 
-output=$("$SUBMIT_JOB_BIN" -q "$final_queue" "${new_args[@]}" 2>&1)
+output=$("$SUBMIT_JOB_BIN" -H mind7 -q "$final_queue" "${new_args[@]}" 2>&1)
 echo "$output" >&2
 
 jobid=$(echo "$output" | grep -oE 'Your job [0-9]+' | awk '{print $3}' | tail -n 1)

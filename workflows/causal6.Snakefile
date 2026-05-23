@@ -141,7 +141,7 @@ def _provision_node():
 
     project_root = Path(workflow.basedir).parent
     cache_dir = Path("/tmp/jgauthier-cache-uv")
-    env_dir = Path(f"/tmp/uv-{branch}")
+    env_dir = Path(f"/tmp/venv-barakeet")
     venv = project_root / ".venv"
     sentinel = env_dir / ".provisioned"
 
@@ -608,7 +608,8 @@ rule acoustic_decoding_null:
 
     resources:
         gpu = 1,
-        mem_gb = 100
+        mem_gb = 200,
+        queue = "mind-gpu"
 
     run:
         outdir = Path(output.notebook).parent
@@ -669,7 +670,7 @@ rule behavior_decoding_single_electrode_null:
 
     resources:
         gpu = 1,
-        mem_gb = 100
+        mem_gb = 500
 
     run:
         outdir = Path(output.notebook).parent
@@ -727,7 +728,7 @@ rule behavior_decoding_single_electrode_hga_only_null:
 
     resources:
         gpu = 1,
-        mem_gb = 100
+        mem_gb = 200
 
     run:
         outdir = Path(output.notebook).parent
@@ -1321,7 +1322,7 @@ rule ganong_decoding_null:
 
     resources:
         gpu = 1,
-        mem_gb = 100
+        mem_gb = 200
 
     run:
         outdir = Path(output.notebook).parent
@@ -1378,7 +1379,7 @@ rule ganong_decoding_hga_only_null:
 
     resources:
         gpu = 1,
-        mem_gb = 100
+        mem_gb = 200
 
     run:
         outdir = Path(output.notebook).parent
