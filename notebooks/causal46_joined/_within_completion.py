@@ -1,19 +1,25 @@
-"""Shared trial-selection / HGA-extraction / searchlight-t-test primitives
-used by star_plots.py (JON-43), calibration.py and t_tests.py (JON-44).
+"""Shared trial-selection / HGA-extraction / bootstrap primitives used by
+star_plots.py (JON-43) and t_tests.py (JON-44).
 
 Notebook-local on purpose: src/ stays untouched while JON-41 Group B is in
 flux. Promote to src/ only if a third caller appears outside this directory.
 
-Note on gallery vs. t-test trial subsets (B4 only):
-    `star_plots.py::matched_n_star_plot` does pool-then-balance (pool all
-    qualifying steps, subsample the larger behavior class to the smaller
-    one) — this is what the visual gallery shows. `select_cell_trials` here
-    does per-step balanced subsampling at a fixed `n_per_group` then pools
-    across steps — this is what the t-tests run on. The two subsets agree
-    for B3 (single step, single subsample) but diverge for B4. The
-    filtered-gallery hook in `t_tests.py` joins per (site, word_end) key
-    only — not by identical trial subset — so B4 gallery PDFs are flagged
-    powered/significant based on the t-test's per-step-balanced subsample.
+The B4 sampling rule on `causal6-speech-responsive-update` is *per-step class
+balance*: at each ambiguous step `s`, draw `min_class[s]` trials per class
+(both classes — both bootstrapped with replacement for the t-test path; in
+the gallery only the majority class is subsampled, with the minority used
+in full). Concat across steps. Both classes share identical step composition
+by construction, so the class-difference trace is free of within-class
+step-acoustic confound.
+
+For B3 (single ambiguous step) this collapses to: draw `min_class[s]` of
+each class at that one step, bootstrap both with replacement.
+
+`star_plots.py::matched_n_star_plot` does single-draw, minority-in-full
+visualisation. The t-test code in `t_tests.py` does R-replicate bootstrap
+of *both* classes with replacement. The two paths therefore display and
+test slightly different trial subsets — the filtered-gallery hook in
+`t_tests.py` joins per (site, word_end[, resampled]) key only.
 """
 from __future__ import annotations
 
@@ -22,7 +28,6 @@ from typing import Sequence
 
 import numpy as np
 import pandas as pd
-from scipy.stats import ttest_ind
 
 
 BEHAVIOR_COL_PREFERENCE: tuple[str, ...] = (
@@ -47,92 +52,70 @@ def resolve_behavior_col(md: pd.DataFrame) -> str:
     )
 
 
-def select_cell_trials(
+def per_step_class_counts(
     md_pp: pd.DataFrame,
     *,
-    word_end: str | None,
-    resampled_steps: Sequence[int],
+    word_end: str,
+    qualifying_steps: Sequence[int],
     group_col: str,
-    n_per_group: int | None = None,
-    rng: np.random.Generator | None = None,
-) -> dict[int, np.ndarray]:
-    """Return {group_value: trial_indices_into_md_pp} for one B3 or B4 cell.
+) -> dict[int, dict[int, np.ndarray]]:
+    """Return {step: {class: trial_indices}} for one cell.
 
-    md_pp must already be filtered to a single phoneme_pair and have a clean
-    integer index (0..len-1). `group_col` partitions trials within each step
-    in `resampled_steps`; n_per_group (if set) subsamples per (step × group).
-
-    - For B3: resampled_steps=[step], group_col='behavior_dummy_forced',
-      n_per_group=N_cal (subsamples to N_cal per class).
-    - For B4: resampled_steps=qualifying_steps, group_col='behavior_dummy_forced',
-      n_per_group=N_cal — sampling done per (step × class), pooled across steps.
-
-    For the acoustic-calibration case (resampled=1 vs 6) use the sibling
-    helper `select_endpoint_trials` instead — overloading group_col='resampled'
-    here would conflate the step axis with the group axis.
-
-    Raises if any (step × group) has fewer than n_per_group trials. Caller is
-    responsible for filtering cells where min_class >= n_per_group beforehand.
+    Caller iterates this to compute `min_class[s] = min(len(v) for v in
+    .values())` per step, then draws per-step balanced samples from it.
+    Pre-computed once per cell so the inner bootstrap loop only resamples
+    indices (cheap), never re-scans metadata.
     """
-    if rng is None:
-        rng = np.random.default_rng(0)
-
-    if word_end is not None:
-        we_mask = (md_pp["word_end"] == word_end).values
-    else:
-        we_mask = np.ones(len(md_pp), dtype=bool)
-
+    we_mask = (md_pp["word_end"] == word_end).values
     groups = sorted(md_pp.loc[we_mask, group_col].dropna().unique())
-    out: dict[int, list[np.ndarray]] = {g: [] for g in groups}
-
-    for step in resampled_steps:
-        step_mask = we_mask & (md_pp["resampled"] == step).values
-        for g in groups:
-            cell_mask = step_mask & (md_pp[group_col] == g).values
-            idxs = np.where(cell_mask)[0]
-            if n_per_group is not None:
-                if len(idxs) < n_per_group:
-                    raise ValueError(
-                        f"step={step} group={g}: only {len(idxs)} trials < "
-                        f"n_per_group={n_per_group}"
-                    )
-                idxs = rng.choice(idxs, size=n_per_group, replace=False)
-            out[g].append(idxs)
-
-    return {g: np.concatenate(parts) for g, parts in out.items()}
-
-
-def select_endpoint_trials(
-    md_pp: pd.DataFrame,
-    *,
-    n_per_group: int,
-    rng: np.random.Generator | None = None,
-    endpoints: tuple[int, int] = (1, 6),
-) -> dict[int, np.ndarray]:
-    """Return {endpoint_step: trial_indices} for the acoustic-calibration test.
-
-    Pools across word_ends (the causal6 acoustic peak is word_end-agnostic).
-    Raises if either endpoint has fewer than n_per_group trials.
-    """
-    if rng is None:
-        rng = np.random.default_rng(0)
-    out: dict[int, np.ndarray] = {}
-    for step in endpoints:
-        idxs = np.where((md_pp["resampled"] == step).values)[0]
-        if len(idxs) < n_per_group:
-            raise ValueError(
-                f"endpoint step={step}: only {len(idxs)} trials < "
-                f"n_per_group={n_per_group}"
-            )
-        out[step] = rng.choice(idxs, size=n_per_group, replace=False)
+    out: dict[int, dict[int, np.ndarray]] = {}
+    for s in qualifying_steps:
+        step_mask = we_mask & (md_pp["resampled"] == s).values
+        out[int(s)] = {
+            int(g): np.where(step_mask & (md_pp[group_col] == g).values)[0]
+            for g in groups
+        }
     return out
+
+
+def select_cell_trials_bootstrap(
+    per_step: dict[int, dict[int, np.ndarray]],
+    *,
+    rng: np.random.Generator,
+) -> dict[int, np.ndarray]:
+    """One bootstrap draw under per-step class balance.
+
+    For each step in `per_step`: n_s = min over classes of len(class indices).
+    For each class: rng.choice(class_idxs, size=n_s, replace=True) — both
+    classes bootstrapped with replacement. Concat across steps.
+
+    Returns {class_value: concatenated_indices_into_md_pp}, each of length
+    sum_s n_s. Length is constant across replicates (per cell).
+    """
+    drawn: dict[int, list[np.ndarray]] = {}
+    for step, by_class in per_step.items():
+        n_s = min(len(v) for v in by_class.values())
+        if n_s == 0:
+            # Step contributes nothing — usually filtered upstream, but be defensive.
+            continue
+        for cls, idxs in by_class.items():
+            drawn.setdefault(cls, []).append(
+                rng.choice(idxs, size=n_s, replace=True)
+            )
+    return {cls: np.concatenate(parts) for cls, parts in drawn.items()}
+
+
+def n_per_class_from_per_step(per_step: dict[int, dict[int, np.ndarray]]) -> int:
+    """Sum of min_class[s] across steps — the per-class sample size per replicate."""
+    return int(sum(min(len(v) for v in by_class.values())
+                   for by_class in per_step.values()))
 
 
 def extract_hga(ep, electrode_idx: int) -> np.ndarray:
     """Trials × time HGA for one electrode, baseline-corrected.
 
     Returned array is indexed by ep.metadata's integer index. Callers slice
-    with the indices from select_cell_trials.
+    with the indices from select_cell_trials_bootstrap.
     """
     return (
         ep.copy()
@@ -143,51 +126,91 @@ def extract_hga(ep, electrode_idx: int) -> np.ndarray:
 
 
 @dataclass
-class SearchlightTResult:
+class MeanDiffWindow:
     smin: int
     smax: int
-    t_stat: float
-    df: float
-    p_value: float
-    hedges_g: float
-    n_group1: int
-    n_group2: int
+    mean_pos: float       # mean HGA over `pos` group's bootstrap indices
+    mean_neg: float       # mean HGA over `neg` group's bootstrap indices
+    mean_diff: float      # mean_pos - mean_neg
+    n_pos: int
+    n_neg: int
 
 
-def searchlight_ttest(
+def searchlight_mean_diff(
     hga: np.ndarray,
-    g1_idx: np.ndarray,
-    g2_idx: np.ndarray,
+    pos_idx: np.ndarray,
+    neg_idx: np.ndarray,
     *,
     search_smin: int,
     search_smax: int,
     window_size: int = 15,
     stride: int = 15,
-) -> list[SearchlightTResult]:
-    """Welch's t per window over [search_smin, search_smax) with window_size/stride.
+) -> list[MeanDiffWindow]:
+    """Per-window mean(HGA[pos, win]) - mean(HGA[neg, win]).
 
-    Returns one result per window start in
-    `range(search_smin, search_smax - window_size + 1, stride)`. If that
-    range is empty (the search interval is shorter than `window_size`), the
-    return list is empty.
+    Returns one MeanDiffWindow per window start in
+    `range(search_smin, search_smax - window_size + 1, stride)`. Empty list
+    if the search interval is shorter than `window_size`.
     """
-    results: list[SearchlightTResult] = []
-    n1, n2 = len(g1_idx), len(g2_idx)
+    out: list[MeanDiffWindow] = []
+    n_pos, n_neg = len(pos_idx), len(neg_idx)
     for start in range(search_smin, search_smax - window_size + 1, stride):
-        x1 = hga[g1_idx, start : start + window_size].mean(axis=1)
-        x2 = hga[g2_idx, start : start + window_size].mean(axis=1)
-        t, p = ttest_ind(x1, x2, equal_var=False)
-        v1, v2 = float(x1.var(ddof=1)), float(x2.var(ddof=1))
-        df_num = (v1 / n1 + v2 / n2) ** 2
-        df_den = (v1 / n1) ** 2 / (n1 - 1) + (v2 / n2) ** 2 / (n2 - 1)
-        df = df_num / df_den if df_den > 0 else float("nan")
-        sp = np.sqrt(((n1 - 1) * v1 + (n2 - 1) * v2) / (n1 + n2 - 2))
-        d = (x1.mean() - x2.mean()) / sp if sp > 0 else 0.0
-        J = 1 - 3 / (4 * (n1 + n2) - 9)
-        g = J * d
-        results.append(SearchlightTResult(
-            smin=start, smax=start + window_size,
-            t_stat=float(t), df=float(df), p_value=float(p),
-            hedges_g=float(g), n_group1=n1, n_group2=n2,
+        end = start + window_size
+        mp = float(hga[pos_idx, start:end].mean())
+        mn = float(hga[neg_idx, start:end].mean())
+        out.append(MeanDiffWindow(
+            smin=start, smax=end,
+            mean_pos=mp, mean_neg=mn, mean_diff=mp - mn,
+            n_pos=n_pos, n_neg=n_neg,
         ))
-    return results
+    return out
+
+
+def acoustic_preferred_class(
+    hga: np.ndarray,
+    md_pp: pd.DataFrame,
+    *,
+    group_col: str,
+    word_end: str,
+    acoustic_smin: int,
+    acoustic_smax: int,
+    endpoints: tuple[int, int] = (1, 6),
+) -> int | None:
+    """Per cell, identify the behavior class aligned with the cell's
+    acoustic tuning.
+
+    Determined on *endpoint trials only* (resampled=1, =6) — never on the
+    ambiguous trials the bootstrap t-test runs on. Mechanic:
+
+      1. Compare mean HGA in the acoustic window between the two
+         endpoint steps. Pick the endpoint with higher mean HGA — this
+         is the acoustically-preferred endpoint.
+      2. Map the preferred endpoint to a behavior class via the modal
+         `behavior_dummy_forced` value at that endpoint (at endpoints the
+         participant almost always reports the corresponding percept).
+      3. Return that class. `mean_diff_aligned > 0` then means
+         class-matching-acoustic-tuning has higher HGA in the behavioral
+         window — a non-circular signed contrast.
+
+    Returns None when either endpoint has no trials, the two endpoint
+    means are tied, or the modal behavior at the preferred endpoint is
+    tied. Caller emits `mean_diff_aligned = NaN` for those cells.
+
+    `endpoints` is the (low_step, high_step) pair. `word_end` filters the
+    pool — the same word_end the bootstrap cell uses.
+    """
+    we_mask = (md_pp["word_end"] == word_end).values
+    low, high = endpoints
+    low_mask = we_mask & (md_pp["resampled"] == low).values
+    high_mask = we_mask & (md_pp["resampled"] == high).values
+    if not low_mask.any() or not high_mask.any():
+        return None
+    m_low = float(hga[low_mask, acoustic_smin:acoustic_smax].mean())
+    m_high = float(hga[high_mask, acoustic_smin:acoustic_smax].mean())
+    if m_low == m_high:
+        return None
+    pref_step_mask = low_mask if m_low > m_high else high_mask
+    modal = md_pp.loc[pref_step_mask, group_col].mode()
+    if len(modal) != 1:
+        return None
+    return int(modal.iloc[0])

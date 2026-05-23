@@ -1,0 +1,1026 @@
+# ---
+# jupyter:
+#   jupytext:
+#     formats: ipynb,py:percent
+#     text_representation:
+#       extension: .py
+#       format_name: percent
+#       format_version: '1.3'
+#       jupytext_version: 1.19.1
+# ---
+
+# %% [markdown]
+# # B3 + B4 within-completion behavior bootstrap CIs (JON-44)
+#
+# Per-AS-site searchlight bootstrap of the within-completion HGA contrast
+# under **per-step class balance** (the same trial-selection rule as the
+# refactored star_plots gallery on `causal6-speech-responsive-update`):
+#
+# - For each (site × word_end × qualifying step `s`), pick `min_class[s]`
+#   trials per class. Both classes are bootstrapped with replacement to
+#   that size. Concat across qualifying steps → `sum_s min_class[s]`
+#   trials per class per replicate (constant within cell, varies between
+#   cells).
+# - For each bootstrap replicate, compute the searchlight mean-HGA
+#   difference per window. Two signed variants:
+#     - `mean_diff_raw`     = mean(HGA[class==1]) − mean(HGA[class==0])
+#     - `mean_diff_aligned` = mean(HGA[acoustic-preferred class])
+#                             − mean(HGA[non-preferred class])
+#   where the acoustic-preferred class is determined per cell by which
+#   behavior label shows higher mean HGA in the cell's acoustic window
+#   (causal6 peak smin/smax). If the two class means are tied,
+#   `mean_diff_aligned = NaN` for the cell and the aligned summary skips it.
+# - R = 1000 bootstrap replicates per cell. Per (cell × window) we report
+#   median, 2.5/97.5 percentile, std, and a bootstrap 2-sided empirical
+#   p-value. `ci_excludes_zero` is the headline boolean for cell-window
+#   significance. No FDR for now (TBD).
+#
+# Cells with `n_per_class < K` (= K from star_plots.py) are flagged
+# underpowered and excluded from the bootstrap loop; they appear in the
+# manifest with status='underpowered'.
+#
+# B3 (single ambiguous step) is the degenerate B4 with one step.
+#
+# Outputs:
+# - `outputs/causal46_joined/t_tests/b{3,4}_bootstrap.parquet` — per (cell × window × replicate)
+# - `outputs/causal46_joined/t_tests/b{3,4}_per_window.parquet` — aggregates
+# - `outputs/causal46_joined/t_tests/b{3,4}_per_cell.parquet` — best-window per cell
+# - `outputs/causal46_joined/t_tests/cell_manifest.parquet`
+# - `outputs/causal46_joined/t_tests/population_summary.csv`
+# - `outputs/causal46_joined/t_tests/population_summary.pdf`
+# - `outputs/causal46_joined/t_tests/star_plots_filtered/{b3,b4}_{powered,powered_significant}.pdf`
+# - `outputs/causal46_joined/t_tests/star_plots_filtered/filtered_manifest.csv`
+
+# %%
+from __future__ import annotations
+
+import os
+import sys
+import traceback
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+import polars as pl
+import yaml
+from matplotlib.backends.backend_pdf import PdfPages
+from tqdm.auto import tqdm
+
+from src.data import get_electrode_df
+from src.stimuli import OFFSET_DICT
+from src.viz_paper import epoch_sfreq, epoch_tmin
+from src.viz_provisional import load_epochs_dict
+
+sys.path.insert(0, str(Path(".").resolve() / "notebooks" / "causal46_joined"))
+from _within_completion import (  # noqa: E402
+    acoustic_preferred_class,
+    extract_hga,
+    n_per_class_from_per_step,
+    per_step_class_counts,
+    resolve_behavior_col,
+    searchlight_mean_diff,
+    select_cell_trials_bootstrap,
+)
+
+# %%
+REPO = Path(".").resolve()
+JOINED_DIR = REPO / "outputs/causal46_joined"
+OUT_DIR = JOINED_DIR / "t_tests"
+FILT_DIR = OUT_DIR / "star_plots_filtered"
+OUT_DIR.mkdir(parents=True, exist_ok=True)
+FILT_DIR.mkdir(parents=True, exist_ok=True)
+
+EPOCH_DIR = Path(os.environ.get(
+    "BARAKEET_EPOCH_DIR", str(REPO / "outputs/epochs_preprocessed"),
+))
+CAUSAL6_PEAKS = REPO / "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet"
+STAR_DIR = JOINED_DIR / "star_plots"
+
+_cfg = yaml.safe_load((REPO / "config.yaml").read_text())
+WINDOW_SIZE = int(_cfg["analysis"]["decoding"].get("window_size", 15))
+STRIDE = 15
+WORD_END_TAIL_SAMPLES = 20  # +200 ms past word offset (sfreq=100)
+
+# Same cell-inclusion floor as the star-plot gallery on this branch.
+K = 5
+R = 1000              # bootstrap replicates per cell
+CI_LOW, CI_HIGH = 2.5, 97.5
+
+print(f"REPO:      {REPO}")
+print(f"EPOCH_DIR: {EPOCH_DIR}  (exists: {EPOCH_DIR.exists()})")
+print(f"K = {K}   R = {R}   CI = [{CI_LOW}, {CI_HIGH}]")
+print(f"behavioral search range = (phon_smax_c6,  word_offset_sample + {WORD_END_TAIL_SAMPLES})")
+print(f"window={WINDOW_SIZE}  stride={STRIDE}")
+
+# %% [markdown]
+# ## Load AS sites, trial balance, and epochs
+
+# %%
+_peaks_raw = pl.read_parquet(CAUSAL6_PEAKS)
+if "significant" in _peaks_raw.columns:
+    peaks = _peaks_raw.filter(pl.col("significant"))
+else:
+    peaks = _peaks_raw.filter(pl.col("p_value") < 0.05)
+    print("⚠ no `significant` column — falling back to p_value < 0.05 (uncorrected)")
+print(f"AS sites: {peaks.height}")
+
+trial_balance = pl.read_csv(JOINED_DIR / "trial_balance_index.csv")
+print(f"trial_balance: {trial_balance.height} rows")
+
+epochs_dict = load_epochs_dict(EPOCH_DIR)
+print(f"epochs loaded: {sorted(epochs_dict)}")
+
+# %% [markdown]
+# ## Word-end behavioral search bound (samples)
+
+# %%
+def word_end_search_smax(word_end: str) -> int:
+    offset_s = OFFSET_DICT[word_end]
+    sample = int(round((offset_s - epoch_tmin) * epoch_sfreq))
+    return sample + WORD_END_TAIL_SAMPLES
+
+
+WE_SMAX = {we: word_end_search_smax(we) for we in OFFSET_DICT.keys()}
+print(f"word-end search_smax (samples): {WE_SMAX}")
+
+
+def behav_search_range(word_end: str, phon_smax_c6: int) -> tuple[int, int]:
+    return int(phon_smax_c6), int(WE_SMAX[word_end])
+
+
+# %% [markdown]
+# ## B3 cell definition (single ambiguous step, min_class ≥ K)
+#
+# Same definition as star_plots.py. B3 cells live at the (site × word_end ×
+# resampled) grain. Per-step balance at one step = subsample to min_class[s]
+# per class.
+
+# %%
+b3_qualified = (
+    trial_balance
+    .filter(pl.col("is_ambiguous_step") & (pl.col("min_class") >= K))
+    .join(
+        peaks.select(["subject", "electrode_idx", "phoneme_pair",
+                      "smin", "smax", "test_roc_auc"])
+             .rename({"smin": "phon_smin", "smax": "phon_smax",
+                      "test_roc_auc": "acoustic_peak_auc"}),
+        on=["subject", "electrode_idx", "phoneme_pair"], how="inner",
+    )
+    .sort(["subject", "electrode_idx", "phoneme_pair", "word_end", "resampled"])
+)
+b3_all_ambig = (
+    trial_balance
+    .filter(pl.col("is_ambiguous_step"))
+    .join(
+        peaks.select(["subject", "electrode_idx", "phoneme_pair"]),
+        on=["subject", "electrode_idx", "phoneme_pair"], how="inner",
+    )
+)
+print(f"B3 qualifying cells: {b3_qualified.height} "
+      f"/ {b3_all_ambig.height} ambiguous cells at AS sites "
+      f"({100*b3_qualified.height/max(b3_all_ambig.height,1):.1f}%)")
+
+# %% [markdown]
+# ## B4 cell definition (per-step balanced pool across ambiguous steps)
+
+# %%
+b4_qualified = (
+    trial_balance
+    .filter(pl.col("is_ambiguous_step"))
+    .group_by(["subject", "electrode_idx", "phoneme_pair", "word_end"])
+    .agg(
+        pl.col("resampled").sort().alias("qualifying_steps"),
+        pl.col("min_class").sum().alias("n_per_class"),
+        pl.len().alias("n_qualifying"),
+    )
+    .filter((pl.col("n_qualifying") >= 2) & (pl.col("n_per_class") >= K))
+    .join(
+        peaks.select(["subject", "electrode_idx", "phoneme_pair",
+                      "smin", "smax", "test_roc_auc"])
+             .rename({"smin": "phon_smin", "smax": "phon_smax",
+                      "test_roc_auc": "acoustic_peak_auc"}),
+        on=["subject", "electrode_idx", "phoneme_pair"], how="inner",
+    )
+    .sort(["subject", "electrode_idx", "phoneme_pair", "word_end"])
+)
+print(f"B4 qualifying cells (n_qualifying ≥ 2, n_per_class ≥ {K}): "
+      f"{b4_qualified.height}")
+
+# %% [markdown]
+# ## Bootstrap loop
+
+# %%
+def bootstrap_cell(
+    *,
+    md_pp,
+    hga,
+    bhv_col: str,
+    word_end: str,
+    qualifying_steps: list[int],
+    acoustic_smin: int,
+    acoustic_smax: int,
+    behav_smin: int,
+    behav_smax: int,
+    R: int,
+    base_seed: int = 0,
+) -> tuple[list[dict], int, int | None]:
+    """Run R bootstrap replicates of the cell's mean-diff searchlight.
+
+    Returns (rows_per_replicate_window, n_per_class, preferred_class).
+    Preferred class is None for tied cells; rows still carry mean_diff_raw
+    and mean_diff_aligned = NaN.
+    """
+    per_step = per_step_class_counts(
+        md_pp, word_end=word_end, qualifying_steps=qualifying_steps,
+        group_col=bhv_col,
+    )
+    n_per_class = n_per_class_from_per_step(per_step)
+    preferred = acoustic_preferred_class(
+        hga, md_pp, group_col=bhv_col, word_end=word_end,
+        acoustic_smin=acoustic_smin, acoustic_smax=acoustic_smax,
+    )
+    rows: list[dict] = []
+    for r in range(R):
+        rng = np.random.default_rng(base_seed + r)
+        draws = select_cell_trials_bootstrap(per_step, rng=rng)
+        keys = sorted(draws.keys())
+        # raw: pos = class==1 (or larger key), neg = class==0 (or smaller key)
+        raw_pos_key, raw_neg_key = keys[1], keys[0]
+        res = searchlight_mean_diff(
+            hga, draws[raw_pos_key], draws[raw_neg_key],
+            search_smin=behav_smin, search_smax=behav_smax,
+            window_size=WINDOW_SIZE, stride=STRIDE,
+        )
+        for w in res:
+            mean_diff_raw = w.mean_diff
+            if preferred is None:
+                mean_diff_aligned = float("nan")
+            else:
+                # If raw_pos_key == preferred, aligned = raw; else aligned = -raw
+                mean_diff_aligned = mean_diff_raw if raw_pos_key == preferred \
+                    else -mean_diff_raw
+            rows.append({
+                "replicate": r,
+                "smin": w.smin, "smax": w.smax,
+                "tmin": w.smin / epoch_sfreq + epoch_tmin,
+                "tmax": w.smax / epoch_sfreq + epoch_tmin,
+                "mean_pos_raw": w.mean_pos,
+                "mean_neg_raw": w.mean_neg,
+                "mean_diff_raw": mean_diff_raw,
+                "mean_diff_aligned": mean_diff_aligned,
+                "n_per_class": n_per_class,
+            })
+    return rows, n_per_class, preferred
+
+
+# %% [markdown]
+# ## Run B3 cells
+
+# %%
+b3_boot_rows: list[dict] = []
+b3_cell_manifest: list[dict] = []
+b3_failures: list[dict] = []
+
+for row in tqdm(b3_qualified.iter_rows(named=True),
+                total=b3_qualified.height, desc="B3 bootstrap"):
+    subj = row["subject"]
+    if subj not in epochs_dict:
+        b3_failures.append({**row, "error": "no epochs for subject"})
+        continue
+    ep = epochs_dict[subj]
+    md = ep.metadata
+    bhv_col = resolve_behavior_col(md)
+    pp_mask = (md["phoneme_pair"] == row["phoneme_pair"]).values
+    ep_pp = ep[pp_mask]
+    md_pp = md[pp_mask].reset_index(drop=True)
+    hga = extract_hga(ep_pp, int(row["electrode_idx"]))
+    behav_smin, behav_smax = behav_search_range(row["word_end"], row["phon_smax"])
+    if behav_smax - behav_smin < WINDOW_SIZE:
+        b3_cell_manifest.append({
+            "subject": subj,
+            "electrode_idx": int(row["electrode_idx"]),
+            "phoneme_pair": row["phoneme_pair"],
+            "word_end": row["word_end"],
+            "mode": "single_step",
+            "resampled_step": int(row["resampled"]),
+            "qualifying_steps": "",
+            "n_per_class": int(row["min_class"]),
+            "preferred_class": None,
+            "status": "search_range_too_narrow",
+            "behav_smin": behav_smin, "behav_smax": behav_smax,
+        })
+        continue
+    try:
+        rows, n_per_class, preferred = bootstrap_cell(
+            md_pp=md_pp, hga=hga, bhv_col=bhv_col,
+            word_end=row["word_end"],
+            qualifying_steps=[int(row["resampled"])],
+            acoustic_smin=int(row["phon_smin"]),
+            acoustic_smax=int(row["phon_smax"]),
+            behav_smin=behav_smin, behav_smax=behav_smax,
+            R=R,
+        )
+        for r in rows:
+            b3_boot_rows.append({
+                "subject": subj,
+                "electrode_idx": int(row["electrode_idx"]),
+                "phoneme_pair": row["phoneme_pair"],
+                "word_end": row["word_end"],
+                "resampled": int(row["resampled"]),
+                "mode": "single_step",
+                "acoustic_peak_auc": float(row["acoustic_peak_auc"]),
+                **r,
+            })
+        b3_cell_manifest.append({
+            "subject": subj,
+            "electrode_idx": int(row["electrode_idx"]),
+            "phoneme_pair": row["phoneme_pair"],
+            "word_end": row["word_end"],
+            "mode": "single_step",
+            "resampled_step": int(row["resampled"]),
+            "qualifying_steps": str(int(row["resampled"])),
+            "n_per_class": n_per_class,
+            "preferred_class": preferred,
+            "status": "ok",
+            "behav_smin": behav_smin, "behav_smax": behav_smax,
+        })
+    except Exception as exc:
+        tb = traceback.format_exc()
+        b3_failures.append({
+            **{k: row[k] for k in
+               ("subject", "electrode_idx", "phoneme_pair", "word_end", "resampled")},
+            "error": repr(exc), "traceback": tb,
+        })
+        print(f"FAILED B3: {subj} e{row['electrode_idx']} {row['phoneme_pair']} "
+              f"{row['word_end']} step={row['resampled']}\n{tb}")
+
+# Underpowered B3 cells
+b3_under = b3_all_ambig.filter(pl.col("min_class") < K)
+for row in b3_under.iter_rows(named=True):
+    b3_cell_manifest.append({
+        "subject": row["subject"],
+        "electrode_idx": int(row["electrode_idx"]),
+        "phoneme_pair": row["phoneme_pair"],
+        "word_end": row["word_end"],
+        "mode": "single_step",
+        "resampled_step": int(row["resampled"]),
+        "qualifying_steps": "",
+        "n_per_class": int(row["min_class"]),
+        "preferred_class": None,
+        "status": "underpowered",
+        "behav_smin": None, "behav_smax": None,
+    })
+
+b3_boot = pl.DataFrame(b3_boot_rows) if b3_boot_rows else pl.DataFrame()
+if b3_boot.height:
+    b3_boot.write_parquet(OUT_DIR / "b3_bootstrap.parquet")
+print(f"B3 bootstrap rows: {b3_boot.height}  "
+      f"(failures: {len(b3_failures)}; underpowered cells: {b3_under.height})")
+
+# %% [markdown]
+# ## Run B4 cells
+
+# %%
+b4_boot_rows: list[dict] = []
+b4_cell_manifest: list[dict] = []
+b4_failures: list[dict] = []
+
+for row in tqdm(b4_qualified.iter_rows(named=True),
+                total=b4_qualified.height, desc="B4 bootstrap"):
+    subj = row["subject"]
+    if subj not in epochs_dict:
+        b4_failures.append({**row, "error": "no epochs for subject"})
+        continue
+    ep = epochs_dict[subj]
+    md = ep.metadata
+    bhv_col = resolve_behavior_col(md)
+    pp_mask = (md["phoneme_pair"] == row["phoneme_pair"]).values
+    ep_pp = ep[pp_mask]
+    md_pp = md[pp_mask].reset_index(drop=True)
+    hga = extract_hga(ep_pp, int(row["electrode_idx"]))
+    behav_smin, behav_smax = behav_search_range(row["word_end"], row["phon_smax"])
+    steps = [int(s) for s in row["qualifying_steps"]]
+    if behav_smax - behav_smin < WINDOW_SIZE:
+        b4_cell_manifest.append({
+            "subject": subj,
+            "electrode_idx": int(row["electrode_idx"]),
+            "phoneme_pair": row["phoneme_pair"],
+            "word_end": row["word_end"],
+            "mode": "matched_n",
+            "resampled_step": None,
+            "qualifying_steps": ",".join(str(s) for s in steps),
+            "n_per_class": int(row["n_per_class"]),
+            "preferred_class": None,
+            "status": "search_range_too_narrow",
+            "behav_smin": behav_smin, "behav_smax": behav_smax,
+        })
+        continue
+    try:
+        rows, n_per_class, preferred = bootstrap_cell(
+            md_pp=md_pp, hga=hga, bhv_col=bhv_col,
+            word_end=row["word_end"], qualifying_steps=steps,
+            acoustic_smin=int(row["phon_smin"]),
+            acoustic_smax=int(row["phon_smax"]),
+            behav_smin=behav_smin, behav_smax=behav_smax,
+            R=R,
+        )
+        for r in rows:
+            b4_boot_rows.append({
+                "subject": subj,
+                "electrode_idx": int(row["electrode_idx"]),
+                "phoneme_pair": row["phoneme_pair"],
+                "word_end": row["word_end"],
+                "resampled": None,
+                "qualifying_steps": ",".join(str(s) for s in steps),
+                "n_qualifying_steps": len(steps),
+                "mode": "matched_n",
+                "acoustic_peak_auc": float(row["acoustic_peak_auc"]),
+                **r,
+            })
+        b4_cell_manifest.append({
+            "subject": subj,
+            "electrode_idx": int(row["electrode_idx"]),
+            "phoneme_pair": row["phoneme_pair"],
+            "word_end": row["word_end"],
+            "mode": "matched_n",
+            "resampled_step": None,
+            "qualifying_steps": ",".join(str(s) for s in steps),
+            "n_per_class": n_per_class,
+            "preferred_class": preferred,
+            "status": "ok",
+            "behav_smin": behav_smin, "behav_smax": behav_smax,
+        })
+    except Exception as exc:
+        tb = traceback.format_exc()
+        b4_failures.append({
+            **{k: row[k] for k in
+               ("subject", "electrode_idx", "phoneme_pair", "word_end")},
+            "qualifying_steps": ",".join(str(s) for s in steps),
+            "error": repr(exc), "traceback": tb,
+        })
+        print(f"FAILED B4: {subj} e{row['electrode_idx']} {row['phoneme_pair']} "
+              f"{row['word_end']}\n{tb}")
+
+# Underpowered B4 candidates
+b4_drops = (
+    b3_all_ambig
+    .group_by(["subject", "electrode_idx", "phoneme_pair", "word_end"])
+    .agg(pl.len().alias("n_ambig_steps"),
+         pl.col("min_class").sum().alias("n_per_class_pool"))
+    .filter((pl.col("n_ambig_steps") < 2) | (pl.col("n_per_class_pool") < K))
+)
+for row in b4_drops.iter_rows(named=True):
+    b4_cell_manifest.append({
+        "subject": row["subject"],
+        "electrode_idx": int(row["electrode_idx"]),
+        "phoneme_pair": row["phoneme_pair"],
+        "word_end": row["word_end"],
+        "mode": "matched_n",
+        "resampled_step": None,
+        "qualifying_steps": "",
+        "n_per_class": int(row["n_per_class_pool"]),
+        "preferred_class": None,
+        "status": "underpowered",
+        "behav_smin": None, "behav_smax": None,
+    })
+
+b4_boot = pl.DataFrame(b4_boot_rows) if b4_boot_rows else pl.DataFrame()
+if b4_boot.height:
+    b4_boot.write_parquet(OUT_DIR / "b4_bootstrap.parquet")
+print(f"B4 bootstrap rows: {b4_boot.height}  (failures: {len(b4_failures)})")
+
+cell_manifest = pl.DataFrame(b3_cell_manifest + b4_cell_manifest)
+cell_manifest.write_parquet(OUT_DIR / "cell_manifest.parquet")
+print(f"cell_manifest: {cell_manifest.height} rows")
+print(cell_manifest.group_by(["mode", "status"]).len().sort(["mode", "status"]))
+
+# %% [markdown]
+# ## Per-window aggregation (CI + empirical p)
+
+# %%
+def per_window_summary(boot: pl.DataFrame, cell_keys: list[str]) -> pl.DataFrame:
+    if boot.height == 0:
+        return pl.DataFrame()
+    grouped = (
+        boot
+        .group_by(cell_keys + ["smin", "smax", "tmin", "tmax"])
+        .agg(
+            pl.col("mean_diff_raw").median().alias("mean_diff_raw_med"),
+            pl.col("mean_diff_raw").quantile(CI_LOW / 100).alias("mean_diff_raw_ci_lo"),
+            pl.col("mean_diff_raw").quantile(CI_HIGH / 100).alias("mean_diff_raw_ci_hi"),
+            pl.col("mean_diff_raw").std().alias("mean_diff_raw_std"),
+            (pl.col("mean_diff_raw") <= 0).cast(pl.Float64).mean().alias("frac_raw_le0"),
+            (pl.col("mean_diff_raw") >= 0).cast(pl.Float64).mean().alias("frac_raw_ge0"),
+
+            pl.col("mean_diff_aligned").median().alias("mean_diff_aligned_med"),
+            pl.col("mean_diff_aligned").quantile(CI_LOW / 100).alias("mean_diff_aligned_ci_lo"),
+            pl.col("mean_diff_aligned").quantile(CI_HIGH / 100).alias("mean_diff_aligned_ci_hi"),
+            pl.col("mean_diff_aligned").std().alias("mean_diff_aligned_std"),
+            (pl.col("mean_diff_aligned") <= 0).cast(pl.Float64).mean().alias("frac_aligned_le0"),
+            (pl.col("mean_diff_aligned") >= 0).cast(pl.Float64).mean().alias("frac_aligned_ge0"),
+
+            pl.col("n_per_class").first().alias("n_per_class"),
+            pl.col("acoustic_peak_auc").first().alias("acoustic_peak_auc"),
+            pl.col("replicate").max().alias("R_replicates"),
+        )
+    )
+    grouped = grouped.with_columns([
+        # Empirical 2-sided bootstrap p: 2 * min(frac<=0, frac>=0). Clamped to 1.
+        pl.min_horizontal(
+            2 * pl.min_horizontal("frac_raw_le0", "frac_raw_ge0"),
+            pl.lit(1.0),
+        ).alias("emp_p_raw"),
+        pl.min_horizontal(
+            2 * pl.min_horizontal("frac_aligned_le0", "frac_aligned_ge0"),
+            pl.lit(1.0),
+        ).alias("emp_p_aligned"),
+        # CI excludes 0: lo > 0 OR hi < 0.
+        ((pl.col("mean_diff_raw_ci_lo") > 0) | (pl.col("mean_diff_raw_ci_hi") < 0))
+            .alias("ci_raw_excludes_zero"),
+        ((pl.col("mean_diff_aligned_ci_lo") > 0) | (pl.col("mean_diff_aligned_ci_hi") < 0))
+            .alias("ci_aligned_excludes_zero"),
+    ])
+    return grouped.sort(cell_keys + ["smin"])
+
+
+b3_cell_keys = ["subject", "electrode_idx", "phoneme_pair", "word_end", "resampled"]
+b4_cell_keys = ["subject", "electrode_idx", "phoneme_pair", "word_end"]
+b3_per_window = per_window_summary(b3_boot, b3_cell_keys)
+b4_per_window = per_window_summary(b4_boot, b4_cell_keys)
+if b3_per_window.height:
+    b3_per_window.write_parquet(OUT_DIR / "b3_per_window.parquet")
+if b4_per_window.height:
+    b4_per_window.write_parquet(OUT_DIR / "b4_per_window.parquet")
+print(f"B3 per_window rows: {b3_per_window.height}")
+print(f"B4 per_window rows: {b4_per_window.height}")
+
+# %% [markdown]
+# ## Per-cell best-window summary
+#
+# Best window = window with largest |median(mean_diff_aligned)|. Falls back
+# to |raw| when aligned is NaN (tied tuning).
+
+# %%
+def per_cell_best(per_window: pl.DataFrame, cell_keys: list[str]) -> pl.DataFrame:
+    if per_window.height == 0:
+        return pl.DataFrame()
+    return (
+        per_window
+        .with_columns([
+            pl.when(pl.col("mean_diff_aligned_med").is_not_null())
+                .then(pl.col("mean_diff_aligned_med").abs())
+                .otherwise(pl.col("mean_diff_raw_med").abs())
+                .alias("__rank"),
+        ])
+        .sort(cell_keys + ["__rank"], descending=[False] * len(cell_keys) + [True])
+        .group_by(cell_keys, maintain_order=True)
+        .head(1)
+        .drop("__rank")
+        .rename({
+            "smin": "best_smin", "smax": "best_smax",
+            "tmin": "best_tmin", "tmax": "best_tmax",
+            "mean_diff_raw_med": "best_mean_diff_raw_med",
+            "mean_diff_raw_ci_lo": "best_mean_diff_raw_ci_lo",
+            "mean_diff_raw_ci_hi": "best_mean_diff_raw_ci_hi",
+            "mean_diff_aligned_med": "best_mean_diff_aligned_med",
+            "mean_diff_aligned_ci_lo": "best_mean_diff_aligned_ci_lo",
+            "mean_diff_aligned_ci_hi": "best_mean_diff_aligned_ci_hi",
+            "emp_p_raw": "best_emp_p_raw",
+            "emp_p_aligned": "best_emp_p_aligned",
+            "ci_raw_excludes_zero": "best_ci_raw_excludes_zero",
+            "ci_aligned_excludes_zero": "best_ci_aligned_excludes_zero",
+        })
+    )
+
+
+b3_per_cell = per_cell_best(b3_per_window, b3_cell_keys)
+b4_per_cell = per_cell_best(b4_per_window, b4_cell_keys)
+if b3_per_cell.height:
+    b3_per_cell.write_parquet(OUT_DIR / "b3_per_cell.parquet")
+if b4_per_cell.height:
+    b4_per_cell.write_parquet(OUT_DIR / "b4_per_cell.parquet")
+print(f"B3 per_cell rows: {b3_per_cell.height}")
+print(f"B4 per_cell rows: {b4_per_cell.height}")
+
+# %% [markdown]
+# ## ROI lookup
+
+# %%
+roi_frames = []
+subjects = sorted({*([] if b3_boot.height == 0 else b3_boot["subject"].unique().to_list()),
+                   *([] if b4_boot.height == 0 else b4_boot["subject"].unique().to_list())})
+for subj in subjects:
+    try:
+        edf = get_electrode_df(subj)
+    except Exception as exc:
+        print(f"⚠ no electrode_df for {subj}: {exc}")
+        continue
+    roi_col = "ROI" if "ROI" in edf.columns else (
+        "anat" if "anat" in edf.columns else None
+    )
+    if roi_col is None:
+        print(f"⚠ no ROI/anat column for {subj}: {list(edf.columns)}")
+        continue
+    edf2 = edf.reset_index().rename(columns={"index": "electrode_idx"}) \
+        if "electrode_idx" not in edf.columns else edf
+    roi_frames.append(pl.from_pandas(
+        edf2[["electrode_idx", roi_col]].assign(subject=subj).rename(
+            columns={roi_col: "roi"}
+        )
+    ))
+electrode_roi = (
+    pl.concat(roi_frames, how="diagonal_relaxed")
+    if roi_frames else
+    pl.DataFrame(schema={"subject": pl.Utf8, "electrode_idx": pl.Int64,
+                          "roi": pl.Utf8})
+)
+print(f"ROI rows: {electrode_roi.height}")
+
+# %% [markdown]
+# ## Population summary
+#
+# Per (mode × window × cut): fraction of cells with `ci_aligned_excludes_zero`
+# (and the raw counterpart for sanity), median signed mean_diff_aligned,
+# median |mean_diff_aligned|, IQR. Cells with tied tuning (preferred_class
+# is None → aligned is NaN) are counted in the raw column but excluded from
+# aligned medians and fraction.
+
+# %%
+def population_summary(per_window: pl.DataFrame, mode_name: str) -> pl.DataFrame:
+    if per_window.height == 0:
+        return pl.DataFrame()
+    pc = per_window.with_columns(pl.lit(mode_name).alias("mode")) \
+        .join(electrode_roi, on=["subject", "electrode_idx"], how="left") \
+        .with_columns(pl.col("roi").fill_null("unknown"))
+    out: list[pl.DataFrame] = []
+    for cut_name, group_cols in [
+        ("overall", []),
+        ("phoneme_pair", ["phoneme_pair"]),
+        ("roi", ["roi"]),
+        ("phoneme_pair_x_roi", ["phoneme_pair", "roi"]),
+    ]:
+        agg = (
+            pc
+            .group_by(["mode", "smin", "smax", "tmin", "tmax"] + group_cols)
+            .agg(
+                pl.len().alias("n_cells"),
+                pl.col("ci_raw_excludes_zero").cast(pl.Float64).sum().alias("n_ci_raw_sig"),
+                pl.col("ci_aligned_excludes_zero").cast(pl.Float64).sum().alias("n_ci_aligned_sig"),
+                pl.col("mean_diff_aligned_med").is_not_null().cast(pl.Float64)
+                    .sum().alias("n_cells_aligned_defined"),
+                pl.col("mean_diff_aligned_med").median().alias("median_signed_aligned"),
+                pl.col("mean_diff_aligned_med").abs().median().alias("median_abs_aligned"),
+                pl.col("mean_diff_aligned_med").abs().quantile(0.25).alias("q25_abs_aligned"),
+                pl.col("mean_diff_aligned_med").abs().quantile(0.75).alias("q75_abs_aligned"),
+            )
+            .with_columns([
+                (pl.col("n_ci_raw_sig") / pl.col("n_cells")).alias("frac_ci_raw"),
+                (pl.col("n_ci_aligned_sig") /
+                 pl.when(pl.col("n_cells_aligned_defined") > 0)
+                   .then(pl.col("n_cells_aligned_defined"))
+                   .otherwise(1)).alias("frac_ci_aligned"),
+                pl.lit(cut_name).alias("cut"),
+            ])
+        )
+        out.append(agg)
+    return pl.concat(out, how="diagonal_relaxed")
+
+
+b3_pop = population_summary(b3_per_window, "b3")
+b4_pop = population_summary(b4_per_window, "b4")
+population = pl.concat([df for df in (b3_pop, b4_pop) if df.height],
+                       how="diagonal_relaxed")
+if population.height:
+    population.write_csv(OUT_DIR / "population_summary.csv")
+print(f"population_summary rows: {population.height}")
+
+# %% [markdown]
+# ## Population summary plots
+
+# %%
+JON41_GREENLIGHT = 0.40
+JON41_REVISIT = 0.15
+
+
+def _peak_frac(pop: pl.DataFrame, mode: str, frac_col: str) -> float | None:
+    if pop.height == 0:
+        return None
+    sub = pop.filter((pl.col("mode") == mode) & (pl.col("cut") == "overall"))
+    if sub.height == 0:
+        return None
+    return float(sub[frac_col].max())
+
+
+pdf_path = OUT_DIR / "population_summary.pdf"
+with PdfPages(pdf_path) as pdf:
+    # Title
+    fig, ax = plt.subplots(figsize=(8.5, 11))
+    ax.axis("off")
+    ax.text(0.5, 0.7, "Bootstrap CI summary — within-completion behavior contrast",
+            ha="center", va="center", fontsize=18)
+    n_b3_ok = cell_manifest.filter((pl.col('mode')=='single_step') & (pl.col('status')=='ok')).height
+    n_b4_ok = cell_manifest.filter((pl.col('mode')=='matched_n') & (pl.col('status')=='ok')).height
+    ax.text(0.5, 0.55,
+            f"K = {K}   ·   R = {R}   ·   CI = {CI_LOW}–{CI_HIGH}%\n"
+            f"B3 cells (ok): {n_b3_ok}   ·   B4 cells (ok): {n_b4_ok}\n"
+            f"AS sites: {peaks.height}",
+            ha="center", va="center", fontsize=11)
+    pdf.savefig(fig); plt.close(fig)
+
+    # Per-time frac-CI-excludes-0 curves
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4), sharey=True)
+    for ax, mode in zip(axes, ("b3", "b4")):
+        for col, color, label in (
+            ("frac_ci_aligned", "#2166ac", "aligned (CI excludes 0)"),
+            ("frac_ci_raw",     "#b2182b", "raw (CI excludes 0)"),
+        ):
+            sub = (
+                population
+                .filter((pl.col("mode") == mode) & (pl.col("cut") == "overall"))
+                .sort("tmin")
+            )
+            if sub.height == 0:
+                continue
+            ax.plot(sub["tmin"].to_numpy(), sub[col].to_numpy(),
+                    marker="o", color=color, lw=1.4, label=label)
+        ax.axhline(JON41_GREENLIGHT, color="#4dac26", lw=1, ls="--",
+                   label=f"greenlight ≥ {JON41_GREENLIGHT:.0%}")
+        ax.axhline(JON41_REVISIT, color="#d73027", lw=1, ls="--",
+                   label=f"revisit < {JON41_REVISIT:.0%}")
+        ax.set_xlabel("Window start (s, post word onset)")
+        ax.set_ylim(0, 1.02)
+        ax.set_title(f"{mode.upper()} — fraction with CI excluding 0")
+        ax.grid(alpha=0.3)
+    axes[0].set_ylabel("fraction of cells")
+    axes[0].legend(fontsize=7, loc="upper right")
+    fig.tight_layout()
+    pdf.savefig(fig); plt.close(fig)
+
+    # Sites x time heatmap of median signed aligned mean_diff
+    for mode, per_window, ckeys in (
+        ("b3", b3_per_window, b3_cell_keys),
+        ("b4", b4_per_window, b4_cell_keys),
+    ):
+        if per_window.height == 0:
+            fig, ax = plt.subplots(figsize=(8.5, 11))
+            ax.text(0.5, 0.5, f"{mode.upper()}: no per-window rows",
+                    ha="center", va="center", fontsize=14); ax.axis("off")
+            pdf.savefig(fig); plt.close(fig)
+            continue
+        pivot = (
+            per_window
+            .pivot(values="mean_diff_aligned_med", index=ckeys, on="tmin",
+                   aggregate_function="first")
+            .sort(ckeys)
+        )
+        time_cols_sorted = sorted([c for c in pivot.columns if c not in ckeys],
+                                  key=lambda c: float(c))
+        mat = pivot.select(time_cols_sorted).to_numpy().astype(float)
+        if mat.size == 0:
+            continue
+        sort_order = np.argsort(-np.nanmax(np.abs(mat), axis=1))
+        mat = mat[sort_order]
+        fig, ax = plt.subplots(figsize=(8.5, 11))
+        finite = np.isfinite(mat) & ~np.isnan(mat)
+        vlim = float(np.nanpercentile(np.abs(mat[finite]) if finite.any() else [1], 98)) or 1.0
+        im = ax.imshow(mat, aspect="auto", cmap="RdBu_r",
+                       vmin=-vlim, vmax=vlim,
+                       extent=[float(time_cols_sorted[0]),
+                               float(time_cols_sorted[-1]), mat.shape[0], 0])
+        ax.set_xlabel("Window start (s, post word onset)")
+        ax.set_ylabel("Cell (sorted by peak |aligned mean_diff|)")
+        ax.set_title(f"{mode.upper()} — median signed aligned mean_diff (R={R})  "
+                     f"n_cells={mat.shape[0]}")
+        cb = fig.colorbar(im, ax=ax, shrink=0.6); cb.set_label("aligned mean_diff (HGA)")
+        fig.tight_layout()
+        pdf.savefig(fig); plt.close(fig)
+
+    # Effect-size distributions: best-window aligned medians
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+    for ax, (mode, per_cell) in zip(axes, [
+        ("b3", b3_per_cell), ("b4", b4_per_cell),
+    ]):
+        if per_cell.height == 0:
+            ax.text(0.5, 0.5, f"{mode}: empty", ha="center", va="center"); ax.axis("off"); continue
+        signed = per_cell["best_mean_diff_aligned_med"].drop_nulls().to_numpy()
+        ax.hist(signed, bins=30, color="#4393c3", edgecolor="k", alpha=0.7)
+        ax.axvline(0, color="k", lw=0.8, ls="--")
+        ax.set_xlabel("best-window median signed aligned mean_diff")
+        ax.set_ylabel("# cells")
+        med = float(np.nanmedian(signed)) if len(signed) else float("nan")
+        ax.set_title(f"{mode.upper()} — n={len(signed)}, median={med:.2f}")
+    fig.tight_layout()
+    pdf.savefig(fig); plt.close(fig)
+
+    # Phoneme_pair / ROI breakdowns
+    fig, axes = plt.subplots(2, 2, figsize=(10, 8))
+    for col, mode in enumerate(("b3", "b4")):
+        for row, cut in enumerate(("phoneme_pair", "roi")):
+            ax = axes[row, col]
+            sub = population.filter((pl.col("mode") == mode) & (pl.col("cut") == cut))
+            if sub.height == 0:
+                ax.text(0.5, 0.5, f"{mode}/{cut}: empty",
+                        ha="center", va="center"); ax.axis("off"); continue
+            peak = (
+                sub.group_by(cut)
+                   .agg(pl.col("frac_ci_aligned").max().alias("frac_peak"),
+                        pl.col("n_cells_aligned_defined").max().alias("n_peak"))
+                   .sort("frac_peak", descending=True)
+            )
+            labels = peak[cut].to_list()
+            vals = peak["frac_peak"].to_list()
+            ns = peak["n_peak"].to_list()
+            ax.barh(labels, vals, color="#4393c3", edgecolor="k")
+            ax.axvline(JON41_GREENLIGHT, color="#4dac26", lw=1, ls="--")
+            ax.axvline(JON41_REVISIT, color="#d73027", lw=1, ls="--")
+            for y, (v, n) in enumerate(zip(vals, ns)):
+                ax.text(v + 0.01, y, f"{v:.0%} (n={int(n)})", va="center", fontsize=8)
+            ax.set_xlim(0, 1.05)
+            ax.set_xlabel("peak-window frac with CI excluding 0 (aligned)")
+            ax.set_title(f"{mode.upper()} — {cut}")
+    fig.tight_layout()
+    pdf.savefig(fig); plt.close(fig)
+
+    # Decision callout
+    b3_peak = _peak_frac(population, "b3", "frac_ci_aligned")
+    b4_peak = _peak_frac(population, "b4", "frac_ci_aligned")
+    fig, ax = plt.subplots(figsize=(8.5, 11))
+    ax.axis("off")
+    headline = b4_peak if b4_peak is not None else b3_peak
+    if headline is None:
+        verdict = "    INDETERMINATE — no cells qualified"
+    elif headline >= JON41_GREENLIGHT:
+        verdict = "    GREENLIGHT — option 1 supported by per-site bootstrap CIs"
+    elif headline < JON41_REVISIT:
+        verdict = "    REVISIT — eyeball/star-plot evidence outruns statistics"
+    else:
+        verdict = "    AMBIGUOUS — between thresholds; needs discussion"
+    lines = [
+        "DECISION CALLOUT — JON-41 Group B thresholds",
+        "",
+        f"  Greenlight (continue option 1):   peak frac CI-aligned ≥ {JON41_GREENLIGHT:.0%}",
+        f"  Revisit (rethink AS-site filter): peak frac CI-aligned <  {JON41_REVISIT:.0%}",
+        "",
+        f"  B3 peak frac CI-aligned: "
+        f"{b3_peak:.1%}" if b3_peak is not None else "  B3: n/a (no cells)",
+        f"  B4 peak frac CI-aligned: "
+        f"{b4_peak:.1%}" if b4_peak is not None else "  B4: n/a (no cells)",
+        "",
+        "  Verdict (B4 if available, else B3):",
+        verdict,
+    ]
+    ax.text(0.05, 0.95, "\n".join(lines), ha="left", va="top",
+            family="monospace", fontsize=11)
+    pdf.savefig(fig); plt.close(fig)
+
+print(f"wrote {pdf_path}")
+
+# %% [markdown]
+# ## Filtered-gallery hook
+
+# %%
+try:
+    from pypdf import PdfReader, PdfWriter
+    _HAS_PYPDF = True
+except ImportError:
+    PdfReader = PdfWriter = None  # type: ignore[assignment]
+    _HAS_PYPDF = False
+    print("⚠ pypdf not installed — will emit filtered_manifest.csv only; "
+          "filtered PDFs skipped.")
+
+
+def _b3_pdf(row: dict) -> Path:
+    return (STAR_DIR / "single_step" / "per_site"
+            / f"{row['subject']}_{row['electrode_idx']}_{row['phoneme_pair']}_"
+              f"{row['word_end']}_step{row['resampled']}.pdf")
+
+
+def _b4_pdf(row: dict) -> Path:
+    return (STAR_DIR / "matched_n" / "per_site"
+            / f"{row['subject']}_{row['electrode_idx']}_{row['phoneme_pair']}_"
+              f"{row['word_end']}.pdf")
+
+
+def concat_pdfs(paths: list[Path], out_path: Path) -> int:
+    if not _HAS_PYPDF or not paths:
+        return 0
+    writer = PdfWriter()
+    n = 0
+    for p in paths:
+        if not p.exists():
+            continue
+        try:
+            for page in PdfReader(str(p)).pages:
+                writer.add_page(page)
+            n += 1
+        except Exception as exc:
+            print(f"  ⚠ skipping unreadable PDF {p}: {exc}")
+    if n:
+        with out_path.open("wb") as fh:
+            writer.write(fh)
+    return n
+
+
+filtered_rows: list[dict] = []
+
+if b3_per_cell.height:
+    powered_paths: list[Path] = []
+    sig_paths: list[Path] = []
+    for row in b3_per_cell.iter_rows(named=True):
+        pdf_p = _b3_pdf(row)
+        is_powered = pdf_p.exists()
+        is_sig = is_powered and bool(row["best_ci_aligned_excludes_zero"])
+        if is_powered: powered_paths.append(pdf_p)
+        if is_sig: sig_paths.append(pdf_p)
+        filtered_rows.append({
+            "mode": "single_step",
+            "subject": row["subject"], "electrode_idx": row["electrode_idx"],
+            "phoneme_pair": row["phoneme_pair"], "word_end": row["word_end"],
+            "resampled": row["resampled"], "qualifying_steps": str(row["resampled"]),
+            "best_smin": row["best_smin"], "best_smax": row["best_smax"],
+            "best_mean_diff_aligned_med": row["best_mean_diff_aligned_med"],
+            "best_emp_p_aligned": row["best_emp_p_aligned"],
+            "best_ci_aligned_excludes_zero": row["best_ci_aligned_excludes_zero"],
+            "powered": is_powered, "significant": is_sig,
+            "pdf_path": str(pdf_p.relative_to(REPO)) if pdf_p.exists() else "",
+            "status": "ok",
+        })
+    n_p = concat_pdfs(powered_paths, FILT_DIR / "b3_powered.pdf")
+    n_s = concat_pdfs(sig_paths,    FILT_DIR / "b3_powered_significant.pdf")
+    print(f"B3 filtered PDFs: powered={n_p}  significant={n_s}")
+
+if b4_per_cell.height:
+    powered_paths = []
+    sig_paths = []
+    for row in b4_per_cell.iter_rows(named=True):
+        pdf_p = _b4_pdf(row)
+        is_powered = pdf_p.exists()
+        is_sig = is_powered and bool(row["best_ci_aligned_excludes_zero"])
+        if is_powered: powered_paths.append(pdf_p)
+        if is_sig: sig_paths.append(pdf_p)
+        manifest_row = cell_manifest.filter(
+            (pl.col("mode") == "matched_n")
+            & (pl.col("subject") == row["subject"])
+            & (pl.col("electrode_idx") == row["electrode_idx"])
+            & (pl.col("phoneme_pair") == row["phoneme_pair"])
+            & (pl.col("word_end") == row["word_end"])
+        )
+        qs = manifest_row["qualifying_steps"][0] if manifest_row.height else ""
+        filtered_rows.append({
+            "mode": "matched_n",
+            "subject": row["subject"], "electrode_idx": row["electrode_idx"],
+            "phoneme_pair": row["phoneme_pair"], "word_end": row["word_end"],
+            "resampled": None, "qualifying_steps": qs,
+            "best_smin": row["best_smin"], "best_smax": row["best_smax"],
+            "best_mean_diff_aligned_med": row["best_mean_diff_aligned_med"],
+            "best_emp_p_aligned": row["best_emp_p_aligned"],
+            "best_ci_aligned_excludes_zero": row["best_ci_aligned_excludes_zero"],
+            "powered": is_powered, "significant": is_sig,
+            "pdf_path": str(pdf_p.relative_to(REPO)) if pdf_p.exists() else "",
+            "status": "ok",
+        })
+    n_p = concat_pdfs(powered_paths, FILT_DIR / "b4_powered.pdf")
+    n_s = concat_pdfs(sig_paths,    FILT_DIR / "b4_powered_significant.pdf")
+    print(f"B4 filtered PDFs: powered={n_p}  significant={n_s}")
+
+under = cell_manifest.filter(
+    pl.col("status").is_in(["underpowered", "search_range_too_narrow"])
+)
+for row in under.iter_rows(named=True):
+    filtered_rows.append({
+        "mode": row["mode"],
+        "subject": row["subject"], "electrode_idx": row["electrode_idx"],
+        "phoneme_pair": row["phoneme_pair"], "word_end": row["word_end"],
+        "resampled": row["resampled_step"] if row["mode"] == "single_step" else None,
+        "qualifying_steps": row["qualifying_steps"],
+        "best_smin": None, "best_smax": None,
+        "best_mean_diff_aligned_med": None,
+        "best_emp_p_aligned": None,
+        "best_ci_aligned_excludes_zero": False,
+        "powered": False, "significant": False,
+        "pdf_path": "", "status": row["status"],
+    })
+
+if filtered_rows:
+    pl.DataFrame(filtered_rows).write_csv(FILT_DIR / "filtered_manifest.csv")
+    print(f"wrote {FILT_DIR / 'filtered_manifest.csv'}  ({len(filtered_rows)} rows)")
+else:
+    (FILT_DIR / "filtered_manifest.csv").write_text("")
+    print("filtered_manifest.csv: no rows (empty)")
+
+# %% [markdown]
+# ## Done
+
+# %%
+print("=" * 70)
+print(f"K = {K}   R = {R}   CI = {CI_LOW}–{CI_HIGH}%")
+print(f"AS sites: {peaks.height}")
+print(f"B3 cells (ok): "
+      f"{cell_manifest.filter((pl.col('mode')=='single_step') & (pl.col('status')=='ok')).height}")
+print(f"B4 cells (ok): "
+      f"{cell_manifest.filter((pl.col('mode')=='matched_n') & (pl.col('status')=='ok')).height}")
+b3_peak = _peak_frac(population, "b3", "frac_ci_aligned")
+b4_peak = _peak_frac(population, "b4", "frac_ci_aligned")
+print(f"B3 peak frac CI-aligned: {b3_peak if b3_peak is None else f'{b3_peak:.1%}'}")
+print(f"B4 peak frac CI-aligned: {b4_peak if b4_peak is None else f'{b4_peak:.1%}'}")
+print(f"See {pdf_path} for the decision callout.")

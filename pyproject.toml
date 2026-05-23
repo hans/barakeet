@@ -20,6 +20,8 @@ dependencies = [
     # viz
     "matplotlib>=3.8",
     "seaborn>=0.13",
+    "pypdf>=4",  # PDF concatenation for causal46_joined/t_tests filtered gallery
+
     # utils
     "loguru>=0.7",
     "tqdm>=4.66",
