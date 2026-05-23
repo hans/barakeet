@@ -49,16 +49,13 @@ def compute_as_filter(
         have at least one ``acoustic_significant`` electrode.
     """
     sig = phon_peaks_df.filter(pl.col("p_value") < as_p_threshold)
-    as_per_subj = (
-        sig.group_by(["subject", "electrode_idx"])
-        .agg(pl.lit(True).alias("acoustic_significant"))
-    )
+    as_keys = sig.select(["subject", "electrode_idx"]).unique()
 
     annotated: dict[str, pd.DataFrame] = {}
     subjects_with_as: list[str] = []
     for subject, sr in electrode_dfs_by_subject.items():
         as_idxs = (
-            as_per_subj.filter(pl.col("subject") == subject)["electrode_idx"]
+            as_keys.filter(pl.col("subject") == subject)["electrode_idx"]
             .to_list()
         )
         sr_out = sr.copy()

@@ -63,6 +63,7 @@ print(
 electrode_dfs_by_subject: dict[str, pd.DataFrame] = {}
 for csv_path in electrode_csv_paths:
     sr = pd.read_csv(csv_path)
+    assert sr["subject"].nunique() == 1, f"{csv_path} contains rows for multiple subjects"
     subj = sr["subject"].iloc[0]
     if subj in electrode_dfs_by_subject:
         raise ValueError(
