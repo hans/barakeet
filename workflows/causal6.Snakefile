@@ -661,6 +661,10 @@ rule behavior_decoding_single_electrode_null:
         winners    = REG_LAMBDA_WINNERS,
         scores     = "outputs/causal6/behavior_decoding_single_electrode/{subject}/scores.parquet",
         notebook   = "notebooks/causal6/behavior_decoding_single_electrode_null.py",
+        all_electrode_dfs = expand(
+            "outputs/causal6/find_speech_responsive/{subject}_results.csv",
+            subject=config["data"]["subjects"],
+        ),
 
     output:
         notebook        = "outputs/causal6/behavior_decoding_single_electrode_null/{subject}/notebook.ipynb",
@@ -705,6 +709,12 @@ rule behavior_decoding_single_electrode_null:
                 escalate_corrected_p_max=C6["escalate_corrected_p_max"],
                 permutation_seed=C6["permutation_seed"],
                 permutation_chunk_size=C6["permutation_chunk_size"],
+
+                n_permutations_stage3=C6["n_permutations_stage3"],
+                stage3_k_gate=C6["stage3_k_gate"],
+                fdr_alpha=config["analysis"]["fdr_alpha"],
+                fdr_rois=config["analysis"]["fdr_rois"],
+                electrode_dfs_paths=list(input.all_electrode_dfs),
             ),
             wildcards=wildcards,
             resources=resources,
@@ -719,6 +729,10 @@ rule behavior_decoding_single_electrode_hga_only_null:
         winners    = REG_LAMBDA_WINNERS,
         scores     = "outputs/causal6/behavior_decoding_single_electrode_hga_only/{subject}/scores.parquet",
         notebook   = "notebooks/causal6/behavior_decoding_single_electrode_hga_only_null.py",
+        all_electrode_dfs = expand(
+            "outputs/causal6/find_speech_responsive/{subject}_results.csv",
+            subject=config["data"]["subjects"],
+        ),
 
     output:
         notebook        = "outputs/causal6/behavior_decoding_single_electrode_hga_only_null/{subject}/notebook.ipynb",
@@ -762,6 +776,12 @@ rule behavior_decoding_single_electrode_hga_only_null:
                 escalate_corrected_p_max=C6["escalate_corrected_p_max"],
                 permutation_seed=C6["permutation_seed"],
                 permutation_chunk_size=C6["permutation_chunk_size"],
+
+                n_permutations_stage3=C6["n_permutations_stage3"],
+                stage3_k_gate=C6["stage3_k_gate"],
+                fdr_alpha=config["analysis"]["fdr_alpha"],
+                fdr_rois=config["analysis"]["fdr_rois"],
+                electrode_dfs_paths=list(input.all_electrode_dfs),
             ),
             wildcards=wildcards,
             resources=resources,
@@ -942,6 +962,10 @@ rule behavior_decoding_single_electrode_summarize_aggregate:
             "outputs/causal6/behavior_decoding_single_electrode_summarize/{subject}/peak_summary.parquet",
             subject=config["data"]["subjects"],
         ),
+        all_electrode_dfs = expand(
+            "outputs/causal6/find_speech_responsive/{subject}_results.csv",
+            subject=config["data"]["subjects"],
+        ),
 
     output:
         notebook = "outputs/causal6/behavior_decoding_single_electrode_summarize/aggregate_notebook.ipynb",
@@ -957,6 +981,8 @@ rule behavior_decoding_single_electrode_summarize_aggregate:
                 outdir=str(outdir),
                 output_name="peak_summary_all.parquet",
                 fdr_alpha=config["analysis"]["fdr_alpha"],
+                fdr_rois=config["analysis"]["fdr_rois"],
+                electrode_dfs_paths=list(input.all_electrode_dfs),
             ),
         )
 
@@ -967,6 +993,10 @@ rule behavior_decoding_single_electrode_hga_only_summarize_aggregate:
         notebook     = "notebooks/causal6/significance_aggregate.py",
         result_paths = expand(
             "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/{subject}/peak_summary.parquet",
+            subject=config["data"]["subjects"],
+        ),
+        all_electrode_dfs = expand(
+            "outputs/causal6/find_speech_responsive/{subject}_results.csv",
             subject=config["data"]["subjects"],
         ),
 
@@ -984,6 +1014,8 @@ rule behavior_decoding_single_electrode_hga_only_summarize_aggregate:
                 outdir=str(outdir),
                 output_name="peak_summary_all.parquet",
                 fdr_alpha=config["analysis"]["fdr_alpha"],
+                fdr_rois=config["analysis"]["fdr_rois"],
+                electrode_dfs_paths=list(input.all_electrode_dfs),
             ),
         )
 
@@ -1057,6 +1089,10 @@ rule behavior_decoding_single_electrode_summarize_aggregate_tstat_maxstat:
             "outputs/causal6/behavior_decoding_single_electrode_summarize/{subject}/peak_summary_tstat_maxstat.parquet",
             subject=config["data"]["subjects"],
         ),
+        all_electrode_dfs = expand(
+            "outputs/causal6/find_speech_responsive/{subject}_results.csv",
+            subject=config["data"]["subjects"],
+        ),
 
     output:
         notebook = "outputs/causal6/behavior_decoding_single_electrode_summarize/aggregate_notebook_tstat_maxstat.ipynb",
@@ -1072,6 +1108,8 @@ rule behavior_decoding_single_electrode_summarize_aggregate_tstat_maxstat:
                 outdir=str(outdir),
                 output_name="peak_summary_tstat_maxstat_all.parquet",
                 fdr_alpha=config["analysis"]["fdr_alpha"],
+                fdr_rois=config["analysis"]["fdr_rois"],
+                electrode_dfs_paths=list(input.all_electrode_dfs),
             ),
         )
 
@@ -1082,6 +1120,10 @@ rule behavior_decoding_single_electrode_summarize_aggregate_foldmean_tfce:
         notebook     = "notebooks/causal6/significance_aggregate.py",
         result_paths = expand(
             "outputs/causal6/behavior_decoding_single_electrode_summarize/{subject}/peak_summary_foldmean_tfce.parquet",
+            subject=config["data"]["subjects"],
+        ),
+        all_electrode_dfs = expand(
+            "outputs/causal6/find_speech_responsive/{subject}_results.csv",
             subject=config["data"]["subjects"],
         ),
 
@@ -1099,6 +1141,8 @@ rule behavior_decoding_single_electrode_summarize_aggregate_foldmean_tfce:
                 outdir=str(outdir),
                 output_name="peak_summary_foldmean_tfce_all.parquet",
                 fdr_alpha=config["analysis"]["fdr_alpha"],
+                fdr_rois=config["analysis"]["fdr_rois"],
+                electrode_dfs_paths=list(input.all_electrode_dfs),
             ),
         )
 
@@ -1109,6 +1153,10 @@ rule behavior_decoding_single_electrode_summarize_aggregate_tstat_tfce:
         notebook     = "notebooks/causal6/significance_aggregate.py",
         result_paths = expand(
             "outputs/causal6/behavior_decoding_single_electrode_summarize/{subject}/peak_summary_tstat_tfce.parquet",
+            subject=config["data"]["subjects"],
+        ),
+        all_electrode_dfs = expand(
+            "outputs/causal6/find_speech_responsive/{subject}_results.csv",
             subject=config["data"]["subjects"],
         ),
 
@@ -1126,6 +1174,8 @@ rule behavior_decoding_single_electrode_summarize_aggregate_tstat_tfce:
                 outdir=str(outdir),
                 output_name="peak_summary_tstat_tfce_all.parquet",
                 fdr_alpha=config["analysis"]["fdr_alpha"],
+                fdr_rois=config["analysis"]["fdr_rois"],
+                electrode_dfs_paths=list(input.all_electrode_dfs),
             ),
         )
 
@@ -1136,6 +1186,10 @@ rule behavior_decoding_single_electrode_hga_only_summarize_aggregate_tstat_maxst
         notebook     = "notebooks/causal6/significance_aggregate.py",
         result_paths = expand(
             "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/{subject}/peak_summary_tstat_maxstat.parquet",
+            subject=config["data"]["subjects"],
+        ),
+        all_electrode_dfs = expand(
+            "outputs/causal6/find_speech_responsive/{subject}_results.csv",
             subject=config["data"]["subjects"],
         ),
 
@@ -1153,6 +1207,8 @@ rule behavior_decoding_single_electrode_hga_only_summarize_aggregate_tstat_maxst
                 outdir=str(outdir),
                 output_name="peak_summary_tstat_maxstat_all.parquet",
                 fdr_alpha=config["analysis"]["fdr_alpha"],
+                fdr_rois=config["analysis"]["fdr_rois"],
+                electrode_dfs_paths=list(input.all_electrode_dfs),
             ),
         )
 
@@ -1163,6 +1219,10 @@ rule behavior_decoding_single_electrode_hga_only_summarize_aggregate_foldmean_tf
         notebook     = "notebooks/causal6/significance_aggregate.py",
         result_paths = expand(
             "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/{subject}/peak_summary_foldmean_tfce.parquet",
+            subject=config["data"]["subjects"],
+        ),
+        all_electrode_dfs = expand(
+            "outputs/causal6/find_speech_responsive/{subject}_results.csv",
             subject=config["data"]["subjects"],
         ),
 
@@ -1180,6 +1240,8 @@ rule behavior_decoding_single_electrode_hga_only_summarize_aggregate_foldmean_tf
                 outdir=str(outdir),
                 output_name="peak_summary_foldmean_tfce_all.parquet",
                 fdr_alpha=config["analysis"]["fdr_alpha"],
+                fdr_rois=config["analysis"]["fdr_rois"],
+                electrode_dfs_paths=list(input.all_electrode_dfs),
             ),
         )
 
@@ -1190,6 +1252,10 @@ rule behavior_decoding_single_electrode_hga_only_summarize_aggregate_tstat_tfce:
         notebook     = "notebooks/causal6/significance_aggregate.py",
         result_paths = expand(
             "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/{subject}/peak_summary_tstat_tfce.parquet",
+            subject=config["data"]["subjects"],
+        ),
+        all_electrode_dfs = expand(
+            "outputs/causal6/find_speech_responsive/{subject}_results.csv",
             subject=config["data"]["subjects"],
         ),
 
@@ -1207,6 +1273,8 @@ rule behavior_decoding_single_electrode_hga_only_summarize_aggregate_tstat_tfce:
                 outdir=str(outdir),
                 output_name="peak_summary_tstat_tfce_all.parquet",
                 fdr_alpha=config["analysis"]["fdr_alpha"],
+                fdr_rois=config["analysis"]["fdr_rois"],
+                electrode_dfs_paths=list(input.all_electrode_dfs),
             ),
         )
 
@@ -1313,6 +1381,10 @@ rule ganong_decoding_null:
         winners    = REG_LAMBDA_WINNERS,
         scores     = "outputs/causal6/ganong_decoding_single_electrode/{subject}/scores.parquet",
         notebook   = "notebooks/causal6/ganong_decoding_null.py",
+        all_electrode_dfs = expand(
+            "outputs/causal6/find_speech_responsive/{subject}_results.csv",
+            subject=config["data"]["subjects"],
+        ),
 
     output:
         notebook        = "outputs/causal6/ganong_decoding_null/{subject}/notebook.ipynb",
@@ -1356,6 +1428,12 @@ rule ganong_decoding_null:
                 escalate_corrected_p_max=C6["escalate_corrected_p_max"],
                 permutation_seed=C6["permutation_seed"],
                 permutation_chunk_size=C6["permutation_chunk_size"],
+
+                n_permutations_stage3=C6["n_permutations_stage3"],
+                stage3_k_gate=C6["stage3_k_gate"],
+                fdr_alpha=config["analysis"]["fdr_alpha"],
+                fdr_rois=config["analysis"]["fdr_rois"],
+                electrode_dfs_paths=list(input.all_electrode_dfs),
             ),
             wildcards=wildcards,
             resources=resources,
@@ -1370,6 +1448,10 @@ rule ganong_decoding_hga_only_null:
         winners    = REG_LAMBDA_WINNERS,
         scores     = "outputs/causal6/ganong_decoding_single_electrode_hga_only/{subject}/scores.parquet",
         notebook   = "notebooks/causal6/ganong_decoding_hga_only_null.py",
+        all_electrode_dfs = expand(
+            "outputs/causal6/find_speech_responsive/{subject}_results.csv",
+            subject=config["data"]["subjects"],
+        ),
 
     output:
         notebook        = "outputs/causal6/ganong_decoding_hga_only_null/{subject}/notebook.ipynb",
@@ -1412,6 +1494,12 @@ rule ganong_decoding_hga_only_null:
                 escalate_corrected_p_max=C6["escalate_corrected_p_max"],
                 permutation_seed=C6["permutation_seed"],
                 permutation_chunk_size=C6["permutation_chunk_size"],
+
+                n_permutations_stage3=C6["n_permutations_stage3"],
+                stage3_k_gate=C6["stage3_k_gate"],
+                fdr_alpha=config["analysis"]["fdr_alpha"],
+                fdr_rois=config["analysis"]["fdr_rois"],
+                electrode_dfs_paths=list(input.all_electrode_dfs),
             ),
             wildcards=wildcards,
             resources=resources,
@@ -1494,6 +1582,10 @@ rule ganong_decoding_summarize_aggregate:
             "outputs/causal6/ganong_decoding_summarize/{subject}/peak_summary.parquet",
             subject=config["data"]["subjects"],
         ),
+        all_electrode_dfs = expand(
+            "outputs/causal6/find_speech_responsive/{subject}_results.csv",
+            subject=config["data"]["subjects"],
+        ),
 
     output:
         notebook = "outputs/causal6/ganong_decoding_summarize/aggregate_notebook.ipynb",
@@ -1509,6 +1601,8 @@ rule ganong_decoding_summarize_aggregate:
                 outdir=str(outdir),
                 output_name="peak_summary_all.parquet",
                 fdr_alpha=config["analysis"]["fdr_alpha"],
+                fdr_rois=config["analysis"]["fdr_rois"],
+                electrode_dfs_paths=list(input.all_electrode_dfs),
             ),
         )
 
@@ -1519,6 +1613,10 @@ rule ganong_decoding_hga_only_summarize_aggregate:
         notebook     = "notebooks/causal6/significance_aggregate.py",
         result_paths = expand(
             "outputs/causal6/ganong_decoding_hga_only_summarize/{subject}/peak_summary.parquet",
+            subject=config["data"]["subjects"],
+        ),
+        all_electrode_dfs = expand(
+            "outputs/causal6/find_speech_responsive/{subject}_results.csv",
             subject=config["data"]["subjects"],
         ),
 
@@ -1536,6 +1634,8 @@ rule ganong_decoding_hga_only_summarize_aggregate:
                 outdir=str(outdir),
                 output_name="peak_summary_all.parquet",
                 fdr_alpha=config["analysis"]["fdr_alpha"],
+                fdr_rois=config["analysis"]["fdr_rois"],
+                electrode_dfs_paths=list(input.all_electrode_dfs),
             ),
         )
 

@@ -24,6 +24,7 @@ import os
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 
 # %%
+from functools import partial
 from pathlib import Path
 import re
 
@@ -45,6 +46,7 @@ from src.models.causal6_adaptive_null import (
     log_stage2_skipped,
     stage1_gate,
     stage2_spill_dir,
+    stage3_boost,
 )
 from src.models.causal6_aggregates import (
     FLAVORS_GANONG_WITH_CONTROL,
@@ -83,6 +85,13 @@ n_permutations_stage2 = 9000
 escalate_corrected_p_max = 0.20
 permutation_seed = 0
 permutation_chunk_size = 6
+
+# Stage-3 boost — refit sites in the BH rejection neighborhood at K3 perms.
+n_permutations_stage3 = 90000
+stage3_k_gate = 200
+fdr_alpha = 0.05
+fdr_rois = []                       # populated from config.analysis.fdr_rois
+electrode_dfs_paths = []            # all subjects' find_speech_responsive CSVs
 
 # %%
 subject = re.findall(r"(EC[\d]+)_epo", str(epochs_path))[0]
@@ -207,11 +216,68 @@ else:
     )
 
 # %% [markdown]
+# ## Stage 3 — boost K for sites in the BH rejection neighborhood.
+
+# %%
+if fdr_rois and electrode_dfs_paths and n_permutations_stage3 > 0:
+    electrode_dfs = [
+        pl.from_pandas(pd.read_csv(p)) for p in electrode_dfs_paths
+    ]
+    stage3_seeds = list(range(
+        permutation_seed + n_permutations_stage1 + n_permutations_stage2,
+        permutation_seed + n_permutations_stage1 + n_permutations_stage2
+            + n_permutations_stage3,
+    ))
+    null_scores, gate_log = stage3_boost(
+        subject=subject, outdir=outdir,
+        real_scores=real_scores,
+        real_agg=real_agg,
+        null_scores=null_scores,
+        gate_log=gate_log,
+        site_keys=SITE_KEYS_GANONG_WITH_CONTROL,
+        flavors=FLAVORS_GANONG_WITH_CONTROL,
+        aggregate_fn=partial(
+            aggregate_ganong_with_control,
+            epoch_tmin=epoch_tmin,
+            epoch_sfreq=epoch_sfreq,
+            peak_search_smax=peak_search_smax,
+        ),
+        preagg_fn=preagg_ganong_with_control_null,
+        run_permutations_fn=partial(
+            run_ganong_with_control_permutations,
+            epochs, subject=subject,
+            windows=windows,
+            reg_lambda=reg_lambda,
+            reg_lambda_baseline=reg_lambda_baseline,
+            permutation_chunk_size=permutation_chunk_size,
+            n_folds=n_folds, cv_random_state=cv_random_state,
+            device=device, dtype=torch.float32,
+            tol=tol, max_iter=max_iter,
+        ),
+        baseline_site_keys=["subject", "phoneme_pair"],
+        electrode_dfs=electrode_dfs,
+        fdr_rois=fdr_rois,
+        k_gate=stage3_k_gate,
+        fdr_alpha=fdr_alpha,
+        permutation_seeds=stage3_seeds,
+        n_permutations_pre=n_permutations_stage1 + n_permutations_stage2,
+    )
+else:
+    print(
+        f"[{subject}] stage3 skipped "
+        f"(rois={bool(fdr_rois)}, paths={bool(electrode_dfs_paths)}, K3={n_permutations_stage3})",
+        flush=True,
+    )
+    gate_log = gate_log.with_columns(pl.lit(False).alias("stage3_refit"))
+
+# %% [markdown]
 # ## Outputs.
 
 # %%
 gate_log = gate_log.with_columns(
-    pl.when(pl.col("escalated"))
+    pl.when(pl.col("stage3_refit"))
+    .then(n_permutations_stage1 + n_permutations_stage2 + n_permutations_stage3)
+    .when(pl.col("escalated"))
     .then(n_permutations_stage1 + n_permutations_stage2)
     .otherwise(n_permutations_stage1)
     .alias("n_permutations")
