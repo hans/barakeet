@@ -92,11 +92,11 @@ print(f"K={K}  AC_SEARCH=[{AC_SEARCH_SMIN}, {AC_SEARCH_SMAX}]")
 
 # %%
 _peaks_raw = pl.read_parquet(CAUSAL6_PEAKS)
-if "significant" in _peaks_raw.columns:
-    peaks = _peaks_raw.filter(pl.col("significant"))
-else:
-    peaks = _peaks_raw.filter(pl.col("p_value") < 0.05)
-    print("⚠ no `significant` column — falling back to p_value < 0.05 (uncorrected)")
+# if "significant" in _peaks_raw.columns:
+#     peaks = _peaks_raw.filter(pl.col("significant"))
+# else:
+peaks = _peaks_raw.filter(pl.col("p_value") < 0.05)
+print("using p_value < 0.05 (uncorrected)")
 
 trial_balance = pl.read_csv(OUT_DIR / "trial_balance_index.csv")
 trial_summary = pl.read_csv(OUT_DIR / "trial_balance_summary.csv")
@@ -270,7 +270,7 @@ def matched_n_star_plot(
     phon_smax=None,
     phon_search_smin=None,
     phon_search_smax=None,
-    textgrid_dir="data/stimuli/textgrid",
+    textgrid_dir="textgrids",
     figsize=(6.5, 5.5),
     acoustic_peak_auc=None,
     rng=None,
@@ -324,13 +324,13 @@ def matched_n_star_plot(
     )
     if acoustic_peak_auc is not None:
         top_title += f"  (ac={acoustic_peak_auc:.3f})"
-    ax_top.set_title(top_title, fontsize=9)
+    ax_top.set_title(top_title, fontsize=9, pad=20)
     ax_top.legend(fontsize=7, loc="upper left", framealpha=0.7)
 
     # Bottom: at each ambiguous step, draw min_class[s] of each class
     # (minority in full; majority subsampled), then concat across steps.
     # Both classes end up with the same step composition by construction.
-    bhv_colors = ["#762a83", "#1b7837"]
+    bhv_colors = ["#2166ac", "#d73027"]
     we_mask = (md_pp["word_end"] == word_end).values
     bhv_vals = sorted(md_pp.loc[we_mask, bhv_col].dropna().unique())
 
@@ -374,19 +374,19 @@ def matched_n_star_plot(
         f"Per-step class-balanced — steps {list(qualifying_steps)}  "
         f"({n_per_class} per class)",
         fontsize=9,
+        pad=20,
     )
     ax_bot.legend(fontsize=7, loc="upper left", framealpha=0.7)
 
-    try:
-        for ax in (ax_top, ax_bot):
-            add_textgrid(
-                ax,
-                textgrid_dir=textgrid_dir,
-                textgrid_file=f"11_{word_end}_dn_002.TextGrid",
-                vline_extent=1.0,
-            )
-    except Exception:
-        pass
+    textgrid_file = next(iter(Path(textgrid_dir).glob(f"*_{word_end}_{phoneme_pair}_*.TextGrid")))
+
+    for ax in (ax_top, ax_bot):
+        add_textgrid(
+            ax,
+            textgrid_dir=textgrid_dir,
+            textgrid_file=textgrid_file.name,
+            vline_extent=1.0,
+        )
 
     xlim = OFFSET_DICT.get(word_end, 1.0) + 0.1
     ax_top.set_xlim(0.0, xlim)
@@ -412,7 +412,7 @@ if _smoke.height == 0:
           "— skipping smoke test")
 else:
     _row = _smoke.row(0, named=True)
-    _smoke_steps = [int(s) for s in _row["ambiguous_steps"].split(",")]
+    _smoke_steps = [int(float(s)) for s in _row["ambiguous_steps"].split(",")]
     _smoke_can = peaks.filter(
         (pl.col("subject") == _row["subject"])
         & (pl.col("electrode_idx") == _row["electrode_idx"])
@@ -440,7 +440,7 @@ else:
             acoustic_peak_auc=float(_smoke_can["test_roc_auc"]),
         )
         fig.savefig(MATCHED_DIR / "_smoke.pdf", bbox_inches="tight")
-        plt.close(fig)
+        # plt.close(fig)
         print(f"Wrote {MATCHED_DIR / '_smoke.pdf'} — eyeball before the full gallery.")
 
 # %% [markdown]
@@ -463,7 +463,7 @@ b4_per_step = (
         pl.col("min_class").sum().alias("n_per_class"),
         pl.len().alias("n_qualifying"),
     )
-    .filter((pl.col("n_qualifying") >= 2) & (pl.col("n_per_class") >= K))
+    .filter((pl.col("n_qualifying") >= 1) & (pl.col("n_per_class") >= K))
     .join(
         peaks.select(["subject", "electrode_idx", "phoneme_pair",
                       "smin", "smax", "test_roc_auc"])
@@ -473,7 +473,7 @@ b4_per_step = (
     )
     .sort(["subject", "electrode_idx", "phoneme_pair", "word_end"])
 )
-print(f"B4 cells (K={K}, ≥2 ambiguous steps, n_per_class ≥ K): {b4_per_step.height}")
+print(f"B4 cells (K={K}, ≥1 ambiguous steps, n_per_class ≥ K): {b4_per_step.height}")
 print("n_per_class distribution:")
 print(b4_per_step.group_by("n_per_class").len().sort("n_per_class"))
 
@@ -488,7 +488,7 @@ b4_combined_pdf = MATCHED_DIR / "star_plots_all.pdf"
 with PdfPages(b4_combined_pdf) as pdf:
     fig, ax = plt.subplots(figsize=(8.5, 11))
     ax.text(0.5, 0.6,
-            f"B4 class-balanced star plots\nK={K}  (≥2 ambiguous steps)\n"
+            f"B4 class-balanced star plots\nK={K}  (≥1 ambiguous steps)\n"
             f"{b4_per_step.height} (site × word_end) cells",
             ha="center", va="center", fontsize=18)
     ax.axis("off")
@@ -577,7 +577,7 @@ print(f"K={K} ({THRESHOLD_COL}) — production default")
 print(f"\nAS sites (causal6 significant): {peaks.height}")
 print(f"Sites with ≥1 B3 cell: {sites_with_any_b3}")
 print(
-    "Sites with ≥1 B4 cell (≥2 ambiguous steps, n_per_class ≥ K): "
+    "Sites with ≥1 B4 cell (≥1 ambiguous steps, n_per_class ≥ K): "
     f"{b4_per_step.select(['subject','electrode_idx','phoneme_pair']).unique().height}"
 )
 print(f"\nB3 cells rendered: {sum(1 for m in b3_manifest if m['status']=='rendered')}")
