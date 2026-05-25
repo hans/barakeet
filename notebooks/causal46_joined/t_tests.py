@@ -54,6 +54,7 @@
 # %%
 from __future__ import annotations
 
+import io
 import os
 import sys
 import traceback
@@ -812,6 +813,33 @@ with PdfPages(pdf_path) as pdf:
     fig.tight_layout()
     pdf.savefig(fig); plt.close(fig)
 
+    # Best-window timing scatter — colored by CI significance
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+    for ax, (mode, per_cell) in zip(axes, [("b3", b3_per_cell), ("b4", b4_per_cell)]):
+        if per_cell.height == 0:
+            ax.text(0.5, 0.5, f"{mode}: empty", ha="center", va="center"); ax.axis("off"); continue
+        tmin_arr = per_cell["best_tmin"].to_numpy().astype(float)
+        sig_mask = per_cell["best_ci_aligned_excludes_zero"].to_numpy().astype(bool)
+        rng_jit = np.random.default_rng(42)
+        y_jit = rng_jit.uniform(-0.4, 0.4, size=len(tmin_arr))
+        ax.scatter(tmin_arr[~sig_mask], y_jit[~sig_mask],
+                   color="#d9d9d9", s=22, alpha=0.8, linewidths=0.4,
+                   edgecolors="k", label="CI includes 0", zorder=2)
+        ax.scatter(tmin_arr[sig_mask], y_jit[sig_mask],
+                   color="#2166ac", s=30, alpha=0.85, linewidths=0.4,
+                   edgecolors="k", label="CI excludes 0 (aligned)", zorder=3)
+        n_sig = int(sig_mask.sum())
+        n_tot = len(sig_mask)
+        ax.axhline(0, color="k", lw=0.4, ls=":")
+        ax.set_xlabel("Best-window tmin (s, post word onset)")
+        ax.set_yticks([])
+        ax.set_title(f"{mode.upper()} — {n_sig}/{n_tot} significant ({100*n_sig/max(n_tot,1):.0f}%)")
+        ax.legend(fontsize=8, loc="upper right")
+        ax.grid(axis="x", alpha=0.3)
+    fig.suptitle("Best-window timing per cell", fontsize=12)
+    fig.tight_layout()
+    pdf.savefig(fig); plt.close(fig)
+
     # Phoneme_pair / ROI breakdowns
     fig, axes = plt.subplots(2, 2, figsize=(10, 8))
     for col, mode in enumerate(("b3", "b4")):
@@ -901,6 +929,88 @@ def _b4_pdf(row: dict) -> Path:
               f"{row['word_end']}.pdf")
 
 
+def site_effect_fig(row: dict, site_per_window: pl.DataFrame) -> plt.Figure:
+    """CI-trace figure for one cell: median ± bootstrap band across windows."""
+    fig, ax = plt.subplots(figsize=(8.5, 3.2))
+    if site_per_window.height > 0:
+        pw = site_per_window.sort("tmin")
+        tmin = pw["tmin"].to_numpy().astype(float)
+        med = pw["mean_diff_aligned_med"].to_numpy().astype(float)
+        ci_lo = pw["mean_diff_aligned_ci_lo"].to_numpy().astype(float)
+        ci_hi = pw["mean_diff_aligned_ci_hi"].to_numpy().astype(float)
+        ax.plot(tmin, med, color="#2166ac", lw=1.5,
+                label="median aligned mean_diff")
+        ax.fill_between(tmin, ci_lo, ci_hi, color="#2166ac", alpha=0.22,
+                        label=f"{CI_LOW}–{CI_HIGH}% bootstrap CI")
+        # Highlight best window
+        if row.get("best_tmin") is not None and row.get("best_tmax") is not None:
+            ax.axvspan(float(row["best_tmin"]), float(row["best_tmax"]),
+                       color="#fdae61", alpha=0.45, label="best window", zorder=0)
+    ax.axhline(0, color="k", lw=0.7, ls="--", alpha=0.6)
+    ax.set_xlabel("Window tmin (s, post word onset)")
+    ax.set_ylabel("aligned mean_diff (HGA)")
+    ax.legend(fontsize=8, loc="upper right")
+    ax.grid(alpha=0.3)
+    med_val = row.get("best_mean_diff_aligned_med")
+    ci_lo_v = row.get("best_mean_diff_aligned_ci_lo")
+    ci_hi_v = row.get("best_mean_diff_aligned_ci_hi")
+    p_val = row.get("best_emp_p_aligned")
+    sig_str = "CI excludes 0" if row.get("best_ci_aligned_excludes_zero") else "CI includes 0"
+    id_str = (f"{row['subject']} e{row['electrode_idx']} "
+              f"{row['phoneme_pair']} · {row['word_end']}")
+    if row.get("resampled") is not None:
+        id_str += f" step {row['resampled']}"
+    stat_str = ""
+    if med_val is not None:
+        stat_str = (f"  |  effect = {med_val:.3f} [{ci_lo_v:.3f}, {ci_hi_v:.3f}]"
+                    f"  p = {p_val:.3f}  {sig_str}")
+    ax.set_title(id_str + stat_str, fontsize=9)
+    fig.tight_layout()
+    return fig
+
+
+def write_annotated_pdfs(
+    entries: list[tuple[dict, Path]],
+    per_window: pl.DataFrame,
+    cell_keys: list[str],
+    out_path: Path,
+) -> int:
+    """Filtered-gallery PDF: per-site CI-trace page followed by its star-plot pages."""
+    if not entries:
+        return 0
+    if not _HAS_PYPDF:
+        return concat_pdfs([p for _, p in entries], out_path)
+    writer = PdfWriter()
+    n = 0
+    for row, pdf_p in entries:
+        filt = (
+            (pl.col("subject") == row["subject"])
+            & (pl.col("electrode_idx") == row["electrode_idx"])
+            & (pl.col("phoneme_pair") == row["phoneme_pair"])
+            & (pl.col("word_end") == row["word_end"])
+        )
+        if "resampled" in cell_keys and row.get("resampled") is not None:
+            filt = filt & (pl.col("resampled") == row["resampled"])
+        site_pw = per_window.filter(filt) if per_window.height else pl.DataFrame()
+        fig = site_effect_fig(row, site_pw)
+        buf = io.BytesIO()
+        fig.savefig(buf, format="pdf", bbox_inches="tight")
+        plt.close(fig)
+        buf.seek(0)
+        for page in PdfReader(buf).pages:
+            writer.add_page(page)
+        try:
+            for page in PdfReader(str(pdf_p)).pages:
+                writer.add_page(page)
+            n += 1
+        except Exception as exc:
+            print(f"  ⚠ skipping unreadable PDF {pdf_p}: {exc}")
+    if n:
+        with out_path.open("wb") as fh:
+            writer.write(fh)
+    return n
+
+
 def concat_pdfs(paths: list[Path], out_path: Path) -> int:
     if not _HAS_PYPDF or not paths:
         return 0
@@ -924,14 +1034,14 @@ def concat_pdfs(paths: list[Path], out_path: Path) -> int:
 filtered_rows: list[dict] = []
 
 if b3_per_cell.height:
-    powered_paths: list[Path] = []
-    sig_paths: list[Path] = []
+    powered_entries: list[tuple[dict, Path]] = []
+    sig_entries: list[tuple[dict, Path]] = []
     for row in b3_per_cell.iter_rows(named=True):
         pdf_p = _b3_pdf(row)
         is_powered = pdf_p.exists()
         is_sig = is_powered and bool(row["best_ci_aligned_excludes_zero"])
-        if is_powered: powered_paths.append(pdf_p)
-        if is_sig: sig_paths.append(pdf_p)
+        if is_powered: powered_entries.append((row, pdf_p))
+        if is_sig: sig_entries.append((row, pdf_p))
         filtered_rows.append({
             "mode": "single_step",
             "subject": row["subject"], "electrode_idx": row["electrode_idx"],
@@ -945,19 +1055,21 @@ if b3_per_cell.height:
             "pdf_path": str(pdf_p.relative_to(REPO)) if pdf_p.exists() else "",
             "status": "ok",
         })
-    n_p = concat_pdfs(powered_paths, FILT_DIR / "b3_powered.pdf")
-    n_s = concat_pdfs(sig_paths,    FILT_DIR / "b3_powered_significant.pdf")
+    n_p = write_annotated_pdfs(powered_entries, b3_per_window, b3_cell_keys,
+                               FILT_DIR / "b3_powered.pdf")
+    n_s = write_annotated_pdfs(sig_entries, b3_per_window, b3_cell_keys,
+                               FILT_DIR / "b3_powered_significant.pdf")
     print(f"B3 filtered PDFs: powered={n_p}  significant={n_s}")
 
 if b4_per_cell.height:
-    powered_paths = []
-    sig_paths = []
+    powered_entries = []
+    sig_entries = []
     for row in b4_per_cell.iter_rows(named=True):
         pdf_p = _b4_pdf(row)
         is_powered = pdf_p.exists()
         is_sig = is_powered and bool(row["best_ci_aligned_excludes_zero"])
-        if is_powered: powered_paths.append(pdf_p)
-        if is_sig: sig_paths.append(pdf_p)
+        if is_powered: powered_entries.append((row, pdf_p))
+        if is_sig: sig_entries.append((row, pdf_p))
         manifest_row = cell_manifest.filter(
             (pl.col("mode") == "matched_n")
             & (pl.col("subject") == row["subject"])
@@ -979,8 +1091,10 @@ if b4_per_cell.height:
             "pdf_path": str(pdf_p.relative_to(REPO)) if pdf_p.exists() else "",
             "status": "ok",
         })
-    n_p = concat_pdfs(powered_paths, FILT_DIR / "b4_powered.pdf")
-    n_s = concat_pdfs(sig_paths,    FILT_DIR / "b4_powered_significant.pdf")
+    n_p = write_annotated_pdfs(powered_entries, b4_per_window, b4_cell_keys,
+                               FILT_DIR / "b4_powered.pdf")
+    n_s = write_annotated_pdfs(sig_entries, b4_per_window, b4_cell_keys,
+                               FILT_DIR / "b4_powered_significant.pdf")
     print(f"B4 filtered PDFs: powered={n_p}  significant={n_s}")
 
 under = cell_manifest.filter(
