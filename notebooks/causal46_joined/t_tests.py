@@ -7,6 +7,10 @@
 #       format_name: percent
 #       format_version: '1.3'
 #       jupytext_version: 1.19.1
+#   kernelspec:
+#     display_name: barakeet
+#     language: python
+#     name: python3
 # ---
 
 # %% [markdown]
@@ -117,11 +121,11 @@ print(f"window={WINDOW_SIZE}  stride={STRIDE}")
 
 # %%
 _peaks_raw = pl.read_parquet(CAUSAL6_PEAKS)
-if "significant" in _peaks_raw.columns:
-    peaks = _peaks_raw.filter(pl.col("significant"))
-else:
-    peaks = _peaks_raw.filter(pl.col("p_value") < 0.05)
-    print("⚠ no `significant` column — falling back to p_value < 0.05 (uncorrected)")
+# if "significant" in _peaks_raw.columns:
+#     peaks = _peaks_raw.filter(pl.col("significant"))
+# else:
+peaks = _peaks_raw.filter(pl.col("p_value") < 0.05)
+print("using p_value < 0.05 (uncorrected)")
 print(f"AS sites: {peaks.height}")
 
 trial_balance = pl.read_csv(JOINED_DIR / "trial_balance_index.csv")
@@ -193,7 +197,7 @@ b4_qualified = (
         pl.col("min_class").sum().alias("n_per_class"),
         pl.len().alias("n_qualifying"),
     )
-    .filter((pl.col("n_qualifying") >= 2) & (pl.col("n_per_class") >= K))
+    .filter((pl.col("n_qualifying") >= 1) & (pl.col("n_per_class") >= K))
     .join(
         peaks.select(["subject", "electrode_idx", "phoneme_pair",
                       "smin", "smax", "test_roc_auc"])
@@ -203,7 +207,7 @@ b4_qualified = (
     )
     .sort(["subject", "electrode_idx", "phoneme_pair", "word_end"])
 )
-print(f"B4 qualifying cells (n_qualifying ≥ 2, n_per_class ≥ {K}): "
+print(f"B4 qualifying cells (n_qualifying ≥ 1, n_per_class ≥ {K}): "
       f"{b4_qualified.height}")
 
 # %% [markdown]
@@ -467,7 +471,7 @@ b4_drops = (
     .group_by(["subject", "electrode_idx", "phoneme_pair", "word_end"])
     .agg(pl.len().alias("n_ambig_steps"),
          pl.col("min_class").sum().alias("n_per_class_pool"))
-    .filter((pl.col("n_ambig_steps") < 2) | (pl.col("n_per_class_pool") < K))
+    .filter((pl.col("n_ambig_steps") < 1) | (pl.col("n_per_class_pool") < K))
 )
 for row in b4_drops.iter_rows(named=True):
     b4_cell_manifest.append({
@@ -615,7 +619,7 @@ for subj in subjects:
     except Exception as exc:
         print(f"⚠ no electrode_df for {subj}: {exc}")
         continue
-    roi_col = "ROI" if "ROI" in edf.columns else (
+    roi_col = "roi" if "roi" in edf.columns else (
         "anat" if "anat" in edf.columns else None
     )
     if roi_col is None:
@@ -626,7 +630,7 @@ for subj in subjects:
     roi_frames.append(pl.from_pandas(
         edf2[["electrode_idx", roi_col]].assign(subject=subj).rename(
             columns={roi_col: "roi"}
-        )
+        ).astype({"roi": str})
     ))
 electrode_roi = (
     pl.concat(roi_frames, how="diagonal_relaxed")
