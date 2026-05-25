@@ -938,20 +938,20 @@ def site_effect_fig(row: dict, site_per_window: pl.DataFrame) -> plt.Figure:
     fig, ax = plt.subplots(figsize=(8.5, 3.2))
     if site_per_window.height > 0:
         pw = site_per_window.sort("tmin")
-        tmin = pw["tmin"].to_numpy().astype(float)
+        tcenter = ((pw["tmin"] + pw["tmax"]) / 2).to_numpy().astype(float)
         med = pw["mean_diff_aligned_med"].to_numpy().astype(float)
         ci_lo = pw["mean_diff_aligned_ci_lo"].to_numpy().astype(float)
         ci_hi = pw["mean_diff_aligned_ci_hi"].to_numpy().astype(float)
-        ax.plot(tmin, med, color="#2166ac", lw=1.5,
+        ax.plot(tcenter, med, color="#2166ac", lw=1.5,
                 label="median aligned mean_diff")
-        ax.fill_between(tmin, ci_lo, ci_hi, color="#2166ac", alpha=0.22,
+        ax.fill_between(tcenter, ci_lo, ci_hi, color="#2166ac", alpha=0.22,
                         label=f"{CI_LOW}–{CI_HIGH}% bootstrap CI")
-        # Highlight best window
+        # Highlight best window — spans tmin to tmax so the line center sits inside it
         if row.get("best_tmin") is not None and row.get("best_tmax") is not None:
             ax.axvspan(float(row["best_tmin"]), float(row["best_tmax"]),
                        color="#fdae61", alpha=0.45, label="best window", zorder=0)
     ax.axhline(0, color="k", lw=0.7, ls="--", alpha=0.6)
-    ax.set_xlabel("Window tmin (s, post word onset)")
+    ax.set_xlabel("Window center (s, post word onset)")
     ax.set_ylabel("aligned mean_diff (HGA)")
     ax.legend(fontsize=8, loc="upper right")
     ax.grid(alpha=0.3)
