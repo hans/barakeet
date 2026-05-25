@@ -23,6 +23,7 @@
 from pathlib import Path
 
 
+configfile: "config.yaml"
 include: "causal6.Snakefile"
 
 
@@ -204,7 +205,7 @@ rule joined_behavior_decoding_single_electrode_null:
 
     resources:
         gpu = 1,
-        mem_gb = 100
+        mem_gb = 200
 
     run:
         outdir = Path(output.notebook).parent
@@ -272,7 +273,7 @@ rule joined_behavior_decoding_single_electrode_hga_only_null:
 
     resources:
         gpu = 1,
-        mem_gb = 100
+        mem_gb = 200
 
     run:
         outdir = Path(output.notebook).parent
@@ -778,7 +779,7 @@ rule joined_ganong_decoding_null:
 
     resources:
         gpu = 1,
-        mem_gb = 100
+        mem_gb = 200
 
     run:
         outdir = Path(output.notebook).parent
@@ -845,7 +846,7 @@ rule joined_ganong_decoding_hga_only_null:
 
     resources:
         gpu = 1,
-        mem_gb = 100
+        mem_gb = 200
 
     run:
         outdir = Path(output.notebook).parent
