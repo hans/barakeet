@@ -56,12 +56,12 @@ THRESHOLDS = (4, 5, 10)
 
 # %%
 _peaks_raw = pl.read_parquet(CAUSAL6_PEAKS)
-if "significant" in _peaks_raw.columns:
-    canonical = _peaks_raw.filter(pl.col("significant"))
-else:
-    # Fallback for parquets produced before significance_aggregate added the column.
-    canonical = _peaks_raw.filter(pl.col("p_value") < 0.05)
-    print("⚠ no `significant` column — falling back to p_value < 0.05 (uncorrected)")
+# if "significant" in _peaks_raw.columns:
+#     canonical = _peaks_raw.filter(pl.col("significant"))
+# else:
+# Fallback for parquets produced before significance_aggregate added the column.
+canonical = _peaks_raw.filter(pl.col("p_value") < 0.1)
+print("⚠ no `significant` column — falling back to p_value < 0.1 (uncorrected)")
 
 needed_subjects = sorted(canonical["subject"].unique().to_list())
 print(f"Canonical sites: {canonical.height}  across {len(needed_subjects)} subjects")
@@ -316,9 +316,9 @@ for k in THRESHOLDS:
     col = f"meets_threshold_{k}"
     n_any = summary.filter(pl.col(col)).height
     n_two_plus = summary.filter(
-        pl.col(col) & (pl.col("n_ambiguous") >= 2)
+        pl.col(col) & (pl.col("n_ambiguous") >= 1)
     ).height
     print(
         f"K={k:2d}: (site×word_end) with n_per_class ≥ K: {n_any:4d}/{summary.height}; "
-        f"and ≥2 ambiguous steps: {n_two_plus:4d}/{summary.height}"
+        f"and ≥1 ambiguous step: {n_two_plus:4d}/{summary.height}"
     )

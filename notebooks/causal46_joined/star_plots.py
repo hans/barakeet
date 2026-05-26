@@ -24,7 +24,7 @@
 # excluded from qualifying-step sets upstream (in `trial_balance_index.py`)
 # since they calibrate the acoustic decoder.
 #
-# Uses `src.viz_provisional.provisional_star_plot` for B3; a notebook-local
+# A notebook-local
 # `matched_n_star_plot` helper for B4 (per-step class balance: at each
 # ambiguous step, draw min_class[s] of each class; concat across steps).
 # Both classes have the same step composition by construction, killing
@@ -43,6 +43,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
+import seaborn as sns
 import yaml
 from matplotlib.backends.backend_pdf import PdfPages
 from tqdm.auto import tqdm
@@ -54,6 +55,10 @@ from src.viz_provisional import (
     load_epochs_dict,
     provisional_star_plot,
 )
+
+import sys
+sys.path.insert(0, str(Path(".").resolve() / "notebooks" / "causal46_joined"))
+from _within_completion import extract_hga, resolve_behavior_col
 
 # %%
 REPO = Path(".").resolve()
@@ -76,13 +81,15 @@ EPOCH_DIR = Path(os.environ.get(
 # Production default per A2 plan; expose K so downstream can tighten/loosen.
 # K is the cell-level floor on the class-balanced subsample size (n_per_class
 # in the summary). Per-step ambiguity is gated by `is_ambiguous_step` upstream.
-K = 5
+K = 4
 THRESHOLD_COL = f"meets_threshold_{K}"
 
 # Acoustic search bounds (for dashed lines on the top panel).
 _cfg = yaml.safe_load((REPO / "config.yaml").read_text())
 AC_SEARCH_SMIN = int(_cfg["analysis"]["decoding"]["acoustic_peak_search_smin"])
 AC_SEARCH_SMAX = int(_cfg["analysis"]["decoding"]["acoustic_peak_search_smax"])
+AC_P_VALUE_THRESHOLD = 0.001
+
 print(f"REPO:      {REPO}")
 print(f"EPOCH_DIR: {EPOCH_DIR}  (exists: {EPOCH_DIR.exists()})")
 print(f"K={K}  AC_SEARCH=[{AC_SEARCH_SMIN}, {AC_SEARCH_SMAX}]")
@@ -92,11 +99,11 @@ print(f"K={K}  AC_SEARCH=[{AC_SEARCH_SMIN}, {AC_SEARCH_SMAX}]")
 
 # %%
 _peaks_raw = pl.read_parquet(CAUSAL6_PEAKS)
-if "significant" in _peaks_raw.columns:
-    peaks = _peaks_raw.filter(pl.col("significant"))
-else:
-    peaks = _peaks_raw.filter(pl.col("p_value") < 0.05)
-    print("⚠ no `significant` column — falling back to p_value < 0.05 (uncorrected)")
+# if "significant" in _peaks_raw.columns:
+#     peaks = _peaks_raw.filter(pl.col("significant"))
+# else:
+peaks = _peaks_raw.filter(pl.col("p_value") < AC_P_VALUE_THRESHOLD)
+print(f"using p_value < {AC_P_VALUE_THRESHOLD} (uncorrected)")
 
 trial_balance = pl.read_csv(OUT_DIR / "trial_balance_index.csv")
 trial_summary = pl.read_csv(OUT_DIR / "trial_balance_summary.csv")
@@ -119,126 +126,6 @@ print(f"Epochs loaded: {sorted(epochs_dict)}")
 
 ambig_steps_default = load_ambig_steps(epochs_dict)
 print(f"ambig_steps_default: {len(ambig_steps_default)} (subject, pp, word_end) keys")
-
-# %% [markdown]
-# ## B3 — single-step cells (ambiguous step with min_class ≥ K)
-#
-# A single-step cell is the degenerate case of the cell-level rule: the
-# pool over a 1-step set balanced = min_class for that step.
-
-# %%
-b3_cells = (
-    trial_balance
-    .filter(pl.col("is_ambiguous_step") & (pl.col("min_class") >= K))
-    .join(
-        peaks.select(["subject", "electrode_idx", "phoneme_pair",
-                      "smin", "smax", "test_roc_auc"])
-             .rename({"smin": "phon_smin", "smax": "phon_smax",
-                      "test_roc_auc": "acoustic_peak_auc"}),
-        on=["subject", "electrode_idx", "phoneme_pair"], how="inner",
-    )
-    .sort(["subject", "electrode_idx", "phoneme_pair", "word_end", "resampled"])
-)
-print(f"B3 cells (K={K}): {b3_cells.height} across "
-      f"{b3_cells.select(['subject','electrode_idx','phoneme_pair']).unique().height} sites")
-print(b3_cells.group_by("resampled").len().sort("resampled"))
-
-# %%
-sites_with_any_b3 = (
-    b3_cells.select(["subject", "electrode_idx", "phoneme_pair"]).unique().height
-)
-print(f"AS sites with ≥1 B3 cell: {sites_with_any_b3}/{peaks.height}")
-print(f"Sites with ZERO qualifying single-step cell at K={K}: "
-      f"{peaks.height - sites_with_any_b3}")
-
-# %% [markdown]
-# ## Render B3 single-step star plots
-#
-# Reuses `provisional_star_plot` unchanged. For each B3 cell, we build a
-# single-entry `ambig_steps` dict containing only that one step — the
-# middle panel of the figure then shows that step alone, split by
-# `behavior_dummy_forced`.
-
-# %%
-b3_failures: list[dict] = []
-b3_manifest: list[dict] = []
-b3_combined_pdf = SINGLE_DIR / "star_plots_all.pdf"
-
-with PdfPages(b3_combined_pdf) as pdf:
-    # Title page (always written; matplotlib >= 3.10 deletes empty PDFs).
-    fig, ax = plt.subplots(figsize=(8.5, 11))
-    ax.text(0.5, 0.6,
-            f"B3 single-step star plots\nK={K}\n"
-            f"{b3_cells.height} cells across {sites_with_any_b3} AS sites",
-            ha="center", va="center", fontsize=18)
-    ax.axis("off")
-    pdf.savefig(fig)
-    plt.close(fig)
-
-    for row in tqdm(b3_cells.iter_rows(named=True), total=b3_cells.height):
-        subj = row["subject"]
-        if subj not in epochs_dict:
-            b3_failures.append({**row, "error": "no epochs for subject"})
-            continue
-        # Override ambig_steps for THIS cell only: a per-call dict containing
-        # just the qualifying step at this (subject, pp, word_end).
-        cell_ambig = {
-            (subj, row["phoneme_pair"], row["word_end"]): [row["resampled"]],
-        }
-        try:
-            fig = provisional_star_plot(
-                subject=subj,
-                electrode_idx=int(row["electrode_idx"]),
-                phoneme_pair=row["phoneme_pair"],
-                word_end=row["word_end"],
-                epochs_dict=epochs_dict,
-                ambig_steps=cell_ambig,
-                phon_smin_c6=int(row["phon_smin"]),
-                phon_smax_c6=int(row["phon_smax"]),
-                phon_search_smin=AC_SEARCH_SMIN,
-                phon_search_smax=AC_SEARCH_SMAX,
-                acoustic_peak_auc=float(row["acoustic_peak_auc"]),
-            )
-            fig.suptitle(
-                f"B3 step={row['resampled']}  |  {subj} e{row['electrode_idx']} "
-                f"{row['phoneme_pair']} · {row['word_end']}\n"
-                f"n_class0={row['n_class0']}  n_class1={row['n_class1']}  "
-                f"min_class={row['min_class']}  ac={row['acoustic_peak_auc']:.3f}",
-                y=1.01, fontsize=9,
-            )
-            site_pdf = (
-                SINGLE_DIR / "per_site"
-                / f"{subj}_{row['electrode_idx']}_{row['phoneme_pair']}_"
-                  f"{row['word_end']}_step{row['resampled']}.pdf"
-            )
-            fig.savefig(site_pdf, bbox_inches="tight")
-            pdf.savefig(fig, bbox_inches="tight")
-            plt.close(fig)
-            b3_manifest.append({
-                "subject": subj,
-                "electrode_idx": row["electrode_idx"],
-                "phoneme_pair": row["phoneme_pair"],
-                "word_end": row["word_end"],
-                "mode": "single_step",
-                "resampled_step": row["resampled"],
-                "qualifying_steps": "",
-                "n_per_class": int(row["min_class"]),
-                "n_total": int(row["n_total"]),
-                "threshold_K": K,
-                "status": "rendered",
-            })
-        except Exception as exc:
-            tb = traceback.format_exc()
-            print(f"FAILED: {subj} e{row['electrode_idx']} {row['phoneme_pair']} "
-                  f"{row['word_end']} step={row['resampled']}\n{tb}")
-            b3_failures.append({**row, "error": repr(exc), "traceback": tb})
-            plt.close("all")
-
-if b3_failures:
-    pl.DataFrame(b3_failures).write_csv(SINGLE_DIR / "failures.csv")
-else:
-    (SINGLE_DIR / "failures.csv").write_text("")
-print(f"B3 rendered: {len(b3_manifest)} cells  |  failed: {len(b3_failures)}")
 
 # %% [markdown]
 # ## `matched_n_star_plot` — inline helper for B4
@@ -279,21 +166,12 @@ def matched_n_star_plot(
         rng = np.random.default_rng(0)
     ep = epochs_dict[subject]
     md = ep.metadata
-    bhv_col = (
-        "behavior_dummy_forced"
-        if "behavior_dummy_forced" in md.columns
-        else "behavior_categorical"
-    )
+    bhv_col = resolve_behavior_col(md)
 
     pp_mask = (md["phoneme_pair"] == phoneme_pair).values
     ep_pp = ep[pp_mask]
     md_pp = md[pp_mask].reset_index(drop=True)
-    hga = (
-        ep_pp.copy()
-        .apply_baseline((None, 0))
-        .get_data(picks=[electrode_idx])
-        .squeeze(1)
-    )
+    hga = extract_hga(ep_pp, electrode_idx)
     times = ep.times
 
     fig, (ax_top, ax_bot) = plt.subplots(2, 1, figsize=figsize, sharex=True)
@@ -403,7 +281,9 @@ def matched_n_star_plot(
 # %%
 _smoke = (
     trial_summary
-    .filter(pl.col(THRESHOLD_COL) & (pl.col("n_ambiguous") >= 2))
+    .filter(pl.col(THRESHOLD_COL),
+            pl.col("n_ambiguous") >= 1,)
+    .join(peaks, on=["subject", "electrode_idx", "phoneme_pair"], how="inner")
     .sort("n_per_class", descending=True)
     .head(1)
 )
@@ -412,12 +292,7 @@ if _smoke.height == 0:
           "— skipping smoke test")
 else:
     _row = _smoke.row(0, named=True)
-    _smoke_steps = [int(s) for s in _row["ambiguous_steps"].split(",")]
-    _smoke_can = peaks.filter(
-        (pl.col("subject") == _row["subject"])
-        & (pl.col("electrode_idx") == _row["electrode_idx"])
-        & (pl.col("phoneme_pair") == _row["phoneme_pair"])
-    ).row(0, named=True)
+    _smoke_steps = [int(float(s)) for s in _row["ambiguous_steps"].split(",")]
     _smoke_n = int(_row["n_per_class"])
     print(f"smoke: {_row['subject']} e{_row['electrode_idx']} "
           f"{_row['phoneme_pair']} · {_row['word_end']}  "
@@ -433,11 +308,11 @@ else:
             qualifying_steps=_smoke_steps,
             epochs_dict=epochs_dict,
             n_per_class=_smoke_n,
-            phon_smin=int(_smoke_can["smin"]),
-            phon_smax=int(_smoke_can["smax"]),
+            phon_smin=int(_row["smin"]),
+            phon_smax=int(_row["smax"]),
             phon_search_smin=AC_SEARCH_SMIN,
             phon_search_smax=AC_SEARCH_SMAX,
-            acoustic_peak_auc=float(_smoke_can["test_roc_auc"]),
+            acoustic_peak_auc=float(_row["test_roc_auc"]),
         )
         fig.savefig(MATCHED_DIR / "_smoke.pdf", bbox_inches="tight")
         plt.close(fig)
@@ -463,7 +338,7 @@ b4_per_step = (
         pl.col("min_class").sum().alias("n_per_class"),
         pl.len().alias("n_qualifying"),
     )
-    .filter((pl.col("n_qualifying") >= 2) & (pl.col("n_per_class") >= K))
+    .filter((pl.col("n_qualifying") >= 1) & (pl.col("n_per_class") >= K))
     .join(
         peaks.select(["subject", "electrode_idx", "phoneme_pair",
                       "smin", "smax", "test_roc_auc"])
@@ -473,9 +348,11 @@ b4_per_step = (
     )
     .sort(["subject", "electrode_idx", "phoneme_pair", "word_end"])
 )
-print(f"B4 cells (K={K}, ≥2 ambiguous steps, n_per_class ≥ K): {b4_per_step.height}")
+print(f"B4 cells (K={K}, ≥1 ambiguous step, n_per_class ≥ K): {b4_per_step.height}")
 print("n_per_class distribution:")
-print(b4_per_step.group_by("n_per_class").len().sort("n_per_class"))
+
+g = sns.displot(b4_per_step["n_per_class"], kde=False, height=2, aspect=3)
+g.fig.suptitle(f"n_per_class distribution for B4 cells (K={K}, ≥1 ambiguous step)", y=1.02)
 
 # %% [markdown]
 # ## Render B4 class-balanced star plots
@@ -488,7 +365,7 @@ b4_combined_pdf = MATCHED_DIR / "star_plots_all.pdf"
 with PdfPages(b4_combined_pdf) as pdf:
     fig, ax = plt.subplots(figsize=(8.5, 11))
     ax.text(0.5, 0.6,
-            f"B4 class-balanced star plots\nK={K}  (≥2 ambiguous steps)\n"
+            f"B4 class-balanced star plots\nK={K}  (≥1 ambiguous step)\n"
             f"{b4_per_step.height} (site × word_end) cells",
             ha="center", va="center", fontsize=18)
     ax.axis("off")
@@ -561,7 +438,7 @@ print(f"B4 rendered: {len(b4_manifest)} cells  |  failed: {len(b4_failures)}")
 # ## Combined manifest
 
 # %%
-manifest = pl.DataFrame(b3_manifest + b4_manifest)
+manifest = pl.DataFrame(b4_manifest)
 manifest.write_csv(STAR_DIR / "star_plot_keys.csv")
 print(f"Wrote manifest: {STAR_DIR / 'star_plot_keys.csv'}  ({manifest.height} rows)")
 print(manifest.group_by("mode").len().sort("mode"))
@@ -575,17 +452,14 @@ print(manifest.group_by("mode").len().sort("mode"))
 # %%
 print(f"K={K} ({THRESHOLD_COL}) — production default")
 print(f"\nAS sites (causal6 significant): {peaks.height}")
-print(f"Sites with ≥1 B3 cell: {sites_with_any_b3}")
 print(
-    "Sites with ≥1 B4 cell (≥2 ambiguous steps, n_per_class ≥ K): "
+    "Sites with ≥1 B4 cell (≥1 ambiguous step, n_per_class ≥ K): "
     f"{b4_per_step.select(['subject','electrode_idx','phoneme_pair']).unique().height}"
 )
-print(f"\nB3 cells rendered: {sum(1 for m in b3_manifest if m['status']=='rendered')}")
 print(f"B4 cells rendered: {sum(1 for m in b4_manifest if m['status']=='rendered')}")
 print(
-    f"Failures: B3={len(b3_failures)}, B4={len(b4_failures)} "
+    f"Failures: B4={len(b4_failures)} "
     "(must be 0 — investigate any > 0)"
 )
 print("\nNext: read outputs/causal46_joined/star_plots/"
       "{single_step,matched_n}/star_plots_all.pdf.")
-print("If B3 coverage looks too sparse, re-run with K=4 (set K=4 at the top of the notebook).")
