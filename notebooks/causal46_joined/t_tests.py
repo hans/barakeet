@@ -78,6 +78,7 @@ sys.path.insert(0, str(Path(".").resolve() / "notebooks" / "causal46_joined"))
 from _within_completion import (  # noqa: E402
     acoustic_preferred_class,
     extract_hga,
+    matched_n_star_plot,
     n_per_class_from_per_step,
     per_step_class_counts,
     resolve_behavior_col,
@@ -105,6 +106,8 @@ STRIDE = 15
 WORD_END_TAIL_SAMPLES = 20  # +200 ms past word offset (sfreq=100)
 
 AC_P_VALUE_THRESHOLD = 0.001
+AC_SEARCH_SMIN = int(_cfg["analysis"]["decoding"].get("acoustic_peak_search_smin", 0))
+AC_SEARCH_SMAX = int(_cfg["analysis"]["decoding"].get("acoustic_peak_search_smax", 50))
 
 # Same cell-inclusion floor as the star-plot gallery on this branch.
 K = 4
@@ -389,6 +392,7 @@ def per_window_summary(boot: pl.DataFrame, cell_keys: list[str]) -> pl.DataFrame
             (pl.col("mean_diff_raw") >= 0).cast(pl.Float64).mean().alias("frac_raw_ge0"),
 
             pl.col("mean_diff_aligned").median().alias("mean_diff_aligned_med"),
+            pl.col("mean_diff_aligned").mean().alias("mean_diff_aligned_mean"),
             pl.col("mean_diff_aligned").quantile(CI_LOW / 100).alias("mean_diff_aligned_ci_lo"),
             pl.col("mean_diff_aligned").quantile(CI_HIGH / 100).alias("mean_diff_aligned_ci_hi"),
             pl.col("mean_diff_aligned").std().alias("mean_diff_aligned_std"),
@@ -468,6 +472,16 @@ b4_per_cell = per_cell_best(b4_per_window, b4_cell_keys)
 if b4_per_cell.height:
     b4_per_cell.write_parquet(OUT_DIR / "b4_per_cell.parquet")
 print(f"B4 per_cell rows: {b4_per_cell.height}")
+
+# Augment with fields needed to regenerate star plots in the filtered gallery.
+if b4_per_cell.height:
+    b4_per_cell = b4_per_cell.join(
+        b4_qualified.select([
+            "subject", "electrode_idx", "phoneme_pair", "word_end",
+            "qualifying_steps", "phon_smin", "phon_smax",
+        ]),
+        on=b4_cell_keys, how="left",
+    )
 
 # %% [markdown]
 # ## ROI lookup
@@ -783,34 +797,22 @@ def _b4_pdf(row: dict) -> Path:
 
 
 def site_effect_fig(row: dict, site_per_window: pl.DataFrame) -> plt.Figure:
-    """CI-trace figure for one cell: median ± bootstrap band across windows."""
+    """CI-trace figure for one cell: bootstrap mean ± CI band across windows."""
     fig, ax = plt.subplots(figsize=(8.5, 3.2))
     if site_per_window.height > 0:
         pw = site_per_window.sort("tmin")
         tcenter = ((pw["tmin"] + pw["tmax"]) / 2).to_numpy().astype(float)
-        med = pw["mean_diff_aligned_med"].to_numpy().astype(float)
+        mn = pw["mean_diff_aligned_mean"].to_numpy().astype(float)
         ci_lo = pw["mean_diff_aligned_ci_lo"].to_numpy().astype(float)
         ci_hi = pw["mean_diff_aligned_ci_hi"].to_numpy().astype(float)
-        ax.plot(tcenter, med, color="#2166ac", lw=1.5,
-                label="median aligned mean_diff")
+        ax.plot(tcenter, mn, color="#2166ac", lw=1.5,
+                label="bootstrap mean aligned diff")
         ax.fill_between(tcenter, ci_lo, ci_hi, color="#2166ac", alpha=0.22,
                         label=f"{CI_LOW}–{CI_HIGH}% bootstrap CI")
         # Highlight best window — spans tmin to tmax so the line center sits inside it
         if row.get("best_tmin") is not None and row.get("best_tmax") is not None:
             ax.axvspan(float(row["best_tmin"]), float(row["best_tmax"]),
                        color="#fdae61", alpha=0.45, label="best window", zorder=0)
-        # Gray bar at top of axis for windows where CI excludes zero (same barh
-        # convention as the t-test significance bars in the original star plots)
-        sig_mask = pw["ci_aligned_excludes_zero"].to_numpy().astype(bool)
-        tmin_arr = pw["tmin"].to_numpy().astype(float)
-        tmax_arr = pw["tmax"].to_numpy().astype(float)
-        ymin, ymax = ax.get_ylim()
-        bar_h = (ymax - ymin) * 0.04
-        bar_y = ymin + (ymax - ymin) * 0.95
-        for i, is_sig in enumerate(sig_mask):
-            if is_sig:
-                ax.barh(y=bar_y, width=tmax_arr[i] - tmin_arr[i], left=tmin_arr[i],
-                        height=bar_h, color="gray", alpha=0.6, edgecolor="none", zorder=3)
     ax.axhline(0, color="k", lw=0.7, ls="--", alpha=0.6)
     ax.set_xlabel("Window center (s, post word onset)")
     ax.set_ylabel("aligned mean_diff (HGA)")
@@ -839,8 +841,15 @@ def write_annotated_pdfs(
     per_window: pl.DataFrame,
     cell_keys: list[str],
     out_path: Path,
+    epochs_dict: dict | None = None,
 ) -> int:
-    """Filtered-gallery PDF: per-site CI-trace page followed by its star-plot pages."""
+    """Filtered-gallery PDF: per-site CI-trace page followed by its star-plot pages.
+
+    When `epochs_dict` is provided and the row carries `qualifying_steps`,
+    `phon_smin`, and `phon_smax`, the star plot is regenerated on the fly so
+    the bottom panel shows the bootstrap mean diff overlay + significance bars.
+    Otherwise falls back to reading the pre-rendered per-site PDF.
+    """
     if not entries:
         return 0
     if not _HAS_PYPDF:
@@ -857,6 +866,8 @@ def write_annotated_pdfs(
         if "resampled" in cell_keys and row.get("resampled") is not None:
             filt = filt & (pl.col("resampled") == row["resampled"])
         site_pw = per_window.filter(filt) if per_window.height else pl.DataFrame()
+
+        # CI-trace page (without gray bars; bars move to the star plot below).
         fig = site_effect_fig(row, site_pw)
         buf = io.BytesIO()
         fig.savefig(buf, format="pdf", bbox_inches="tight")
@@ -864,12 +875,75 @@ def write_annotated_pdfs(
         buf.seek(0)
         for page in PdfReader(buf).pages:
             writer.add_page(page)
-        try:
-            for page in PdfReader(str(pdf_p)).pages:
-                writer.add_page(page)
-            n += 1
-        except Exception as exc:
-            print(f"  ⚠ skipping unreadable PDF {pdf_p}: {exc}")
+
+        # Precompute sig windows and bootstrap mean-diff arrays for ax_bot overlay.
+        sig_wins = None
+        mda = None
+        if site_pw.height:
+            pw_s = site_pw.sort("tmin")
+            sig_list = [
+                (float(r["tmin"]), float(r["tmax"]))
+                for r in pw_s.filter(pl.col("ci_aligned_excludes_zero")).iter_rows(named=True)
+            ]
+            sig_wins = sig_list or None
+            mda = {
+                "tcenter": ((pw_s["tmin"] + pw_s["tmax"]) / 2).to_numpy().astype(float),
+                "mean": pw_s["mean_diff_aligned_mean"].to_numpy().astype(float),
+                "ci_lo": pw_s["mean_diff_aligned_ci_lo"].to_numpy().astype(float),
+                "ci_hi": pw_s["mean_diff_aligned_ci_hi"].to_numpy().astype(float),
+            }
+
+        # Try to regenerate star plot with sig bars + overlay on ax_bot.
+        qs = row.get("qualifying_steps")
+        can_regen = (
+            epochs_dict is not None
+            and row.get("subject") in epochs_dict
+            and qs is not None
+            and row.get("phon_smin") is not None
+        )
+        if can_regen:
+            if isinstance(qs, str):
+                qs = [int(s) for s in qs.split(",") if s]
+            try:
+                fig2 = matched_n_star_plot(
+                    subject=row["subject"],
+                    electrode_idx=int(row["electrode_idx"]),
+                    phoneme_pair=row["phoneme_pair"],
+                    word_end=row["word_end"],
+                    qualifying_steps=list(qs),
+                    epochs_dict=epochs_dict,
+                    n_per_class=int(row["n_per_class"]),
+                    phon_smin=int(row["phon_smin"]),
+                    phon_smax=int(row["phon_smax"]),
+                    phon_search_smin=AC_SEARCH_SMIN,
+                    phon_search_smax=AC_SEARCH_SMAX,
+                    acoustic_peak_auc=row.get("acoustic_peak_auc"),
+                    sig_windows=sig_wins,
+                    mean_diff_arrays=mda,
+                )
+                buf2 = io.BytesIO()
+                fig2.savefig(buf2, format="pdf", bbox_inches="tight")
+                plt.close(fig2)
+                buf2.seek(0)
+                for page in PdfReader(buf2).pages:
+                    writer.add_page(page)
+                n += 1
+            except Exception as exc:
+                print(f"  ⚠ star plot regen failed for {row['subject']} "
+                      f"e{row['electrode_idx']}: {exc}")
+                try:
+                    for page in PdfReader(str(pdf_p)).pages:
+                        writer.add_page(page)
+                    n += 1
+                except Exception as exc2:
+                    print(f"  ⚠ skipping unreadable PDF {pdf_p}: {exc2}")
+        else:
+            try:
+                for page in PdfReader(str(pdf_p)).pages:
+                    writer.add_page(page)
+                n += 1
+            except Exception as exc:
+                print(f"  ⚠ skipping unreadable PDF {pdf_p}: {exc}")
     if n:
         with out_path.open("wb") as fh:
             writer.write(fh)
@@ -929,9 +1003,11 @@ if b4_per_cell.height:
             "status": "ok",
         })
     n_p = write_annotated_pdfs(powered_entries, b4_per_window, b4_cell_keys,
-                               FILT_DIR / "b4_powered.pdf")
+                               FILT_DIR / "b4_powered.pdf",
+                               epochs_dict=epochs_dict)
     n_s = write_annotated_pdfs(sig_entries, b4_per_window, b4_cell_keys,
-                               FILT_DIR / "b4_powered_significant.pdf")
+                               FILT_DIR / "b4_powered_significant.pdf",
+                               epochs_dict=epochs_dict)
     print(f"B4 filtered PDFs: powered={n_p}  significant={n_s}")
 
 under = cell_manifest.filter(

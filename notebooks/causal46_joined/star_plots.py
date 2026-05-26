@@ -58,7 +58,7 @@ from src.viz_provisional import (
 
 import sys
 sys.path.insert(0, str(Path(".").resolve() / "notebooks" / "causal46_joined"))
-from _within_completion import extract_hga, resolve_behavior_col
+from _within_completion import extract_hga, matched_n_star_plot, resolve_behavior_col
 
 # %%
 REPO = Path(".").resolve()
@@ -143,133 +143,7 @@ print(f"ambig_steps_default: {len(ambig_steps_default)} (subject, pp, word_end) 
 # recomputes from metadata — that's a counting bug, not bad data.
 
 
-# %%
-def matched_n_star_plot(
-    subject,
-    electrode_idx,
-    phoneme_pair,
-    word_end,
-    qualifying_steps,
-    *,
-    epochs_dict,
-    n_per_class,
-    phon_smin=None,
-    phon_smax=None,
-    phon_search_smin=None,
-    phon_search_smax=None,
-    textgrid_dir="textgrids",
-    figsize=(6.5, 5.5),
-    acoustic_peak_auc=None,
-    rng=None,
-):
-    if rng is None:
-        rng = np.random.default_rng(0)
-    ep = epochs_dict[subject]
-    md = ep.metadata
-    bhv_col = resolve_behavior_col(md)
-
-    pp_mask = (md["phoneme_pair"] == phoneme_pair).values
-    ep_pp = ep[pp_mask]
-    md_pp = md[pp_mask].reset_index(drop=True)
-    hga = extract_hga(ep_pp, electrode_idx)
-    times = ep.times
-
-    fig, (ax_top, ax_bot) = plt.subplots(2, 1, figsize=figsize, sharex=True)
-
-    # Top: unambiguous step 1 & 6 (mirrors provisional_star_plot top).
-    step_colors = {1: "#2166ac", 6: "#d73027"}
-    for step, color in step_colors.items():
-        mask = (md_pp["resampled"] == step).values
-        if not mask.any():
-            continue
-        tr = hga[mask]
-        m = tr.mean(0)
-        se = tr.std(0) / np.sqrt(mask.sum())
-        ax_top.plot(times, m, color=color, lw=1.5,
-                    label=f"step {step}  (n={mask.sum()})")
-        ax_top.fill_between(times, m - se, m + se, color=color, alpha=0.18)
-    if phon_search_smin is not None and phon_search_smax is not None:
-        for s in (phon_search_smin, phon_search_smax):
-            ax_top.axvline(s / epoch_sfreq + epoch_tmin,
-                           color="k", lw=0.6, ls="--", alpha=0.5)
-    if phon_smin is not None:
-        t_phon = np.array([phon_smin, phon_smax]) / epoch_sfreq + epoch_tmin
-        ax_top.axvspan(*t_phon, color="#4dac26", alpha=0.20, label="acoustic peak")
-    ax_top.axhline(0, color="k", lw=0.5, ls=":")
-    ax_top.set_ylabel("HGA (z)")
-    top_title = (
-        f"{subject} e{electrode_idx} {phoneme_pair} · {word_end} — unambiguous"
-    )
-    if acoustic_peak_auc is not None:
-        top_title += f"  (ac={acoustic_peak_auc:.3f})"
-    ax_top.set_title(top_title, fontsize=9, pad=20)
-    ax_top.legend(fontsize=7, loc="upper left", framealpha=0.7)
-
-    # Bottom: at each ambiguous step, draw min_class[s] of each class
-    # (minority in full; majority subsampled), then concat across steps.
-    # Both classes end up with the same step composition by construction.
-    bhv_colors = ["#2166ac", "#d73027"]
-    we_mask = (md_pp["word_end"] == word_end).values
-    bhv_vals = sorted(md_pp.loc[we_mask, bhv_col].dropna().unique())
-
-    chosen_per_class: dict = {bhv: [] for bhv in bhv_vals}
-    pool_check = 0
-    for s in sorted(qualifying_steps):
-        step_mask = we_mask & (md_pp["resampled"] == s).values
-        step_idxs = {
-            bhv: np.where(step_mask & (md_pp[bhv_col] == bhv).values)[0]
-            for bhv in bhv_vals
-        }
-        n_s = min(len(v) for v in step_idxs.values())
-        pool_check += n_s
-        for bhv in bhv_vals:
-            chosen_per_class[bhv].append(
-                rng.choice(step_idxs[bhv], size=n_s, replace=False)
-            )
-    if pool_check != n_per_class:
-        raise ValueError(
-            f"pool size mismatch: per-step min_class summed to {pool_check}, "
-            f"caller passed n_per_class={n_per_class} (data integrity bug)"
-        )
-    chosen_per_class = {
-        bhv: np.concatenate(arrs) for bhv, arrs in chosen_per_class.items()
-    }
-
-    for i, bhv in enumerate(bhv_vals):
-        tr = hga[chosen_per_class[bhv]]
-        m = tr.mean(0)
-        se = tr.std(0) / np.sqrt(tr.shape[0])
-        color = bhv_colors[i % len(bhv_colors)]
-        ax_bot.plot(
-            times, m, color=color, lw=1.5,
-            label=f"resp={bhv}  (n={tr.shape[0]})",
-        )
-        ax_bot.fill_between(times, m - se, m + se, color=color, alpha=0.18)
-    ax_bot.axhline(0, color="k", lw=0.5, ls=":")
-    ax_bot.set_ylabel("HGA (z)")
-    ax_bot.set_xlabel("Time (s, post word onset)")
-    ax_bot.set_title(
-        f"Per-step class-balanced — steps {list(qualifying_steps)}  "
-        f"({n_per_class} per class)",
-        fontsize=9,
-        pad=20,
-    )
-    ax_bot.legend(fontsize=7, loc="upper left", framealpha=0.7)
-
-    textgrid_file = next(iter(Path(textgrid_dir).glob(f"*_{word_end}_{phoneme_pair}_*.TextGrid")))
-
-    for ax in (ax_top, ax_bot):
-        add_textgrid(
-            ax,
-            textgrid_dir=textgrid_dir,
-            textgrid_file=textgrid_file.name,
-            vline_extent=1.0,
-        )
-
-    xlim = OFFSET_DICT.get(word_end, 1.0) + 0.1
-    ax_top.set_xlim(0.0, xlim)
-    fig.tight_layout()
-    return fig
+# matched_n_star_plot is defined in _within_completion.py (imported above).
 
 
 # %% [markdown]
