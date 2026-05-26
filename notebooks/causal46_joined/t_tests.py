@@ -950,6 +950,18 @@ def site_effect_fig(row: dict, site_per_window: pl.DataFrame) -> plt.Figure:
         if row.get("best_tmin") is not None and row.get("best_tmax") is not None:
             ax.axvspan(float(row["best_tmin"]), float(row["best_tmax"]),
                        color="#fdae61", alpha=0.45, label="best window", zorder=0)
+        # Gray bar at top of axis for windows where CI excludes zero (same barh
+        # convention as the t-test significance bars in the original star plots)
+        sig_mask = pw["ci_aligned_excludes_zero"].to_numpy().astype(bool)
+        tmin_arr = pw["tmin"].to_numpy().astype(float)
+        tmax_arr = pw["tmax"].to_numpy().astype(float)
+        ymin, ymax = ax.get_ylim()
+        bar_h = (ymax - ymin) * 0.04
+        bar_y = ymin + (ymax - ymin) * 0.95
+        for i, is_sig in enumerate(sig_mask):
+            if is_sig:
+                ax.barh(y=bar_y, width=tmax_arr[i] - tmin_arr[i], left=tmin_arr[i],
+                        height=bar_h, color="gray", alpha=0.6, edgecolor="none", zorder=3)
     ax.axhline(0, color="k", lw=0.7, ls="--", alpha=0.6)
     ax.set_xlabel("Window center (s, post word onset)")
     ax.set_ylabel("aligned mean_diff (HGA)")
