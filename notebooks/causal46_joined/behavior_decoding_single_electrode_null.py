@@ -14,6 +14,8 @@
 # ---
 
 # %% [markdown]
+# Sync source: notebooks/causal6/behavior_decoding_single_electrode_null.py
+#
 # causal6: behavior-with-control permutation-null refits with two-stage
 # adaptive K.
 #
@@ -113,7 +115,7 @@ outdir = Path(outdir)
 # %%
 electrode_df = pd.read_csv(electrodes_path)
 speech_responsive_idxs = sorted(
-    electrode_df.loc[electrode_df.speech_responsive, "electrode_idx"].unique().astype(int)
+    electrode_df.loc[electrode_df.acoustic_significant & electrode_df.speech_responsive, "electrode_idx"].unique().astype(int)
 )
 
 epochs = mne.read_epochs(epochs_path, verbose=False)

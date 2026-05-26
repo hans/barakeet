@@ -157,7 +157,7 @@ def matched_n_star_plot(
     phon_smax=None,
     phon_search_smin=None,
     phon_search_smax=None,
-    textgrid_dir="data/stimuli/textgrid",
+    textgrid_dir="textgrids",
     figsize=(6.5, 5.5),
     acoustic_peak_auc=None,
     rng=None,
@@ -202,13 +202,13 @@ def matched_n_star_plot(
     )
     if acoustic_peak_auc is not None:
         top_title += f"  (ac={acoustic_peak_auc:.3f})"
-    ax_top.set_title(top_title, fontsize=9)
+    ax_top.set_title(top_title, fontsize=9, pad=20)
     ax_top.legend(fontsize=7, loc="upper left", framealpha=0.7)
 
     # Bottom: at each ambiguous step, draw min_class[s] of each class
     # (minority in full; majority subsampled), then concat across steps.
     # Both classes end up with the same step composition by construction.
-    bhv_colors = ["#762a83", "#1b7837"]
+    bhv_colors = ["#2166ac", "#d73027"]
     we_mask = (md_pp["word_end"] == word_end).values
     bhv_vals = sorted(md_pp.loc[we_mask, bhv_col].dropna().unique())
 
@@ -252,19 +252,19 @@ def matched_n_star_plot(
         f"Per-step class-balanced — steps {list(qualifying_steps)}  "
         f"({n_per_class} per class)",
         fontsize=9,
+        pad=20,
     )
     ax_bot.legend(fontsize=7, loc="upper left", framealpha=0.7)
 
-    try:
-        for ax in (ax_top, ax_bot):
-            add_textgrid(
-                ax,
-                textgrid_dir=textgrid_dir,
-                textgrid_file=f"11_{word_end}_dn_002.TextGrid",
-                vline_extent=1.0,
-            )
-    except Exception:
-        pass
+    textgrid_file = next(iter(Path(textgrid_dir).glob(f"*_{word_end}_{phoneme_pair}_*.TextGrid")))
+
+    for ax in (ax_top, ax_bot):
+        add_textgrid(
+            ax,
+            textgrid_dir=textgrid_dir,
+            textgrid_file=textgrid_file.name,
+            vline_extent=1.0,
+        )
 
     xlim = OFFSET_DICT.get(word_end, 1.0) + 0.1
     ax_top.set_xlim(0.0, xlim)
@@ -315,7 +315,7 @@ else:
             acoustic_peak_auc=float(_row["test_roc_auc"]),
         )
         fig.savefig(MATCHED_DIR / "_smoke.pdf", bbox_inches="tight")
-        plt.close(fig)
+        # plt.close(fig)
         print(f"Wrote {MATCHED_DIR / '_smoke.pdf'} — eyeball before the full gallery.")
 
 # %% [markdown]

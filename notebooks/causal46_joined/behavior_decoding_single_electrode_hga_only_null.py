@@ -14,22 +14,15 @@
 # ---
 
 # %% [markdown]
-# causal6: behavior-with-control permutation-null refits with two-stage
+# Sync source: notebooks/causal6/behavior_decoding_single_electrode_hga_only_null.py
+#
+# causal6: behavior-HGA-only permutation-null refits with two-stage
 # adaptive K.
 #
-# Stage 1 runs `n_permutations_stage1` shuffles for both `model='full'`
-# and `model='baseline'`. The stage-1 nulls are aggregated via
-# `aggregate_behavior_with_control` (paired full−baseline diff) and
-# gated by `stage1_gate` over the four behavior flavors (fold_mean +
-# t_stat, raw + TFCE). Borderline sites get K2 more shuffles (with
-# non-overlapping seeds for determinism) restricted to the borderline
-# electrodes; results are filtered down to the exact borderline
-# (electrode_idx, phoneme_pair, word_end) tuples and merged with stage 1.
-#
-# Outputs:
-#   null_scores.parquet     — merged stage1 + filtered stage2 null.
-#   escalation_log.parquet  — per-site corrected_p, peak window/
-#                             flavor, escalated bool, final per-site K.
+# Same shape as the with-control variant, but the aggregator centers the
+# fold-mean statistic on AUC=0.5. The TFCE flavor for fold_mean uses
+# threshold=0.5 (chance-level floor) — handled inside `stage1_gate` via
+# `FLAVORS_BEHAVIOR_HGA_ONLY[*].tfce_threshold`.
 
 # %%
 import os
@@ -49,7 +42,7 @@ import torch
 from src.data import add_metadata_features
 from src.models.causal6 import (
     make_windows,
-    run_behavior_with_control_permutations,
+    run_behavior_hga_only_permutations,
 )
 from src.models.causal6_adaptive_null import (
     filter_null_to_borderline,
@@ -61,18 +54,18 @@ from src.models.causal6_adaptive_null import (
     stage3_boost,
 )
 from src.models.causal6_aggregates import (
-    FLAVORS_BEHAVIOR_WITH_CONTROL,
-    SITE_KEYS_BEHAVIOR_WITH_CONTROL,
-    aggregate_behavior_with_control,
+    FLAVORS_BEHAVIOR_HGA_ONLY,
+    SITE_KEYS_BEHAVIOR_HGA_ONLY,
+    aggregate_behavior_hga_only,
     behavior_null_smax,
-    preagg_behavior_with_control_null,
+    preagg_behavior_hga_only_null,
 )
 
 # %% tags=["parameters"]
 subject = "EC282"
 epochs_path = f"outputs/epochs_preprocessed/{subject}_epo.fif"
 electrodes_path = f"outputs/causal5/find_speech_responsive/{subject}_results.csv"
-scores_path = f"outputs/causal6/behavior_decoding_single_electrode/{subject}/scores.parquet"
+scores_path = f"outputs/causal6/behavior_decoding_single_electrode_hga_only/{subject}/scores.parquet"
 outdir = "."
 
 min_sample = 1
@@ -86,7 +79,6 @@ peak_search_smin = 0
 peak_search_smax = 290
 
 reg_lambda = 1.0
-reg_lambda_baseline = None
 n_folds = 5
 cv_random_state = 42
 device = "cuda"
@@ -113,7 +105,7 @@ outdir = Path(outdir)
 # %%
 electrode_df = pd.read_csv(electrodes_path)
 speech_responsive_idxs = sorted(
-    electrode_df.loc[electrode_df.speech_responsive, "electrode_idx"].unique().astype(int)
+    electrode_df.loc[electrode_df.acoustic_significant & electrode_df.speech_responsive, "electrode_idx"].unique().astype(int)
 )
 
 epochs = mne.read_epochs(epochs_path, verbose=False)
@@ -130,12 +122,11 @@ windows = windows[(windows[:, 0] >= peak_search_smin) & (windows[:, 1] <= _null_
 
 # %%
 stage1_seeds = list(range(permutation_seed, permutation_seed + n_permutations_stage1))
-null_stage1_raw = run_behavior_with_control_permutations(
+null_stage1_raw = run_behavior_hga_only_permutations(
     epochs, subject=subject,
     electrode_idxs=speech_responsive_idxs,
     windows=windows,
     reg_lambda=reg_lambda,
-    reg_lambda_baseline=reg_lambda_baseline,
     permute_seeds=stage1_seeds,
     permutation_chunk_size=permutation_chunk_size,
     n_folds=n_folds, cv_random_state=cv_random_state,
@@ -143,7 +134,7 @@ null_stage1_raw = run_behavior_with_control_permutations(
     tol=tol, max_iter=max_iter,
 )
 assert null_stage1_raw.height > 0, (
-    f"[{subject}] behavior with-control stage-1 produced no rows"
+    f"[{subject}] behavior hga_only stage-1 produced no rows"
 )
 
 # %% [markdown]
@@ -151,10 +142,10 @@ assert null_stage1_raw.height > 0, (
 
 # %%
 real_scores = pl.read_parquet(scores_path)
-null_stage1 = preagg_behavior_with_control_null(null_stage1_raw, real_scores)
+null_stage1 = preagg_behavior_hga_only_null(null_stage1_raw, real_scores)
 del null_stage1_raw
 
-real_agg, null_agg_stage1 = aggregate_behavior_with_control(
+real_agg, null_agg_stage1 = aggregate_behavior_hga_only(
     real_scores, null_stage1,
     epoch_tmin=epoch_tmin,
     epoch_sfreq=epoch_sfreq,
@@ -165,8 +156,8 @@ real_agg, null_agg_stage1 = aggregate_behavior_with_control(
 
 borderline_keys, gate_log = stage1_gate(
     real_agg, null_agg_stage1,
-    site_keys=SITE_KEYS_BEHAVIOR_WITH_CONTROL,
-    flavors=FLAVORS_BEHAVIOR_WITH_CONTROL,
+    site_keys=SITE_KEYS_BEHAVIOR_HGA_ONLY,
+    flavors=FLAVORS_BEHAVIOR_HGA_ONLY,
     p_max=escalate_corrected_p_max,
 )
 
@@ -181,6 +172,14 @@ log_stage1_gate(
 
 # %% [markdown]
 # ## Stage 2 — additional permutations on the borderline electrodes only.
+#
+# Stage-2 raw output (electrode × phoneme_pair × word_end × window × perm ×
+# fold) blows past 200 GB of RAM on high-electrode-count subjects when
+# materialized as a single DataFrame, then ~5/6 of those rows get dropped
+# by the `(electrode, phoneme_pair, word_end)` borderline filter. We
+# instead stream chunks to a per-rule spill directory, scan_parquet → semi-
+# join with `borderline_keys` lazily → collect, so peak RAM stays bounded
+# by the filtered result.
 
 # %%
 if borderline_keys and n_permutations_stage2 > 0:
@@ -188,16 +187,15 @@ if borderline_keys and n_permutations_stage2 > 0:
         permutation_seed + n_permutations_stage1,
         permutation_seed + n_permutations_stage1 + n_permutations_stage2,
     ))
-    eidx_pos = SITE_KEYS_BEHAVIOR_WITH_CONTROL.index("electrode_idx")
+    eidx_pos = SITE_KEYS_BEHAVIOR_HGA_ONLY.index("electrode_idx")
     borderline_electrode_idxs = sorted({k[eidx_pos] for k in borderline_keys})
 
     with stage2_spill_dir(outdir) as spill_dir:
-        run_behavior_with_control_permutations(
+        run_behavior_hga_only_permutations(
             epochs, subject=subject,
             electrode_idxs=borderline_electrode_idxs,
             windows=windows,
             reg_lambda=reg_lambda,
-            reg_lambda_baseline=reg_lambda_baseline,
             permute_seeds=stage2_seeds,
             permutation_chunk_size=permutation_chunk_size,
             n_folds=n_folds, cv_random_state=cv_random_state,
@@ -208,10 +206,9 @@ if borderline_keys and n_permutations_stage2 > 0:
         null_stage2_raw = filter_null_to_borderline(
             pl.scan_parquet(spill_dir / "*.parquet"),
             borderline_keys,
-            site_keys=SITE_KEYS_BEHAVIOR_WITH_CONTROL,
-            baseline_site_keys=["subject", "phoneme_pair", "word_end"],
+            site_keys=SITE_KEYS_BEHAVIOR_HGA_ONLY,
         ).collect()
-    null_stage2 = preagg_behavior_with_control_null(null_stage2_raw, real_scores)
+    null_stage2 = preagg_behavior_hga_only_null(null_stage2_raw, real_scores)
     del null_stage2_raw
 
     null_scores = pl.concat([null_stage1, null_stage2])
@@ -249,29 +246,27 @@ if fdr_rois and electrode_dfs_paths and n_permutations_stage3 > 0:
         real_agg=real_agg,
         null_scores=null_scores,
         gate_log=gate_log,
-        site_keys=SITE_KEYS_BEHAVIOR_WITH_CONTROL,
-        flavors=FLAVORS_BEHAVIOR_WITH_CONTROL,
+        site_keys=SITE_KEYS_BEHAVIOR_HGA_ONLY,
+        flavors=FLAVORS_BEHAVIOR_HGA_ONLY,
         aggregate_fn=partial(
-            aggregate_behavior_with_control,
+            aggregate_behavior_hga_only,
             epoch_tmin=epoch_tmin,
             epoch_sfreq=epoch_sfreq,
             behav_peak_post_offset_s=behav_peak_post_offset_s,
             peak_search_smin=peak_search_smin,
             peak_search_smax=peak_search_smax,
         ),
-        preagg_fn=preagg_behavior_with_control_null,
+        preagg_fn=preagg_behavior_hga_only_null,
         run_permutations_fn=partial(
-            run_behavior_with_control_permutations,
+            run_behavior_hga_only_permutations,
             epochs, subject=subject,
             windows=windows,
             reg_lambda=reg_lambda,
-            reg_lambda_baseline=reg_lambda_baseline,
             permutation_chunk_size=permutation_chunk_size,
             n_folds=n_folds, cv_random_state=cv_random_state,
             device=device, dtype=torch.float32,
             tol=tol, max_iter=max_iter,
         ),
-        baseline_site_keys=["subject", "phoneme_pair", "word_end"],
         electrode_dfs=electrode_dfs,
         fdr_rois=fdr_rois,
         k_gate=stage3_k_gate,

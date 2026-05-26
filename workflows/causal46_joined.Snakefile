@@ -1,0 +1,1046 @@
+# =============================================================================
+# causal46_joined: behavior + ganong decoders restricted to AS sites
+#
+# This pipeline re-runs the causal6 behavior_* and ganong_* decoder family
+# (decode + null + summarize + aggregate, full + hga_only) on the subset of
+# electrodes that are acoustic-significant (AS) per the causal6 acoustic
+# peak test. Restricting the electrode set shrinks the per-electrode FDR
+# family enough that cross-pair behavioral tests at each AS site have
+# headroom to survive correction.
+#
+# AS definition: uncorrected `p_value < 0.05` in
+#   outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet
+# collapsed to electrode level via OR over `phoneme_pair`.
+#
+# Inputs assumed already produced by the causal6 pipeline:
+#   - outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet
+#   - outputs/causal6/find_speech_responsive/{subject}_results.csv
+#
+# This Snakefile `include:`s causal6.Snakefile to inherit helpers
+# (`run_notebook`, `run_notebook_with_gpu`, `_provision_node`, `C6`).
+# =============================================================================
+
+from pathlib import Path
+
+
+configfile: "config.yaml"
+include: "causal6.Snakefile"
+
+
+# =============================================================================
+# Checkpoint: build the AS electrode filter
+# =============================================================================
+
+
+checkpoint prepare_as_electrode_filter:
+    """Compute the AS-electrode mask from causal6 acoustic peaks.
+
+    Writes per-subject CSVs (full causal6 schema + new `acoustic_significant`
+    column) and a `subjects_with_as.txt` manifest listing the subjects with at
+    least one AS electrode. Downstream joined aggregate rules consume the
+    manifest to skip empty subjects.
+    """
+    input:
+        phon_peaks_all   = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet",
+        electrode_csvs   = expand(
+            "outputs/causal6/find_speech_responsive/{subject}_results.csv",
+            subject=config["data"]["subjects"],
+        ),
+        notebook         = "notebooks/causal46_joined/prepare_as_electrode_filter.py",
+
+    output:
+        notebook = "outputs/causal46_joined/electrodes_as_filtered/notebook.ipynb",
+        manifest = "outputs/causal46_joined/electrodes_as_filtered/subjects_with_as.txt",
+        csvs     = expand(
+            "outputs/causal46_joined/electrodes_as_filtered/{subject}_results.csv",
+            subject=config["data"]["subjects"],
+        ),
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                phon_peaks_path=str(input.phon_peaks_all),
+                electrode_csv_paths=list(input.electrode_csvs),
+                outdir=str(outdir),
+                as_p_threshold=0.05,
+            ),
+        )
+
+
+# =============================================================================
+# Helper for aggregate rules: resolve per-subject input paths from the
+# checkpoint's `subjects_with_as.txt` manifest. Snakemake calls the returned
+# function with `wildcards` at DAG-build time, after the checkpoint has run.
+# =============================================================================
+
+
+def joined_aggregate_paths(template):
+    def _fn(wildcards):
+        ckpt = checkpoints.prepare_as_electrode_filter.get().output.manifest
+        with open(ckpt) as f:
+            subjects = [s.strip() for s in f if s.strip()]
+        return [template.format(subject=s) for s in subjects]
+    return _fn
+
+
+# =============================================================================
+# Per-subject decoder rules — mechanical clones of their causal6 counterparts
+# with the electrode CSV input rerouted to the AS-filtered manifest and the
+# notebook path swapped to the causal46_joined copy.
+# =============================================================================
+
+
+rule joined_behavior_decoding_single_electrode:
+    """Behavior decoding with resampled control — AS-restricted."""
+    input:
+        epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
+        electrodes = "outputs/causal46_joined/electrodes_as_filtered/{subject}_results.csv",
+        winners    = REG_LAMBDA_WINNERS,
+        notebook   = "notebooks/causal46_joined/behavior_decoding_single_electrode.py",
+
+    output:
+        notebook     = "outputs/causal46_joined/behavior_decoding_single_electrode/{subject}/notebook.ipynb",
+        scores       = "outputs/causal46_joined/behavior_decoding_single_electrode/{subject}/scores.parquet",
+        predictions  = "outputs/causal46_joined/behavior_decoding_single_electrode/{subject}/predictions.parquet",
+        coefficients = "outputs/causal46_joined/behavior_decoding_single_electrode/{subject}/coefficients.parquet",
+
+    resources:
+        gpu = 1
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook_with_gpu(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                epochs_path=str(input.epochs),
+                electrodes_path=str(input.electrodes),
+                outdir=str(outdir),
+
+                min_sample=config["analysis"]["decoding"]["min_sample"],
+                window_size=config["analysis"]["decoding"]["window_size"],
+                stride=config["analysis"]["decoding"]["stride"],
+
+                reg_lambda=_load_reg_lambda(input.winners, "behavior_full"),
+                reg_lambda_baseline=None,
+                n_folds=C6["n_folds"],
+                cv_random_state=C6["cv_random_state"],
+                device=C6["device"],
+                tol=C6["tol"],
+                max_iter=C6["max_iter"],
+            ),
+            wildcards=wildcards,
+            resources=resources,
+        )
+
+
+rule joined_behavior_decoding_single_electrode_hga_only:
+    """Behavior decoding, HGA only — AS-restricted."""
+    input:
+        epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
+        electrodes = "outputs/causal46_joined/electrodes_as_filtered/{subject}_results.csv",
+        winners    = REG_LAMBDA_WINNERS,
+        notebook   = "notebooks/causal46_joined/behavior_decoding_single_electrode_hga_only.py",
+
+    output:
+        notebook     = "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only/{subject}/notebook.ipynb",
+        scores       = "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only/{subject}/scores.parquet",
+        predictions  = "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only/{subject}/predictions.parquet",
+        coefficients = "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only/{subject}/coefficients.parquet",
+
+    resources:
+        gpu = 1
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook_with_gpu(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                epochs_path=str(input.epochs),
+                electrodes_path=str(input.electrodes),
+                outdir=str(outdir),
+
+                min_sample=config["analysis"]["decoding"]["min_sample"],
+                window_size=config["analysis"]["decoding"]["window_size"],
+                stride=config["analysis"]["decoding"]["stride"],
+
+                reg_lambda=_load_reg_lambda(input.winners, "behavior_hga_only"),
+                n_folds=C6["n_folds"],
+                cv_random_state=C6["cv_random_state"],
+                device=C6["device"],
+                tol=C6["tol"],
+                max_iter=C6["max_iter"],
+            ),
+            wildcards=wildcards,
+            resources=resources,
+        )
+
+
+# =============================================================================
+# Per-subject null refits — AS-restricted clones of the causal6 null rules.
+# =============================================================================
+
+
+rule joined_behavior_decoding_single_electrode_null:
+    """Per-subject behavior-with-control permutation-null refits — AS-restricted."""
+    input:
+        epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
+        electrodes = "outputs/causal46_joined/electrodes_as_filtered/{subject}_results.csv",
+        winners    = REG_LAMBDA_WINNERS,
+        scores     = "outputs/causal46_joined/behavior_decoding_single_electrode/{subject}/scores.parquet",
+        notebook   = "notebooks/causal46_joined/behavior_decoding_single_electrode_null.py",
+        all_electrode_dfs = expand(
+            "outputs/causal46_joined/electrodes_as_filtered/{subject}_results.csv",
+            subject=config["data"]["subjects"],
+        ),
+
+    output:
+        notebook        = "outputs/causal46_joined/behavior_decoding_single_electrode_null/{subject}/notebook.ipynb",
+        null_scores     = "outputs/causal46_joined/behavior_decoding_single_electrode_null/{subject}/null_scores.parquet",
+        escalation_log  = "outputs/causal46_joined/behavior_decoding_single_electrode_null/{subject}/escalation_log.parquet",
+
+    resources:
+        gpu = 1,
+        mem_gb = 200
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook_with_gpu(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                epochs_path=str(input.epochs),
+                electrodes_path=str(input.electrodes),
+                scores_path=str(input.scores),
+                outdir=str(outdir),
+
+                min_sample=config["analysis"]["decoding"]["min_sample"],
+                window_size=config["analysis"]["decoding"]["window_size"],
+                stride=config["analysis"]["decoding"]["stride"],
+
+                epoch_tmin=config["analysis"]["epoch_tmin"],
+                epoch_sfreq=config["analysis"]["epoch_sfreq"],
+                behav_peak_post_offset_s=config["analysis"]["behav_peak_post_offset_s"],
+                peak_search_smin=config["analysis"]["decoding"]["peak_search_smin"],
+                peak_search_smax=config["analysis"]["decoding"]["peak_search_smax"],
+
+                reg_lambda=_load_reg_lambda(input.winners, "behavior_full"),
+                reg_lambda_baseline=None,
+                n_folds=C6["n_folds"],
+                cv_random_state=C6["cv_random_state"],
+                device=C6["device"],
+                tol=C6["tol"],
+                max_iter=C6["max_iter"],
+
+                n_permutations_stage1=C6["n_permutations_stage1"],
+                n_permutations_stage2=C6["n_permutations_stage2"],
+                escalate_corrected_p_max=C6["escalate_corrected_p_max"],
+                permutation_seed=C6["permutation_seed"],
+                permutation_chunk_size=C6["permutation_chunk_size"],
+
+                n_permutations_stage3=C6["n_permutations_stage3"],
+                stage3_k_gate=C6["stage3_k_gate"],
+                fdr_alpha=config["analysis"]["fdr_alpha"],
+                fdr_rois=config["analysis"]["fdr_rois"],
+                electrode_dfs_paths=list(input.all_electrode_dfs),
+            ),
+            wildcards=wildcards,
+            resources=resources,
+        )
+
+
+rule joined_behavior_decoding_single_electrode_hga_only_null:
+    """Per-subject behavior-HGA-only permutation-null refits — AS-restricted."""
+    input:
+        epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
+        electrodes = "outputs/causal46_joined/electrodes_as_filtered/{subject}_results.csv",
+        winners    = REG_LAMBDA_WINNERS,
+        scores     = "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only/{subject}/scores.parquet",
+        notebook   = "notebooks/causal46_joined/behavior_decoding_single_electrode_hga_only_null.py",
+        all_electrode_dfs = expand(
+            "outputs/causal46_joined/electrodes_as_filtered/{subject}_results.csv",
+            subject=config["data"]["subjects"],
+        ),
+
+    output:
+        notebook        = "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only_null/{subject}/notebook.ipynb",
+        null_scores     = "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only_null/{subject}/null_scores.parquet",
+        escalation_log  = "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only_null/{subject}/escalation_log.parquet",
+
+    resources:
+        gpu = 1,
+        mem_gb = 200
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook_with_gpu(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                epochs_path=str(input.epochs),
+                electrodes_path=str(input.electrodes),
+                scores_path=str(input.scores),
+                outdir=str(outdir),
+
+                min_sample=config["analysis"]["decoding"]["min_sample"],
+                window_size=config["analysis"]["decoding"]["window_size"],
+                stride=config["analysis"]["decoding"]["stride"],
+
+                epoch_tmin=config["analysis"]["epoch_tmin"],
+                epoch_sfreq=config["analysis"]["epoch_sfreq"],
+                behav_peak_post_offset_s=config["analysis"]["behav_peak_post_offset_s"],
+                peak_search_smin=config["analysis"]["decoding"]["peak_search_smin"],
+                peak_search_smax=config["analysis"]["decoding"]["peak_search_smax"],
+
+                reg_lambda=_load_reg_lambda(input.winners, "behavior_hga_only"),
+                n_folds=C6["n_folds"],
+                cv_random_state=C6["cv_random_state"],
+                device=C6["device"],
+                tol=C6["tol"],
+                max_iter=C6["max_iter"],
+
+                n_permutations_stage1=C6["n_permutations_stage1"],
+                n_permutations_stage2=C6["n_permutations_stage2"],
+                escalate_corrected_p_max=C6["escalate_corrected_p_max"],
+                permutation_seed=C6["permutation_seed"],
+                permutation_chunk_size=C6["permutation_chunk_size"],
+
+                n_permutations_stage3=C6["n_permutations_stage3"],
+                stage3_k_gate=C6["stage3_k_gate"],
+                fdr_alpha=config["analysis"]["fdr_alpha"],
+                fdr_rois=config["analysis"]["fdr_rois"],
+                electrode_dfs_paths=list(input.all_electrode_dfs),
+            ),
+            wildcards=wildcards,
+            resources=resources,
+        )
+
+
+# =============================================================================
+# Per-subject summarize rules — reuse the causal6 summarize notebooks (not
+# copied per the plan; they don't read the electrode CSV directly) but route
+# all inputs/outputs through outputs/causal46_joined/.
+# =============================================================================
+
+
+rule joined_behavior_decoding_single_electrode_summarize:
+    """Null-standardized peak-finding + p-values for behavior-with-control — AS-restricted.
+
+    Emits four peak-summary parquet flavors per subject. peak_summary.parquet
+    keeps the v1 foldmean_maxstat contract.
+    """
+    input:
+        scores       = "outputs/causal46_joined/behavior_decoding_single_electrode/{subject}/scores.parquet",
+        predictions  = "outputs/causal46_joined/behavior_decoding_single_electrode/{subject}/predictions.parquet",
+        null_scores  = "outputs/causal46_joined/behavior_decoding_single_electrode_null/{subject}/null_scores.parquet",
+        notebook     = "notebooks/causal6/behavior_decoding_single_electrode_summarize.py",
+
+    output:
+        notebook                      = "outputs/causal46_joined/behavior_decoding_single_electrode_summarize/{subject}/notebook.ipynb",
+        peak_summary                  = "outputs/causal46_joined/behavior_decoding_single_electrode_summarize/{subject}/peak_summary.parquet",
+        peak_summary_tstat_maxstat    = "outputs/causal46_joined/behavior_decoding_single_electrode_summarize/{subject}/peak_summary_tstat_maxstat.parquet",
+        peak_summary_foldmean_tfce    = "outputs/causal46_joined/behavior_decoding_single_electrode_summarize/{subject}/peak_summary_foldmean_tfce.parquet",
+        peak_summary_tstat_tfce       = "outputs/causal46_joined/behavior_decoding_single_electrode_summarize/{subject}/peak_summary_tstat_tfce.parquet",
+        peak_predictions              = "outputs/causal46_joined/behavior_decoding_single_electrode_summarize/{subject}/peak_predictions.parquet",
+
+    resources:
+        mem_gb = 300
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                scores_path=str(input.scores),
+                predictions_path=str(input.predictions),
+                null_scores_path=str(input.null_scores),
+                outdir=str(outdir),
+
+                epoch_tmin=config["analysis"]["epoch_tmin"],
+                epoch_sfreq=config["analysis"]["epoch_sfreq"],
+                behav_peak_post_offset_s=config["analysis"]["behav_peak_post_offset_s"],
+                peak_search_smin=config["analysis"]["decoding"]["peak_search_smin"],
+                peak_search_smax=config["analysis"]["decoding"]["peak_search_smax"],
+            ),
+        )
+
+
+rule joined_behavior_decoding_single_electrode_hga_only_summarize:
+    """Null-standardized peak-finding + p-values for behavior-HGA-only — AS-restricted.
+
+    Emits four peak-summary flavors; peak_summary.parquet keeps the v1
+    foldmean_maxstat contract.
+    """
+    input:
+        scores       = "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only/{subject}/scores.parquet",
+        predictions  = "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only/{subject}/predictions.parquet",
+        null_scores  = "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only_null/{subject}/null_scores.parquet",
+        notebook     = "notebooks/causal6/behavior_decoding_single_electrode_hga_only_summarize.py",
+
+    output:
+        notebook                      = "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only_summarize/{subject}/notebook.ipynb",
+        peak_summary                  = "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only_summarize/{subject}/peak_summary.parquet",
+        peak_summary_tstat_maxstat    = "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only_summarize/{subject}/peak_summary_tstat_maxstat.parquet",
+        peak_summary_foldmean_tfce    = "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only_summarize/{subject}/peak_summary_foldmean_tfce.parquet",
+        peak_summary_tstat_tfce       = "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only_summarize/{subject}/peak_summary_tstat_tfce.parquet",
+        peak_predictions              = "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only_summarize/{subject}/peak_predictions.parquet",
+
+    resources:
+        mem_gb = 300
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                scores_path=str(input.scores),
+                predictions_path=str(input.predictions),
+                null_scores_path=str(input.null_scores),
+                outdir=str(outdir),
+
+                epoch_tmin=config["analysis"]["epoch_tmin"],
+                epoch_sfreq=config["analysis"]["epoch_sfreq"],
+                behav_peak_post_offset_s=config["analysis"]["behav_peak_post_offset_s"],
+                peak_search_smin=config["analysis"]["decoding"]["peak_search_smin"],
+                peak_search_smax=config["analysis"]["decoding"]["peak_search_smax"],
+            ),
+        )
+
+
+# =============================================================================
+# Cross-subject aggregate rules — checkpoint-gated input lists via
+# joined_aggregate_paths(). Notebook is the unmodified causal6 aggregator.
+# =============================================================================
+
+
+rule joined_behavior_decoding_single_electrode_summarize_aggregate:
+    """Concatenate per-subject peak_summary.parquet + BH-FDR on p_value — AS-restricted."""
+    input:
+        notebook     = "notebooks/causal6/significance_aggregate.py",
+        result_paths = joined_aggregate_paths(
+            "outputs/causal46_joined/behavior_decoding_single_electrode_summarize/{subject}/peak_summary.parquet",
+        ),
+        all_electrode_dfs = joined_aggregate_paths(
+            "outputs/causal46_joined/electrodes_as_filtered/{subject}_results.csv",
+        ),
+
+    output:
+        notebook = "outputs/causal46_joined/behavior_decoding_single_electrode_summarize/aggregate_notebook.ipynb",
+        all      = "outputs/causal46_joined/behavior_decoding_single_electrode_summarize/peak_summary_all.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                result_paths=list(input.result_paths),
+                outdir=str(outdir),
+                output_name="peak_summary_all.parquet",
+                fdr_alpha=config["analysis"]["fdr_alpha"],
+                fdr_rois=config["analysis"]["fdr_rois"],
+                electrode_dfs_paths=list(input.all_electrode_dfs),
+            ),
+        )
+
+
+rule joined_behavior_decoding_single_electrode_summarize_aggregate_tstat_maxstat:
+    """Behavior-with-control, t-stat max-stat peaks: concatenate + BH-FDR — AS-restricted."""
+    input:
+        notebook     = "notebooks/causal6/significance_aggregate.py",
+        result_paths = joined_aggregate_paths(
+            "outputs/causal46_joined/behavior_decoding_single_electrode_summarize/{subject}/peak_summary_tstat_maxstat.parquet",
+        ),
+        all_electrode_dfs = joined_aggregate_paths(
+            "outputs/causal46_joined/electrodes_as_filtered/{subject}_results.csv",
+        ),
+
+    output:
+        notebook = "outputs/causal46_joined/behavior_decoding_single_electrode_summarize/aggregate_notebook_tstat_maxstat.ipynb",
+        all      = "outputs/causal46_joined/behavior_decoding_single_electrode_summarize/peak_summary_tstat_maxstat_all.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                result_paths=list(input.result_paths),
+                outdir=str(outdir),
+                output_name="peak_summary_tstat_maxstat_all.parquet",
+                fdr_alpha=config["analysis"]["fdr_alpha"],
+                fdr_rois=config["analysis"]["fdr_rois"],
+                electrode_dfs_paths=list(input.all_electrode_dfs),
+            ),
+        )
+
+
+rule joined_behavior_decoding_single_electrode_summarize_aggregate_foldmean_tfce:
+    """Behavior-with-control, fold-mean TFCE peaks: concatenate + BH-FDR — AS-restricted."""
+    input:
+        notebook     = "notebooks/causal6/significance_aggregate.py",
+        result_paths = joined_aggregate_paths(
+            "outputs/causal46_joined/behavior_decoding_single_electrode_summarize/{subject}/peak_summary_foldmean_tfce.parquet",
+        ),
+        all_electrode_dfs = joined_aggregate_paths(
+            "outputs/causal46_joined/electrodes_as_filtered/{subject}_results.csv",
+        ),
+
+    output:
+        notebook = "outputs/causal46_joined/behavior_decoding_single_electrode_summarize/aggregate_notebook_foldmean_tfce.ipynb",
+        all      = "outputs/causal46_joined/behavior_decoding_single_electrode_summarize/peak_summary_foldmean_tfce_all.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                result_paths=list(input.result_paths),
+                outdir=str(outdir),
+                output_name="peak_summary_foldmean_tfce_all.parquet",
+                fdr_alpha=config["analysis"]["fdr_alpha"],
+                fdr_rois=config["analysis"]["fdr_rois"],
+                electrode_dfs_paths=list(input.all_electrode_dfs),
+            ),
+        )
+
+
+rule joined_behavior_decoding_single_electrode_summarize_aggregate_tstat_tfce:
+    """Behavior-with-control, t-stat TFCE peaks: concatenate + BH-FDR — AS-restricted."""
+    input:
+        notebook     = "notebooks/causal6/significance_aggregate.py",
+        result_paths = joined_aggregate_paths(
+            "outputs/causal46_joined/behavior_decoding_single_electrode_summarize/{subject}/peak_summary_tstat_tfce.parquet",
+        ),
+        all_electrode_dfs = joined_aggregate_paths(
+            "outputs/causal46_joined/electrodes_as_filtered/{subject}_results.csv",
+        ),
+
+    output:
+        notebook = "outputs/causal46_joined/behavior_decoding_single_electrode_summarize/aggregate_notebook_tstat_tfce.ipynb",
+        all      = "outputs/causal46_joined/behavior_decoding_single_electrode_summarize/peak_summary_tstat_tfce_all.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                result_paths=list(input.result_paths),
+                outdir=str(outdir),
+                output_name="peak_summary_tstat_tfce_all.parquet",
+                fdr_alpha=config["analysis"]["fdr_alpha"],
+                fdr_rois=config["analysis"]["fdr_rois"],
+                electrode_dfs_paths=list(input.all_electrode_dfs),
+            ),
+        )
+
+
+rule joined_behavior_decoding_single_electrode_hga_only_summarize_aggregate:
+    """Concatenate per-subject HGA-only peak_summary.parquet + BH-FDR on p_value — AS-restricted."""
+    input:
+        notebook     = "notebooks/causal6/significance_aggregate.py",
+        result_paths = joined_aggregate_paths(
+            "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only_summarize/{subject}/peak_summary.parquet",
+        ),
+        all_electrode_dfs = joined_aggregate_paths(
+            "outputs/causal46_joined/electrodes_as_filtered/{subject}_results.csv",
+        ),
+
+    output:
+        notebook = "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only_summarize/aggregate_notebook.ipynb",
+        all      = "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only_summarize/peak_summary_all.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                result_paths=list(input.result_paths),
+                outdir=str(outdir),
+                output_name="peak_summary_all.parquet",
+                fdr_alpha=config["analysis"]["fdr_alpha"],
+                fdr_rois=config["analysis"]["fdr_rois"],
+                electrode_dfs_paths=list(input.all_electrode_dfs),
+            ),
+        )
+
+
+rule joined_behavior_decoding_single_electrode_hga_only_summarize_aggregate_tstat_maxstat:
+    """Behavior HGA-only, t-stat max-stat peaks: concatenate + BH-FDR — AS-restricted."""
+    input:
+        notebook     = "notebooks/causal6/significance_aggregate.py",
+        result_paths = joined_aggregate_paths(
+            "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only_summarize/{subject}/peak_summary_tstat_maxstat.parquet",
+        ),
+        all_electrode_dfs = joined_aggregate_paths(
+            "outputs/causal46_joined/electrodes_as_filtered/{subject}_results.csv",
+        ),
+
+    output:
+        notebook = "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only_summarize/aggregate_notebook_tstat_maxstat.ipynb",
+        all      = "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only_summarize/peak_summary_tstat_maxstat_all.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                result_paths=list(input.result_paths),
+                outdir=str(outdir),
+                output_name="peak_summary_tstat_maxstat_all.parquet",
+                fdr_alpha=config["analysis"]["fdr_alpha"],
+                fdr_rois=config["analysis"]["fdr_rois"],
+                electrode_dfs_paths=list(input.all_electrode_dfs),
+            ),
+        )
+
+
+rule joined_behavior_decoding_single_electrode_hga_only_summarize_aggregate_foldmean_tfce:
+    """Behavior HGA-only, fold-mean TFCE peaks: concatenate + BH-FDR — AS-restricted."""
+    input:
+        notebook     = "notebooks/causal6/significance_aggregate.py",
+        result_paths = joined_aggregate_paths(
+            "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only_summarize/{subject}/peak_summary_foldmean_tfce.parquet",
+        ),
+        all_electrode_dfs = joined_aggregate_paths(
+            "outputs/causal46_joined/electrodes_as_filtered/{subject}_results.csv",
+        ),
+
+    output:
+        notebook = "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only_summarize/aggregate_notebook_foldmean_tfce.ipynb",
+        all      = "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only_summarize/peak_summary_foldmean_tfce_all.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                result_paths=list(input.result_paths),
+                outdir=str(outdir),
+                output_name="peak_summary_foldmean_tfce_all.parquet",
+                fdr_alpha=config["analysis"]["fdr_alpha"],
+                fdr_rois=config["analysis"]["fdr_rois"],
+                electrode_dfs_paths=list(input.all_electrode_dfs),
+            ),
+        )
+
+
+rule joined_behavior_decoding_single_electrode_hga_only_summarize_aggregate_tstat_tfce:
+    """Behavior HGA-only, t-stat TFCE peaks: concatenate + BH-FDR — AS-restricted."""
+    input:
+        notebook     = "notebooks/causal6/significance_aggregate.py",
+        result_paths = joined_aggregate_paths(
+            "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only_summarize/{subject}/peak_summary_tstat_tfce.parquet",
+        ),
+        all_electrode_dfs = joined_aggregate_paths(
+            "outputs/causal46_joined/electrodes_as_filtered/{subject}_results.csv",
+        ),
+
+    output:
+        notebook = "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only_summarize/aggregate_notebook_tstat_tfce.ipynb",
+        all      = "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only_summarize/peak_summary_tstat_tfce_all.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                result_paths=list(input.result_paths),
+                outdir=str(outdir),
+                output_name="peak_summary_tstat_tfce_all.parquet",
+                fdr_alpha=config["analysis"]["fdr_alpha"],
+                fdr_rois=config["analysis"]["fdr_rois"],
+                electrode_dfs_paths=list(input.all_electrode_dfs),
+            ),
+        )
+
+
+# =============================================================================
+# Ganong decoders — AS-restricted clones (single v1 BH flavor per decoder).
+# =============================================================================
+
+
+rule joined_ganong_decoding_single_electrode:
+    """Ganong decoding with resampled control — AS-restricted, pooled across completions."""
+    input:
+        epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
+        electrodes = "outputs/causal46_joined/electrodes_as_filtered/{subject}_results.csv",
+        winners    = REG_LAMBDA_WINNERS,
+        notebook   = "notebooks/causal46_joined/ganong_decoding_single_electrode.py",
+
+    output:
+        notebook     = "outputs/causal46_joined/ganong_decoding_single_electrode/{subject}/notebook.ipynb",
+        scores       = "outputs/causal46_joined/ganong_decoding_single_electrode/{subject}/scores.parquet",
+        predictions  = "outputs/causal46_joined/ganong_decoding_single_electrode/{subject}/predictions.parquet",
+        coefficients = "outputs/causal46_joined/ganong_decoding_single_electrode/{subject}/coefficients.parquet",
+
+    resources:
+        gpu = 1
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook_with_gpu(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                epochs_path=str(input.epochs),
+                electrodes_path=str(input.electrodes),
+                outdir=str(outdir),
+
+                min_sample=config["analysis"]["decoding"]["min_sample"],
+                window_size=config["analysis"]["decoding"]["window_size"],
+                stride=config["analysis"]["decoding"]["stride"],
+
+                reg_lambda=_load_reg_lambda(input.winners, "ganong_full"),
+                reg_lambda_baseline=None,
+                n_folds=C6["n_folds"],
+                cv_random_state=C6["cv_random_state"],
+                device=C6["device"],
+                tol=C6["tol"],
+                max_iter=C6["max_iter"],
+            ),
+            wildcards=wildcards,
+            resources=resources,
+        )
+
+
+rule joined_ganong_decoding_single_electrode_hga_only:
+    """Ganong decoding, HGA only — AS-restricted, pooled across completions."""
+    input:
+        epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
+        electrodes = "outputs/causal46_joined/electrodes_as_filtered/{subject}_results.csv",
+        winners    = REG_LAMBDA_WINNERS,
+        notebook   = "notebooks/causal46_joined/ganong_decoding_single_electrode_hga_only.py",
+
+    output:
+        notebook     = "outputs/causal46_joined/ganong_decoding_single_electrode_hga_only/{subject}/notebook.ipynb",
+        scores       = "outputs/causal46_joined/ganong_decoding_single_electrode_hga_only/{subject}/scores.parquet",
+        predictions  = "outputs/causal46_joined/ganong_decoding_single_electrode_hga_only/{subject}/predictions.parquet",
+        coefficients = "outputs/causal46_joined/ganong_decoding_single_electrode_hga_only/{subject}/coefficients.parquet",
+
+    resources:
+        gpu = 1
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook_with_gpu(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                epochs_path=str(input.epochs),
+                electrodes_path=str(input.electrodes),
+                outdir=str(outdir),
+
+                min_sample=config["analysis"]["decoding"]["min_sample"],
+                window_size=config["analysis"]["decoding"]["window_size"],
+                stride=config["analysis"]["decoding"]["stride"],
+
+                reg_lambda=_load_reg_lambda(input.winners, "ganong_hga_only"),
+                n_folds=C6["n_folds"],
+                cv_random_state=C6["cv_random_state"],
+                device=C6["device"],
+                tol=C6["tol"],
+                max_iter=C6["max_iter"],
+            ),
+            wildcards=wildcards,
+            resources=resources,
+        )
+
+
+rule joined_ganong_decoding_null:
+    """Per-subject ganong-with-control permutation-null refits — AS-restricted."""
+    input:
+        epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
+        electrodes = "outputs/causal46_joined/electrodes_as_filtered/{subject}_results.csv",
+        winners    = REG_LAMBDA_WINNERS,
+        scores     = "outputs/causal46_joined/ganong_decoding_single_electrode/{subject}/scores.parquet",
+        notebook   = "notebooks/causal46_joined/ganong_decoding_null.py",
+        all_electrode_dfs = expand(
+            "outputs/causal46_joined/electrodes_as_filtered/{subject}_results.csv",
+            subject=config["data"]["subjects"],
+        ),
+
+    output:
+        notebook        = "outputs/causal46_joined/ganong_decoding_null/{subject}/notebook.ipynb",
+        null_scores     = "outputs/causal46_joined/ganong_decoding_null/{subject}/null_scores.parquet",
+        escalation_log  = "outputs/causal46_joined/ganong_decoding_null/{subject}/escalation_log.parquet",
+
+    resources:
+        gpu = 1,
+        mem_gb = 200
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook_with_gpu(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                epochs_path=str(input.epochs),
+                electrodes_path=str(input.electrodes),
+                scores_path=str(input.scores),
+                outdir=str(outdir),
+
+                min_sample=config["analysis"]["decoding"]["min_sample"],
+                window_size=config["analysis"]["decoding"]["window_size"],
+                stride=config["analysis"]["decoding"]["stride"],
+
+                epoch_tmin=config["analysis"]["epoch_tmin"],
+                epoch_sfreq=config["analysis"]["epoch_sfreq"],
+                behav_peak_post_offset_s=config["analysis"]["behav_peak_post_offset_s"],
+                peak_search_smax=config["analysis"]["decoding"]["peak_search_smax"],
+
+                reg_lambda=_load_reg_lambda(input.winners, "ganong_full"),
+                reg_lambda_baseline=None,
+                n_folds=C6["n_folds"],
+                cv_random_state=C6["cv_random_state"],
+                device=C6["device"],
+                tol=C6["tol"],
+                max_iter=C6["max_iter"],
+
+                n_permutations_stage1=C6["n_permutations_stage1"],
+                n_permutations_stage2=C6["n_permutations_stage2"],
+                escalate_corrected_p_max=C6["escalate_corrected_p_max"],
+                permutation_seed=C6["permutation_seed"],
+                permutation_chunk_size=C6["permutation_chunk_size"],
+
+                n_permutations_stage3=C6["n_permutations_stage3"],
+                stage3_k_gate=C6["stage3_k_gate"],
+                fdr_alpha=config["analysis"]["fdr_alpha"],
+                fdr_rois=config["analysis"]["fdr_rois"],
+                electrode_dfs_paths=list(input.all_electrode_dfs),
+            ),
+            wildcards=wildcards,
+            resources=resources,
+        )
+
+
+rule joined_ganong_decoding_hga_only_null:
+    """Per-subject ganong-HGA-only permutation-null refits — AS-restricted."""
+    input:
+        epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
+        electrodes = "outputs/causal46_joined/electrodes_as_filtered/{subject}_results.csv",
+        winners    = REG_LAMBDA_WINNERS,
+        scores     = "outputs/causal46_joined/ganong_decoding_single_electrode_hga_only/{subject}/scores.parquet",
+        notebook   = "notebooks/causal46_joined/ganong_decoding_hga_only_null.py",
+        all_electrode_dfs = expand(
+            "outputs/causal46_joined/electrodes_as_filtered/{subject}_results.csv",
+            subject=config["data"]["subjects"],
+        ),
+
+    output:
+        notebook        = "outputs/causal46_joined/ganong_decoding_hga_only_null/{subject}/notebook.ipynb",
+        null_scores     = "outputs/causal46_joined/ganong_decoding_hga_only_null/{subject}/null_scores.parquet",
+        escalation_log  = "outputs/causal46_joined/ganong_decoding_hga_only_null/{subject}/escalation_log.parquet",
+
+    resources:
+        gpu = 1,
+        mem_gb = 200
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook_with_gpu(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                epochs_path=str(input.epochs),
+                electrodes_path=str(input.electrodes),
+                scores_path=str(input.scores),
+                outdir=str(outdir),
+
+                min_sample=config["analysis"]["decoding"]["min_sample"],
+                window_size=config["analysis"]["decoding"]["window_size"],
+                stride=config["analysis"]["decoding"]["stride"],
+
+                epoch_tmin=config["analysis"]["epoch_tmin"],
+                epoch_sfreq=config["analysis"]["epoch_sfreq"],
+                behav_peak_post_offset_s=config["analysis"]["behav_peak_post_offset_s"],
+                peak_search_smax=config["analysis"]["decoding"]["peak_search_smax"],
+
+                reg_lambda=_load_reg_lambda(input.winners, "ganong_hga_only"),
+                n_folds=C6["n_folds"],
+                cv_random_state=C6["cv_random_state"],
+                device=C6["device"],
+                tol=C6["tol"],
+                max_iter=C6["max_iter"],
+
+                n_permutations_stage1=C6["n_permutations_stage1"],
+                n_permutations_stage2=C6["n_permutations_stage2"],
+                escalate_corrected_p_max=C6["escalate_corrected_p_max"],
+                permutation_seed=C6["permutation_seed"],
+                permutation_chunk_size=C6["permutation_chunk_size"],
+
+                n_permutations_stage3=C6["n_permutations_stage3"],
+                stage3_k_gate=C6["stage3_k_gate"],
+                fdr_alpha=config["analysis"]["fdr_alpha"],
+                fdr_rois=config["analysis"]["fdr_rois"],
+                electrode_dfs_paths=list(input.all_electrode_dfs),
+            ),
+            wildcards=wildcards,
+            resources=resources,
+        )
+
+
+rule joined_ganong_decoding_summarize:
+    """Null-standardized peak-finding + p-values for ganong-with-control — AS-restricted."""
+    input:
+        scores       = "outputs/causal46_joined/ganong_decoding_single_electrode/{subject}/scores.parquet",
+        predictions  = "outputs/causal46_joined/ganong_decoding_single_electrode/{subject}/predictions.parquet",
+        null_scores  = "outputs/causal46_joined/ganong_decoding_null/{subject}/null_scores.parquet",
+        notebook     = "notebooks/causal6/ganong_decoding_summarize.py",
+
+    output:
+        notebook         = "outputs/causal46_joined/ganong_decoding_summarize/{subject}/notebook.ipynb",
+        peak_summary     = "outputs/causal46_joined/ganong_decoding_summarize/{subject}/peak_summary.parquet",
+        peak_predictions = "outputs/causal46_joined/ganong_decoding_summarize/{subject}/peak_predictions.parquet",
+
+    resources:
+        mem_gb = 300
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                scores_path=str(input.scores),
+                predictions_path=str(input.predictions),
+                null_scores_path=str(input.null_scores),
+                outdir=str(outdir),
+
+                epoch_tmin=config["analysis"]["epoch_tmin"],
+                epoch_sfreq=config["analysis"]["epoch_sfreq"],
+                peak_search_smax=config["analysis"]["decoding"]["peak_search_smax"],
+            ),
+        )
+
+
+rule joined_ganong_decoding_hga_only_summarize:
+    """Null-standardized peak-finding + p-values for ganong-HGA-only — AS-restricted."""
+    input:
+        scores       = "outputs/causal46_joined/ganong_decoding_single_electrode_hga_only/{subject}/scores.parquet",
+        predictions  = "outputs/causal46_joined/ganong_decoding_single_electrode_hga_only/{subject}/predictions.parquet",
+        null_scores  = "outputs/causal46_joined/ganong_decoding_hga_only_null/{subject}/null_scores.parquet",
+        notebook     = "notebooks/causal6/ganong_decoding_hga_only_summarize.py",
+
+    output:
+        notebook         = "outputs/causal46_joined/ganong_decoding_hga_only_summarize/{subject}/notebook.ipynb",
+        peak_summary     = "outputs/causal46_joined/ganong_decoding_hga_only_summarize/{subject}/peak_summary.parquet",
+        peak_predictions = "outputs/causal46_joined/ganong_decoding_hga_only_summarize/{subject}/peak_predictions.parquet",
+
+    resources:
+        mem_gb = 300
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                scores_path=str(input.scores),
+                predictions_path=str(input.predictions),
+                null_scores_path=str(input.null_scores),
+                outdir=str(outdir),
+
+                epoch_tmin=config["analysis"]["epoch_tmin"],
+                epoch_sfreq=config["analysis"]["epoch_sfreq"],
+                peak_search_smax=config["analysis"]["decoding"]["peak_search_smax"],
+            ),
+        )
+
+
+rule joined_ganong_decoding_summarize_aggregate:
+    """Concatenate per-subject ganong peak_summary.parquet + BH-FDR on p_value — AS-restricted."""
+    input:
+        notebook     = "notebooks/causal6/significance_aggregate.py",
+        result_paths = joined_aggregate_paths(
+            "outputs/causal46_joined/ganong_decoding_summarize/{subject}/peak_summary.parquet",
+        ),
+        all_electrode_dfs = joined_aggregate_paths(
+            "outputs/causal46_joined/electrodes_as_filtered/{subject}_results.csv",
+        ),
+
+    output:
+        notebook = "outputs/causal46_joined/ganong_decoding_summarize/aggregate_notebook.ipynb",
+        all      = "outputs/causal46_joined/ganong_decoding_summarize/peak_summary_all.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                result_paths=list(input.result_paths),
+                outdir=str(outdir),
+                output_name="peak_summary_all.parquet",
+                fdr_alpha=config["analysis"]["fdr_alpha"],
+                fdr_rois=config["analysis"]["fdr_rois"],
+                electrode_dfs_paths=list(input.all_electrode_dfs),
+            ),
+        )
+
+
+rule joined_ganong_decoding_hga_only_summarize_aggregate:
+    """Concatenate per-subject ganong HGA-only peak_summary.parquet + BH-FDR on p_value — AS-restricted."""
+    input:
+        notebook     = "notebooks/causal6/significance_aggregate.py",
+        result_paths = joined_aggregate_paths(
+            "outputs/causal46_joined/ganong_decoding_hga_only_summarize/{subject}/peak_summary.parquet",
+        ),
+        all_electrode_dfs = joined_aggregate_paths(
+            "outputs/causal46_joined/electrodes_as_filtered/{subject}_results.csv",
+        ),
+
+    output:
+        notebook = "outputs/causal46_joined/ganong_decoding_hga_only_summarize/aggregate_notebook.ipynb",
+        all      = "outputs/causal46_joined/ganong_decoding_hga_only_summarize/peak_summary_all.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                result_paths=list(input.result_paths),
+                outdir=str(outdir),
+                output_name="peak_summary_all.parquet",
+                fdr_alpha=config["analysis"]["fdr_alpha"],
+                fdr_rois=config["analysis"]["fdr_rois"],
+                electrode_dfs_paths=list(input.all_electrode_dfs),
+            ),
+        )
+
+
+# =============================================================================
+# Default target — AS-filter + the 10 cross-subject aggregate _all parquets.
+# =============================================================================
+
+
+rule causal46_joined_all:
+    """Default target: AS-filter + all joined aggregates."""
+    input:
+        "outputs/causal46_joined/electrodes_as_filtered/subjects_with_as.txt",
+        # Behavior with control — 4 flavors
+        "outputs/causal46_joined/behavior_decoding_single_electrode_summarize/peak_summary_all.parquet",
+        "outputs/causal46_joined/behavior_decoding_single_electrode_summarize/peak_summary_tstat_maxstat_all.parquet",
+        "outputs/causal46_joined/behavior_decoding_single_electrode_summarize/peak_summary_foldmean_tfce_all.parquet",
+        "outputs/causal46_joined/behavior_decoding_single_electrode_summarize/peak_summary_tstat_tfce_all.parquet",
+        # Behavior HGA-only — 4 flavors
+        "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only_summarize/peak_summary_all.parquet",
+        "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only_summarize/peak_summary_tstat_maxstat_all.parquet",
+        "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only_summarize/peak_summary_foldmean_tfce_all.parquet",
+        "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only_summarize/peak_summary_tstat_tfce_all.parquet",
+        # Ganong (single v1 flavor each)
+        "outputs/causal46_joined/ganong_decoding_summarize/peak_summary_all.parquet",
+        "outputs/causal46_joined/ganong_decoding_hga_only_summarize/peak_summary_all.parquet",
