@@ -239,8 +239,6 @@ def matched_n_star_plot(
     figsize=(6.5, 5.5),
     acoustic_peak_auc=None,
     R_plot=200,
-    ci_low=2.5,
-    ci_high=97.5,
     sig_windows=None,
     mean_diff_arrays=None,
 ):
@@ -331,12 +329,11 @@ def matched_n_star_plot(
             continue
         arr = np.array(boot_traces[bhv])   # (R_plot, n_times)
         m = arr.mean(0)
-        cl = np.percentile(arr, ci_low, axis=0)
-        ch = np.percentile(arr, ci_high, axis=0)
+        se = arr.std(0)   # bootstrap SE ≈ sample SEM
         color = bhv_colors[i % len(bhv_colors)]
         ax_bot.plot(times, m, color=color, lw=1.5,
                     label=f"resp={bhv}  (n≈{n_per_class}/rep)")
-        ax_bot.fill_between(times, cl, ch, color=color, alpha=0.18)
+        ax_bot.fill_between(times, m - se, m + se, color=color, alpha=0.18)
 
     # Bootstrap mean aligned diff overlay (dashed line + CI band).
     if mean_diff_arrays is not None:
