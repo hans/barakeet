@@ -441,7 +441,6 @@ print(f"B4 rendered: {len(b4_manifest)} cells  |  failed: {len(b4_failures)}")
 manifest = pl.DataFrame(b4_manifest)
 manifest.write_csv(STAR_DIR / "star_plot_keys.csv")
 print(f"Wrote manifest: {STAR_DIR / 'star_plot_keys.csv'}  ({manifest.height} rows)")
-print(manifest.group_by("mode").len().sort("mode"))
 
 # %% [markdown]
 # ## Reviewer summary

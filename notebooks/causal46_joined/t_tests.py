@@ -14,7 +14,7 @@
 # ---
 
 # %% [markdown]
-# # B3 + B4 within-completion behavior bootstrap CIs (JON-44)
+# # B4 within-completion behavior bootstrap CIs (JON-44)
 #
 # Per-AS-site searchlight bootstrap of the within-completion HGA contrast
 # under **per-step class balance** (the same trial-selection rule as the
@@ -43,16 +43,14 @@
 # underpowered and excluded from the bootstrap loop; they appear in the
 # manifest with status='underpowered'.
 #
-# B3 (single ambiguous step) is the degenerate B4 with one step.
-#
 # Outputs:
-# - `outputs/causal46_joined/t_tests/b{3,4}_bootstrap.parquet` — per (cell × window × replicate)
-# - `outputs/causal46_joined/t_tests/b{3,4}_per_window.parquet` — aggregates
-# - `outputs/causal46_joined/t_tests/b{3,4}_per_cell.parquet` — best-window per cell
+# - `outputs/causal46_joined/t_tests/b4_bootstrap.parquet` — per (cell × window × replicate)
+# - `outputs/causal46_joined/t_tests/b4_per_window.parquet` — aggregates
+# - `outputs/causal46_joined/t_tests/b4_per_cell.parquet` — best-window per cell
 # - `outputs/causal46_joined/t_tests/cell_manifest.parquet`
 # - `outputs/causal46_joined/t_tests/population_summary.csv`
 # - `outputs/causal46_joined/t_tests/population_summary.pdf`
-# - `outputs/causal46_joined/t_tests/star_plots_filtered/{b3,b4}_{powered,powered_significant}.pdf`
+# - `outputs/causal46_joined/t_tests/star_plots_filtered/{b4}_{powered,powered_significant}.pdf`
 # - `outputs/causal46_joined/t_tests/star_plots_filtered/filtered_manifest.csv`
 
 # %%
@@ -106,6 +104,8 @@ WINDOW_SIZE = int(_cfg["analysis"]["decoding"].get("window_size", 15))
 STRIDE = 15
 WORD_END_TAIL_SAMPLES = 20  # +200 ms past word offset (sfreq=100)
 
+AC_P_VALUE_THRESHOLD = 0.001
+
 # Same cell-inclusion floor as the star-plot gallery on this branch.
 K = 4
 R = 1000              # bootstrap replicates per cell
@@ -125,8 +125,8 @@ _peaks_raw = pl.read_parquet(CAUSAL6_PEAKS)
 # if "significant" in _peaks_raw.columns:
 #     peaks = _peaks_raw.filter(pl.col("significant"))
 # else:
-peaks = _peaks_raw.filter(pl.col("p_value") < 0.1)
-print("using p_value < 0.1 (uncorrected)")
+peaks = _peaks_raw.filter(pl.col("p_value") < AC_P_VALUE_THRESHOLD)
+print(f"using p_value < {AC_P_VALUE_THRESHOLD} (uncorrected)")
 print(f"AS sites: {peaks.height}")
 
 trial_balance = pl.read_csv(JOINED_DIR / "trial_balance_index.csv")
@@ -152,38 +152,6 @@ print(f"word-end search_smax (samples): {WE_SMAX}")
 def behav_search_range(word_end: str, phon_smax_c6: int) -> tuple[int, int]:
     return int(phon_smax_c6), int(WE_SMAX[word_end])
 
-
-# %% [markdown]
-# ## B3 cell definition (single ambiguous step, min_class ≥ K)
-#
-# Same definition as star_plots.py. B3 cells live at the (site × word_end ×
-# resampled) grain. Per-step balance at one step = subsample to min_class[s]
-# per class.
-
-# %%
-b3_qualified = (
-    trial_balance
-    .filter(pl.col("is_ambiguous_step") & (pl.col("min_class") >= K))
-    .join(
-        peaks.select(["subject", "electrode_idx", "phoneme_pair",
-                      "smin", "smax", "test_roc_auc"])
-             .rename({"smin": "phon_smin", "smax": "phon_smax",
-                      "test_roc_auc": "acoustic_peak_auc"}),
-        on=["subject", "electrode_idx", "phoneme_pair"], how="inner",
-    )
-    .sort(["subject", "electrode_idx", "phoneme_pair", "word_end", "resampled"])
-)
-b3_all_ambig = (
-    trial_balance
-    .filter(pl.col("is_ambiguous_step"))
-    .join(
-        peaks.select(["subject", "electrode_idx", "phoneme_pair"]),
-        on=["subject", "electrode_idx", "phoneme_pair"], how="inner",
-    )
-)
-print(f"B3 qualifying cells: {b3_qualified.height} "
-      f"/ {b3_all_ambig.height} ambiguous cells at AS sites "
-      f"({100*b3_qualified.height/max(b3_all_ambig.height,1):.1f}%)")
 
 # %% [markdown]
 # ## B4 cell definition (per-step balanced pool across ambiguous steps)
@@ -279,110 +247,6 @@ def bootstrap_cell(
 
 
 # %% [markdown]
-# ## Run B3 cells
-
-# %%
-b3_boot_rows: list[dict] = []
-b3_cell_manifest: list[dict] = []
-b3_failures: list[dict] = []
-
-for row in tqdm(b3_qualified.iter_rows(named=True),
-                total=b3_qualified.height, desc="B3 bootstrap"):
-    subj = row["subject"]
-    if subj not in epochs_dict:
-        b3_failures.append({**row, "error": "no epochs for subject"})
-        continue
-    ep = epochs_dict[subj]
-    md = ep.metadata
-    bhv_col = resolve_behavior_col(md)
-    pp_mask = (md["phoneme_pair"] == row["phoneme_pair"]).values
-    ep_pp = ep[pp_mask]
-    md_pp = md[pp_mask].reset_index(drop=True)
-    hga = extract_hga(ep_pp, int(row["electrode_idx"]))
-    behav_smin, behav_smax = behav_search_range(row["word_end"], row["phon_smax"])
-    if behav_smax - behav_smin < WINDOW_SIZE:
-        b3_cell_manifest.append({
-            "subject": subj,
-            "electrode_idx": int(row["electrode_idx"]),
-            "phoneme_pair": row["phoneme_pair"],
-            "word_end": row["word_end"],
-            "mode": "single_step",
-            "resampled_step": int(row["resampled"]),
-            "qualifying_steps": "",
-            "n_per_class": int(row["min_class"]),
-            "preferred_class": None,
-            "status": "search_range_too_narrow",
-            "behav_smin": behav_smin, "behav_smax": behav_smax,
-        })
-        continue
-    try:
-        rows, n_per_class, preferred = bootstrap_cell(
-            md_pp=md_pp, hga=hga, bhv_col=bhv_col,
-            word_end=row["word_end"],
-            qualifying_steps=[int(row["resampled"])],
-            acoustic_smin=int(row["phon_smin"]),
-            acoustic_smax=int(row["phon_smax"]),
-            behav_smin=behav_smin, behav_smax=behav_smax,
-            R=R,
-        )
-        for r in rows:
-            b3_boot_rows.append({
-                "subject": subj,
-                "electrode_idx": int(row["electrode_idx"]),
-                "phoneme_pair": row["phoneme_pair"],
-                "word_end": row["word_end"],
-                "resampled": int(row["resampled"]),
-                "mode": "single_step",
-                "acoustic_peak_auc": float(row["acoustic_peak_auc"]),
-                **r,
-            })
-        b3_cell_manifest.append({
-            "subject": subj,
-            "electrode_idx": int(row["electrode_idx"]),
-            "phoneme_pair": row["phoneme_pair"],
-            "word_end": row["word_end"],
-            "mode": "single_step",
-            "resampled_step": int(row["resampled"]),
-            "qualifying_steps": str(int(row["resampled"])),
-            "n_per_class": n_per_class,
-            "preferred_class": preferred,
-            "status": "ok",
-            "behav_smin": behav_smin, "behav_smax": behav_smax,
-        })
-    except Exception as exc:
-        tb = traceback.format_exc()
-        b3_failures.append({
-            **{k: row[k] for k in
-               ("subject", "electrode_idx", "phoneme_pair", "word_end", "resampled")},
-            "error": repr(exc), "traceback": tb,
-        })
-        print(f"FAILED B3: {subj} e{row['electrode_idx']} {row['phoneme_pair']} "
-              f"{row['word_end']} step={row['resampled']}\n{tb}")
-
-# Underpowered B3 cells
-b3_under = b3_all_ambig.filter(pl.col("min_class") < K)
-for row in b3_under.iter_rows(named=True):
-    b3_cell_manifest.append({
-        "subject": row["subject"],
-        "electrode_idx": int(row["electrode_idx"]),
-        "phoneme_pair": row["phoneme_pair"],
-        "word_end": row["word_end"],
-        "mode": "single_step",
-        "resampled_step": int(row["resampled"]),
-        "qualifying_steps": "",
-        "n_per_class": int(row["min_class"]),
-        "preferred_class": None,
-        "status": "underpowered",
-        "behav_smin": None, "behav_smax": None,
-    })
-
-b3_boot = pl.DataFrame(b3_boot_rows) if b3_boot_rows else pl.DataFrame()
-if b3_boot.height:
-    b3_boot.write_parquet(OUT_DIR / "b3_bootstrap.parquet")
-print(f"B3 bootstrap rows: {b3_boot.height}  "
-      f"(failures: {len(b3_failures)}; underpowered cells: {b3_under.height})")
-
-# %% [markdown]
 # ## Run B4 cells
 
 # %%
@@ -468,10 +332,17 @@ for row in tqdm(b4_qualified.iter_rows(named=True),
 
 # Underpowered B4 candidates
 b4_drops = (
-    b3_all_ambig
+    trial_balance
+    .filter(pl.col("is_ambiguous_step"))
+    .join(
+        peaks.select(["subject", "electrode_idx", "phoneme_pair"]),
+        on=["subject", "electrode_idx", "phoneme_pair"], how="inner",
+    )
     .group_by(["subject", "electrode_idx", "phoneme_pair", "word_end"])
-    .agg(pl.len().alias("n_ambig_steps"),
-         pl.col("min_class").sum().alias("n_per_class_pool"))
+    .agg(
+        pl.len().alias("n_ambig_steps"),
+        pl.col("min_class").sum().alias("n_per_class_pool"),
+    )
     .filter((pl.col("n_ambig_steps") < 1) | (pl.col("n_per_class_pool") < K))
 )
 for row in b4_drops.iter_rows(named=True):
@@ -494,10 +365,10 @@ if b4_boot.height:
     b4_boot.write_parquet(OUT_DIR / "b4_bootstrap.parquet")
 print(f"B4 bootstrap rows: {b4_boot.height}  (failures: {len(b4_failures)})")
 
-cell_manifest = pl.DataFrame(b3_cell_manifest + b4_cell_manifest)
+cell_manifest = pl.DataFrame(b4_cell_manifest)
 cell_manifest.write_parquet(OUT_DIR / "cell_manifest.parquet")
 print(f"cell_manifest: {cell_manifest.height} rows")
-print(cell_manifest.group_by(["mode", "status"]).len().sort(["mode", "status"]))
+print(cell_manifest.group_by(["status"]).len().sort(["status"]))
 
 # %% [markdown]
 # ## Per-window aggregation (CI + empirical p)
@@ -548,15 +419,10 @@ def per_window_summary(boot: pl.DataFrame, cell_keys: list[str]) -> pl.DataFrame
     return grouped.sort(cell_keys + ["smin"])
 
 
-b3_cell_keys = ["subject", "electrode_idx", "phoneme_pair", "word_end", "resampled"]
 b4_cell_keys = ["subject", "electrode_idx", "phoneme_pair", "word_end"]
-b3_per_window = per_window_summary(b3_boot, b3_cell_keys)
 b4_per_window = per_window_summary(b4_boot, b4_cell_keys)
-if b3_per_window.height:
-    b3_per_window.write_parquet(OUT_DIR / "b3_per_window.parquet")
 if b4_per_window.height:
     b4_per_window.write_parquet(OUT_DIR / "b4_per_window.parquet")
-print(f"B3 per_window rows: {b3_per_window.height}")
 print(f"B4 per_window rows: {b4_per_window.height}")
 
 # %% [markdown]
@@ -598,13 +464,9 @@ def per_cell_best(per_window: pl.DataFrame, cell_keys: list[str]) -> pl.DataFram
     )
 
 
-b3_per_cell = per_cell_best(b3_per_window, b3_cell_keys)
 b4_per_cell = per_cell_best(b4_per_window, b4_cell_keys)
-if b3_per_cell.height:
-    b3_per_cell.write_parquet(OUT_DIR / "b3_per_cell.parquet")
 if b4_per_cell.height:
     b4_per_cell.write_parquet(OUT_DIR / "b4_per_cell.parquet")
-print(f"B3 per_cell rows: {b3_per_cell.height}")
 print(f"B4 per_cell rows: {b4_per_cell.height}")
 
 # %% [markdown]
@@ -612,8 +474,7 @@ print(f"B4 per_cell rows: {b4_per_cell.height}")
 
 # %%
 roi_frames = []
-subjects = sorted({*([] if b3_boot.height == 0 else b3_boot["subject"].unique().to_list()),
-                   *([] if b4_boot.height == 0 else b4_boot["subject"].unique().to_list())})
+subjects = sorted({*([] if b4_boot.height == 0 else b4_boot["subject"].unique().to_list())})
 for subj in subjects:
     try:
         edf = get_electrode_df(subj)
@@ -691,9 +552,8 @@ def population_summary(per_window: pl.DataFrame, mode_name: str) -> pl.DataFrame
     return pl.concat(out, how="diagonal_relaxed")
 
 
-b3_pop = population_summary(b3_per_window, "b3")
 b4_pop = population_summary(b4_per_window, "b4")
-population = pl.concat([df for df in (b3_pop, b4_pop) if df.height],
+population = pl.concat([df for df in (b4_pop,) if df.height],
                        how="diagonal_relaxed")
 if population.height:
     population.write_csv(OUT_DIR / "population_summary.csv")
@@ -723,18 +583,17 @@ with PdfPages(pdf_path) as pdf:
     ax.axis("off")
     ax.text(0.5, 0.7, "Bootstrap CI summary — within-completion behavior contrast",
             ha="center", va="center", fontsize=18)
-    n_b3_ok = cell_manifest.filter((pl.col('mode')=='single_step') & (pl.col('status')=='ok')).height
     n_b4_ok = cell_manifest.filter((pl.col('mode')=='matched_n') & (pl.col('status')=='ok')).height
     ax.text(0.5, 0.55,
             f"K = {K}   ·   R = {R}   ·   CI = {CI_LOW}–{CI_HIGH}%\n"
-            f"B3 cells (ok): {n_b3_ok}   ·   B4 cells (ok): {n_b4_ok}\n"
+            f"B4 cells (ok): {n_b4_ok}\n"
             f"AS sites: {peaks.height}",
             ha="center", va="center", fontsize=11)
     pdf.savefig(fig); plt.close(fig)
 
     # Per-time frac-CI-excludes-0 curves
     fig, axes = plt.subplots(1, 2, figsize=(10, 4), sharey=True)
-    for ax, mode in zip(axes, ("b3", "b4")):
+    for ax, mode in zip(axes, ("b4",)):
         for col, color, label in (
             ("frac_ci_aligned", "#2166ac", "aligned (CI excludes 0)"),
             ("frac_ci_raw",     "#b2182b", "raw (CI excludes 0)"),
@@ -763,7 +622,6 @@ with PdfPages(pdf_path) as pdf:
 
     # Sites x time heatmap of median signed aligned mean_diff
     for mode, per_window, ckeys in (
-        ("b3", b3_per_window, b3_cell_keys),
         ("b4", b4_per_window, b4_cell_keys),
     ):
         if per_window.height == 0:
@@ -803,7 +661,7 @@ with PdfPages(pdf_path) as pdf:
     # Effect-size distributions: best-window aligned medians
     fig, axes = plt.subplots(1, 2, figsize=(10, 4))
     for ax, (mode, per_cell) in zip(axes, [
-        ("b3", b3_per_cell), ("b4", b4_per_cell),
+        ("b4", b4_per_cell),
     ]):
         if per_cell.height == 0:
             ax.text(0.5, 0.5, f"{mode}: empty", ha="center", va="center"); ax.axis("off"); continue
@@ -819,7 +677,7 @@ with PdfPages(pdf_path) as pdf:
 
     # Best-window timing scatter — colored by CI significance
     fig, axes = plt.subplots(1, 2, figsize=(10, 4))
-    for ax, (mode, per_cell) in zip(axes, [("b3", b3_per_cell), ("b4", b4_per_cell)]):
+    for ax, (mode, per_cell) in zip(axes, [("b4", b4_per_cell)]):
         if per_cell.height == 0:
             ax.text(0.5, 0.5, f"{mode}: empty", ha="center", va="center"); ax.axis("off"); continue
         tmin_arr = per_cell["best_tmin"].to_numpy().astype(float)
@@ -846,7 +704,7 @@ with PdfPages(pdf_path) as pdf:
 
     # Phoneme_pair / ROI breakdowns
     fig, axes = plt.subplots(2, 2, figsize=(10, 8))
-    for col, mode in enumerate(("b3", "b4")):
+    for col, mode in enumerate(("b4",)):
         for row, cut in enumerate(("phoneme_pair", "roi")):
             ax = axes[row, col]
             sub = population.filter((pl.col("mode") == mode) & (pl.col("cut") == cut))
@@ -874,11 +732,10 @@ with PdfPages(pdf_path) as pdf:
     pdf.savefig(fig); plt.close(fig)
 
     # Decision callout
-    b3_peak = _peak_frac(population, "b3", "frac_ci_aligned")
     b4_peak = _peak_frac(population, "b4", "frac_ci_aligned")
     fig, ax = plt.subplots(figsize=(8.5, 11))
     ax.axis("off")
-    headline = b4_peak if b4_peak is not None else b3_peak
+    headline = b4_peak if b4_peak is not None else None
     if headline is None:
         verdict = "    INDETERMINATE — no cells qualified"
     elif headline >= JON41_GREENLIGHT:
@@ -893,8 +750,6 @@ with PdfPages(pdf_path) as pdf:
         f"  Greenlight (continue option 1):   peak frac CI-aligned ≥ {JON41_GREENLIGHT:.0%}",
         f"  Revisit (rethink AS-site filter): peak frac CI-aligned <  {JON41_REVISIT:.0%}",
         "",
-        f"  B3 peak frac CI-aligned: "
-        f"{b3_peak:.1%}" if b3_peak is not None else "  B3: n/a (no cells)",
         f"  B4 peak frac CI-aligned: "
         f"{b4_peak:.1%}" if b4_peak is not None else "  B4: n/a (no cells)",
         "",
@@ -919,12 +774,6 @@ except ImportError:
     _HAS_PYPDF = False
     print("⚠ pypdf not installed — will emit filtered_manifest.csv only; "
           "filtered PDFs skipped.")
-
-
-def _b3_pdf(row: dict) -> Path:
-    return (STAR_DIR / "single_step" / "per_site"
-            / f"{row['subject']}_{row['electrode_idx']}_{row['phoneme_pair']}_"
-              f"{row['word_end']}_step{row['resampled']}.pdf")
 
 
 def _b4_pdf(row: dict) -> Path:
@@ -1049,34 +898,6 @@ def concat_pdfs(paths: list[Path], out_path: Path) -> int:
 
 filtered_rows: list[dict] = []
 
-if b3_per_cell.height:
-    powered_entries: list[tuple[dict, Path]] = []
-    sig_entries: list[tuple[dict, Path]] = []
-    for row in b3_per_cell.iter_rows(named=True):
-        pdf_p = _b3_pdf(row)
-        is_powered = pdf_p.exists()
-        is_sig = is_powered and bool(row["best_ci_aligned_excludes_zero"])
-        if is_powered: powered_entries.append((row, pdf_p))
-        if is_sig: sig_entries.append((row, pdf_p))
-        filtered_rows.append({
-            "mode": "single_step",
-            "subject": row["subject"], "electrode_idx": row["electrode_idx"],
-            "phoneme_pair": row["phoneme_pair"], "word_end": row["word_end"],
-            "resampled": row["resampled"], "qualifying_steps": str(row["resampled"]),
-            "best_smin": row["best_smin"], "best_smax": row["best_smax"],
-            "best_mean_diff_aligned_med": row["best_mean_diff_aligned_med"],
-            "best_emp_p_aligned": row["best_emp_p_aligned"],
-            "best_ci_aligned_excludes_zero": row["best_ci_aligned_excludes_zero"],
-            "powered": is_powered, "significant": is_sig,
-            "pdf_path": str(pdf_p.relative_to(REPO)) if pdf_p.exists() else "",
-            "status": "ok",
-        })
-    n_p = write_annotated_pdfs(powered_entries, b3_per_window, b3_cell_keys,
-                               FILT_DIR / "b3_powered.pdf")
-    n_s = write_annotated_pdfs(sig_entries, b3_per_window, b3_cell_keys,
-                               FILT_DIR / "b3_powered_significant.pdf")
-    print(f"B3 filtered PDFs: powered={n_p}  significant={n_s}")
-
 if b4_per_cell.height:
     powered_entries = []
     sig_entries = []
@@ -1145,12 +966,8 @@ else:
 print("=" * 70)
 print(f"K = {K}   R = {R}   CI = {CI_LOW}–{CI_HIGH}%")
 print(f"AS sites: {peaks.height}")
-print(f"B3 cells (ok): "
-      f"{cell_manifest.filter((pl.col('mode')=='single_step') & (pl.col('status')=='ok')).height}")
 print(f"B4 cells (ok): "
       f"{cell_manifest.filter((pl.col('mode')=='matched_n') & (pl.col('status')=='ok')).height}")
-b3_peak = _peak_frac(population, "b3", "frac_ci_aligned")
 b4_peak = _peak_frac(population, "b4", "frac_ci_aligned")
-print(f"B3 peak frac CI-aligned: {b3_peak if b3_peak is None else f'{b3_peak:.1%}'}")
 print(f"B4 peak frac CI-aligned: {b4_peak if b4_peak is None else f'{b4_peak:.1%}'}")
 print(f"See {pdf_path} for the decision callout.")
