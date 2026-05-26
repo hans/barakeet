@@ -238,18 +238,26 @@ def matched_n_star_plot(
     textgrid_dir="textgrids",
     figsize=(6.5, 5.5),
     acoustic_peak_auc=None,
-    rng=None,
+    R_plot=200,
+    ci_low=2.5,
+    ci_high=97.5,
     sig_windows=None,
     mean_diff_arrays=None,
 ):
     """Two-panel B4 star plot.
 
     Top panel: unambiguous steps 1 & 6 (acoustic anchor).
-    Bottom panel: per-step class-balanced behavioral contrast. Optionally
-    overlays bootstrap mean aligned diff + CI band, and significance bars.
+    Bottom panel: per-step class-balanced behavioral contrast shown as
+    bootstrap mean ± percentile CI (R_plot replicates, same trial-selection
+    rule as the main t-test bootstrap). Optionally overlays bootstrap mean
+    aligned diff + CI band, and significance bars.
 
     Parameters
     ----------
+    R_plot : int
+        Number of bootstrap replicates for the bottom-panel class curves.
+    ci_low, ci_high : float
+        Percentile bounds for the CI bands (default 2.5 / 97.5).
     sig_windows : list of (tmin, tmax) float tuples, optional
         Windows where the bootstrap CI excludes zero. Drawn as gray bars at
         the top of ax_bot.
@@ -257,8 +265,6 @@ def matched_n_star_plot(
         Pre-computed bootstrap mean-diff overlay for ax_bot. Expected keys:
         ``tcenter``, ``mean``, ``ci_lo``, ``ci_hi`` (all float arrays).
     """
-    if rng is None:
-        rng = np.random.default_rng(0)
     ep = epochs_dict[subject]
     md = ep.metadata
     bhv_col = resolve_behavior_col(md)
@@ -300,46 +306,37 @@ def matched_n_star_plot(
     ax_top.set_title(top_title, fontsize=9, pad=20)
     ax_top.legend(fontsize=7, loc="upper left", framealpha=0.7)
 
-    # Bottom: at each ambiguous step, draw min_class[s] of each class
-    # (minority in full; majority subsampled), then concat across steps.
-    # Both classes end up with the same step composition by construction.
+    # Bottom: bootstrap-estimated class mean HGA timecourses.
+    # R_plot replicates of per-step balanced sampling (same protocol as the
+    # main t-test bootstrap: both classes drawn with replacement to min_class[s]
+    # per step, concatenated across steps).
     bhv_colors = ["#2166ac", "#d73027"]
     we_mask = (md_pp["word_end"] == word_end).values
     bhv_vals = sorted(md_pp.loc[we_mask, bhv_col].dropna().unique())
 
-    chosen_per_class: dict = {bhv: [] for bhv in bhv_vals}
-    pool_check = 0
-    for s in sorted(qualifying_steps):
-        step_mask = we_mask & (md_pp["resampled"] == s).values
-        step_idxs = {
-            bhv: np.where(step_mask & (md_pp[bhv_col] == bhv).values)[0]
-            for bhv in bhv_vals
-        }
-        n_s = min(len(v) for v in step_idxs.values())
-        pool_check += n_s
+    per_step = per_step_class_counts(
+        md_pp, word_end=word_end,
+        qualifying_steps=list(qualifying_steps),
+        group_col=bhv_col,
+    )
+    boot_traces: dict[int, list[np.ndarray]] = {bhv: [] for bhv in bhv_vals}
+    for r in range(R_plot):
+        draws = select_cell_trials_bootstrap(per_step, rng=np.random.default_rng(r))
         for bhv in bhv_vals:
-            chosen_per_class[bhv].append(
-                rng.choice(step_idxs[bhv], size=n_s, replace=False)
-            )
-    if pool_check != n_per_class:
-        raise ValueError(
-            f"pool size mismatch: per-step min_class summed to {pool_check}, "
-            f"caller passed n_per_class={n_per_class} (data integrity bug)"
-        )
-    chosen_per_class = {
-        bhv: np.concatenate(arrs) for bhv, arrs in chosen_per_class.items()
-    }
+            if bhv in draws:
+                boot_traces[bhv].append(hga[draws[bhv]].mean(0))
 
     for i, bhv in enumerate(bhv_vals):
-        tr = hga[chosen_per_class[bhv]]
-        m = tr.mean(0)
-        se = tr.std(0) / np.sqrt(tr.shape[0])
+        if not boot_traces[bhv]:
+            continue
+        arr = np.array(boot_traces[bhv])   # (R_plot, n_times)
+        m = arr.mean(0)
+        cl = np.percentile(arr, ci_low, axis=0)
+        ch = np.percentile(arr, ci_high, axis=0)
         color = bhv_colors[i % len(bhv_colors)]
-        ax_bot.plot(
-            times, m, color=color, lw=1.5,
-            label=f"resp={bhv}  (n={tr.shape[0]})",
-        )
-        ax_bot.fill_between(times, m - se, m + se, color=color, alpha=0.18)
+        ax_bot.plot(times, m, color=color, lw=1.5,
+                    label=f"resp={bhv}  (n≈{n_per_class}/rep)")
+        ax_bot.fill_between(times, cl, ch, color=color, alpha=0.18)
 
     # Bootstrap mean aligned diff overlay (dashed line + CI band).
     if mean_diff_arrays is not None:
