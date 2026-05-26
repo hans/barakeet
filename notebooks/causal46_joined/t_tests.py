@@ -856,7 +856,7 @@ def write_annotated_pdfs(
         return concat_pdfs([p for _, p in entries], out_path)
     writer = PdfWriter()
     n = 0
-    for row, pdf_p in entries:
+    for row, pdf_p in tqdm(entries):
         filt = (
             (pl.col("subject") == row["subject"])
             & (pl.col("electrode_idx") == row["electrode_idx"])
@@ -866,15 +866,6 @@ def write_annotated_pdfs(
         if "resampled" in cell_keys and row.get("resampled") is not None:
             filt = filt & (pl.col("resampled") == row["resampled"])
         site_pw = per_window.filter(filt) if per_window.height else pl.DataFrame()
-
-        # CI-trace page (without gray bars; bars move to the star plot below).
-        fig = site_effect_fig(row, site_pw)
-        buf = io.BytesIO()
-        fig.savefig(buf, format="pdf", bbox_inches="tight")
-        plt.close(fig)
-        buf.seek(0)
-        for page in PdfReader(buf).pages:
-            writer.add_page(page)
 
         # Precompute sig windows and bootstrap mean-diff arrays for ax_bot overlay.
         sig_wins = None
