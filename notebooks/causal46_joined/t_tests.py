@@ -107,7 +107,7 @@ STRIDE = 15
 WORD_END_TAIL_SAMPLES = 20  # +200 ms past word offset (sfreq=100)
 
 # Same cell-inclusion floor as the star-plot gallery on this branch.
-K = 5
+K = 4
 R = 1000              # bootstrap replicates per cell
 CI_LOW, CI_HIGH = 2.5, 97.5
 
@@ -125,8 +125,8 @@ _peaks_raw = pl.read_parquet(CAUSAL6_PEAKS)
 # if "significant" in _peaks_raw.columns:
 #     peaks = _peaks_raw.filter(pl.col("significant"))
 # else:
-peaks = _peaks_raw.filter(pl.col("p_value") < 0.05)
-print("using p_value < 0.05 (uncorrected)")
+peaks = _peaks_raw.filter(pl.col("p_value") < 0.1)
+print("using p_value < 0.1 (uncorrected)")
 print(f"AS sites: {peaks.height}")
 
 trial_balance = pl.read_csv(JOINED_DIR / "trial_balance_index.csv")
