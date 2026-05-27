@@ -86,19 +86,22 @@ from _within_completion import (  # noqa: E402
     select_cell_trials_bootstrap,
 )
 
+# %% tags=["parameters"]
+phon_peaks_path = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet"
+epoch_dir = "outputs/epochs_preprocessed"
+trial_balance_path = "outputs/causal46_joined/trial_balance_index.csv"
+outdir = "outputs/causal46_joined/t_tests"
+
 # %%
 REPO = Path(".").resolve()
-JOINED_DIR = REPO / "outputs/causal46_joined"
-OUT_DIR = JOINED_DIR / "t_tests"
+OUT_DIR = Path(outdir)
 FILT_DIR = OUT_DIR / "star_plots_filtered"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 FILT_DIR.mkdir(parents=True, exist_ok=True)
 
-EPOCH_DIR = Path(os.environ.get(
-    "BARAKEET_EPOCH_DIR", str(REPO / "outputs/epochs_preprocessed"),
-))
-CAUSAL6_PEAKS = REPO / "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet"
-STAR_DIR = JOINED_DIR / "star_plots"
+EPOCH_DIR = Path(epoch_dir)
+CAUSAL6_PEAKS = Path(phon_peaks_path)
+STAR_DIR = REPO / "outputs/causal46_joined/star_plots"
 
 _cfg = yaml.safe_load((REPO / "config.yaml").read_text())
 WINDOW_SIZE = int(_cfg["analysis"]["decoding"].get("window_size", 15))
@@ -132,7 +135,7 @@ peaks = _peaks_raw.filter(pl.col("p_value") < AC_P_VALUE_THRESHOLD)
 print(f"using p_value < {AC_P_VALUE_THRESHOLD} (uncorrected)")
 print(f"AS sites: {peaks.height}")
 
-trial_balance = pl.read_csv(JOINED_DIR / "trial_balance_index.csv")
+trial_balance = pl.read_csv(trial_balance_path)
 print(f"trial_balance: {trial_balance.height} rows")
 
 epochs_dict = load_epochs_dict(EPOCH_DIR)
@@ -968,7 +971,7 @@ if b4_per_cell.height:
     sig_entries = []
     for row in b4_per_cell.iter_rows(named=True):
         pdf_p = _b4_pdf(row)
-        is_powered = pdf_p.exists()
+        is_powered = True
         is_sig = is_powered and bool(row["best_ci_aligned_excludes_zero"])
         if is_powered: powered_entries.append((row, pdf_p))
         if is_sig: sig_entries.append((row, pdf_p))
