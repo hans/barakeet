@@ -844,6 +844,13 @@ def write_annotated_pdfs(
     """Filtered-gallery PDF: regenerated star plot per cell."""
     if not entries or not _HAS_PYPDF:
         return 0
+    # Precompute matched x-axis limit per (subject, electrode_idx, phoneme_pair):
+    # both word_ends in a group share the max offset so plots align vertically.
+    group_xlim: dict[tuple, float] = {}
+    for row in entries:
+        key = (row["subject"], row["electrode_idx"], row["phoneme_pair"])
+        we_xlim = OFFSET_DICT.get(row["word_end"], 1.0) + 0.1
+        group_xlim[key] = max(group_xlim.get(key, 0.0), we_xlim)
     writer = PdfWriter()
     n = 0
     for row in tqdm(entries):
@@ -886,6 +893,7 @@ def write_annotated_pdfs(
             continue
         if isinstance(qs, str):
             qs = [int(s) for s in qs.split(",") if s]
+        key = (row["subject"], row["electrode_idx"], row["phoneme_pair"])
         try:
             fig2 = matched_n_star_plot(
                 subject=row["subject"],
@@ -902,6 +910,7 @@ def write_annotated_pdfs(
                 acoustic_peak_auc=row.get("acoustic_peak_auc"),
                 sig_windows=sig_wins,
                 mean_diff_arrays=mda,
+                xlim=group_xlim[key],
             )
             buf2 = io.BytesIO()
             fig2.savefig(buf2, format="pdf", bbox_inches="tight")

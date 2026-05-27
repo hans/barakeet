@@ -241,6 +241,7 @@ def matched_n_star_plot(
     R_plot=200,
     sig_windows=None,
     mean_diff_arrays=None,
+    xlim=None,
 ):
     """Two-panel B4 star plot.
 
@@ -371,7 +372,8 @@ def matched_n_star_plot(
             vline_extent=1.0,
         )
 
-    xlim = OFFSET_DICT.get(word_end, 1.0) + 0.1
+    if xlim is None:
+        xlim = OFFSET_DICT.get(word_end, 1.0) + 0.1
     ax_top.set_xlim(0.0, xlim)
 
     # Significance bars: gray horizontal bars at top of ax_bot for sig windows.
