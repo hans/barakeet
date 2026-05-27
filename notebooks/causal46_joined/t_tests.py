@@ -157,7 +157,9 @@ print(f"word-end search_smax (samples): {WE_SMAX}")
 
 
 def behav_search_range(word_end: str, phon_smax_c6: int) -> tuple[int, int]:
-    return int(phon_smax_c6), int(WE_SMAX[word_end])
+    # return int(phon_smax_c6), int(WE_SMAX[word_end])
+    # DEV: just do search from onset onward
+    return 0, int(WE_SMAX[word_end])
 
 
 # %% [markdown]
