@@ -241,6 +241,7 @@ def matched_n_star_plot(
     R_plot=200,
     sig_windows=None,
     mean_diff_arrays=None,
+    xlim=None,
 ):
     """Two-panel B4 star plot.
 
@@ -273,12 +274,14 @@ def matched_n_star_plot(
     hga = extract_hga(ep_pp, electrode_idx)
     times = ep.times
 
+    we_mask = (md_pp["word_end"] == word_end).values
+
     fig, (ax_top, ax_bot) = plt.subplots(2, 1, figsize=figsize, sharex=True)
 
-    # Top: unambiguous step 1 & 6 (mirrors provisional_star_plot top).
+    # Top: unambiguous step 1 & 6, restricted to this word_end.
     step_colors = {1: "#2166ac", 6: "#d73027"}
     for step, color in step_colors.items():
-        mask = (md_pp["resampled"] == step).values
+        mask = we_mask & (md_pp["resampled"] == step).values
         if not mask.any():
             continue
         tr = hga[mask]
@@ -309,7 +312,6 @@ def matched_n_star_plot(
     # main t-test bootstrap: both classes drawn with replacement to min_class[s]
     # per step, concatenated across steps).
     bhv_colors = ["#2166ac", "#d73027"]
-    we_mask = (md_pp["word_end"] == word_end).values
     bhv_vals = sorted(md_pp.loc[we_mask, bhv_col].dropna().unique())
 
     per_step = per_step_class_counts(
@@ -370,7 +372,8 @@ def matched_n_star_plot(
             vline_extent=1.0,
         )
 
-    xlim = OFFSET_DICT.get(word_end, 1.0) + 0.1
+    if xlim is None:
+        xlim = OFFSET_DICT.get(word_end, 1.0) + 0.1
     ax_top.set_xlim(0.0, xlim)
 
     # Significance bars: gray horizontal bars at top of ax_bot for sig windows.
