@@ -101,8 +101,8 @@ CAUSAL6_PEAKS = REPO / "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.p
 STAR_DIR = JOINED_DIR / "star_plots"
 
 _cfg = yaml.safe_load((REPO / "config.yaml").read_text())
-WINDOW_SIZE = int(_cfg["analysis"]["decoding"].get("window_size", 15))
-STRIDE = 15
+WINDOW_SIZE = 10 #  int(_cfg["analysis"]["decoding"].get("window_size", 15))
+STRIDE = 10
 WORD_END_TAIL_SAMPLES = 20  # +200 ms past word offset (sfreq=100)
 
 AC_P_VALUE_THRESHOLD = 0.001
