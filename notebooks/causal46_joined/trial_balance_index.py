@@ -37,15 +37,16 @@ import polars as pl
 
 from src.data import add_metadata_features, get_ambiguous_resampled_steps
 
-# %%
-REPO = Path(".").resolve()
-EPOCH_DIR = REPO / "outputs/epochs_preprocessed"
-OUT_DIR = REPO / "outputs/causal46_joined"
-OUT_DIR.mkdir(parents=True, exist_ok=True)
+# %% tags=["parameters"]
+phon_peaks_path = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet"
+epoch_dir = "outputs/epochs_preprocessed"
+outdir = "outputs/causal46_joined"
 
-# Canonical acoustic sites: causal6 foldmean-maxstat peaks, FDR-significant.
-# Produced by acoustic_decoding_peaks_aggregate rule in causal6.Snakefile.
-CAUSAL6_PEAKS = REPO / "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet"
+# %%
+CAUSAL6_PEAKS = Path(phon_peaks_path)
+EPOCH_DIR = Path(epoch_dir)
+OUT_DIR = Path(outdir)
+OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # K=5 is the recommended default; K=4 is the permissive companion for
 # borderline subjects; K=10 is retained as a strict-tail sanity column.

@@ -1023,6 +1023,79 @@ rule joined_ganong_decoding_hga_only_summarize_aggregate:
 
 
 # =============================================================================
+# Trial balance index — electrode-agnostic per-step class counts + AS join.
+# =============================================================================
+
+
+rule joined_trial_balance_index:
+    """Build trial_balance_index.csv and trial_balance_summary.csv — all AS sites."""
+    input:
+        phon_peaks_all = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet",
+        epoch_fifs     = expand(
+            "outputs/epochs_preprocessed/{subject}_epo.fif",
+            subject=config["data"]["subjects"],
+        ),
+        notebook       = "notebooks/causal46_joined/trial_balance_index.py",
+
+    output:
+        notebook      = "outputs/causal46_joined/trial_balance_index/notebook.ipynb",
+        index_csv     = "outputs/causal46_joined/trial_balance_index.csv",
+        summary_csv   = "outputs/causal46_joined/trial_balance_summary.csv",
+        counts_csv    = "outputs/causal46_joined/trial_counts_by_subject.csv",
+
+    run:
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                phon_peaks_path=str(input.phon_peaks_all),
+                epoch_dir=str(Path(input.epoch_fifs[0]).parent),
+                outdir=str(Path(output.notebook).parent.parent),
+            ),
+        )
+
+
+# =============================================================================
+# B4 bootstrap t-tests — within-completion behavior contrast at AS sites.
+# =============================================================================
+
+
+rule joined_t_tests:
+    """B4 bootstrap CIs for within-completion HGA contrast at AS sites."""
+    input:
+        phon_peaks_all  = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet",
+        trial_balance   = "outputs/causal46_joined/trial_balance_index.csv",
+        epoch_fifs      = expand(
+            "outputs/epochs_preprocessed/{subject}_epo.fif",
+            subject=config["data"]["subjects"],
+        ),
+        notebook        = "notebooks/causal46_joined/t_tests.py",
+
+    output:
+        notebook           = "outputs/causal46_joined/t_tests/notebook.ipynb",
+        b4_bootstrap       = "outputs/causal46_joined/t_tests/b4_bootstrap.parquet",
+        b4_per_window      = "outputs/causal46_joined/t_tests/b4_per_window.parquet",
+        b4_per_cell        = "outputs/causal46_joined/t_tests/b4_per_cell.parquet",
+        cell_manifest      = "outputs/causal46_joined/t_tests/cell_manifest.parquet",
+        population_summary = "outputs/causal46_joined/t_tests/population_summary.csv",
+        population_pdf     = "outputs/causal46_joined/t_tests/population_summary.pdf",
+        filtered_manifest  = "outputs/causal46_joined/t_tests/star_plots_filtered/filtered_manifest.csv",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                phon_peaks_path=str(input.phon_peaks_all),
+                epoch_dir=str(Path(input.epoch_fifs[0]).parent),
+                trial_balance_path=str(input.trial_balance),
+                outdir=str(outdir),
+            ),
+        )
+
+
+# =============================================================================
 # Default target — AS-filter + the 10 cross-subject aggregate _all parquets.
 # =============================================================================
 
@@ -1044,3 +1117,6 @@ rule causal46_joined_all:
         # Ganong (single v1 flavor each)
         "outputs/causal46_joined/ganong_decoding_summarize/peak_summary_all.parquet",
         "outputs/causal46_joined/ganong_decoding_hga_only_summarize/peak_summary_all.parquet",
+        # Trial balance index + B4 bootstrap t-tests
+        "outputs/causal46_joined/trial_balance_index.csv",
+        "outputs/causal46_joined/t_tests/population_summary.csv",
