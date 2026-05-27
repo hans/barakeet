@@ -49,7 +49,7 @@ CAUSAL6_PEAKS = REPO / "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.p
 
 # K=5 is the recommended default; K=4 is the permissive companion for
 # borderline subjects; K=10 is retained as a strict-tail sanity column.
-THRESHOLDS = (4, 5, 10)
+THRESHOLDS = (3, 4, 5, 10)
 
 # %% [markdown]
 # ## Load canonical sites and discover needed subjects
