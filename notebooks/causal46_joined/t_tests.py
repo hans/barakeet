@@ -57,7 +57,6 @@
 from __future__ import annotations
 
 import io
-import os
 import sys
 import traceback
 from pathlib import Path
@@ -91,6 +90,10 @@ phon_peaks_path = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parque
 epoch_dir = "outputs/epochs_preprocessed"
 trial_balance_path = "outputs/causal46_joined/trial_balance_index.csv"
 outdir = "outputs/causal46_joined/t_tests"
+min_class_k = 4
+window_size = 10
+stride = 10
+ac_p_value_threshold = 0.001
 
 # %%
 REPO = Path(".").resolve()
@@ -101,19 +104,17 @@ FILT_DIR.mkdir(parents=True, exist_ok=True)
 
 EPOCH_DIR = Path(epoch_dir)
 CAUSAL6_PEAKS = Path(phon_peaks_path)
-STAR_DIR = REPO / "outputs/causal46_joined/star_plots"
 
 _cfg = yaml.safe_load((REPO / "config.yaml").read_text())
-WINDOW_SIZE = 10 #  int(_cfg["analysis"]["decoding"].get("window_size", 15))
-STRIDE = 10
+WINDOW_SIZE = window_size
+STRIDE = stride
 WORD_END_TAIL_SAMPLES = 20  # +200 ms past word offset (sfreq=100)
 
-AC_P_VALUE_THRESHOLD = 0.001
+AC_P_VALUE_THRESHOLD = ac_p_value_threshold
 AC_SEARCH_SMIN = int(_cfg["analysis"]["decoding"].get("acoustic_peak_search_smin", 0))
 AC_SEARCH_SMAX = int(_cfg["analysis"]["decoding"].get("acoustic_peak_search_smax", 50))
 
-# Same cell-inclusion floor as the star-plot gallery on this branch.
-K = 4
+K = min_class_k
 R = 1000              # bootstrap replicates per cell
 CI_LOW, CI_HIGH = 2.5, 97.5
 
@@ -793,12 +794,6 @@ except ImportError:
           "filtered PDFs skipped.")
 
 
-def _b4_pdf(row: dict) -> Path:
-    return (STAR_DIR / "matched_n" / "per_site"
-            / f"{row['subject']}_{row['electrode_idx']}_{row['phoneme_pair']}_"
-              f"{row['word_end']}.pdf")
-
-
 def site_effect_fig(row: dict, site_per_window: pl.DataFrame) -> plt.Figure:
     """CI-trace figure for one cell: bootstrap mean ± CI band across windows."""
     fig, ax = plt.subplots(figsize=(8.5, 3.2))
@@ -840,26 +835,18 @@ def site_effect_fig(row: dict, site_per_window: pl.DataFrame) -> plt.Figure:
 
 
 def write_annotated_pdfs(
-    entries: list[tuple[dict, Path]],
+    entries: list[dict],
     per_window: pl.DataFrame,
     cell_keys: list[str],
     out_path: Path,
     epochs_dict: dict | None = None,
 ) -> int:
-    """Filtered-gallery PDF: per-site CI-trace page followed by its star-plot pages.
-
-    When `epochs_dict` is provided and the row carries `qualifying_steps`,
-    `phon_smin`, and `phon_smax`, the star plot is regenerated on the fly so
-    the bottom panel shows the bootstrap mean diff overlay + significance bars.
-    Otherwise falls back to reading the pre-rendered per-site PDF.
-    """
-    if not entries:
+    """Filtered-gallery PDF: regenerated star plot per cell."""
+    if not entries or not _HAS_PYPDF:
         return 0
-    if not _HAS_PYPDF:
-        return concat_pdfs([p for _, p in entries], out_path)
     writer = PdfWriter()
     n = 0
-    for row, pdf_p in tqdm(entries):
+    for row in tqdm(entries):
         filt = (
             (pl.col("subject") == row["subject"])
             & (pl.col("electrode_idx") == row["electrode_idx"])
@@ -870,7 +857,6 @@ def write_annotated_pdfs(
             filt = filt & (pl.col("resampled") == row["resampled"])
         site_pw = per_window.filter(filt) if per_window.height else pl.DataFrame()
 
-        # Precompute sig windows and bootstrap mean-diff arrays for ax_bot overlay.
         sig_wins = None
         mda = None
         if site_pw.height:
@@ -887,7 +873,6 @@ def write_annotated_pdfs(
                 "ci_hi": pw_s["mean_diff_aligned_ci_hi"].to_numpy().astype(float),
             }
 
-        # Try to regenerate star plot with sig bars + overlay on ax_bot.
         qs = row.get("qualifying_steps")
         can_regen = (
             epochs_dict is not None
@@ -895,69 +880,39 @@ def write_annotated_pdfs(
             and qs is not None
             and row.get("phon_smin") is not None
         )
-        if can_regen:
-            if isinstance(qs, str):
-                qs = [int(s) for s in qs.split(",") if s]
-            try:
-                fig2 = matched_n_star_plot(
-                    subject=row["subject"],
-                    electrode_idx=int(row["electrode_idx"]),
-                    phoneme_pair=row["phoneme_pair"],
-                    word_end=row["word_end"],
-                    qualifying_steps=list(qs),
-                    epochs_dict=epochs_dict,
-                    n_per_class=int(row["n_per_class"]),
-                    phon_smin=int(row["phon_smin"]),
-                    phon_smax=int(row["phon_smax"]),
-                    phon_search_smin=AC_SEARCH_SMIN,
-                    phon_search_smax=AC_SEARCH_SMAX,
-                    acoustic_peak_auc=row.get("acoustic_peak_auc"),
-                    sig_windows=sig_wins,
-                    mean_diff_arrays=mda,
-                )
-                buf2 = io.BytesIO()
-                fig2.savefig(buf2, format="pdf", bbox_inches="tight")
-                plt.close(fig2)
-                buf2.seek(0)
-                for page in PdfReader(buf2).pages:
-                    writer.add_page(page)
-                n += 1
-            except Exception as exc:
-                print(f"  ⚠ star plot regen failed for {row['subject']} "
-                      f"e{row['electrode_idx']}: {exc}")
-                try:
-                    for page in PdfReader(str(pdf_p)).pages:
-                        writer.add_page(page)
-                    n += 1
-                except Exception as exc2:
-                    print(f"  ⚠ skipping unreadable PDF {pdf_p}: {exc2}")
-        else:
-            try:
-                for page in PdfReader(str(pdf_p)).pages:
-                    writer.add_page(page)
-                n += 1
-            except Exception as exc:
-                print(f"  ⚠ skipping unreadable PDF {pdf_p}: {exc}")
-    if n:
-        with out_path.open("wb") as fh:
-            writer.write(fh)
-    return n
-
-
-def concat_pdfs(paths: list[Path], out_path: Path) -> int:
-    if not _HAS_PYPDF or not paths:
-        return 0
-    writer = PdfWriter()
-    n = 0
-    for p in paths:
-        if not p.exists():
+        if not can_regen:
+            print(f"  ⚠ skipping {row['subject']} e{row['electrode_idx']}: "
+                  "cannot regenerate star plot (missing epochs or qualifying_steps)")
             continue
+        if isinstance(qs, str):
+            qs = [int(s) for s in qs.split(",") if s]
         try:
-            for page in PdfReader(str(p)).pages:
+            fig2 = matched_n_star_plot(
+                subject=row["subject"],
+                electrode_idx=int(row["electrode_idx"]),
+                phoneme_pair=row["phoneme_pair"],
+                word_end=row["word_end"],
+                qualifying_steps=list(qs),
+                epochs_dict=epochs_dict,
+                n_per_class=int(row["n_per_class"]),
+                phon_smin=int(row["phon_smin"]),
+                phon_smax=int(row["phon_smax"]),
+                phon_search_smin=AC_SEARCH_SMIN,
+                phon_search_smax=AC_SEARCH_SMAX,
+                acoustic_peak_auc=row.get("acoustic_peak_auc"),
+                sig_windows=sig_wins,
+                mean_diff_arrays=mda,
+            )
+            buf2 = io.BytesIO()
+            fig2.savefig(buf2, format="pdf", bbox_inches="tight")
+            plt.close(fig2)
+            buf2.seek(0)
+            for page in PdfReader(buf2).pages:
                 writer.add_page(page)
             n += 1
         except Exception as exc:
-            print(f"  ⚠ skipping unreadable PDF {p}: {exc}")
+            print(f"  ⚠ star plot regen failed for {row['subject']} "
+                  f"e{row['electrode_idx']}: {exc}")
     if n:
         with out_path.open("wb") as fh:
             writer.write(fh)
@@ -970,11 +925,9 @@ if b4_per_cell.height:
     powered_entries = []
     sig_entries = []
     for row in b4_per_cell.iter_rows(named=True):
-        pdf_p = _b4_pdf(row)
-        is_powered = True
-        is_sig = is_powered and bool(row["best_ci_aligned_excludes_zero"])
-        if is_powered: powered_entries.append((row, pdf_p))
-        if is_sig: sig_entries.append((row, pdf_p))
+        is_sig = bool(row["best_ci_aligned_excludes_zero"])
+        powered_entries.append(row)
+        if is_sig: sig_entries.append(row)
         manifest_row = cell_manifest.filter(
             (pl.col("mode") == "matched_n")
             & (pl.col("subject") == row["subject"])
@@ -992,8 +945,8 @@ if b4_per_cell.height:
             "best_mean_diff_aligned_med": row["best_mean_diff_aligned_med"],
             "best_emp_p_aligned": row["best_emp_p_aligned"],
             "best_ci_aligned_excludes_zero": row["best_ci_aligned_excludes_zero"],
-            "powered": is_powered, "significant": is_sig,
-            "pdf_path": str(pdf_p.relative_to(REPO)) if pdf_p.exists() else "",
+            "powered": True, "significant": is_sig,
+            "pdf_path": "",
             "status": "ok",
         })
     n_p = write_annotated_pdfs(powered_entries, b4_per_window, b4_cell_keys,

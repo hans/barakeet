@@ -87,6 +87,13 @@ analysis:
     ambiguous_response_thresholds: [1, 2, 3]
 
 
+causal46_joined:
+  min_class_k: 4            # minimum per-class trials to include a cell
+  window_size: 10           # searchlight window in samples (100ms at 100 Hz)
+  stride: 10
+  ac_p_value_threshold: 0.001   # uncorrected p-value cutoff for AS-site inclusion
+
+
 causal6:
   # Per-task L2 penalty strengths are NOT stored here — they live in
   # outputs/causal6/reg_lambda_sweep/reg_lambda_winners.json, written by the

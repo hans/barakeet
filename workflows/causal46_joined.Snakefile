@@ -1083,6 +1083,7 @@ rule joined_t_tests:
 
     run:
         outdir = Path(output.notebook).parent
+        C46 = config["causal46_joined"]
         run_notebook(
             str(input.notebook),
             str(output.notebook),
@@ -1091,6 +1092,10 @@ rule joined_t_tests:
                 epoch_dir=str(Path(input.epoch_fifs[0]).parent),
                 trial_balance_path=str(input.trial_balance),
                 outdir=str(outdir),
+                min_class_k=C46["min_class_k"],
+                window_size=C46["window_size"],
+                stride=C46["stride"],
+                ac_p_value_threshold=C46["ac_p_value_threshold"],
             ),
         )
 
