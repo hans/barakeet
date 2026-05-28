@@ -69,7 +69,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 from tqdm.auto import tqdm
 
 from src.data import get_electrode_df
-from src.stimuli import OFFSET_DICT
+from src.stimuli import OFFSET_DICT, PHONEME_PAIR_TO_WORD_ENDS
 from src.viz_paper import epoch_sfreq, epoch_tmin
 from src.viz_provisional import load_epochs_dict
 
@@ -155,11 +155,19 @@ def word_end_search_smax(word_end: str) -> int:
 WE_SMAX = {we: word_end_search_smax(we) for we in OFFSET_DICT.keys()}
 print(f"word-end search_smax (samples): {WE_SMAX}")
 
+# Match the star-plot x-axis (shared across WEs in a site+pair).
+PAIR_SMAX = {
+    pp: max(WE_SMAX[we] for we in wes)
+    for pp, wes in PHONEME_PAIR_TO_WORD_ENDS.items()
+}
+print(f"pair search_smax (samples): {PAIR_SMAX}")
 
-def behav_search_range(word_end: str, phon_smax_c6: int) -> tuple[int, int]:
+
+def behav_search_range(phoneme_pair: str, phon_smax_c6: int) -> tuple[int, int]:
     # return int(phon_smax_c6), int(WE_SMAX[word_end])
-    # DEV: just do search from onset onward
-    return 0, int(WE_SMAX[word_end])
+    # DEV: just do search from onset onward, extend smax to the pair-level max
+    # so the bootstrap covers the same window the star plot now shows.
+    return 0, int(PAIR_SMAX[phoneme_pair])
 
 
 # %% [markdown]
@@ -276,7 +284,7 @@ for row in tqdm(b4_qualified.iter_rows(named=True),
     ep_pp = ep[pp_mask]
     md_pp = md[pp_mask].reset_index(drop=True)
     hga = extract_hga(ep_pp, int(row["electrode_idx"]))
-    behav_smin, behav_smax = behav_search_range(row["word_end"], row["phon_smax"])
+    behav_smin, behav_smax = behav_search_range(row["phoneme_pair"], row["phon_smax"])
     steps = [int(s) for s in row["qualifying_steps"]]
     if behav_smax - behav_smin < WINDOW_SIZE:
         b4_cell_manifest.append({
