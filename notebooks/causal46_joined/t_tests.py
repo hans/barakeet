@@ -220,6 +220,13 @@ def bootstrap_cell(
     Returns (rows_per_replicate_window, n_per_class, preferred_class).
     Preferred class is None for tied cells; rows still carry mean_diff_raw
     and mean_diff_aligned = NaN.
+
+    Each row also carries mean_diff_aligned_null: the aligned mean_diff
+    recomputed on the same bootstrap trial draw but with class labels randomly
+    permuted (pool both classes, randomly re-split equally). Used for the
+    pair-level label-permutation emp_p in cross_we_pair_summary. Under H0
+    (no class difference) |mean_diff_aligned_null| ≈ 0; under H1 it is
+    substantially smaller than |mean_diff_aligned|.
     """
     per_step = per_step_class_counts(
         md_pp, word_end=word_end, qualifying_steps=qualifying_steps,
@@ -242,14 +249,29 @@ def bootstrap_cell(
             search_smin=behav_smin, search_smax=behav_smax,
             window_size=WINDOW_SIZE, stride=STRIDE,
         )
+        # Label-permutation null: pool and randomly re-split class labels.
+        # rng state is post-bootstrap so the shuffle seed is deterministic
+        # but independent of which trials each class received.
+        all_idx = np.concatenate([draws[raw_pos_key], draws[raw_neg_key]])
+        rng.shuffle(all_idx)
+        null_pos = all_idx[:n_per_class]
+        null_neg = all_idx[n_per_class:]
+        res_null = searchlight_mean_diff(
+            hga, null_pos, null_neg,
+            search_smin=behav_smin, search_smax=behav_smax,
+            window_size=WINDOW_SIZE, stride=STRIDE,
+        )
+        null_diff_by_window = {(w.smin, w.smax): w.mean_diff for w in res_null}
         for w in res:
             mean_diff_raw = w.mean_diff
             if preferred is None:
                 mean_diff_aligned = float("nan")
+                mean_diff_aligned_null = float("nan")
             else:
-                # If raw_pos_key == preferred, aligned = raw; else aligned = -raw
-                mean_diff_aligned = mean_diff_raw if raw_pos_key == preferred \
-                    else -mean_diff_raw
+                sign = 1 if raw_pos_key == preferred else -1
+                mean_diff_aligned = sign * mean_diff_raw
+                null_raw = null_diff_by_window.get((w.smin, w.smax), float("nan"))
+                mean_diff_aligned_null = sign * null_raw
             rows.append({
                 "replicate": r,
                 "smin": w.smin, "smax": w.smax,
@@ -259,6 +281,7 @@ def bootstrap_cell(
                 "mean_neg_raw": w.mean_neg,
                 "mean_diff_raw": mean_diff_raw,
                 "mean_diff_aligned": mean_diff_aligned,
+                "mean_diff_aligned_null": mean_diff_aligned_null,
                 "n_per_class": n_per_class,
             })
     return rows, n_per_class, preferred
@@ -512,28 +535,31 @@ if b4_per_cell.height:
 
 # %%
 PAIR_KEYS = ["subject", "electrode_idx", "phoneme_pair"]
-N_NULL_PERM = 999
 PAIR_EMP_P_THRESHOLD = 0.05
 
 
 def cross_we_pair_summary(
     boot: pl.DataFrame,
     per_cell: pl.DataFrame,
-    n_null_perm: int = N_NULL_PERM,
-    rng_seed: int = 42,
 ) -> pl.DataFrame:
     """Pair-level magnitude-pooled bootstrap statistic per (subject x electrode x phoneme_pair).
 
     Only processes pairs where BOTH word-ends are present in boot with at least
     one shared (smin, smax) window.  1-WE pairs are skipped entirely.
 
-    S_r = (|e0_r| + |e1_r|) / 2 at the best shared window (argmax median S_r).
-    emp_p: replicate-permutation null — 999 shuffles of WE1's replicate order.
-    pair_ci_excludes_zero = pair_emp_p < PAIR_EMP_P_THRESHOLD.
+    S_obs_r = (|e0_r| + |e1_r|) / 2  at the best shared window (argmax median S_obs_r).
+    S_null_r = (|e0_null_r| + |e1_null_r|) / 2  using mean_diff_aligned_null from
+    bootstrap_cell's label-permutation pass (same trial draw, class labels shuffled).
+    pair_emp_p = fraction of replicates where S_null_r >= S_obs_r.
+    pair_sig = pair_emp_p < PAIR_EMP_P_THRESHOLD.
     """
     if boot.height == 0 or per_cell.height == 0:
         return pl.DataFrame()
-    rng = np.random.default_rng(rng_seed)
+    if "mean_diff_aligned_null" not in boot.columns:
+        raise ValueError(
+            "b4_bootstrap missing 'mean_diff_aligned_null' column — "
+            "re-run the bootstrap (bootstrap_cell now writes this column)."
+        )
     pc_index = {
         (r["subject"], r["electrode_idx"], r["phoneme_pair"], r["word_end"]): r
         for r in per_cell.iter_rows(named=True)
@@ -557,26 +583,30 @@ def cross_we_pair_summary(
 
         we0, we1 = word_ends[0], word_ends[1]
 
-        def _win_map(we: str) -> dict[tuple, np.ndarray]:
+        def _win_map(we: str, col: str) -> dict[tuple, np.ndarray]:
             wdf = group_df.filter(pl.col("word_end") == we)
             wmap: dict[tuple, np.ndarray] = {}
             for wg in wdf.partition_by(["smin", "smax"], maintain_order=True):
                 wmap[(int(wg["smin"][0]), int(wg["smax"][0]))] = (
-                    wg.sort("replicate")["mean_diff_aligned"].to_numpy().astype(float)
+                    wg.sort("replicate")[col].to_numpy().astype(float)
                 )
             return wmap
 
-        map0 = _win_map(we0)
-        map1 = _win_map(we1)
+        map0 = _win_map(we0, "mean_diff_aligned")
+        map1 = _win_map(we1, "mean_diff_aligned")
+        null0 = _win_map(we0, "mean_diff_aligned_null")
+        null1 = _win_map(we1, "mean_diff_aligned_null")
         shared = set(map0.keys()) & set(map1.keys())
         if not shared:
             continue  # no shared windows across WEs
 
-        # Find best window by median pair-statistic
+        # Find best window by median observed pair-statistic
         best_S_med = -1.0
         best_sm = best_sx = 0
         best_e0: np.ndarray | None = None
         best_e1: np.ndarray | None = None
+        best_e0n: np.ndarray | None = None
+        best_e1n: np.ndarray | None = None
         for win_key in shared:
             e0 = map0[win_key]
             e1 = map1[win_key]
@@ -592,6 +622,10 @@ def cross_we_pair_summary(
                 best_S_med = med
                 best_sm, best_sx = win_key
                 best_e0, best_e1 = e0[:min_len], e1[:min_len]
+                e0n = null0.get(win_key, np.full(min_len, float("nan")))
+                e1n = null1.get(win_key, np.full(min_len, float("nan")))
+                best_e0n = e0n[:min_len]
+                best_e1n = e1n[:min_len]
         if best_e0 is None:
             continue
 
@@ -606,15 +640,10 @@ def cross_we_pair_summary(
             if valid.sum() > 0 else float("nan")
         )
 
-        # Replicate-permutation null: shuffle WE1 replicate order independently
-        R_act = len(best_e0)
-        null_meds = np.empty(n_null_perm)
-        for i in range(n_null_perm):
-            idx = rng.permutation(R_act)
-            null_meds[i] = float(np.nanmedian(
-                (np.abs(best_e0) + np.abs(best_e1[idx])) / 2
-            ))
-        pair_emp_p = float(np.mean(null_meds >= s_med))
+        # Label-permutation emp_p: per-replicate comparison of observed vs null
+        # pair statistic. Under H0, S_null_r ≈ S_obs_r; under H1, S_obs >> S_null.
+        S_null = (np.abs(best_e0n) + np.abs(best_e1n)) / 2
+        pair_emp_p = float(np.nanmean(S_null >= S_obs))
         pair_ci_excl = pair_emp_p < PAIR_EMP_P_THRESHOLD
 
         cells_sig = sum(
@@ -977,7 +1006,7 @@ with PdfPages(pdf_path) as pdf:
         ax.text(0.5, 0.5,
                 f"Total pairs (both WEs present): {b4_per_pair.height}\n"
                 f"pair_ci_excludes_zero: {n_sig_pair}  ·  lift (sig but not both cells): {n_lift}\n"
-                f"Method: S_r = (|e0_r| + |e1_r|) / 2  ·  emp_p from {N_NULL_PERM}-rep permutation null",
+                f"Method: S_r = (|e0_r| + |e1_r|) / 2  ·  emp_p from per-replicate label-permutation null",
                 ha="center", va="center", fontsize=11)
         pdf.savefig(fig); plt.close(fig)
 
@@ -1245,34 +1274,36 @@ def write_annotated_pdfs(
                 mean_diff_arrays=mda,
                 xlim=group_xlim[key],
             )
-            # Cross-WE pooled test banner
+            # Cross-WE pooled test bar on ax_bot (matches sig_windows style,
+            # different color so it's visually distinct from per-cell gray bars).
             if pair_lookup is not None:
                 pair_key_lut = (
                     row["subject"], int(row["electrode_idx"]), row["phoneme_pair"]
                 )
                 pr = pair_lookup.get(pair_key_lut)
                 if pr is not None:
+                    ax_bot = fig2.axes[1]
+                    ymin, ymax = ax_bot.get_ylim()
+                    bar_h = (ymax - ymin) * 0.04
+                    # Sit just below the per-cell gray bars (which are at 0.95)
+                    bar_y = ymin + (ymax - ymin) * 0.90
+                    pair_tmin = pr.get("pair_tmin")
+                    pair_tmax = pr.get("pair_tmax")
                     pair_sig = bool(pr.get("pair_ci_excludes_zero", False))
                     emp_p = pr.get("pair_emp_p")
                     emp_p_str = f"{float(emp_p):.3f}" if emp_p is not None else "?"
-                    sc = pr.get("sign_concordance")
-                    sc_str = f"{float(sc):.2f}" if sc is not None and not (
-                        isinstance(sc, float) and np.isnan(sc)
-                    ) else "?"
-                    bar_color = "#4dac26" if pair_sig else "#d9d9d9"
-                    text_color = "white" if pair_sig else "#555555"
-                    label = (
-                        f"cross-WE pooled: {'SIG' if pair_sig else 'ns'}"
-                        f"   p = {emp_p_str}"
-                        f"   cells_sig = {pr.get('cells_individually_sig', '?')}/2"
-                        f"   sign_concordance = {sc_str}"
-                    )
-                    fig2.suptitle(
-                        label, y=1.01, fontsize=7.5, color=text_color,
-                        bbox=dict(facecolor=bar_color, alpha=0.9,
-                                  edgecolor="none", pad=4,
-                                  boxstyle="round,pad=0.3"),
-                    )
+                    if pair_tmin is not None and pair_tmax is not None:
+                        bar_color = "#01665e" if pair_sig else "#c7eae5"
+                        ax_bot.barh(
+                            y=bar_y,
+                            width=float(pair_tmax) - float(pair_tmin),
+                            left=float(pair_tmin),
+                            height=bar_h,
+                            color=bar_color, alpha=0.85,
+                            edgecolor="none", zorder=5,
+                            label=f"cross-WE pooled (p={emp_p_str})",
+                        )
+                        ax_bot.legend(fontsize=7, loc="upper left", framealpha=0.7)
             buf2 = io.BytesIO()
             fig2.savefig(buf2, format="pdf", bbox_inches="tight")
             plt.close(fig2)
