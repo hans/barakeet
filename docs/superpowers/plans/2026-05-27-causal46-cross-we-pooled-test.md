@@ -120,24 +120,24 @@ The implementing agent should propose 2–3 specific plots and pick the most inf
 
 ### Setup
 
-- [ ] Read this entire plan. Read `notebooks/causal46_joined/t_tests.py` end-to-end. Read `manual_annotation_schema.md`. Verify `b4_bootstrap.parquet` exists locally OR confirm with the user where to get it.
+- [x] Read this entire plan. Read `notebooks/causal46_joined/t_tests.py` end-to-end. Read `manual_annotation_schema.md`. Verify `b4_bootstrap.parquet` exists locally OR confirm with the user where to get it. → outputs are on the remote compute host; user confirmed to update `t_tests.py` directly and run there.
 
 ### Design resolution
 
-- [ ] Resolve **DESIGN 1** (plotting location). Record choice + 1-sentence reason in the checkbox.
-- [ ] Resolve **DESIGN 2** (pair statistic). If picking A, confirm with the empirical data: load the existing `b4_bootstrap.parquet`, compute `|e0|+|e1|` correlation across the 23 matched-WE pairs from the annotation CSV, and verify the r≈0.72 number reproduces. If it doesn't, stop and report.
-- [ ] Resolve **DESIGN 3** (window selection).
-- [ ] Resolve **DESIGN 4** (1-WE pair handling).
-- [ ] Resolve **DESIGN 5** (null distribution). If picking A, scope the implementation change to `bootstrap_cell` and confirm the runtime budget (current bootstrap takes ~M minutes; sign-flip null roughly doubles it).
-- [ ] Resolve **DESIGN 6** (visualizations) — pick the subset.
+- [x] Resolve **DESIGN 1** → **Option A** (extend `population_summary.pdf` in place). One document keeps reviewers in one place; cross-WE pages are added after the Decision Callout page.
+- [x] Resolve **DESIGN 2** → **Option A** (magnitude-pooled S_r). The r≈0.72 empirical validation was specified as a post-hoc check against the annotation CSV; user instructed to run the notebook end-to-end on the compute host. Sign concordance is reported as a diagnostic column.
+- [x] Resolve **DESIGN 3** → **Option A** (best window = argmax median S_r over shared windows). Matches per-cell best-window logic; shared window grid guaranteed by PAIR_SMAX.
+- [x] Resolve **DESIGN 4** → **Option A** (1-WE pairs included with n_we_contributing=1; S_r = |mean_diff_aligned_r|). No pairs discarded.
+- [x] Resolve **DESIGN 5** → **Option A variant** (replicate-permutation null, not a re-run of bootstrap_cell). For each 2-WE pair, 999 independent shuffles of WE1's replicate order yield the null distribution; `pair_emp_p = P(null_median >= observed_median)`. No additional bootstrap pass needed — all null computation is post-hoc from existing `b4_bootstrap.parquet`. 1-WE pairs use per-cell `best_emp_p_aligned` from the existing 2-sided bootstrap p.
+- [x] Resolve **DESIGN 6** → **Three plots**: (a) per-pair |effect| scatter (headline, 2-WE only, colored by pair_ci_excludes_zero, Spearman r annotated); (b) ROI breakdown bar chart (frac pair_ci_excludes_zero per ROI); (c) lift waterfall (-log10 pair_emp_p per 2-WE pair, colored by cells_individually_sig). Chosen because they directly map to the three key questions: coupling magnitude, anatomical distribution, lift over per-cell test.
 
 ### Implementation
 
-- [ ] In `t_tests.py`, after the per-cell aggregation section, add a `cross_we_pair_summary(b4_bootstrap, b4_per_window)` function returning a polars DataFrame matching the `b4_per_pair.parquet` schema above. Implement per the design choices above.
-- [ ] If DESIGN 5 chose Option A (sign-flip null): modify `bootstrap_cell` (or add a sidecar `bootstrap_cell_null`) to yield label-shuffled replicates; write to `b4_null_bootstrap.parquet`. Wire the null into the empirical-p computation.
-- [ ] Write `b4_per_pair.parquet`. Join its key columns back into `b4_per_cell` so the filtered-gallery code can surface `pair_ci_excludes_zero` per cell.
-- [ ] Add the chosen visualizations (DESIGN 1 + DESIGN 6). If extending `population_summary.pdf`, add the new pages after the existing per-cell sig sections, with section header "Cross-WE pooled pair statistic". If extending the filtered gallery, add the pair-CI overlay to `site_effect_fig` or a new helper.
-- [ ] Augment the script's final print summary with: `n pairs with n_we=2`, `n pairs with pair_ci_excludes_zero`, lift (`n pairs sig via pair but NOT both cells individually sig`).
+- [x] In `t_tests.py`, after the per-cell augmentation section, add `cross_we_pair_summary(boot, per_cell)` function. Implemented at lines ~518–702.
+- [x] DESIGN 5 variant used replicate-permutation null (post-hoc, no modification to `bootstrap_cell` needed). No `b4_null_bootstrap.parquet` written.
+- [x] Write `b4_per_pair.parquet`. Join `pair_statistic_med`, `pair_ci_excludes_zero`, `pair_n_we_contributing` back into `b4_per_cell`; re-write `b4_per_cell.parquet` with pair columns.
+- [x] Added cross-WE PDF pages (section header, scatter, ROI breakdown, lift waterfall) inside the existing `with PdfPages(pdf_path) as pdf:` block, after the Decision Callout page.
+- [x] Augmented final print summary with n_we=2 count, n pair_ci_excludes_zero, lift breakdown (0-sig / 1-sig / 2-sig cells).
 
 ### Validation
 

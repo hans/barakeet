@@ -46,7 +46,8 @@
 # Outputs:
 # - `outputs/causal46_joined/t_tests/b4_bootstrap.parquet` — per (cell × window × replicate)
 # - `outputs/causal46_joined/t_tests/b4_per_window.parquet` — aggregates
-# - `outputs/causal46_joined/t_tests/b4_per_cell.parquet` — best-window per cell
+# - `outputs/causal46_joined/t_tests/b4_per_cell.parquet` — best-window per cell (augmented with pair columns)
+# - `outputs/causal46_joined/t_tests/b4_per_pair.parquet` — pair-level CI per (subject × electrode × phoneme_pair)
 # - `outputs/causal46_joined/t_tests/cell_manifest.parquet`
 # - `outputs/causal46_joined/t_tests/population_summary.csv`
 # - `outputs/causal46_joined/t_tests/population_summary.pdf`
@@ -498,6 +499,180 @@ if b4_per_cell.height:
     )
 
 # %% [markdown]
+# ## Cross-WE pooled pair statistic
+#
+# Design choices (2026-05-27-causal46-cross-we-pooled-test.md):
+#   D1: Extend population_summary.pdf in place (Option A)
+#   D2: S_r = (|e0_r| + |e1_r|) / 2; report sign_concordance (Option A)
+#   D3: Best pair-window = argmax median S_r over windows shared by both WEs (Option A)
+#   D4: Only pairs where BOTH WEs are present with shared windows (revised to Option B/exclude 1-WE)
+#   D5: emp_p via replicate-permutation null — NOTE: this tests WE coupling, not magnitude vs. chance;
+#       a label-permutation null integrated into bootstrap_cell would be more principled (TBD)
+#   D6: Scatter + ROI breakdown + lift waterfall
+
+# %%
+PAIR_KEYS = ["subject", "electrode_idx", "phoneme_pair"]
+N_NULL_PERM = 999
+PAIR_EMP_P_THRESHOLD = 0.05
+
+
+def cross_we_pair_summary(
+    boot: pl.DataFrame,
+    per_cell: pl.DataFrame,
+    n_null_perm: int = N_NULL_PERM,
+    rng_seed: int = 42,
+) -> pl.DataFrame:
+    """Pair-level magnitude-pooled bootstrap statistic per (subject x electrode x phoneme_pair).
+
+    Only processes pairs where BOTH word-ends are present in boot with at least
+    one shared (smin, smax) window.  1-WE pairs are skipped entirely.
+
+    S_r = (|e0_r| + |e1_r|) / 2 at the best shared window (argmax median S_r).
+    emp_p: replicate-permutation null — 999 shuffles of WE1's replicate order.
+    pair_ci_excludes_zero = pair_emp_p < PAIR_EMP_P_THRESHOLD.
+    """
+    if boot.height == 0 or per_cell.height == 0:
+        return pl.DataFrame()
+    rng = np.random.default_rng(rng_seed)
+    pc_index = {
+        (r["subject"], r["electrode_idx"], r["phoneme_pair"], r["word_end"]): r
+        for r in per_cell.iter_rows(named=True)
+    }
+
+    def _pc(subj: str, eidx: int, pp: str, we: str) -> dict | None:
+        return pc_index.get((subj, eidx, pp, we))
+
+    rows: list[dict] = []
+    for group_df in tqdm(
+        boot.partition_by(PAIR_KEYS, maintain_order=True),
+        desc="cross-WE pairs",
+    ):
+        subj = str(group_df["subject"][0])
+        eidx = int(group_df["electrode_idx"][0])
+        pp = str(group_df["phoneme_pair"][0])
+
+        word_ends = sorted(group_df["word_end"].unique().to_list())
+        if len(word_ends) != 2:
+            continue  # only process pairs where both WEs are present
+
+        we0, we1 = word_ends[0], word_ends[1]
+
+        def _win_map(we: str) -> dict[tuple, np.ndarray]:
+            wdf = group_df.filter(pl.col("word_end") == we)
+            wmap: dict[tuple, np.ndarray] = {}
+            for wg in wdf.partition_by(["smin", "smax"], maintain_order=True):
+                wmap[(int(wg["smin"][0]), int(wg["smax"][0]))] = (
+                    wg.sort("replicate")["mean_diff_aligned"].to_numpy().astype(float)
+                )
+            return wmap
+
+        map0 = _win_map(we0)
+        map1 = _win_map(we1)
+        shared = set(map0.keys()) & set(map1.keys())
+        if not shared:
+            continue  # no shared windows across WEs
+
+        # Find best window by median pair-statistic
+        best_S_med = -1.0
+        best_sm = best_sx = 0
+        best_e0: np.ndarray | None = None
+        best_e1: np.ndarray | None = None
+        for win_key in shared:
+            e0 = map0[win_key]
+            e1 = map1[win_key]
+            min_len = min(len(e0), len(e1))
+            if min_len < 10:
+                continue
+            e0, e1 = e0[:min_len], e1[:min_len]
+            valid = ~(np.isnan(e0) | np.isnan(e1))
+            if valid.sum() < 10:
+                continue
+            med = float(np.nanmedian((np.abs(e0) + np.abs(e1)) / 2))
+            if med > best_S_med:
+                best_S_med = med
+                best_sm, best_sx = win_key
+                best_e0, best_e1 = e0[:min_len], e1[:min_len]
+        if best_e0 is None:
+            continue
+
+        S_obs = (np.abs(best_e0) + np.abs(best_e1)) / 2
+        s_med = float(np.nanmedian(S_obs))
+        s_ci_lo = float(np.nanpercentile(S_obs, CI_LOW))
+        s_ci_hi = float(np.nanpercentile(S_obs, CI_HIGH))
+
+        valid = ~(np.isnan(best_e0) | np.isnan(best_e1))
+        sign_conc = (
+            float(np.mean(np.sign(best_e0[valid]) == np.sign(best_e1[valid])))
+            if valid.sum() > 0 else float("nan")
+        )
+
+        # Replicate-permutation null: shuffle WE1 replicate order independently
+        R_act = len(best_e0)
+        null_meds = np.empty(n_null_perm)
+        for i in range(n_null_perm):
+            idx = rng.permutation(R_act)
+            null_meds[i] = float(np.nanmedian(
+                (np.abs(best_e0) + np.abs(best_e1[idx])) / 2
+            ))
+        pair_emp_p = float(np.mean(null_meds >= s_med))
+        pair_ci_excl = pair_emp_p < PAIR_EMP_P_THRESHOLD
+
+        cells_sig = sum(
+            1 for we in word_ends
+            if (pcr := _pc(subj, eidx, pp, we)) and pcr.get("best_ci_aligned_excludes_zero")
+        )
+        auc_list = []
+        for we in word_ends:
+            pcr = _pc(subj, eidx, pp, we)
+            if pcr is not None:
+                v = pcr.get("acoustic_peak_auc")
+                if v is not None:
+                    auc_list.append(float(v))
+        auc_max = max(auc_list) if auc_list else float("nan")
+
+        rows.append({
+            "subject": subj,
+            "electrode_idx": eidx,
+            "phoneme_pair": pp,
+            "word_ends": ",".join(word_ends),
+            "n_we_contributing": 2,
+            "pair_smin": best_sm,
+            "pair_smax": best_sx,
+            "pair_tmin": best_sm / epoch_sfreq + epoch_tmin,
+            "pair_tmax": best_sx / epoch_sfreq + epoch_tmin,
+            "pair_statistic_med": s_med,
+            "pair_statistic_ci_lo": s_ci_lo,
+            "pair_statistic_ci_hi": s_ci_hi,
+            "pair_emp_p": pair_emp_p,
+            "pair_ci_excludes_zero": pair_ci_excl,
+            "sign_concordance": sign_conc,
+            "acoustic_peak_auc_max": auc_max,
+            "cells_individually_sig": cells_sig,
+        })
+
+    return pl.DataFrame(rows) if rows else pl.DataFrame()
+
+
+b4_per_pair = cross_we_pair_summary(b4_boot, b4_per_cell)
+if b4_per_pair.height:
+    b4_per_pair.write_parquet(OUT_DIR / "b4_per_pair.parquet")
+n_pair_sig = b4_per_pair.filter(pl.col("pair_ci_excludes_zero")).height if b4_per_pair.height else 0
+print(f"B4 per_pair rows: {b4_per_pair.height}  (pair_ci_excl: {n_pair_sig})")
+
+# Join pair verdict back to b4_per_cell and re-write
+if b4_per_pair.height and b4_per_cell.height:
+    b4_per_cell = b4_per_cell.join(
+        b4_per_pair.select([
+            "subject", "electrode_idx", "phoneme_pair",
+            "pair_statistic_med", "pair_ci_excludes_zero",
+            pl.col("n_we_contributing").alias("pair_n_we_contributing"),
+        ]),
+        on=PAIR_KEYS, how="left",
+    )
+    b4_per_cell.write_parquet(OUT_DIR / "b4_per_cell.parquet")
+    print(f"Updated b4_per_cell.parquet with pair columns ({b4_per_cell.height} rows)")
+
+# %% [markdown]
 # ## ROI lookup
 
 # %%
@@ -788,6 +963,148 @@ with PdfPages(pdf_path) as pdf:
             family="monospace", fontsize=11)
     pdf.savefig(fig); plt.close(fig)
 
+    # ---- Cross-WE pooled pair statistic pages ----
+    if b4_per_pair.height:
+        # Section header
+        fig, ax = plt.subplots(figsize=(8.5, 11))
+        ax.axis("off")
+        ax.text(0.5, 0.7, "Cross-WE pooled pair statistic",
+                ha="center", va="center", fontsize=18)
+        n_sig_pair = b4_per_pair.filter(pl.col("pair_ci_excludes_zero")).height
+        n_lift = b4_per_pair.filter(
+            pl.col("pair_ci_excludes_zero") & (pl.col("cells_individually_sig") < 2)
+        ).height if "cells_individually_sig" in b4_per_pair.columns else 0
+        ax.text(0.5, 0.5,
+                f"Total pairs (both WEs present): {b4_per_pair.height}\n"
+                f"pair_ci_excludes_zero: {n_sig_pair}  ·  lift (sig but not both cells): {n_lift}\n"
+                f"Method: S_r = (|e0_r| + |e1_r|) / 2  ·  emp_p from {N_NULL_PERM}-rep permutation null",
+                ha="center", va="center", fontsize=11)
+        pdf.savefig(fig); plt.close(fig)
+
+        # D6a: Per-pair scatter (all pairs have both WEs; n_we_contributing==2 always)
+        pairs_2we = b4_per_pair
+        if pairs_2we.height and b4_per_cell.height:
+            pairs_2we = pairs_2we.with_columns([
+                pl.col("word_ends").str.split(",").list.get(0).alias("_we0"),
+                pl.col("word_ends").str.split(",").list.get(1).alias("_we1"),
+            ])
+            eff_lookup = b4_per_cell.select(
+                ["subject", "electrode_idx", "phoneme_pair", "word_end",
+                 "best_mean_diff_aligned_med"]
+            )
+            scatter_df = (
+                pairs_2we.join(
+                    eff_lookup.rename({
+                        "word_end": "_we0",
+                        "best_mean_diff_aligned_med": "eff_we0",
+                    }),
+                    on=["subject", "electrode_idx", "phoneme_pair", "_we0"],
+                    how="left",
+                ).join(
+                    eff_lookup.rename({
+                        "word_end": "_we1",
+                        "best_mean_diff_aligned_med": "eff_we1",
+                    }),
+                    on=["subject", "electrode_idx", "phoneme_pair", "_we1"],
+                    how="left",
+                )
+            )
+            x_arr = scatter_df["eff_we0"].to_numpy().astype(float)
+            y_arr = scatter_df["eff_we1"].to_numpy().astype(float)
+            sig_arr = scatter_df["pair_ci_excludes_zero"].to_numpy().astype(bool)
+            valid_mask = np.isfinite(x_arr) & np.isfinite(y_arr)
+            x_v, y_v, sig_v = np.abs(x_arr[valid_mask]), np.abs(y_arr[valid_mask]), sig_arr[valid_mask]
+            fig, ax = plt.subplots(figsize=(6, 6))
+            ax.scatter(x_v[~sig_v], y_v[~sig_v], color="#d9d9d9", s=40, alpha=0.8,
+                       edgecolors="k", lw=0.5, label=f"pair CI includes 0 (n={int((~sig_v).sum())})")
+            ax.scatter(x_v[sig_v], y_v[sig_v], color="#2166ac", s=50, alpha=0.9,
+                       edgecolors="k", lw=0.5, label=f"pair CI excludes 0 (n={int(sig_v.sum())})")
+            if valid_mask.sum() >= 3:
+                from scipy.stats import spearmanr
+                r_sp, p_sp = spearmanr(x_v, y_v)
+                ax.set_title(
+                    f"Cross-WE |effect| scatter — 2-WE pairs (n={valid_mask.sum()})\n"
+                    f"Spearman r = {r_sp:.2f}, p = {p_sp:.3f}", fontsize=10
+                )
+            else:
+                ax.set_title(f"Cross-WE |effect| scatter — n={valid_mask.sum()}", fontsize=10)
+            lim = max(x_v.max() if len(x_v) else 1, y_v.max() if len(y_v) else 1) * 1.05
+            ax.set_xlim(0, lim); ax.set_ylim(0, lim)
+            ax.plot([0, lim], [0, lim], "k--", lw=0.8, alpha=0.4)
+            ax.set_xlabel("|best aligned effect| — WE0")
+            ax.set_ylabel("|best aligned effect| — WE1")
+            ax.legend(fontsize=8, loc="upper left")
+            ax.grid(alpha=0.3)
+            fig.tight_layout()
+            pdf.savefig(fig); plt.close(fig)
+
+        # D6b: ROI breakdown — frac pair_ci_excludes_zero per ROI
+        pair_roi = (
+            b4_per_pair
+            .join(electrode_roi, on=["subject", "electrode_idx"], how="left")
+            .with_columns(pl.col("roi").fill_null("unknown"))
+        )
+        roi_pair_summary = (
+            pair_roi
+            .group_by("roi")
+            .agg(
+                pl.len().alias("n_pairs"),
+                pl.col("pair_ci_excludes_zero").cast(pl.Float64).sum().alias("n_pair_sig"),
+                pl.col("n_we_contributing").eq(2).cast(pl.Float64).mean().alias("frac_2we"),
+            )
+            .with_columns(
+                (pl.col("n_pair_sig") / pl.col("n_pairs")).alias("frac_pair_sig")
+            )
+            .sort("frac_pair_sig", descending=True)
+        )
+        fig, ax = plt.subplots(figsize=(8, max(3, roi_pair_summary.height * 0.45)))
+        labels = roi_pair_summary["roi"].to_list()
+        vals = roi_pair_summary["frac_pair_sig"].to_list()
+        ns = roi_pair_summary["n_pairs"].to_list()
+        ax.barh(labels, vals, color="#4393c3", edgecolor="k")
+        ax.axvline(JON41_GREENLIGHT, color="#4dac26", lw=1, ls="--")
+        ax.axvline(JON41_REVISIT, color="#d73027", lw=1, ls="--")
+        for y_pos, (v, n) in enumerate(zip(vals, ns)):
+            ax.text(v + 0.01, y_pos, f"{v:.0%} (n={int(n)})", va="center", fontsize=8)
+        ax.set_xlim(0, 1.05)
+        ax.set_xlabel("fraction of pairs with pair_ci_excludes_zero")
+        ax.set_title("Cross-WE pair significance by ROI", fontsize=11)
+        ax.grid(axis="x", alpha=0.3)
+        fig.tight_layout()
+        pdf.savefig(fig); plt.close(fig)
+
+        # D6c: Lift waterfall — all pairs sorted by pair_emp_p
+        pairs_2we_lift = b4_per_pair.sort("pair_emp_p")
+        if pairs_2we_lift.height:
+            emp_p_arr = pairs_2we_lift["pair_emp_p"].to_numpy().astype(float)
+            csig_arr = pairs_2we_lift["cells_individually_sig"].to_numpy().astype(int)
+            log_p = -np.log10(np.clip(emp_p_arr, 1e-4, 1))
+            colors = {0: "#d01c8b", 1: "#f1b6da", 2: "#4dac26"}
+            bar_colors = [colors.get(int(c), "#888888") for c in csig_arr]
+            fig, ax = plt.subplots(figsize=(min(12, 0.4 * len(log_p) + 2), 4))
+            ax.bar(range(len(log_p)), log_p, color=bar_colors, edgecolor="none", width=0.8)
+            ax.axhline(-np.log10(PAIR_EMP_P_THRESHOLD), color="k", lw=1, ls="--",
+                       label=f"p = {PAIR_EMP_P_THRESHOLD}")
+            from matplotlib.patches import Patch
+            legend_els = [
+                Patch(facecolor=colors[0], label="neither cell individually sig"),
+                Patch(facecolor=colors[1], label="1 cell sig"),
+                Patch(facecolor=colors[2], label="both cells sig"),
+            ]
+            ax.legend(handles=legend_els, fontsize=8, loc="upper right")
+            ax.set_xlabel("pair (sorted by pair_emp_p)")
+            ax.set_ylabel("-log10(pair_emp_p)")
+            ax.set_title(
+                f"Lift waterfall — cross-WE pairs (n={pairs_2we_lift.height})\n"
+                f"sig (p<{PAIR_EMP_P_THRESHOLD}): {int((emp_p_arr < PAIR_EMP_P_THRESHOLD).sum())}  "
+                f"of which lift (cells_sig<2): "
+                f"{int(((emp_p_arr < PAIR_EMP_P_THRESHOLD) & (csig_arr < 2)).sum())}",
+                fontsize=10,
+            )
+            ax.grid(axis="y", alpha=0.3)
+            fig.tight_layout()
+            pdf.savefig(fig); plt.close(fig)
+
 print(f"wrote {pdf_path}")
 
 # %% [markdown]
@@ -850,8 +1167,14 @@ def write_annotated_pdfs(
     cell_keys: list[str],
     out_path: Path,
     epochs_dict: dict | None = None,
+    pair_lookup: dict | None = None,
 ) -> int:
-    """Filtered-gallery PDF: regenerated star plot per cell."""
+    """Filtered-gallery PDF: regenerated star plot per cell.
+
+    pair_lookup: optional dict keyed by (subject, electrode_idx, phoneme_pair) →
+    b4_per_pair row dict. When provided, a colored banner is added at the top of
+    each page showing the cross-WE pooled test result for that site/pair.
+    """
     if not entries or not _HAS_PYPDF:
         return 0
     # Precompute matched x-axis limit per (subject, electrode_idx, phoneme_pair):
@@ -922,6 +1245,34 @@ def write_annotated_pdfs(
                 mean_diff_arrays=mda,
                 xlim=group_xlim[key],
             )
+            # Cross-WE pooled test banner
+            if pair_lookup is not None:
+                pair_key_lut = (
+                    row["subject"], int(row["electrode_idx"]), row["phoneme_pair"]
+                )
+                pr = pair_lookup.get(pair_key_lut)
+                if pr is not None:
+                    pair_sig = bool(pr.get("pair_ci_excludes_zero", False))
+                    emp_p = pr.get("pair_emp_p")
+                    emp_p_str = f"{float(emp_p):.3f}" if emp_p is not None else "?"
+                    sc = pr.get("sign_concordance")
+                    sc_str = f"{float(sc):.2f}" if sc is not None and not (
+                        isinstance(sc, float) and np.isnan(sc)
+                    ) else "?"
+                    bar_color = "#4dac26" if pair_sig else "#d9d9d9"
+                    text_color = "white" if pair_sig else "#555555"
+                    label = (
+                        f"cross-WE pooled: {'SIG' if pair_sig else 'ns'}"
+                        f"   p = {emp_p_str}"
+                        f"   cells_sig = {pr.get('cells_individually_sig', '?')}/2"
+                        f"   sign_concordance = {sc_str}"
+                    )
+                    fig2.suptitle(
+                        label, y=1.01, fontsize=7.5, color=text_color,
+                        bbox=dict(facecolor=bar_color, alpha=0.9,
+                                  edgecolor="none", pad=4,
+                                  boxstyle="round,pad=0.3"),
+                    )
             buf2 = io.BytesIO()
             fig2.savefig(buf2, format="pdf", bbox_inches="tight")
             plt.close(fig2)
@@ -968,12 +1319,16 @@ if b4_per_cell.height:
             "pdf_path": "",
             "status": "ok",
         })
+    pair_lut = {
+        (r["subject"], int(r["electrode_idx"]), r["phoneme_pair"]): r
+        for r in b4_per_pair.iter_rows(named=True)
+    } if b4_per_pair.height else None
     n_p = write_annotated_pdfs(powered_entries, b4_per_window, b4_cell_keys,
                                FILT_DIR / "b4_powered.pdf",
-                               epochs_dict=epochs_dict)
+                               epochs_dict=epochs_dict, pair_lookup=pair_lut)
     n_s = write_annotated_pdfs(sig_entries, b4_per_window, b4_cell_keys,
                                FILT_DIR / "b4_powered_significant.pdf",
-                               epochs_dict=epochs_dict)
+                               epochs_dict=epochs_dict, pair_lookup=pair_lut)
     print(f"B4 filtered PDFs: powered={n_p}  significant={n_s}")
 
 under = cell_manifest.filter(
@@ -1013,3 +1368,22 @@ print(f"B4 cells (ok): "
 b4_peak = _peak_frac(population, "b4", "frac_ci_aligned")
 print(f"B4 peak frac CI-aligned: {b4_peak if b4_peak is None else f'{b4_peak:.1%}'}")
 print(f"See {pdf_path} for the decision callout.")
+print("=" * 70)
+print("Cross-WE pooled pair statistic summary:")
+if b4_per_pair.height:
+    n_sig_pair = b4_per_pair.filter(pl.col("pair_ci_excludes_zero")).height
+    n_sig_neither = b4_per_pair.filter(
+        pl.col("pair_ci_excludes_zero") & (pl.col("cells_individually_sig") == 0)
+    ).height
+    n_sig_one = b4_per_pair.filter(
+        pl.col("pair_ci_excludes_zero") & (pl.col("cells_individually_sig") == 1)
+    ).height
+    n_lift = n_sig_neither + n_sig_one
+    print(f"  Total cross-WE pairs (both WEs present): {b4_per_pair.height}")
+    print(f"  pair_ci_excludes_zero:  {n_sig_pair}")
+    print(f"  Lift (pair sig but NOT both cells individually sig): {n_lift}")
+    print(f"    of which 0 cells sig: {n_sig_neither}")
+    print(f"    of which 1 cell sig:  {n_sig_one}")
+    print(f"  See {OUT_DIR / 'b4_per_pair.parquet'}")
+else:
+    print("  (no pair results — b4_per_pair is empty)")
