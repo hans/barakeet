@@ -865,7 +865,7 @@ with PdfPages(pdf_path) as pdf:
         ax.set_title(f"{mode.upper()} — fraction with CI excluding 0")
         ax.grid(alpha=0.3)
     axes[0].set_ylabel("fraction of cells")
-    axes[0].legend(fontsize=7, loc="upper right")
+    axes[0].legend(fontsize=7, loc="lower left")
     fig.tight_layout()
     pdf.savefig(fig); plt.close(fig)
 
@@ -945,7 +945,7 @@ with PdfPages(pdf_path) as pdf:
         ax.set_xlabel("Best-window tmin (s, post word onset)")
         ax.set_yticks([])
         ax.set_title(f"{mode.upper()} — {n_sig}/{n_tot} significant ({100*n_sig/max(n_tot,1):.0f}%)")
-        ax.legend(fontsize=8, loc="upper right")
+        ax.legend(fontsize=8, loc="lower left")
         ax.grid(axis="x", alpha=0.3)
     fig.suptitle("Best-window timing per cell", fontsize=12)
     fig.tight_layout()
@@ -1079,7 +1079,7 @@ with PdfPages(pdf_path) as pdf:
             ax.plot([0, lim], [0, lim], "k--", lw=0.8, alpha=0.4)
             ax.set_xlabel("|best aligned effect| — WE0")
             ax.set_ylabel("|best aligned effect| — WE1")
-            ax.legend(fontsize=8, loc="upper left")
+            ax.legend(fontsize=8, loc="lower left")
             ax.grid(alpha=0.3)
             fig.tight_layout()
             pdf.savefig(fig); plt.close(fig)
@@ -1137,7 +1137,7 @@ with PdfPages(pdf_path) as pdf:
                 Patch(facecolor=colors[1], label="1 cell sig"),
                 Patch(facecolor=colors[2], label="both cells sig"),
             ]
-            ax.legend(handles=legend_els, fontsize=8, loc="upper right")
+            ax.legend(handles=legend_els, fontsize=8, loc="lower left")
             ax.set_xlabel("pair (sorted by pair_emp_p)")
             ax.set_ylabel("-log10(pair_emp_p)")
             ax.set_title(
@@ -1187,7 +1187,7 @@ def site_effect_fig(row: dict, site_per_window: pl.DataFrame) -> plt.Figure:
     ax.axhline(0, color="k", lw=0.7, ls="--", alpha=0.6)
     ax.set_xlabel("Window center (s, post word onset)")
     ax.set_ylabel("aligned mean_diff (HGA)")
-    ax.legend(fontsize=8, loc="upper right")
+    ax.legend(fontsize=8, loc="lower left")
     ax.grid(alpha=0.3)
     med_val = row.get("best_mean_diff_aligned_med")
     ci_lo_v = row.get("best_mean_diff_aligned_ci_lo")
@@ -1320,7 +1320,7 @@ def write_annotated_pdfs(
                             edgecolor="none", zorder=5,
                             label=f"cross-WE pooled (p={emp_p_str})",
                         )
-                        ax_bot.legend(fontsize=7, loc="upper left", framealpha=0.7)
+                        ax_bot.legend(fontsize=7, loc="lower left", framealpha=0.7)
             buf2 = io.BytesIO()
             fig2.savefig(buf2, format="pdf", bbox_inches="tight")
             plt.close(fig2)
