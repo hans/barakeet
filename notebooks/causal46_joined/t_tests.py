@@ -249,13 +249,30 @@ def bootstrap_cell(
             search_smin=behav_smin, search_smax=behav_smax,
             window_size=WINDOW_SIZE, stride=STRIDE,
         )
-        # Label-permutation null: pool and randomly re-split class labels.
-        # rng state is post-bootstrap so the shuffle seed is deterministic
-        # but independent of which trials each class received.
-        all_idx = np.concatenate([draws[raw_pos_key], draws[raw_neg_key]])
-        rng.shuffle(all_idx)
-        null_pos = all_idx[:n_per_class]
-        null_neg = all_idx[n_per_class:]
+        # Label-permutation null: within each step, pool that step's pos+neg
+        # draws and randomly re-split equally.  This preserves per-step class
+        # balance so step-level HGA variation does not inflate the null.
+        # draws[cls] is concatenated in per_step iteration order; we slice it
+        # back into per-step chunks using the same step sizes.
+        _step_sizes = [
+            min(len(v) for v in by_cls.values())
+            for by_cls in per_step.values()
+            if min(len(v) for v in by_cls.values()) > 0
+        ]
+        _null_pos_parts: list[np.ndarray] = []
+        _null_neg_parts: list[np.ndarray] = []
+        _off = 0
+        for _ns in _step_sizes:
+            _step_pool = np.concatenate([
+                draws[raw_pos_key][_off:_off + _ns],
+                draws[raw_neg_key][_off:_off + _ns],
+            ])
+            rng.shuffle(_step_pool)
+            _null_pos_parts.append(_step_pool[:_ns])
+            _null_neg_parts.append(_step_pool[_ns:])
+            _off += _ns
+        null_pos = np.concatenate(_null_pos_parts)
+        null_neg = np.concatenate(_null_neg_parts)
         res_null = searchlight_mean_diff(
             hga, null_pos, null_neg,
             search_smin=behav_smin, search_smax=behav_smax,
@@ -693,7 +710,7 @@ if b4_per_pair.height and b4_per_cell.height:
     b4_per_cell = b4_per_cell.join(
         b4_per_pair.select([
             "subject", "electrode_idx", "phoneme_pair",
-            "pair_statistic_med", "pair_ci_excludes_zero",
+            "pair_statistic_med", "pair_ci_excludes_zero", "pair_emp_p",
             pl.col("n_we_contributing").alias("pair_n_we_contributing"),
         ]),
         on=PAIR_KEYS, how="left",
@@ -1346,6 +1363,8 @@ if b4_per_cell.height:
             "best_mean_diff_aligned_med": row["best_mean_diff_aligned_med"],
             "best_emp_p_aligned": row["best_emp_p_aligned"],
             "best_ci_aligned_excludes_zero": row["best_ci_aligned_excludes_zero"],
+            "pair_ci_excludes_zero": row.get("pair_ci_excludes_zero"),
+            "pair_emp_p": row.get("pair_emp_p"),
             "powered": True, "significant": is_sig,
             "pdf_path": "",
             "status": "ok",
@@ -1376,6 +1395,8 @@ for row in under.iter_rows(named=True):
         "best_mean_diff_aligned_med": None,
         "best_emp_p_aligned": None,
         "best_ci_aligned_excludes_zero": False,
+        "pair_ci_excludes_zero": None,
+        "pair_emp_p": None,
         "powered": False, "significant": False,
         "pdf_path": "", "status": row["status"],
     })
