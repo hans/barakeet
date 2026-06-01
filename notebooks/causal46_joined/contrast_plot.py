@@ -60,6 +60,9 @@ epochs_dir = "outputs/epochs_preprocessed"
 # %%
 PAIR_PHONEMES = {"bm": ("b", "m"), "dn": ("d", "n"), "pb": ("p", "b")}
 
+# papermill serializes tuples as strings; normalize here
+pval_thresholds = tuple(float(p) for p in pval_thresholds)
+
 OUT_DIR = Path(output_dir)
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
