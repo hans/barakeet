@@ -1125,3 +1125,44 @@ rule causal46_joined_all:
         # Trial balance index + B4 bootstrap t-tests
         "outputs/causal46_joined/trial_balance_index.csv",
         "outputs/causal46_joined/t_tests/population_summary.csv",
+
+
+# =============================================================================
+# Contrast plot — continuous-time HGA contrast (acoustic vs behavioral).
+# =============================================================================
+
+
+rule contrast_plot:
+    input:
+        notebook="notebooks/causal46_joined/contrast_plot.py",
+        manifest="outputs_prod/causal46_joined/filtered_manifest.csv",
+    output:
+        notebook="outputs/causal46_joined/contrast_plot/contrast_plot.ipynb",
+        figure="outputs/causal46_joined/contrast_plot/contrast_plot.pdf",
+    run:
+        outdir = Path(output.notebook).parent
+        outdir.mkdir(parents=True, exist_ok=True)
+        run_notebook(str(input.notebook), str(output.notebook), parameters=dict(
+            manifest_path=str(input.manifest),
+            output_dir=str(outdir),
+            phoneme_pair=None,
+        ))
+
+
+rule contrast_plot_per_pair:
+    input:
+        notebook="notebooks/causal46_joined/contrast_plot.py",
+        manifest="outputs_prod/causal46_joined/filtered_manifest.csv",
+    output:
+        notebook="outputs/causal46_joined/contrast_plot/{pair}_contrast_plot.ipynb",
+        figure="outputs/causal46_joined/contrast_plot/{pair}_contrast_plot.pdf",
+    wildcard_constraints:
+        pair="bm|dn|pb",
+    run:
+        outdir = Path(output.notebook).parent
+        outdir.mkdir(parents=True, exist_ok=True)
+        run_notebook(str(input.notebook), str(output.notebook), parameters=dict(
+            manifest_path=str(input.manifest),
+            output_dir=str(outdir),
+            phoneme_pair=wildcards.pair,
+        ))
