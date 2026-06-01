@@ -233,7 +233,6 @@ for _, row in behavioral_pool.iterrows():
     eidx = int(row["electrode_idx"])
     pair = row["phoneme_pair"]
     word_end = row["word_end"]
-    behav_letter = str(row["_behav_letter"]).strip()
 
     if subj not in epochs_dict:
         print(f"  SKIP behav: no epochs for {subj}")
@@ -247,10 +246,6 @@ for _, row in behavioral_pool.iterrows():
     md_pp = ep_pp.metadata.reset_index(drop=True)
 
     hga = extract_hga(ep_pp, eidx)
-
-    # Determine polarity: class 0 = first phoneme, class 1 = second phoneme
-    first_ph = PAIR_PHONEMES[pair][0]
-    behav_sign = 1 if behav_letter == first_ph else -1
 
     # Determine qualifying steps
     bhv_col = resolve_behavior_col(md_pp)
@@ -293,7 +288,7 @@ for _, row in behavioral_pool.iterrows():
         continue
 
     mean_diff = running_sum / valid_reps
-    trajectory = behav_sign * mean_diff
+    trajectory = np.abs(mean_diff)
     behavioral_trajectories.append(trajectory)
 
 print(f"\nBehavioral trajectories: {len(behavioral_trajectories)}"
