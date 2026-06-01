@@ -26,6 +26,7 @@
 # %%
 from __future__ import annotations
 
+import ast
 import sys
 from pathlib import Path
 
@@ -60,7 +61,9 @@ epochs_dir = "outputs/epochs_preprocessed"
 # %%
 PAIR_PHONEMES = {"bm": ("b", "m"), "dn": ("d", "n"), "pb": ("p", "b")}
 
-# papermill serializes tuples as strings; normalize here
+# papermill serializes tuples as a single string; parse then coerce
+if isinstance(pval_thresholds, str):
+    pval_thresholds = ast.literal_eval(pval_thresholds)
 pval_thresholds = tuple(float(p) for p in pval_thresholds)
 
 OUT_DIR = Path(output_dir)
