@@ -1136,7 +1136,7 @@ rule causal46_joined_all:
 rule contrast_plot:
     input:
         notebook="notebooks/causal46_joined/contrast_plot.py",
-        manifest="outputs/causal46_joined/filtered_manifest.csv",
+        manifest="outputs_prod/causal46_joined/filtered_manifest.csv",
     output:
         notebook="outputs/causal46_joined/contrast_plot/contrast_plot.ipynb",
         figure="outputs/causal46_joined/contrast_plot/contrast_plot.pdf",
@@ -1147,13 +1147,20 @@ rule contrast_plot:
             manifest_path=str(input.manifest),
             output_dir=str(outdir),
             phoneme_pair=None,
+            bootstrap_r=1000,
+            bootstrap_seed=42,
+            min_class_k=4,
+            ttest_window_size=15,
+            ttest_window_stride=15,
+            pval_thresholds=(0.00001, 0.0001, 0.001),
+            epochs_dir="outputs/epochs_preprocessed",
         ))
 
 
 rule contrast_plot_per_pair:
     input:
         notebook="notebooks/causal46_joined/contrast_plot.py",
-        manifest="outputs/causal46_joined/filtered_manifest.csv",
+        manifest="outputs_prod/causal46_joined/filtered_manifest.csv",
     output:
         notebook="outputs/causal46_joined/contrast_plot/{pair}_contrast_plot.ipynb",
         figure="outputs/causal46_joined/contrast_plot/{pair}_contrast_plot.pdf",
@@ -1166,4 +1173,11 @@ rule contrast_plot_per_pair:
             manifest_path=str(input.manifest),
             output_dir=str(outdir),
             phoneme_pair=wildcards.pair,
+            bootstrap_r=1000,
+            bootstrap_seed=42,
+            min_class_k=4,
+            ttest_window_size=15,
+            ttest_window_stride=15,
+            pval_thresholds=(0.00001, 0.0001, 0.001),
+            epochs_dir="outputs/epochs_preprocessed",
         ))
