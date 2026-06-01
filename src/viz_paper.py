@@ -2306,7 +2306,7 @@ def show_behav_stackplot2(
     if filter_word_end is not None:
         md_i = md_i.query("word_end == @filter_word_end")
 
-    all_behaviors = ["d", "n"]
+    all_behaviors = list(phoneme_pair)
     colors = plt.cm.Set3(range(len(all_behaviors)))
     color_map = {behavior: colors[i] for i, behavior in enumerate(all_behaviors)}
 
@@ -2473,8 +2473,8 @@ def plot_behav_barplot(
         ax=ax,
     )
 
-    behavior_styles = {"d": "", "n": "//"}
-    linestyles = {"d": "solid", "n": "dashed"}
+    behavior_styles = dict(zip(list(plot_phoneme_pair), ["", "//"]))
+    linestyles = dict(zip(list(plot_phoneme_pair), ["solid", "dashed"]))
 
     max_width = behav_barplot_data["count"].max()
 
