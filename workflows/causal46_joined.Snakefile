@@ -1154,6 +1154,7 @@ rule contrast_plot:
             ttest_window_stride=15,
             pval_thresholds=(0.00001, 0.0001, 0.001),
             epochs_dir="outputs/epochs_preprocessed",
+            behav_polarity_mode="annotated",
         ))
 
 
@@ -1180,4 +1181,5 @@ rule contrast_plot_per_pair:
             ttest_window_stride=15,
             pval_thresholds=(0.00001, 0.0001, 0.001),
             epochs_dir="outputs/epochs_preprocessed",
+            behav_polarity_mode="annotated",
         ))
