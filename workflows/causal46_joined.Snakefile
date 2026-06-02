@@ -1136,7 +1136,7 @@ rule causal46_joined_all:
 rule contrast_plot:
     input:
         notebook="notebooks/causal46_joined/contrast_plot.py",
-        manifest="outputs_prod/causal46_joined/filtered_manifest.csv",
+        manifest="outputs/causal46_joined/filtered_manifest.csv",
     output:
         notebook="outputs/causal46_joined/contrast_plot/contrast_plot.ipynb",
         figure="outputs/causal46_joined/contrast_plot/contrast_plot.pdf",
@@ -1160,7 +1160,7 @@ rule contrast_plot:
 rule contrast_plot_per_pair:
     input:
         notebook="notebooks/causal46_joined/contrast_plot.py",
-        manifest="outputs_prod/causal46_joined/filtered_manifest.csv",
+        manifest="outputs/causal46_joined/filtered_manifest.csv",
     output:
         notebook="outputs/causal46_joined/contrast_plot/{pair}_contrast_plot.ipynb",
         figure="outputs/causal46_joined/contrast_plot/{pair}_contrast_plot.pdf",
