@@ -1183,3 +1183,199 @@ rule contrast_plot_per_pair:
             epochs_dir="outputs/epochs_preprocessed",
             behav_polarity_mode="annotated",
         ))
+
+
+# =============================================================================
+# Gradient acoustic encoding — manifest-restricted ports of causal5
+# (acoustic_ax_discrimination, multivariate_gradient_perception) plus the
+# sigmoid-fit portion of acoustic_morphology_on_ambiguous. Each rule fans out
+# over `subject`; aggregates concat per-subject parquets.
+#
+# Electrode pool: filtered_manifest.csv rows with `acoustic tuning ~ ^[a-z]$`,
+# collapsed to (subject, electrode_idx, phoneme_pair).
+# Peak window: causal6 phon_peaks.parquet (null-standardized).
+# Completions are pooled (matches causal5).
+# =============================================================================
+
+
+rule joined_acoustic_ax_discrimination:
+    """Per-site adjacent-step decoders at peak acoustic window — manifest-restricted."""
+    input:
+        epochs      = "outputs/epochs_preprocessed/{subject}_epo.fif",
+        phon_peaks  = "outputs/causal6/acoustic_decoding_peaks/{subject}/phon_peaks.parquet",
+        manifest    = "outputs/causal46_joined/filtered_manifest.csv",
+        helper      = "notebooks/causal46_joined/_gradient_pool.py",
+        notebook    = "notebooks/causal46_joined/acoustic_ax_discrimination.py",
+
+    output:
+        notebook             = "outputs/causal46_joined/acoustic_ax_discrimination/{subject}/notebook.ipynb",
+        ax_discrimination_df = "outputs/causal46_joined/acoustic_ax_discrimination/{subject}/ax_discrimination_df.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                epochs_path=str(input.epochs),
+                phon_peaks_path=str(input.phon_peaks),
+                manifest_path=str(input.manifest),
+                outdir=str(outdir),
+                n_jobs=config["analysis"]["decoding"]["n_jobs"],
+            ),
+        )
+
+
+rule joined_acoustic_ax_discrimination_aggregate:
+    """Concat per-subject AX discrimination tables across subjects."""
+    input:
+        per_subject = expand(
+            "outputs/causal46_joined/acoustic_ax_discrimination/{subject}/ax_discrimination_df.parquet",
+            subject=config["data"]["subjects"],
+        ),
+
+    output:
+        all = "outputs/causal46_joined/acoustic_ax_discrimination/ax_discrimination_df_all.parquet",
+
+    run:
+        import pandas as pd
+        dfs = [pd.read_parquet(p) for p in input.per_subject]
+        out = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+        out.to_parquet(output.all, index=False)
+
+
+rule joined_acoustic_univariate_gradient:
+    """Per-site sigmoid neurometric fit on HGA across morph steps — manifest-restricted."""
+    input:
+        epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
+        phon_peaks = "outputs/causal6/acoustic_decoding_peaks/{subject}/phon_peaks.parquet",
+        manifest   = "outputs/causal46_joined/filtered_manifest.csv",
+        helper     = "notebooks/causal46_joined/_gradient_pool.py",
+        notebook   = "notebooks/causal46_joined/acoustic_univariate_gradient.py",
+
+    output:
+        notebook            = "outputs/causal46_joined/acoustic_univariate_gradient/{subject}/notebook.ipynb",
+        trial_df            = "outputs/causal46_joined/acoustic_univariate_gradient/{subject}/trial_df.parquet",
+        model_comparison_df = "outputs/causal46_joined/acoustic_univariate_gradient/{subject}/model_comparison_df.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                epochs_path=str(input.epochs),
+                phon_peaks_path=str(input.phon_peaks),
+                manifest_path=str(input.manifest),
+                outdir=str(outdir),
+            ),
+        )
+
+
+rule joined_acoustic_univariate_gradient_aggregate:
+    """Concat per-subject trial_df + model_comparison_df across subjects."""
+    input:
+        trial_dfs = expand(
+            "outputs/causal46_joined/acoustic_univariate_gradient/{subject}/trial_df.parquet",
+            subject=config["data"]["subjects"],
+        ),
+        model_dfs = expand(
+            "outputs/causal46_joined/acoustic_univariate_gradient/{subject}/model_comparison_df.parquet",
+            subject=config["data"]["subjects"],
+        ),
+
+    output:
+        trial_df_all            = "outputs/causal46_joined/acoustic_univariate_gradient/trial_df_all.parquet",
+        model_comparison_df_all = "outputs/causal46_joined/acoustic_univariate_gradient/model_comparison_df_all.parquet",
+
+    run:
+        import pandas as pd
+        trial_dfs = [pd.read_parquet(p) for p in input.trial_dfs]
+        model_dfs = [pd.read_parquet(p) for p in input.model_dfs]
+        (pd.concat(trial_dfs, ignore_index=True) if trial_dfs else pd.DataFrame()
+         ).to_parquet(output.trial_df_all, index=False)
+        (pd.concat(model_dfs, ignore_index=True) if model_dfs else pd.DataFrame()
+         ).to_parquet(output.model_comparison_df_all, index=False)
+
+
+rule joined_multivariate_gradient_perception:
+    """Per-(subject, phoneme_pair) population logistic+PCA on endpoints — manifest-restricted.
+
+    Trains on endpoint trials (resampled ∈ {1, 6}) across the pair's AS
+    population; applies to held-out endpoint folds, all ambiguous trials, and
+    each adjacent step pair. Gradient claim: do ambiguous-trial decoder_proba
+    track morph step continuously?
+    """
+    input:
+        epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
+        phon_peaks = "outputs/causal6/acoustic_decoding_peaks/{subject}/phon_peaks.parquet",
+        manifest   = "outputs/causal46_joined/filtered_manifest.csv",
+        helper     = "notebooks/causal46_joined/_gradient_pool.py",
+        notebook   = "notebooks/causal46_joined/multivariate_gradient_perception.py",
+
+    output:
+        notebook                 = "outputs/causal46_joined/multivariate_gradient_perception/{subject}/notebook.ipynb",
+        endpoint_predictions     = "outputs/causal46_joined/multivariate_gradient_perception/{subject}/endpoint_predictions.parquet",
+        regression_predictions   = "outputs/causal46_joined/multivariate_gradient_perception/{subject}/regression_predictions.parquet",
+        gradient_stats           = "outputs/causal46_joined/multivariate_gradient_perception/{subject}/gradient_stats.parquet",
+        multivariate_ax          = "outputs/causal46_joined/multivariate_gradient_perception/{subject}/multivariate_ax_discrimination_df.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                epochs_path=str(input.epochs),
+                phon_peaks_path=str(input.phon_peaks),
+                manifest_path=str(input.manifest),
+                outdir=str(outdir),
+                pca_num_components=config["analysis"]["multivariate"]["pca_num_components"],
+                n_jobs=config["analysis"]["multivariate"]["n_jobs"],
+                num_repeats=5,
+                epoch_tmin=config["analysis"]["epoch_tmin"],
+                epoch_sfreq=config["analysis"]["epoch_sfreq"],
+                min_window_post_onset_s=0.3,
+                min_population_size=2,
+                ax_step_pairs=((1, 2), (2, 3), (3, 4), (4, 5), (5, 6)),
+                ax_min_per_class=5,
+            ),
+        )
+
+
+rule joined_multivariate_gradient_perception_aggregate:
+    """Concat per-subject multivariate-gradient parquets across subjects."""
+    input:
+        endpoint     = expand(
+            "outputs/causal46_joined/multivariate_gradient_perception/{subject}/endpoint_predictions.parquet",
+            subject=config["data"]["subjects"],
+        ),
+        regression   = expand(
+            "outputs/causal46_joined/multivariate_gradient_perception/{subject}/regression_predictions.parquet",
+            subject=config["data"]["subjects"],
+        ),
+        stats        = expand(
+            "outputs/causal46_joined/multivariate_gradient_perception/{subject}/gradient_stats.parquet",
+            subject=config["data"]["subjects"],
+        ),
+        ax           = expand(
+            "outputs/causal46_joined/multivariate_gradient_perception/{subject}/multivariate_ax_discrimination_df.parquet",
+            subject=config["data"]["subjects"],
+        ),
+
+    output:
+        endpoint_all   = "outputs/causal46_joined/multivariate_gradient_perception/endpoint_predictions_all.parquet",
+        regression_all = "outputs/causal46_joined/multivariate_gradient_perception/regression_predictions_all.parquet",
+        stats_all      = "outputs/causal46_joined/multivariate_gradient_perception/gradient_stats_all.parquet",
+        ax_all         = "outputs/causal46_joined/multivariate_gradient_perception/multivariate_ax_discrimination_df_all.parquet",
+
+    run:
+        import pandas as pd
+        def _concat(paths, out_path):
+            dfs = [pd.read_parquet(p) for p in paths]
+            (pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+             ).to_parquet(out_path, index=False)
+        _concat(input.endpoint, output.endpoint_all)
+        _concat(input.regression, output.regression_all)
+        _concat(input.stats, output.stats_all)
+        _concat(input.ax, output.ax_all)
