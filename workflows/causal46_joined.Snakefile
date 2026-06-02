@@ -1269,7 +1269,6 @@ rule joined_acoustic_univariate_gradient:
                 manifest_path=str(input.manifest),
                 outdir=str(outdir),
                 endpoint_separation_floor=0.1,
-                winsor_pct=(2.5, 97.5),
                 min_distinct_steps=5,
             ),
         )
@@ -1340,7 +1339,6 @@ rule joined_multivariate_gradient_perception:
                 epoch_sfreq=config["analysis"]["epoch_sfreq"],
                 min_window_post_onset_s=0.3,
                 min_population_size=2,
-                ax_step_pairs=((1, 2), (2, 3), (3, 4), (4, 5), (5, 6)),
                 ax_min_per_class=5,
             ),
         )

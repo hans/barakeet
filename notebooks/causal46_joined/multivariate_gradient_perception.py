@@ -78,11 +78,13 @@ min_window_post_onset_s = 0.3
 # Skip (subject, pair) populations with fewer than this many AS sites.
 min_population_size = 2
 
-# Adjacent step pairs for the multivariate AX pass.
-ax_step_pairs = ((1, 2), (2, 3), (3, 4), (4, 5), (5, 6))
 ax_min_per_class = 5
 
 # %%
+# Adjacent step pairs for the multivariate AX pass. Hard-coded rather than
+# parameterized because papermill flattens nested tuples to strings.
+ax_step_pairs = ((1, 2), (2, 3), (3, 4), (4, 5), (5, 6))
+
 subject = Path(epochs_path).name.split("_")[0]
 outdir = Path(outdir)
 outdir.mkdir(parents=True, exist_ok=True)

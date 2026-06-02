@@ -67,14 +67,16 @@ outdir = "."
 # pooled within-endpoint std. Inherited from causal5.
 endpoint_separation_floor = 0.1
 
-# Winsorize hga_norm at these percentiles per site before sigmoid fit.
-winsor_pct = (2.5, 97.5)
-
 # Require this many distinct morph steps represented in the site's data
 # before attempting the sigmoid fit.
 min_distinct_steps = 5
 
 # %%
+# Winsorize hga_norm at these percentiles per site before sigmoid fit.
+# Hard-coded rather than parameterized because papermill flattens tuples
+# to strings.
+winsor_pct = (2.5, 97.5)
+
 subject = Path(epochs_path).name.split("_")[0]
 outdir = Path(outdir)
 outdir.mkdir(parents=True, exist_ok=True)
