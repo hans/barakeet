@@ -57,6 +57,9 @@ ttest_window_size = 15
 ttest_window_stride = 15
 pval_thresholds = (0.00001, 0.0001, 0.001)
 epochs_dir = "outputs/epochs_preprocessed"
+# "annotated": sign-correct using consensus tuning letter from manifest
+# "abs":       take absolute value of mean diff (no manifest label needed)
+behav_polarity_mode = "annotated"
 
 # %%
 PAIR_PHONEMES = {"bm": ("b", "m"), "dn": ("d", "n"), "pb": ("p", "b")}
@@ -233,6 +236,7 @@ for _, row in behavioral_pool.iterrows():
     eidx = int(row["electrode_idx"])
     pair = row["phoneme_pair"]
     word_end = row["word_end"]
+    behav_letter = str(row["_behav_letter"]).strip()
 
     if subj not in epochs_dict:
         print(f"  SKIP behav: no epochs for {subj}")
@@ -288,7 +292,12 @@ for _, row in behavioral_pool.iterrows():
         continue
 
     mean_diff = running_sum / valid_reps
-    trajectory = np.abs(mean_diff)
+    if behav_polarity_mode == "abs":
+        trajectory = np.abs(mean_diff)
+    else:  # "annotated"
+        first_ph = PAIR_PHONEMES[pair][0]
+        behav_sign = 1 if behav_letter == first_ph else -1
+        trajectory = behav_sign * mean_diff
     behavioral_trajectories.append(trajectory)
 
 print(f"\nBehavioral trajectories: {len(behavioral_trajectories)}"
