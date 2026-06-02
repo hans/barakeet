@@ -1268,6 +1268,9 @@ rule joined_acoustic_univariate_gradient:
                 phon_peaks_path=str(input.phon_peaks),
                 manifest_path=str(input.manifest),
                 outdir=str(outdir),
+                endpoint_separation_floor=0.1,
+                winsor_pct=(2.5, 97.5),
+                min_distinct_steps=5,
             ),
         )
 
