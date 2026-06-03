@@ -109,6 +109,7 @@ CI_LOW, CI_HIGH = 2.5, 97.5
 # B bootstrap searches only this acoustic window (not the full word).
 B_SEARCH_SMIN = int(ac_search_smin)
 B_SEARCH_SMAX = int(ac_search_smax)
+PAIR_EMP_P_THRESHOLD = 0.05
 
 # Acoustic search range (matches acoustic_decoding_peaks.py peak-selection bounds)
 SMIN_LO = int((0.0 - epoch_tmin) * epoch_sfreq)          # word onset = sample 40
@@ -238,14 +239,23 @@ def bootstrap_B_cell(
     """Run R bootstrap replicates of the B behavioral searchlight.
 
     Returns (rows, n_per_class).
-    mean_diff_aligned = acoustic_sign × mean_diff_raw
-    where mean_diff_raw = mean(HGA[class=1]) − mean(HGA[class=0]).
+    mean_diff_aligned       = acoustic_sign × mean_diff_raw
+    mean_diff_aligned_null  = acoustic_sign × null_raw  (label-permutation null
+                              for the cross-WE pooled pair statistic).
+    Null skipped (NaN) when acoustic_sign is NaN — those rows are excluded from
+    the pair statistic regardless, so computing the null is pointless.
     """
     per_step = per_step_class_counts(
         md_pp, word_end=word_end, qualifying_steps=qualifying_steps,
         group_col=bhv_col,
     )
     n_per_class = n_per_class_from_per_step(per_step)
+    _step_sizes = [
+        min(len(v) for v in by_cls.values())
+        for by_cls in per_step.values()
+        if min(len(v) for v in by_cls.values()) > 0
+    ]
+    a_sign_known = not np.isnan(acoustic_sign)
     rows: list[dict] = []
     for r in range(R):
         rng = np.random.default_rng(base_seed + r)
@@ -257,12 +267,38 @@ def bootstrap_B_cell(
             search_smin=search_smin, search_smax=search_smax,
             window_size=WINDOW_SIZE, stride=STRIDE,
         )
+        # Label-permutation null: per-step pool and re-split equally.
+        # Only needed when acoustic_sign is known (aligned values are non-NaN).
+        if a_sign_known:
+            _null_pos_parts: list[np.ndarray] = []
+            _null_neg_parts: list[np.ndarray] = []
+            _off = 0
+            for _ns in _step_sizes:
+                _step_pool = np.concatenate([
+                    draws[raw_pos_key][_off:_off + _ns],
+                    draws[raw_neg_key][_off:_off + _ns],
+                ])
+                rng.shuffle(_step_pool)
+                _null_pos_parts.append(_step_pool[:_ns])
+                _null_neg_parts.append(_step_pool[_ns:])
+                _off += _ns
+            null_pos = np.concatenate(_null_pos_parts)
+            null_neg = np.concatenate(_null_neg_parts)
+            res_null = searchlight_mean_diff(
+                hga, null_pos, null_neg,
+                search_smin=search_smin, search_smax=search_smax,
+                window_size=WINDOW_SIZE, stride=STRIDE,
+            )
+            null_diff_by_win = {(w.smin, w.smax): w.mean_diff for w in res_null}
         for w in windows:
             mean_diff_raw = w.mean_diff
-            if np.isnan(acoustic_sign):
+            if not a_sign_known:
                 mean_diff_aligned = float("nan")
+                mean_diff_aligned_null = float("nan")
             else:
                 mean_diff_aligned = float(acoustic_sign) * mean_diff_raw
+                null_raw = null_diff_by_win.get((w.smin, w.smax), float("nan"))
+                mean_diff_aligned_null = float(acoustic_sign) * null_raw
             rows.append({
                 "replicate": r,
                 "smin": w.smin, "smax": w.smax,
@@ -270,9 +306,104 @@ def bootstrap_B_cell(
                 "tmax": w.smax / epoch_sfreq + epoch_tmin,
                 "mean_diff_raw": mean_diff_raw,
                 "mean_diff_aligned": mean_diff_aligned,
+                "mean_diff_aligned_null": mean_diff_aligned_null,
                 "n_per_class": n_per_class,
             })
     return rows, n_per_class
+
+# %% [markdown]
+# ## Helper — cross-WE pooled pair statistic
+
+# %%
+def _compute_cross_we_pair_stat(
+    raw_rows_by_we: dict[str, list[dict]],
+    word_ends: list[str],
+) -> dict:
+    """Cross-WE pooled pair statistic from raw B bootstrap rows.
+
+    S_r = (|e0_r| + |e1_r|) / 2  at best shared window (argmax median S_r).
+    Null: S_null_r = (|e0_null_r| + |e1_null_r|) / 2  from the per-replicate
+    label-permutation null stored in mean_diff_aligned_null.
+    pair_emp_p = fraction of replicates where S_null_r >= S_obs_r.
+    sign_concordance = fraction of replicates where sign(e0) == sign(e1).
+
+    Both word_ends must have raw rows; sites with acoustic_sign=NaN produce all
+    NaN aligned values and are skipped (all-NaN valid mask < 10).
+    """
+    _null_result = {
+        "B_pooled_sig": False, "pair_emp_p": float("nan"),
+        "pair_statistic_med": float("nan"), "sign_concordance": float("nan"),
+        "pair_smin": None, "pair_smax": None,
+    }
+    if len(word_ends) != 2:
+        return _null_result
+    rows0 = raw_rows_by_we.get(word_ends[0], [])
+    rows1 = raw_rows_by_we.get(word_ends[1], [])
+    if not rows0 or not rows1:
+        return _null_result
+
+    def _win_arrays(rows: list[dict], col: str) -> dict[tuple, np.ndarray]:
+        by_win: dict[tuple, list] = {}
+        for r in rows:
+            by_win.setdefault((r["smin"], r["smax"]), []).append(
+                (r["replicate"], float(r[col]))
+            )
+        return {
+            k: np.array([v for _, v in sorted(vs)], dtype=float)
+            for k, vs in by_win.items()
+        }
+
+    map0 = _win_arrays(rows0, "mean_diff_aligned")
+    map1 = _win_arrays(rows1, "mean_diff_aligned")
+    null0 = _win_arrays(rows0, "mean_diff_aligned_null")
+    null1 = _win_arrays(rows1, "mean_diff_aligned_null")
+    shared = set(map0.keys()) & set(map1.keys())
+    if not shared:
+        return _null_result
+
+    best_S_med = -1.0
+    best_win: tuple | None = None
+    best_e0 = best_e1 = best_e0n = best_e1n = None
+
+    for win_key in shared:
+        e0 = map0[win_key]
+        e1 = map1[win_key]
+        min_len = min(len(e0), len(e1))
+        if min_len < 10:
+            continue
+        e0, e1 = e0[:min_len], e1[:min_len]
+        valid = ~(np.isnan(e0) | np.isnan(e1))
+        if valid.sum() < 10:
+            continue
+        med = float(np.nanmedian((np.abs(e0) + np.abs(e1)) / 2))
+        if med > best_S_med:
+            best_S_med = med
+            best_win = win_key
+            best_e0, best_e1 = e0, e1
+            e0n = null0.get(win_key, np.full(min_len, float("nan")))[:min_len]
+            e1n = null1.get(win_key, np.full(min_len, float("nan")))[:min_len]
+            best_e0n, best_e1n = e0n, e1n
+
+    if best_win is None:
+        return _null_result
+
+    S_obs = (np.abs(best_e0) + np.abs(best_e1)) / 2
+    S_null = (np.abs(best_e0n) + np.abs(best_e1n)) / 2
+    pair_emp_p = float(np.nanmean(S_null >= S_obs))
+    valid_sc = ~(np.isnan(best_e0) | np.isnan(best_e1))
+    sign_conc = (
+        float(np.mean(np.sign(best_e0[valid_sc]) == np.sign(best_e1[valid_sc])))
+        if valid_sc.sum() > 0 else float("nan")
+    )
+    return {
+        "B_pooled_sig": pair_emp_p < PAIR_EMP_P_THRESHOLD,
+        "pair_emp_p": pair_emp_p,
+        "pair_statistic_med": float(np.nanmedian(S_obs)),
+        "sign_concordance": sign_conc,
+        "pair_smin": best_win[0],
+        "pair_smax": best_win[1],
+    }
+
 
 # %% [markdown]
 # ## Helper — B cell qualification from trial balance
@@ -425,6 +556,9 @@ for site in tqdm(sites, desc="early_window sites"):
             "B1_qualifying_steps": "", "B2_qualifying_steps": "",
             "B1_n_per_class": 0, "B2_n_per_class": 0,
             "site_type": "unknown", "status": "search_range_too_narrow",
+            "B_pooled_sig": False, "pair_emp_p": float("nan"),
+            "pair_statistic_med": float("nan"), "sign_concordance": float("nan"),
+            "pair_smin": None, "pair_smax": None,
         })
         continue
 
@@ -463,6 +597,9 @@ for site in tqdm(sites, desc="early_window sites"):
                 "B1_n_per_class": 0, "B2_n_per_class": 0,
                 "site_type": "A_unsigned", "status": "A_endpoint_underpowered",
                 "A_n_step1": n_lo, "A_n_step6": n_hi,
+                "B_pooled_sig": False, "pair_emp_p": float("nan"),
+                "pair_statistic_med": float("nan"), "sign_concordance": float("nan"),
+                "pair_smin": None, "pair_smax": None,
             })
             continue
 
@@ -500,6 +637,7 @@ for site in tqdm(sites, desc="early_window sites"):
         # ------------------------------------------------------------------
         word_ends = PAIR_WE.get(pp, [])
         we_results: dict[str, dict] = {}
+        b_raw_by_we: dict[str, list[dict]] = {}
 
         for we in word_ends:
             b_qual = get_b_cell_qualification(ei, pp, we)
@@ -520,6 +658,7 @@ for site in tqdm(sites, desc="early_window sites"):
                 search_smin=B_SEARCH_SMIN, search_smax=B_SEARCH_SMAX,
                 R=R,
             )
+            b_raw_by_we[we] = b_rows
 
             b_pw = agg_B_per_window(b_rows)
 
@@ -568,6 +707,11 @@ for site in tqdm(sites, desc="early_window sites"):
             }
 
         # ------------------------------------------------------------------
+        # Cross-WE pooled pair statistic (acoustic search window only)
+        # ------------------------------------------------------------------
+        pair_stat = _compute_cross_we_pair_stat(b_raw_by_we, word_ends)
+
+        # ------------------------------------------------------------------
         # Site-type assignment
         # ------------------------------------------------------------------
         we0, we1 = (word_ends + ["", ""])[:2]
@@ -612,6 +756,7 @@ for site in tqdm(sites, desc="early_window sites"):
             "A_n_step6": n_hi,
             "site_type": site_type,
             "status": status,
+            **pair_stat,
         })
 
     except Exception as exc:
@@ -769,6 +914,33 @@ with PdfPages(pdf_path_gallery) as _pdf:
                 b_search_smin=B_SEARCH_SMIN,
                 b_search_smax=B_SEARCH_SMAX,
             )
+            # Overlay cross-WE pooled pair bar on the B₂ panel (axes[2]).
+            _pair_smin = _row.get("pair_smin")
+            if _pair_smin is not None and len(_fig.axes) >= 3:
+                _ax_b2 = _fig.axes[2]
+                _ymin_p, _ymax_p = _ax_b2.get_ylim()
+                _bar_h_p = (_ymax_p - _ymin_p) * 0.04
+                _bar_y_p = _ymin_p + (_ymax_p - _ymin_p) * 0.82
+                _pair_tmin = float(_pair_smin) / epoch_sfreq + epoch_tmin
+                _pair_tmax = float(_row["pair_smax"]) / epoch_sfreq + epoch_tmin
+                _pair_sig = bool(_row.get("B_pooled_sig", False))
+                _emp_p_val = _row.get("pair_emp_p")
+                _emp_p_str = (
+                    f"{float(_emp_p_val):.3f}" if _emp_p_val is not None
+                    and not (isinstance(_emp_p_val, float) and np.isnan(_emp_p_val))
+                    else "?"
+                )
+                _ax_b2.barh(
+                    y=_bar_y_p,
+                    width=_pair_tmax - _pair_tmin,
+                    left=_pair_tmin,
+                    height=_bar_h_p,
+                    color="#01665e" if _pair_sig else "#c7eae5",
+                    alpha=0.85, edgecolor="none", zorder=5,
+                    label=f"cross-WE pooled (p={_emp_p_str})",
+                )
+                _ax_b2.legend(fontsize=7, loc="upper left", framealpha=0.7)
+                _ax_b2.set_ylim(_ymin_p, _ymax_p)
             _pdf.savefig(_fig, bbox_inches="tight")
             plt.close(_fig)
             _n_plotted += 1
