@@ -470,6 +470,8 @@ def early_window_star_plot(
     acoustic_peak_auc: float | None = None,
     search_smin: int = 40,
     search_smax: int = 130,
+    b_search_smin: int | None = None,
+    b_search_smax: int | None = None,
     figsize: tuple = (8.5, 10.0),
     R_plot: int = 200,
 ) -> "plt.Figure":
@@ -479,7 +481,8 @@ def early_window_star_plot(
     Middle: B₁ (WE0 behavioral) — ambiguous qualifying steps for we0.
     Bottom: B₂ (WE1 behavioral) — ambiguous qualifying steps for we1.
 
-    Gray shading: acoustic search range.
+    A panel shading: [search_smin, search_smax] (full acoustic search range).
+    B panel shading: [b_search_smin, b_search_smax] if provided, else same as A.
     Green bars on A panel: A bootstrap CI-excluding-zero windows.
     Gray bars on B panels: aligned CI-excluding-zero (▲); red bars: anti-aligned (▼).
 
@@ -489,6 +492,8 @@ def early_window_star_plot(
         Full subject epochs (not pre-filtered to phoneme_pair).
     a_per_window, b1_per_window, b2_per_window : polars DataFrame
         Pre-filtered to this site (and word_end for B). Empty DataFrame = no data.
+    b_search_smin, b_search_smax : int, optional
+        B bootstrap search range in samples. If None, uses search_smin/smax.
     """
     import polars as pl
 
@@ -501,6 +506,10 @@ def early_window_star_plot(
 
     t_search_lo = search_smin / epoch_sfreq + epoch_tmin
     t_search_hi = search_smax / epoch_sfreq + epoch_tmin
+    _bsmin = b_search_smin if b_search_smin is not None else search_smin
+    _bsmax = b_search_smax if b_search_smax is not None else search_smax
+    t_b_lo = _bsmin / epoch_sfreq + epoch_tmin
+    t_b_hi = _bsmax / epoch_sfreq + epoch_tmin
 
     fig, (ax_top, ax_mid, ax_bot) = plt.subplots(3, 1, figsize=figsize, sharex=True)
 
@@ -545,7 +554,7 @@ def early_window_star_plot(
 
     # ── Helper: draw one behavioral panel ────────────────────────────────────
     def _draw_b_panel(ax, we, qualifying_steps, n_per_class_b, b_pw, panel_label):
-        ax.axvspan(t_search_lo, t_search_hi, color="gray", alpha=0.08, zorder=0)
+        ax.axvspan(t_b_lo, t_b_hi, color="gray", alpha=0.12, zorder=0)
         if not qualifying_steps:
             ax.text(0.5, 0.5,
                     f"B: {we}  — underpowered / no qualifying steps",

@@ -91,6 +91,11 @@ min_class_k = 4
 window_size = 10
 stride = 10
 R = 1000
+# Acoustic decoder peak-selection search range — used as B bootstrap search range.
+# Matches acoustic_decoding_peaks.py so B only evaluates the same early window
+# where the acoustic response was originally found.
+ac_search_smin = 45
+ac_search_smax = 68
 
 # %%
 OUT_DIR = Path(outdir)
@@ -101,6 +106,9 @@ STRIDE = stride
 K = min_class_k
 R = int(R)
 CI_LOW, CI_HIGH = 2.5, 97.5
+# B bootstrap searches only this acoustic window (not the full word).
+B_SEARCH_SMIN = int(ac_search_smin)
+B_SEARCH_SMAX = int(ac_search_smax)
 
 # Acoustic search range (matches acoustic_decoding_peaks.py peak-selection bounds)
 SMIN_LO = int((0.0 - epoch_tmin) * epoch_sfreq)          # word onset = sample 40
@@ -486,7 +494,9 @@ for site in tqdm(sites, desc="early_window sites"):
             acoustic_sign = float("nan")
 
         # ------------------------------------------------------------------
-        # B₁ and B₂ bootstraps (per word_end, ambiguous trials, early window)
+        # B₁ and B₂ bootstraps — restricted to acoustic peak search window
+        # B_SEARCH_SMIN/SMAX matches acoustic_decoding_peaks.py so we only
+        # evaluate the early acoustic period, not late lexical effects.
         # ------------------------------------------------------------------
         word_ends = PAIR_WE.get(pp, [])
         we_results: dict[str, dict] = {}
@@ -507,7 +517,7 @@ for site in tqdm(sites, desc="early_window sites"):
                 word_end=we,
                 qualifying_steps=q_steps,
                 acoustic_sign=acoustic_sign,
-                search_smin=search_smin, search_smax=search_smax,
+                search_smin=B_SEARCH_SMIN, search_smax=B_SEARCH_SMAX,
                 R=R,
             )
 
@@ -756,6 +766,8 @@ with PdfPages(pdf_path_gallery) as _pdf:
                 acoustic_peak_auc=phon_auc.get((_ei, _pp)),
                 search_smin=SMIN_LO,
                 search_smax=PAIR_SMAX_HI.get(_pp, SMAX_HI_ABS),
+                b_search_smin=B_SEARCH_SMIN,
+                b_search_smax=B_SEARCH_SMAX,
             )
             _pdf.savefig(_fig, bbox_inches="tight")
             plt.close(_fig)

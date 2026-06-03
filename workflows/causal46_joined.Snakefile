@@ -1300,6 +1300,56 @@ rule joined_acoustic_univariate_gradient_aggregate:
          ).to_parquet(output.model_comparison_df_all, index=False)
 
 
+rule joined_acoustic_gradient_figures:
+    """Population visualization: AX discrimination + sigmoid neurometric figures.
+
+    Consumes the three aggregate gradient parquets and produces:
+      - confidence_by_step.pdf, confidence_scatter.pdf
+      - ax_discrimination_population.pdf  (headline AX curve)
+      - catplots_sample.pdf               (24 sample sites, AX on secondary axis)
+      - ax_per_site_gallery.pdf           (per-site PDF: neurometric + AX panels)
+      - ideal_model_shapes.pdf, sigmoid_parameter_distributions.pdf
+      - pse_by_subject_phoneme.pdf, pse_overlay_candidates.pdf
+      - sigmoid_vs_auc.pdf, catplots_sigmoid_fits.pdf
+    """
+    input:
+        trial_df_all            = "outputs/causal46_joined/acoustic_univariate_gradient/trial_df_all.parquet",
+        model_comparison_df_all = "outputs/causal46_joined/acoustic_univariate_gradient/model_comparison_df_all.parquet",
+        ax_discrimination_all   = "outputs/causal46_joined/acoustic_ax_discrimination/ax_discrimination_df_all.parquet",
+        phon_peaks_all          = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet",
+        manifest                = "outputs/causal46_joined/filtered_manifest.csv",
+        notebook                = "notebooks/causal46_joined/acoustic_gradient_figures.py",
+
+    output:
+        notebook                        = "outputs/causal46_joined/acoustic_gradient_figures/notebook.ipynb",
+        confidence_by_step              = "outputs/causal46_joined/acoustic_gradient_figures/confidence_by_step.pdf",
+        confidence_scatter              = "outputs/causal46_joined/acoustic_gradient_figures/confidence_scatter.pdf",
+        ax_discrimination_population    = "outputs/causal46_joined/acoustic_gradient_figures/ax_discrimination_population.pdf",
+        catplots_sample                 = "outputs/causal46_joined/acoustic_gradient_figures/catplots_sample.pdf",
+        ax_per_site_gallery             = "outputs/causal46_joined/acoustic_gradient_figures/ax_per_site_gallery.pdf",
+        ideal_model_shapes              = "outputs/causal46_joined/acoustic_gradient_figures/ideal_model_shapes.pdf",
+        sigmoid_parameter_distributions = "outputs/causal46_joined/acoustic_gradient_figures/sigmoid_parameter_distributions.pdf",
+        pse_by_subject_phoneme          = "outputs/causal46_joined/acoustic_gradient_figures/pse_by_subject_phoneme.pdf",
+        pse_overlay_candidates          = "outputs/causal46_joined/acoustic_gradient_figures/pse_overlay_candidates.pdf",
+        sigmoid_vs_auc                  = "outputs/causal46_joined/acoustic_gradient_figures/sigmoid_vs_auc.pdf",
+        catplots_sigmoid_fits           = "outputs/causal46_joined/acoustic_gradient_figures/catplots_sigmoid_fits.pdf",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                trial_df_path=str(input.trial_df_all),
+                model_comparison_df_path=str(input.model_comparison_df_all),
+                ax_discrimination_path=str(input.ax_discrimination_all),
+                phon_peaks_path=str(input.phon_peaks_all),
+                manifest_path=str(input.manifest),
+                outdir=str(outdir),
+            ),
+        )
+
+
 rule joined_multivariate_gradient_perception:
     """Per-(subject, phoneme_pair) population logistic+PCA on endpoints — manifest-restricted.
 
@@ -1421,6 +1471,8 @@ rule early_window_site_types:
                 window_size=C46["window_size"],
                 stride=C46["stride"],
                 R=1000,
+                ac_search_smin=config["analysis"]["decoding"]["acoustic_peak_search_smin"],
+                ac_search_smax=config["analysis"]["decoding"]["acoustic_peak_search_smax"],
             ),
         )
 
