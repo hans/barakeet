@@ -830,23 +830,10 @@ print(f"phon_peaks loaded: {_phon_peaks_subj.height} rows for {subject}  "
       f"({len(phon_auc)} auc entries)")
 
 # %%
-# Sort sites by type for PDF ordering
-_SITE_TYPE_ORDER = [
-    "type2_early_perceptual",
-    "type3_asymmetric",
-    "grab_bag",
-    "type1_acoustic_only",
-    "complex",
-    "A_unsigned",
-    "unknown",
-]
-
-def _site_sort_key(row: dict) -> int:
-    t = row.get("site_type", "unknown") or "unknown"
-    return _SITE_TYPE_ORDER.index(t) if t in _SITE_TYPE_ORDER else len(_SITE_TYPE_ORDER)
-
-
-sorted_sites = sorted(site_type_df.iter_rows(named=True), key=_site_sort_key)
+sorted_sites = sorted(
+    site_type_df.iter_rows(named=True),
+    key=lambda r: (int(r.get("electrode_idx") or 0), str(r.get("phoneme_pair") or "")),
+)
 
 pdf_path_gallery = OUT_DIR / "star_plots_early.pdf"
 _n_plotted = 0
