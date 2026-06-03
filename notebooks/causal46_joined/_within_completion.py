@@ -222,6 +222,62 @@ def acoustic_preferred_class(
     return int(modal.iloc[0])
 
 
+def bootstrap_A_site(
+    hga: np.ndarray,
+    md_pp: pd.DataFrame,
+    *,
+    search_smin: int,
+    search_smax: int,
+    window_size: int = 10,
+    stride: int = 10,
+    endpoints: tuple[int, int] = (1, 6),
+    min_n: int = 4,
+    R: int = 1000,
+    base_seed: int = 0,
+) -> tuple[list[dict], int, int] | None:
+    """Endpoint-balanced A (acoustic) bootstrap for one (electrode × phoneme_pair) site.
+
+    Pools ALL endpoint trials for the pair (both word_ends). Balances between
+    step `lo` and step `hi` across replicates (draws min(n_lo, n_hi) per class).
+
+    pos = step hi (default 6 — high-numbered endpoint, e.g. /n/ for dn)
+    neg = step lo (default 1 — low-numbered endpoint, e.g. /d/ for dn)
+    mean_diff_raw = mean(HGA[pos]) − mean(HGA[neg])
+    acoustic_sign = sign(median(mean_diff_raw)) at best significant window
+
+    Returns (rows, n_lo, n_hi) or None if either endpoint has < min_n trials.
+    rows: list of dicts with keys replicate, smin, smax, tmin, tmax,
+          mean_diff_raw, n_per_class (= min(n_lo, n_hi) for that replicate).
+    """
+    lo, hi = endpoints
+    lo_idx = np.where((md_pp["resampled"] == lo).values)[0]
+    hi_idx = np.where((md_pp["resampled"] == hi).values)[0]
+    n_lo, n_hi = len(lo_idx), len(hi_idx)
+    if n_lo < min_n or n_hi < min_n:
+        return None
+    n_bal = min(n_lo, n_hi)
+    rows: list[dict] = []
+    for r in range(R):
+        rng = np.random.default_rng(base_seed + r)
+        pos_drawn = rng.choice(hi_idx, size=n_bal, replace=True)
+        neg_drawn = rng.choice(lo_idx, size=n_bal, replace=True)
+        windows = searchlight_mean_diff(
+            hga, pos_drawn, neg_drawn,
+            search_smin=search_smin, search_smax=search_smax,
+            window_size=window_size, stride=stride,
+        )
+        for w in windows:
+            rows.append({
+                "replicate": r,
+                "smin": w.smin, "smax": w.smax,
+                "tmin": w.smin / epoch_sfreq + epoch_tmin,
+                "tmax": w.smax / epoch_sfreq + epoch_tmin,
+                "mean_diff_raw": w.mean_diff,
+                "n_per_class": n_bal,
+            })
+    return rows, n_lo, n_hi
+
+
 def matched_n_star_plot(
     subject,
     electrode_idx,

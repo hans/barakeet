@@ -1380,3 +1380,95 @@ rule joined_multivariate_gradient_perception_aggregate:
         _concat(input.regression, output.regression_all)
         _concat(input.stats, output.stats_all)
         _concat(input.ax, output.ax_all)
+
+
+# =============================================================================
+# Early-window site-type classification — per-subject bootstrap, then aggregate
+# =============================================================================
+
+
+rule early_window_site_types:
+    """Per-subject early-window A/B₁/B₂ bootstraps and site-type assignment."""
+    input:
+        epochs        = "outputs/epochs_preprocessed/{subject}_epo.fif",
+        manifest      = "outputs/causal46_joined/filtered_manifest.csv",
+        trial_balance = "outputs/causal46_joined/trial_balance_index.csv",
+        phon_peaks    = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet",
+        helper        = "notebooks/causal46_joined/_within_completion.py",
+        notebook      = "notebooks/causal46_joined/early_window_site_types.py",
+
+    output:
+        notebook              = "outputs/causal46_joined/early_window_site_types/{subject}/notebook.ipynb",
+        A_per_window          = "outputs/causal46_joined/early_window_site_types/{subject}/A_per_window.parquet",
+        B_per_window          = "outputs/causal46_joined/early_window_site_types/{subject}/B_per_window.parquet",
+        site_type_assignments = "outputs/causal46_joined/early_window_site_types/{subject}/site_type_assignments.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        C46 = config["causal46_joined"]
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                subject=wildcards.subject,
+                manifest_path=str(input.manifest),
+                phon_peaks_path=str(input.phon_peaks),
+                epoch_dir=str(Path(input.epochs).parent),
+                trial_balance_path=str(input.trial_balance),
+                outdir=str(outdir),
+                min_class_k=C46["min_class_k"],
+                window_size=C46["window_size"],
+                stride=C46["stride"],
+                R=1000,
+            ),
+        )
+
+
+rule early_window_site_types_aggregate:
+    """Concatenate per-subject parquets and produce population type-count summary."""
+    input:
+        site_types   = expand(
+            "outputs/causal46_joined/early_window_site_types/{subject}/site_type_assignments.parquet",
+            subject=config["data"]["subjects"],
+        ),
+        A_per_window = expand(
+            "outputs/causal46_joined/early_window_site_types/{subject}/A_per_window.parquet",
+            subject=config["data"]["subjects"],
+        ),
+        B_per_window = expand(
+            "outputs/causal46_joined/early_window_site_types/{subject}/B_per_window.parquet",
+            subject=config["data"]["subjects"],
+        ),
+
+    output:
+        site_types_all   = "outputs/causal46_joined/early_window_site_types/site_type_assignments_all.parquet",
+        population_csv   = "outputs/causal46_joined/early_window_site_types/population_site_types.csv",
+        A_per_window_all = "outputs/causal46_joined/early_window_site_types/A_per_window_all.parquet",
+        B_per_window_all = "outputs/causal46_joined/early_window_site_types/B_per_window_all.parquet",
+
+    run:
+        import pandas as pd
+
+        def _concat_parquets(paths, out_path):
+            dfs = [pd.read_parquet(p) for p in paths if Path(p).stat().st_size > 0]
+            out = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+            out.to_parquet(out_path, index=False)
+            return out
+
+        site_all = _concat_parquets(input.site_types, output.site_types_all)
+        _concat_parquets(input.A_per_window, output.A_per_window_all)
+        _concat_parquets(input.B_per_window, output.B_per_window_all)
+
+        # Population counts: (phoneme_pair × site_type)
+        if len(site_all):
+            pop = (
+                site_all
+                .groupby(["phoneme_pair", "site_type"], dropna=False)
+                .size()
+                .reset_index(name="n")
+                .sort_values(["phoneme_pair", "site_type"])
+            )
+        else:
+            pop = pd.DataFrame(columns=["phoneme_pair", "site_type", "n"])
+        pop.to_csv(output.population_csv, index=False)
+        print(f"Population type counts:\n{pop.to_string(index=False)}")
