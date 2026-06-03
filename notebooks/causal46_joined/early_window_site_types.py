@@ -696,6 +696,13 @@ _n_plotted = 0
 _failures_plot: list[tuple] = []
 
 with PdfPages(pdf_path_gallery) as _pdf:
+    if not sorted_sites:
+        _fig0, _ax0 = plt.subplots(figsize=(8.5, 4))
+        _ax0.text(0.5, 0.5, f"{subject}: no sites in manifest",
+                  ha="center", va="center", fontsize=14)
+        _ax0.axis("off")
+        _pdf.savefig(_fig0)
+        plt.close(_fig0)
     for _row in tqdm(sorted_sites, desc="star plots"):
         _ei = int(_row["electrode_idx"])
         _pp = _row["phoneme_pair"]
@@ -754,6 +761,14 @@ with PdfPages(pdf_path_gallery) as _pdf:
         except Exception as _exc:
             _failures_plot.append((_ei, _pp, repr(_exc)))
             plt.close("all")
+
+    if _n_plotted == 0 and sorted_sites:
+        _fig0, _ax0 = plt.subplots(figsize=(8.5, 4))
+        _ax0.text(0.5, 0.5, f"{subject}: all {len(sorted_sites)} sites failed to render",
+                  ha="center", va="center", fontsize=12)
+        _ax0.axis("off")
+        _pdf.savefig(_fig0)
+        plt.close(_fig0)
 
 print(f"star_plots_early.pdf: {_n_plotted} pages  ({len(_failures_plot)} failures)")
 if _failures_plot:
