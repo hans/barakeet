@@ -271,6 +271,7 @@ def bootstrap_B_cell(
 
 # %%
 def get_b_cell_qualification(
+    electrode_idx: int,
     pair: str,
     word_end: str,
 ) -> tuple[list[int], int] | None:
@@ -278,7 +279,8 @@ def get_b_cell_qualification(
     cell = (
         trial_balance
         .filter(
-            (pl.col("phoneme_pair") == pair)
+            (pl.col("electrode_idx") == electrode_idx)
+            & (pl.col("phoneme_pair") == pair)
             & (pl.col("word_end") == word_end)
             & pl.col("is_ambiguous_step")
         )
@@ -288,7 +290,7 @@ def get_b_cell_qualification(
     n_per_class = int(cell["min_class"].sum())
     if n_per_class < K:
         return None
-    steps = sorted(cell["resampled"].to_list())
+    steps = sorted(int(float(s)) for s in cell["resampled"].to_list())
     return steps, n_per_class
 
 # %% [markdown]
@@ -490,7 +492,7 @@ for site in tqdm(sites, desc="early_window sites"):
         we_results: dict[str, dict] = {}
 
         for we in word_ends:
-            b_qual = get_b_cell_qualification(pp, we)
+            b_qual = get_b_cell_qualification(ei, pp, we)
             if b_qual is None:
                 we_results[we] = {
                     "powered": False, "n_per_class": 0, "qualifying_steps": [],
