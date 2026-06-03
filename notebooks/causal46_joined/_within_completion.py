@@ -444,3 +444,186 @@ def matched_n_star_plot(
 
     fig.tight_layout()
     return fig
+
+
+def early_window_star_plot(
+    subject: str,
+    electrode_idx: int,
+    phoneme_pair: str,
+    *,
+    ep,
+    bhv_col: str,
+    a_per_window,
+    b1_per_window,
+    b2_per_window,
+    we0: str,
+    we1: str,
+    b1_qualifying_steps: list,
+    b2_qualifying_steps: list,
+    b1_n_per_class: int,
+    b2_n_per_class: int,
+    a_n_step1: int,
+    a_n_step6: int,
+    acoustic_sign: float,
+    site_type: str,
+    manifest_tuning: str = "",
+    acoustic_peak_auc: float | None = None,
+    search_smin: int = 40,
+    search_smax: int = 130,
+    figsize: tuple = (8.5, 10.0),
+    R_plot: int = 200,
+) -> "plt.Figure":
+    """Three-panel early-window star plot for one (subject × electrode × phoneme_pair) site.
+
+    Top: A (acoustic) — endpoint steps 1 vs 6, pooled across word_ends.
+    Middle: B₁ (WE0 behavioral) — ambiguous qualifying steps for we0.
+    Bottom: B₂ (WE1 behavioral) — ambiguous qualifying steps for we1.
+
+    Gray shading: acoustic search range.
+    Green bars on A panel: A bootstrap CI-excluding-zero windows.
+    Gray bars on B panels: aligned CI-excluding-zero (▲); red bars: anti-aligned (▼).
+
+    Parameters
+    ----------
+    ep : mne.Epochs
+        Full subject epochs (not pre-filtered to phoneme_pair).
+    a_per_window, b1_per_window, b2_per_window : polars DataFrame
+        Pre-filtered to this site (and word_end for B). Empty DataFrame = no data.
+    """
+    import polars as pl
+
+    md = ep.metadata
+    pp_mask = (md["phoneme_pair"] == phoneme_pair).values
+    ep_pp = ep[pp_mask]
+    md_pp = md[pp_mask].reset_index(drop=True)
+    hga = extract_hga(ep_pp, electrode_idx)
+    times = ep.times
+
+    t_search_lo = search_smin / epoch_sfreq + epoch_tmin
+    t_search_hi = search_smax / epoch_sfreq + epoch_tmin
+
+    fig, (ax_top, ax_mid, ax_bot) = plt.subplots(3, 1, figsize=figsize, sharex=True)
+
+    # ── Top: A (endpoint steps 1 vs 6, pooled word_ends) ────────────────────
+    ax_top.axvspan(t_search_lo, t_search_hi, color="gray", alpha=0.08, zorder=0)
+    step_colors = {1: "#2166ac", 6: "#d73027"}
+    for step, color in step_colors.items():
+        mask = (md_pp["resampled"] == step).values
+        if not mask.any():
+            continue
+        tr = hga[mask]
+        m = tr.mean(0)
+        se = tr.std(0) / np.sqrt(mask.sum())
+        ax_top.plot(times, m, color=color, lw=1.5,
+                    label=f"step {step}  (n={mask.sum()})")
+        ax_top.fill_between(times, m - se, m + se, color=color, alpha=0.18)
+    ax_top.axhline(0, color="k", lw=0.5, ls=":")
+    ax_top.set_ylabel("HGA (z)")
+    ax_top.legend(fontsize=7, loc="upper left", framealpha=0.7)
+
+    # Green significance bars on A panel
+    if a_per_window is not None and a_per_window.height > 0:
+        a_sig = a_per_window.filter(pl.col("ci_excludes_zero"))
+        if a_sig.height > 0:
+            ax_top.autoscale_view()
+            ymin_a, ymax_a = ax_top.get_ylim()
+            bar_h_a = (ymax_a - ymin_a) * 0.04
+            bar_y_a = ymin_a + (ymax_a - ymin_a) * 0.94
+            for r in a_sig.iter_rows(named=True):
+                ax_top.barh(y=bar_y_a, width=r["tmax"] - r["tmin"],
+                            left=r["tmin"], height=bar_h_a,
+                            color="#4dac26", alpha=0.7, edgecolor="none", zorder=5)
+            ax_top.set_ylim(ymin_a, ymax_a)
+
+    auc_str = f"  AUC={acoustic_peak_auc:.3f}" if acoustic_peak_auc is not None else ""
+    sign_str = f"  ac_sign={int(acoustic_sign):+d}" if np.isfinite(acoustic_sign) else "  ac_sign=?"
+    ax_top.set_title(
+        f"{subject} / e{electrode_idx} / {phoneme_pair} / tuning={manifest_tuning!r} / {site_type}\n"
+        f"A: n_step1={a_n_step1}  n_step6={a_n_step6}{auc_str}{sign_str}",
+        fontsize=8, loc="left", pad=3,
+    )
+
+    # ── Helper: draw one behavioral panel ────────────────────────────────────
+    def _draw_b_panel(ax, we, qualifying_steps, n_per_class_b, b_pw, panel_label):
+        ax.axvspan(t_search_lo, t_search_hi, color="gray", alpha=0.08, zorder=0)
+        if not qualifying_steps:
+            ax.text(0.5, 0.5,
+                    f"B: {we}  — underpowered / no qualifying steps",
+                    ha="center", va="center", transform=ax.transAxes, fontsize=9)
+            ax.set_ylabel("HGA (z)")
+            return
+
+        per_step_b = per_step_class_counts(
+            md_pp, word_end=we,
+            qualifying_steps=list(qualifying_steps),
+            group_col=bhv_col,
+        )
+        we_mask_b = (md_pp["word_end"] == we).values
+        bhv_vals = sorted(md_pp.loc[we_mask_b, bhv_col].dropna().unique())
+        boot_traces: dict = {bhv: [] for bhv in bhv_vals}
+        for r in range(R_plot):
+            draws = select_cell_trials_bootstrap(per_step_b, rng=np.random.default_rng(r))
+            for bhv in bhv_vals:
+                if bhv in draws:
+                    boot_traces[bhv].append(hga[draws[bhv]].mean(0))
+
+        bhv_colors_b = ["#2166ac", "#d73027"]
+        for i, bhv in enumerate(bhv_vals):
+            if not boot_traces[bhv]:
+                continue
+            arr = np.array(boot_traces[bhv])
+            m = arr.mean(0)
+            se = arr.std(0)
+            color = bhv_colors_b[i % len(bhv_colors_b)]
+            ax.plot(times, m, color=color, lw=1.5,
+                    label=f"resp={bhv}  (n≈{n_per_class_b}/rep)")
+            ax.fill_between(times, m - se, m + se, color=color, alpha=0.18)
+
+        ax.axhline(0, color="k", lw=0.5, ls=":")
+        ax.set_ylabel("HGA (z)")
+        ax.set_title(
+            f"{panel_label}: {we}  steps={qualifying_steps}  n_per_class={n_per_class_b}",
+            fontsize=8, loc="left", pad=3,
+        )
+        ax.legend(fontsize=7, loc="upper left", framealpha=0.7)
+
+        # Significance bars + ▲/▼ glyphs
+        if b_pw is not None and b_pw.height > 0:
+            b_sig_rows = b_pw.filter(pl.col("ci_aligned_excludes_zero"))
+            if b_sig_rows.height > 0:
+                ax.autoscale_view()
+                ymin_b, ymax_b = ax.get_ylim()
+                bar_h_b = (ymax_b - ymin_b) * 0.04
+                bar_y_al = ymin_b + (ymax_b - ymin_b) * 0.94
+                bar_y_an = ymin_b + (ymax_b - ymin_b) * 0.88
+                for brow in b_sig_rows.iter_rows(named=True):
+                    med = brow.get("mean_diff_aligned_med") or 0.0
+                    is_aligned = med > 0
+                    ax.barh(
+                        y=bar_y_al if is_aligned else bar_y_an,
+                        width=brow["tmax"] - brow["tmin"],
+                        left=brow["tmin"],
+                        height=bar_h_b,
+                        color="gray" if is_aligned else "#d73027",
+                        alpha=0.65, edgecolor="none", zorder=5,
+                    )
+                    ax.text(
+                        (brow["tmin"] + brow["tmax"]) / 2,
+                        bar_y_al if is_aligned else bar_y_an,
+                        "▲" if is_aligned else "▼",
+                        ha="center", va="center", fontsize=5, zorder=6,
+                    )
+                ax.set_ylim(ymin_b, ymax_b)
+
+    _draw_b_panel(ax_mid, we0, b1_qualifying_steps, b1_n_per_class, b1_per_window, "B₁")
+    _draw_b_panel(ax_bot, we1, b2_qualifying_steps, b2_n_per_class, b2_per_window, "B₂")
+
+    ax_bot.set_xlabel("Time (s, post word onset)")
+    xlim = max(
+        OFFSET_DICT.get(we0, 1.0) if we0 else 1.0,
+        OFFSET_DICT.get(we1, 1.0) if we1 else 1.0,
+    ) + 0.15
+    ax_top.set_xlim(0.0, xlim)
+
+    fig.tight_layout()
+    return fig

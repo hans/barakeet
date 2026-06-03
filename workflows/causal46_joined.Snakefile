@@ -1402,6 +1402,7 @@ rule early_window_site_types:
         A_per_window          = "outputs/causal46_joined/early_window_site_types/{subject}/A_per_window.parquet",
         B_per_window          = "outputs/causal46_joined/early_window_site_types/{subject}/B_per_window.parquet",
         site_type_assignments = "outputs/causal46_joined/early_window_site_types/{subject}/site_type_assignments.parquet",
+        star_plots_early      = "outputs/causal46_joined/early_window_site_types/{subject}/star_plots_early.pdf",
 
     run:
         outdir = Path(output.notebook).parent
@@ -1472,3 +1473,39 @@ rule early_window_site_types_aggregate:
             pop = pd.DataFrame(columns=["phoneme_pair", "site_type", "n"])
         pop.to_csv(output.population_csv, index=False)
         print(f"Population type counts:\n{pop.to_string(index=False)}")
+
+
+rule early_window_site_types_figures:
+    """Aggregate figures: population bar chart, A-vs-B scatter, full gallery PDF."""
+    input:
+        site_types_all   = "outputs/causal46_joined/early_window_site_types/site_type_assignments_all.parquet",
+        A_per_window_all = "outputs/causal46_joined/early_window_site_types/A_per_window_all.parquet",
+        B_per_window_all = "outputs/causal46_joined/early_window_site_types/B_per_window_all.parquet",
+        phon_peaks       = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet",
+        star_plots       = expand(
+            "outputs/causal46_joined/early_window_site_types/{subject}/star_plots_early.pdf",
+            subject=config["data"]["subjects"],
+        ),
+        helper           = "notebooks/causal46_joined/_within_completion.py",
+        notebook         = "notebooks/causal46_joined/early_window_site_types_aggregate_figures.py",
+
+    output:
+        notebook         = "outputs/causal46_joined/early_window_site_types/aggregate_figures.ipynb",
+        population_bar   = "outputs/causal46_joined/early_window_site_types/population_site_type_counts.pdf",
+        A_vs_B_scatter   = "outputs/causal46_joined/early_window_site_types/A_vs_B_scatter.pdf",
+        star_plots_all   = "outputs/causal46_joined/early_window_site_types/star_plots_all.pdf",
+
+    run:
+        outdir = str(Path(output.notebook).parent)
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                site_types_path=str(input.site_types_all),
+                A_per_window_path=str(input.A_per_window_all),
+                B_per_window_path=str(input.B_per_window_all),
+                phon_peaks_path=str(input.phon_peaks),
+                star_plots_dir=str(Path(input.star_plots[0]).parent.parent),
+                outdir=outdir,
+            ),
+        )

@@ -71,6 +71,7 @@ from src.viz_paper import epoch_sfreq, epoch_tmin
 sys.path.insert(0, str(Path(".").resolve() / "notebooks" / "causal46_joined"))
 from _within_completion import (  # noqa: E402
     bootstrap_A_site,
+    early_window_star_plot,
     extract_hga,
     n_per_class_from_per_step,
     per_step_class_counts,
@@ -650,6 +651,114 @@ site_type_df.write_parquet(OUT_DIR / "site_type_assignments.parquet")
 print(f"site_type_assignments: {site_type_df.height} rows")
 if site_type_df.height > 0 and "site_type" in site_type_df.columns:
     print(site_type_df.group_by("site_type").len().sort("site_type"))
+
+# %% [markdown]
+# ## Star plot gallery
+
+# %%
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
+
+# Load phon_peaks for acoustic AUC annotation
+_phon_peaks_all = pl.read_parquet(phon_peaks_path)
+_phon_peaks_subj = _phon_peaks_all.filter(pl.col("subject") == subject)
+phon_auc: dict[tuple, float] = {
+    (int(r["electrode_idx"]), str(r["phoneme_pair"])): float(r["test_roc_auc"])
+    for r in _phon_peaks_subj.iter_rows(named=True)
+    if r.get("test_roc_auc") is not None
+}
+print(f"phon_peaks loaded: {_phon_peaks_subj.height} rows for {subject}  "
+      f"({len(phon_auc)} auc entries)")
+
+# %%
+# Sort sites by type for PDF ordering
+_SITE_TYPE_ORDER = [
+    "type2_early_perceptual",
+    "type3_asymmetric",
+    "grab_bag",
+    "type1_acoustic_only",
+    "complex",
+    "A_unsigned",
+    "unknown",
+]
+
+def _site_sort_key(row: dict) -> int:
+    t = row.get("site_type", "unknown") or "unknown"
+    return _SITE_TYPE_ORDER.index(t) if t in _SITE_TYPE_ORDER else len(_SITE_TYPE_ORDER)
+
+
+sorted_sites = sorted(site_type_df.iter_rows(named=True), key=_site_sort_key)
+
+pdf_path_gallery = OUT_DIR / "star_plots_early.pdf"
+_n_plotted = 0
+_failures_plot: list[tuple] = []
+
+with PdfPages(pdf_path_gallery) as _pdf:
+    for _row in tqdm(sorted_sites, desc="star plots"):
+        _ei = int(_row["electrode_idx"])
+        _pp = _row["phoneme_pair"]
+        _we0 = _row.get("B1_word_end") or ""
+        _we1 = _row.get("B2_word_end") or ""
+        _b1_steps = [int(s) for s in (_row["B1_qualifying_steps"] or "").split(",") if s]
+        _b2_steps = [int(s) for s in (_row["B2_qualifying_steps"] or "").split(",") if s]
+        _a_sign = float(_row["acoustic_sign"]) if _row["acoustic_sign"] is not None else float("nan")
+
+        _site_a_pw = (
+            A_per_window.filter(
+                (pl.col("electrode_idx") == _ei) & (pl.col("phoneme_pair") == _pp)
+            ) if A_per_window.height > 0 else pl.DataFrame()
+        )
+        _site_b1_pw = (
+            B_per_window.filter(
+                (pl.col("electrode_idx") == _ei)
+                & (pl.col("phoneme_pair") == _pp)
+                & (pl.col("word_end") == _we0)
+            ) if B_per_window.height > 0 and _we0 else pl.DataFrame()
+        )
+        _site_b2_pw = (
+            B_per_window.filter(
+                (pl.col("electrode_idx") == _ei)
+                & (pl.col("phoneme_pair") == _pp)
+                & (pl.col("word_end") == _we1)
+            ) if B_per_window.height > 0 and _we1 else pl.DataFrame()
+        )
+
+        try:
+            _fig = early_window_star_plot(
+                subject, _ei, _pp,
+                ep=ep,
+                bhv_col=bhv_col,
+                a_per_window=_site_a_pw,
+                b1_per_window=_site_b1_pw,
+                b2_per_window=_site_b2_pw,
+                we0=_we0,
+                we1=_we1,
+                b1_qualifying_steps=_b1_steps,
+                b2_qualifying_steps=_b2_steps,
+                b1_n_per_class=int(_row.get("B1_n_per_class") or 0),
+                b2_n_per_class=int(_row.get("B2_n_per_class") or 0),
+                a_n_step1=int(_row.get("A_n_step1") or 0),
+                a_n_step6=int(_row.get("A_n_step6") or 0),
+                acoustic_sign=_a_sign,
+                site_type=str(_row.get("site_type") or "unknown"),
+                manifest_tuning=str(_row.get("manifest_tuning") or ""),
+                acoustic_peak_auc=phon_auc.get((_ei, _pp)),
+                search_smin=SMIN_LO,
+                search_smax=PAIR_SMAX_HI.get(_pp, SMAX_HI_ABS),
+            )
+            _pdf.savefig(_fig, bbox_inches="tight")
+            plt.close(_fig)
+            _n_plotted += 1
+        except Exception as _exc:
+            _failures_plot.append((_ei, _pp, repr(_exc)))
+            plt.close("all")
+
+print(f"star_plots_early.pdf: {_n_plotted} pages  ({len(_failures_plot)} failures)")
+if _failures_plot:
+    for _ei, _pp, _err in _failures_plot:
+        print(f"  e{_ei} {_pp}: {_err}")
 
 # %% [markdown]
 # ## Done
