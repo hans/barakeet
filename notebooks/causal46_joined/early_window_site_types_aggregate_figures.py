@@ -119,6 +119,33 @@ site_types_roi = (
 )
 
 # %% [markdown]
+# ## Site-type relabeling manifest
+#
+# One row per (subject × electrode × phoneme_pair).  Fill `site_type_override`
+# to override the auto-assigned `site_type`; leave blank to keep the original.
+
+# %%
+_relabel_cols = [
+    "subject", "electrode_idx", "phoneme_pair", "roi",
+    "site_type", "status",
+    "manifest_tuning", "tuning_conflict",
+    "acoustic_sign", "A_significant",
+    "B1_word_end", "B1_aligned_sig", "B1_anti_sig", "B1_n_per_class",
+    "B2_word_end", "B2_aligned_sig", "B2_anti_sig", "B2_n_per_class",
+    "A_n_step1", "A_n_step6",
+]
+_avail_cols = [c for c in _relabel_cols if c in site_types_roi.columns]
+relabel_df = (
+    site_types_roi
+    .select(_avail_cols)
+    .with_columns(pl.lit("").alias("site_type_override"))
+    .sort(["subject", "phoneme_pair", "electrode_idx"])
+)
+_relabel_path = OUT_DIR / "site_type_relabel.csv"
+relabel_df.write_csv(_relabel_path)
+print(f"wrote {_relabel_path}  ({relabel_df.height} rows)")
+
+# %% [markdown]
 # ## 1. Population site-type counts bar chart
 
 # %%
@@ -343,8 +370,9 @@ else:
 print("=" * 70)
 print(f"Output dir: {OUT_DIR}")
 print(f"site_types: {site_types.height} rows across {site_types['subject'].n_unique()} subjects")
-print("Figures written:")
-for _f in ["population_site_type_counts.pdf", "A_vs_B_scatter.pdf", "star_plots_all.pdf"]:
+print("Files written:")
+for _f in ["site_type_relabel.csv",
+           "population_site_type_counts.pdf", "A_vs_B_scatter.pdf", "star_plots_all.pdf"]:
     _p = OUT_DIR / _f
     print(f"  {_f}: {'ok' if _p.exists() and _p.stat().st_size > 0 else 'MISSING/EMPTY'}")
 print("=" * 70)
