@@ -701,8 +701,8 @@ with PdfPages(pdf_path_gallery) as _pdf:
         _pp = _row["phoneme_pair"]
         _we0 = _row.get("B1_word_end") or ""
         _we1 = _row.get("B2_word_end") or ""
-        _b1_steps = [int(s) for s in (_row["B1_qualifying_steps"] or "").split(",") if s]
-        _b2_steps = [int(s) for s in (_row["B2_qualifying_steps"] or "").split(",") if s]
+        _b1_steps = [int(float(s)) for s in (_row["B1_qualifying_steps"] or "").split(",") if s]
+        _b2_steps = [int(float(s)) for s in (_row["B2_qualifying_steps"] or "").split(",") if s]
         _a_sign = float(_row["acoustic_sign"]) if _row["acoustic_sign"] is not None else float("nan")
 
         _site_a_pw = (
