@@ -33,14 +33,14 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import scipy.stats  # noqa: F401 (used in sliding_ttest)
 
 sys.path.insert(0, str(Path(".").resolve() / "notebooks" / "causal46_joined"))
-from _within_completion import (  # noqa: E402
-    extract_hga,
-    per_step_class_counts,
-    resolve_behavior_col,
-    select_cell_trials_bootstrap,
+from _contrast import (  # noqa: E402
+    acoustic_endpoint_means,
+    aggregate_trajectories,
+    behavioral_bootstrap_meandiff,
+    plot_contrast_axis,
+    sliding_ttest,
 )
 
 from src.stimuli import OFFSET_DICT, PHONEME_PAIR_TO_WORD_ENDS, POD_dict
@@ -197,24 +197,19 @@ for _, row in acoustic_pool.iterrows():
     md = ep.metadata
     pp_mask = (md["phoneme_pair"] == pair).values
     ep_pp = ep[pp_mask]
-    md_pp = ep_pp.metadata.reset_index(drop=True)
-
-    hga = extract_hga(ep_pp, eidx)
 
     # Determine polarity: class 0 = first phoneme, class 1 = second phoneme
     first_ph = PAIR_PHONEMES[pair][0]
     acoustic_sign = 1 if acoustic_tuning_letter == first_ph else -1
 
     # step 1 = first phoneme (clear), step 6 = second phoneme (clear)
-    step1_mask = (md_pp["resampled"] == 1).values
-    step6_mask = (md_pp["resampled"] == 6).values
-    if not step1_mask.any() or not step6_mask.any():
+    means = acoustic_endpoint_means(ep_pp, eidx)  # (mean_step1, mean_step6)
+    if means is None:
         print(f"  SKIP acoustic: {subj} e{eidx} {pair} missing endpoint steps")
         acoustic_skipped += 1
         continue
-
-    raw_diff = hga[step1_mask].mean(0) - hga[step6_mask].mean(0)
-    trajectory = acoustic_sign * raw_diff
+    mean_step1, mean_step6 = means
+    trajectory = acoustic_sign * (mean_step1 - mean_step6)
     acoustic_trajectories.append(trajectory)
 
 print(f"\nAcoustic trajectories: {len(acoustic_trajectories)} (skipped: {acoustic_skipped})")
@@ -247,51 +242,20 @@ for _, row in behavioral_pool.iterrows():
     md = ep.metadata
     pp_mask = (md["phoneme_pair"] == pair).values
     ep_pp = ep[pp_mask]
-    md_pp = ep_pp.metadata.reset_index(drop=True)
 
-    hga = extract_hga(ep_pp, eidx)
-
-    # Determine qualifying steps
-    bhv_col = resolve_behavior_col(md_pp)
-    we_mask = (md_pp["word_end"] == word_end).values
-    candidate_steps = [
-        s for s in [2, 3, 4, 5]
-        if (we_mask & (md_pp["resampled"] == s).values).any()
-    ]
-    per_step = per_step_class_counts(
-        md_pp, word_end=word_end,
-        qualifying_steps=candidate_steps,
-        group_col=bhv_col,
+    mean_diff, status = behavioral_bootstrap_meandiff(
+        ep_pp, eidx, word_end,
+        min_class_k=min_class_k,
+        bootstrap_r=bootstrap_r,
+        bootstrap_seed=bootstrap_seed,
     )
-    qualifying_steps = [
-        s for s, by_class in per_step.items()
-        if len(by_class) == 2 and min(len(v) for v in by_class.values()) >= min_class_k
-    ]
-    if not qualifying_steps:
+    if status == "no_qualifying":
         behavioral_no_qualifying += 1
         continue
-
-    per_step_q = {s: per_step[s] for s in qualifying_steps}
-
-    # Bootstrap — stream to avoid memory accumulation
-    running_sum = np.zeros(hga.shape[1])
-    valid_reps = 0
-    for r in range(bootstrap_r):
-        draws = select_cell_trials_bootstrap(
-            per_step_q, rng=np.random.default_rng(bootstrap_seed + r)
-        )
-        if 0 not in draws or 1 not in draws:
-            continue
-        # class 0 = first phoneme, class 1 = second phoneme
-        diff_r = hga[draws[0]].mean(0) - hga[draws[1]].mean(0)
-        running_sum += diff_r
-        valid_reps += 1
-
-    if valid_reps == 0:
+    if mean_diff is None:  # status == "skipped"
         behavioral_skipped += 1
         continue
 
-    mean_diff = running_sum / valid_reps
     if behav_polarity_mode == "abs":
         trajectory = np.abs(mean_diff)
     else:  # "annotated"
@@ -307,31 +271,7 @@ print(f"\nBehavioral trajectories: {len(behavioral_trajectories)}"
 # ## Aggregation and significance testing
 
 # %%
-def aggregate_trajectories(trajectories):
-    """Return (matrix, grand_mean, sem) from a list of 1D trajectory arrays."""
-    if not trajectories:
-        return None, None, None
-    matrix = np.stack(trajectories, axis=0)  # (n_sites, n_times)
-    grand_mean = matrix.mean(axis=0)
-    sem = matrix.std(axis=0, ddof=1) / np.sqrt(matrix.shape[0])
-    return matrix, grand_mean, sem
-
-
-def sliding_ttest(matrix, times, window_size, window_stride):
-    """One-sample t-test on sliding windows. Returns list of (t_start, t_end, p_val)."""
-    n_times = matrix.shape[1]
-    results = []
-    for start in range(0, n_times - window_size + 1, window_stride):
-        window_means = matrix[:, start:start + window_size].mean(axis=1)
-        t_stat, p_val = scipy.stats.ttest_1samp(window_means, 0)
-        end = min(start + window_size, n_times - 1)
-        t_start = times[start]
-        t_end = times[end]
-        results.append((t_start, t_end, p_val))
-    return results
-
-
-# %%
+# aggregate_trajectories / sliding_ttest are imported from _contrast.
 ac_matrix, ac_mean, ac_sem = aggregate_trajectories(acoustic_trajectories)
 bh_matrix, bh_mean, bh_sem = aggregate_trajectories(behavioral_trajectories)
 
@@ -345,12 +285,6 @@ bh_ttest = sliding_ttest(bh_matrix, times, ttest_window_size, ttest_window_strid
 # ## Plot
 
 # %%
-ACOUSTIC_COLOR = "#2166ac"
-BEHAVIORAL_COLOR = "#d73027"
-
-# p_threshold height multipliers (from viz_paper.py style)
-P_THRESHOLD_MULTS = [1.0, 0.5, 0.25]
-
 # x-axis limit
 if phoneme_pair is not None:
     _wes = PHONEME_PAIR_TO_WORD_ENDS[phoneme_pair]
@@ -364,83 +298,14 @@ fig, ax = plt.subplots(figsize=(7, 4))
 n_acoustic = len(acoustic_trajectories)
 n_behav = len(behavioral_trajectories)
 
-# -- Plot acoustic mean + SEM ribbon
-if ac_mean is not None:
-    ax.plot(times, ac_mean, color=ACOUSTIC_COLOR, lw=2,
-            label=f"Acoustic (n={n_acoustic} sites)")
-    ax.fill_between(times, ac_mean - ac_sem, ac_mean + ac_sem,
-                    color=ACOUSTIC_COLOR, alpha=0.18)
+pod_vline = POD_dict[phoneme_pair] if (phoneme_pair is not None and phoneme_pair in POD_dict) else None
 
-# -- Plot behavioral mean + SEM ribbon
-if bh_mean is not None:
-    ax.plot(times, bh_mean, color=BEHAVIORAL_COLOR, lw=2,
-            label=f"Behavioral (n={n_behav} cells)")
-    ax.fill_between(times, bh_mean - bh_sem, bh_mean + bh_sem,
-                    color=BEHAVIORAL_COLOR, alpha=0.18)
-
-ax.axhline(0, color="k", lw=0.5, ls=":")
-
-# -- POD vertical line (per-pair only)
-if phoneme_pair is not None and phoneme_pair in POD_dict:
-    pod_time = POD_dict[phoneme_pair]
-    ax.axvline(pod_time, color="gray", lw=1.2, ls="--", alpha=0.7, label="POD")
-
-# -- Significance bars
-# Two rows: acoustic (upper) and behavioral (lower)
-ymin, ymax = ax.get_ylim()
-base_bar_h = (ymax - ymin) * 0.04
-bar_row_gap = base_bar_h * 1.5
-
-bar_y_ac = ymin + (ymax - ymin) * 0.95
-bar_y_bh = bar_y_ac - bar_row_gap
-
-p_thresholds_sorted = sorted(pval_thresholds)   # ascending (smallest first = darkest)
-for (t_start, t_end, p_val) in ac_ttest:
-    for i, p_thresh in enumerate(p_thresholds_sorted):
-        if p_val < p_thresh:
-            mult = P_THRESHOLD_MULTS[i]
-            ax.barh(y=bar_y_ac, width=t_end - t_start, left=t_start,
-                    height=base_bar_h * mult,
-                    color=ACOUSTIC_COLOR, alpha=0.5, edgecolor="none")
-            break
-
-for (t_start, t_end, p_val) in bh_ttest:
-    for i, p_thresh in enumerate(p_thresholds_sorted):
-        if p_val < p_thresh:
-            mult = P_THRESHOLD_MULTS[i]
-            ax.barh(y=bar_y_bh, width=t_end - t_start, left=t_start,
-                    height=base_bar_h * mult,
-                    color=BEHAVIORAL_COLOR, alpha=0.5, edgecolor="none")
-            break
-
-# Legend
-from matplotlib.patches import Rectangle
-from matplotlib.legend_handler import HandlerBase
-
-class HandlerRect(HandlerBase):
-    def create_artists(self, legend, orig_handle, xdescent, ydescent,
-                       width, height, fontsize, trans):
-        rect = Rectangle([xdescent, ydescent], width, height,
-                         facecolor=orig_handle.get_facecolor(),
-                         alpha=orig_handle.get_alpha(),
-                         edgecolor="none")
-        return [rect]
-
-p_handles = []
-for i, (p_thresh, mult) in enumerate(zip(p_thresholds_sorted, P_THRESHOLD_MULTS)):
-    h = Rectangle((0, 0), 1, mult, facecolor="gray", alpha=0.5,
-                  label=f"p < {p_thresh:g}".replace("-0", "-"))
-    p_handles.append(h)
-
-handles, labels = ax.get_legend_handles_labels()
-ax.legend(
-    handles=handles + p_handles,
-    labels=labels + [h.get_label() for h in p_handles],
-    handler_map={Rectangle: HandlerRect()},
-    loc="lower left",
-    fontsize=8,
-    title="Sig bars: acoustic (blue), behavioral (red)\n[different site populations]",
-    title_fontsize=7,
+plot_contrast_axis(
+    ax, times,
+    ac_mean=ac_mean, ac_sem=ac_sem, ac_ttest=ac_ttest, n_acoustic=n_acoustic,
+    bh_mean=bh_mean, bh_sem=bh_sem, bh_ttest=bh_ttest, n_behav=n_behav,
+    pval_thresholds=pval_thresholds,
+    pod_vline=pod_vline,
 )
 
 # Axis labels and title

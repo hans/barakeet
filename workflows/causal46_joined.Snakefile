@@ -1185,6 +1185,35 @@ rule contrast_plot_per_pair:
         ))
 
 
+rule contrast_plot_by_site_type:
+    """One onset-aligned acoustic+behavioral contrast plot per manually
+    annotated response type (site_type_relabel), pooling pairs within type."""
+    input:
+        notebook="notebooks/causal46_joined/contrast_plot_by_site_type.py",
+        helper="notebooks/causal46_joined/_contrast.py",
+        within="notebooks/causal46_joined/_within_completion.py",
+        annotations="outputs/causal46_joined/manual_annotations/early_acoustic_window.csv",
+    output:
+        notebook="outputs/causal46_joined/contrast_plot_by_site_type/contrast_plot_by_site_type.ipynb",
+        figure="outputs/causal46_joined/contrast_plot_by_site_type/contrast_plot_by_site_type.pdf",
+    run:
+        outdir = Path(output.notebook).parent
+        outdir.mkdir(parents=True, exist_ok=True)
+        run_notebook(str(input.notebook), str(output.notebook), parameters=dict(
+            annotations_path=str(input.annotations),
+            output_dir=str(outdir),
+            epochs_dir="outputs/epochs_preprocessed",
+            bootstrap_r=1000,
+            bootstrap_seed=42,
+            min_class_k=4,
+            ttest_window_size=15,
+            ttest_window_stride=15,
+            pval_thresholds=(0.00001, 0.0001, 0.001),
+            complex_acoustic_mode="overlay",
+            review_flags_mode="skip",
+        ))
+
+
 # =============================================================================
 # Gradient acoustic encoding — manifest-restricted ports of causal5
 # (acoustic_ax_discrimination, multivariate_gradient_perception) plus the
