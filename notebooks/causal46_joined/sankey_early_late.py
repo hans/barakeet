@@ -17,21 +17,17 @@
 # %% [markdown]
 # # Sankey: early-window site type → late behavioral response
 #
-# Maps five manually annotated early-window response types
+# Maps all manually annotated early-window response types
 # (`site_type_relabel` in `early_acoustic_window.csv`) onto whether each
 # site×pair cell has a late behavioral response in `filtered_manifest.csv`
 # (`behav @late` non-null in at least one word-end row).
 #
 # **Unit:** site×pair cell (subject × electrode × phoneme_pair). An electrode
-# contributing bm, dn, and pb appears three times.
+# contributing bm, dn, and pb appears three times. Total = 99 cells.
 #
 # **Late window definition:** `behav @late` non-null for ≥1 word-end row
 # in the filtered manifest. "@ac slightly late" is excluded by design;
 # refine if needed.
-#
-# **Status note:** ~8 `status=unclassifiable_B_power` type1 cells are
-# included — their early-window type is well-defined even though the
-# behavioral window classification was unreliable.
 
 # %%
 from __future__ import annotations
@@ -60,12 +56,16 @@ Path(output_dir).mkdir(parents=True, exist_ok=True)
 early = pd.read_csv(annotations_path)
 manifest = pd.read_csv(filtered_manifest_path)
 
+# Ordered bottom→top in the Sankey: typed categories first, then "other" above.
 EARLY_TYPES = [
     "type1_acoustic_only",
     "type2_early_perceptual",
     "type3_asymmetric",
     "type4_early_perceptual_mirrored",
     "type5_behav_only",
+    "A_unsigned",
+    "problematic",
+    "interesting",
 ]
 EARLY_LABELS = {
     "type1_acoustic_only":              "Acoustic only",
@@ -73,6 +73,9 @@ EARLY_LABELS = {
     "type3_asymmetric":                 "Acoustic+perceptual\n(one-sided)",
     "type4_early_perceptual_mirrored":  "Acoustic+perceptual\n(mirrored)",
     "type5_behav_only":                 "Perceptual only",
+    "A_unsigned":                       "A unsigned",
+    "problematic":                      "Problematic",
+    "interesting":                      "Interesting",
 }
 EARLY_COLORS = {
     "type1_acoustic_only":             "#4E79A7",
@@ -80,34 +83,55 @@ EARLY_COLORS = {
     "type3_asymmetric":                "#F28E2B",
     "type4_early_perceptual_mirrored": "#B07AA1",
     "type5_behav_only":                "#E15759",
+    "A_unsigned":                      "#AAAAAA",
+    "problematic":                     "#EDC948",
+    "interesting":                     "#D4A6C8",
 }
-LATE_COLORS = {True: "#76B7B2", False: "#BAB0AC"}
-LATE_LABELS = {True: "Late window\npresent", False: "Late window\nabsent"}
+# Right column: absent → one-sided → two-sided (bottom to top)
+LATE_ORDER  = ["absent", "one-sided", "two-sided"]
+LATE_LABELS = {
+    "absent":     "Late window\nabsent",
+    "one-sided":  "Late window\n(one-sided)",
+    "two-sided":  "Late window\n(two-sided)",
+}
+LATE_COLORS = {
+    "absent":    "#BAB0AC",
+    "one-sided": "#76B7B2",
+    "two-sided": "#4E9F97",
+}
 
 # %%
-early_filt = early[early["site_type_relabel"].isin(EARLY_TYPES)].copy()
+def _late_category(x: pd.Series) -> str:
+    n = int(x.notna().sum())
+    if n == 0:
+        return "absent"
+    elif n == 1:
+        return "one-sided"
+    else:
+        return "two-sided"
 
 late_pres = (
     manifest
     .groupby(["subject", "electrode_idx", "phoneme_pair"])["behav @late"]
-    .apply(lambda x: x.notna().any())
+    .apply(_late_category)
     .reset_index()
-    .rename(columns={"behav @late": "late_present"})
+    .rename(columns={"behav @late": "late_category"})
 )
 
-merged = early_filt.merge(
+merged = early.merge(
     late_pres, on=["subject", "electrode_idx", "phoneme_pair"], how="left"
 )
-merged["late_present"] = merged["late_present"].fillna(False)
+merged["late_category"] = merged["late_category"].fillna("absent")
 
-print(f"Site×pair cells included: {len(merged)}")
-print("\nFlow table (rows=early type, cols=late present):")
+print(f"Site×pair cells total: {len(merged)}")
+print("\nFlow table (rows=early type, cols=late category):")
 ct = (
     merged
-    .groupby(["site_type_relabel", "late_present"])
+    .groupby(["site_type_relabel", "late_category"])
     .size()
     .unstack(fill_value=0)
     .reindex(EARLY_TYPES)
+    [LATE_ORDER]
 )
 print(ct)
 
@@ -146,13 +170,13 @@ X_RIGHT    = 0.65
 PLOT_H     = 1.0
 
 active_left  = [t for t in EARLY_TYPES if (merged["site_type_relabel"] == t).any()]
-active_right = [True, False]
+active_right = LATE_ORDER
 N_LEFT  = len(active_left)
 N_RIGHT = len(active_right)
 grand   = len(merged)
 
-left_totals  = {t:  (merged["site_type_relabel"] == t).sum()  for t in active_left}
-right_totals = {lp: (merged["late_present"] == lp).sum()      for lp in active_right}
+left_totals  = {t:  (merged["site_type_relabel"] == t).sum()   for t in active_left}
+right_totals = {lc: (merged["late_category"] == lc).sum()      for lc in active_right}
 
 left_scale  = (PLOT_H - NODE_GAP * (N_LEFT  - 1)) / grand
 right_scale = (PLOT_H - NODE_GAP * (N_RIGHT - 1)) / grand
@@ -170,7 +194,7 @@ def _positions(labels, totals, scale):
 left_y  = _positions(active_left,  left_totals,  left_scale)
 right_y = _positions(active_right, right_totals, right_scale)
 
-fig, ax = plt.subplots(figsize=(7, 6))
+fig, ax = plt.subplots(figsize=(8, 7))
 
 # Nodes
 for t in active_left:
@@ -178,31 +202,31 @@ for t in active_left:
         (X_LEFT - NODE_W / 2, left_y[t]), NODE_W, left_totals[t] * left_scale,
         color=EARLY_COLORS[t], zorder=3,
     ))
-for lp in active_right:
+for lc in active_right:
     ax.add_patch(Rectangle(
-        (X_RIGHT - NODE_W / 2, right_y[lp]), NODE_W, right_totals[lp] * right_scale,
-        color=LATE_COLORS[lp], zorder=3,
+        (X_RIGHT - NODE_W / 2, right_y[lc]), NODE_W, right_totals[lc] * right_scale,
+        color=LATE_COLORS[lc], zorder=3,
     ))
 
 # Ribbons (iterate left→right to fill each node from bottom to top)
 left_fill  = {t:  0.0 for t in active_left}
-right_fill = {lp: 0.0 for lp in active_right}
+right_fill = {lc: 0.0 for lc in active_right}
 
 for t in active_left:
-    for lp in active_right:
-        n = ((merged["site_type_relabel"] == t) & (merged["late_present"] == lp)).sum()
+    for lc in active_right:
+        n = ((merged["site_type_relabel"] == t) & (merged["late_category"] == lc)).sum()
         if n == 0:
             continue
         lh = n * left_scale
         rh = n * right_scale
         y0b = left_y[t]  + left_fill[t]
-        y1b = right_y[lp] + right_fill[lp]
+        y1b = right_y[lc] + right_fill[lc]
         _ribbon(ax,
                 X_LEFT  + NODE_W / 2, y0b, y0b + lh,
                 X_RIGHT - NODE_W / 2, y1b, y1b + rh,
                 EARLY_COLORS[t])
         left_fill[t]   += lh
-        right_fill[lp] += rh
+        right_fill[lc] += rh
 
 # Left labels
 for t in active_left:
@@ -215,12 +239,12 @@ for t in active_left:
     )
 
 # Right labels
-for lp in active_right:
-    h    = right_totals[lp] * right_scale
-    ymid = right_y[lp] + h / 2
+for lc in active_right:
+    h    = right_totals[lc] * right_scale
+    ymid = right_y[lc] + h / 2
     ax.text(
         X_RIGHT + NODE_W / 2 + 0.02, ymid,
-        f"{LATE_LABELS[lp]}  (n={right_totals[lp]})",
+        f"{LATE_LABELS[lc]}  (n={right_totals[lc]})",
         ha="left", va="center", fontsize=9,
     )
 
