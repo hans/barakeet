@@ -1214,6 +1214,35 @@ rule contrast_plot_by_site_type:
         ))
 
 
+rule sankey_early_late:
+    """Sankey diagram: early-window site type → late behavioral response presence.
+
+    Left column: five manually annotated response types from
+    early_acoustic_window.csv (type1–type5).  Right column: whether the
+    filtered manifest has a non-null `behav @late` entry (pooled across
+    word-ends).  Unit is site×pair cell.
+    """
+    input:
+        annotations = "outputs/causal46_joined/manual_annotations/early_acoustic_window.csv",
+        manifest    = "outputs/causal46_joined/filtered_manifest.csv",
+        notebook    = "notebooks/causal46_joined/sankey_early_late.py",
+    output:
+        notebook    = "outputs/causal46_joined/sankey_early_late/notebook.ipynb",
+        figure      = "outputs/causal46_joined/sankey_early_late/sankey_early_late.pdf",
+    run:
+        outdir = str(Path(output.notebook).parent)
+        Path(outdir).mkdir(parents=True, exist_ok=True)
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                annotations_path=str(input.annotations),
+                filtered_manifest_path=str(input.manifest),
+                output_dir=outdir,
+            ),
+        )
+
+
 # =============================================================================
 # Gradient acoustic encoding — manifest-restricted ports of causal5
 # (acoustic_ax_discrimination, multivariate_gradient_perception) plus the
