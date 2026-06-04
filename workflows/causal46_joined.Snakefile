@@ -1136,7 +1136,7 @@ rule causal46_joined_all:
 rule contrast_plot:
     input:
         notebook="notebooks/causal46_joined/contrast_plot.py",
-        manifest="outputs/causal46_joined/filtered_manifest.csv",
+        manifest="outputs/causal46_joined/manual_annotations/filtered_manifest.csv",
     output:
         notebook="outputs/causal46_joined/contrast_plot/contrast_plot.ipynb",
         figure="outputs/causal46_joined/contrast_plot/contrast_plot.pdf",
@@ -1161,7 +1161,7 @@ rule contrast_plot:
 rule contrast_plot_per_pair:
     input:
         notebook="notebooks/causal46_joined/contrast_plot.py",
-        manifest="outputs/causal46_joined/filtered_manifest.csv",
+        manifest="outputs/causal46_joined/manual_annotations/filtered_manifest.csv",
     output:
         notebook="outputs/causal46_joined/contrast_plot/{pair}_contrast_plot.ipynb",
         figure="outputs/causal46_joined/contrast_plot/{pair}_contrast_plot.pdf",
@@ -1210,7 +1210,15 @@ rule contrast_plot_by_site_type:
             ttest_window_stride=15,
             pval_thresholds=(0.00001, 0.0001, 0.001),
             complex_acoustic_mode="overlay",
+            complex_tuning_values=("both", "complex", "two peaks"),
+            exclude_tuning_conflict=True,
+            site_type_relabel_map={"behav_only": "type5_behav_only"},
+            review_flag_types=("problematic", "interesting", "unknown", "discuss"),
             review_flags_mode="skip",
+            asymmetric_sig_col="if asymmetric, which is sig?",
+            asymmetric_use_sig_we_only=True,
+            mirrored_aligned_col="if mirrored, which WE is aligned?",
+            mirrored_use_anti_we_only=True,
         ))
 
 
@@ -1224,7 +1232,7 @@ rule sankey_early_late:
     """
     input:
         annotations = "outputs/causal46_joined/manual_annotations/early_acoustic_window.csv",
-        manifest    = "outputs/causal46_joined/filtered_manifest.csv",
+        manifest    = "outputs/causal46_joined/manual_annotations/filtered_manifest.csv",
         notebook    = "notebooks/causal46_joined/sankey_early_late.py",
     output:
         notebook    = "outputs/causal46_joined/sankey_early_late/notebook.ipynb",
@@ -1249,7 +1257,7 @@ rule sankey_early_late:
 # sigmoid-fit portion of acoustic_morphology_on_ambiguous. Each rule fans out
 # over `subject`; aggregates concat per-subject parquets.
 #
-# Electrode pool: filtered_manifest.csv rows with `acoustic tuning ~ ^[a-z]$`,
+# Electrode pool: manual_annotations/filtered_manifest.csv rows with `acoustic tuning ~ ^[a-z]$`,
 # collapsed to (subject, electrode_idx, phoneme_pair).
 # Peak window: causal6 phon_peaks.parquet (null-standardized).
 # Completions are pooled (matches causal5).
@@ -1261,7 +1269,7 @@ rule joined_acoustic_ax_discrimination:
     input:
         epochs      = "outputs/epochs_preprocessed/{subject}_epo.fif",
         phon_peaks  = "outputs/causal6/acoustic_decoding_peaks/{subject}/phon_peaks.parquet",
-        manifest    = "outputs/causal46_joined/filtered_manifest.csv",
+        manifest    = "outputs/causal46_joined/manual_annotations/filtered_manifest.csv",
         helper      = "notebooks/causal46_joined/_gradient_pool.py",
         notebook    = "notebooks/causal46_joined/acoustic_ax_discrimination.py",
 
@@ -1307,7 +1315,7 @@ rule joined_acoustic_univariate_gradient:
     input:
         epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
         phon_peaks = "outputs/causal6/acoustic_decoding_peaks/{subject}/phon_peaks.parquet",
-        manifest   = "outputs/causal46_joined/filtered_manifest.csv",
+        manifest   = "outputs/causal46_joined/manual_annotations/filtered_manifest.csv",
         helper     = "notebooks/causal46_joined/_gradient_pool.py",
         notebook   = "notebooks/causal46_joined/acoustic_univariate_gradient.py",
 
@@ -1375,7 +1383,7 @@ rule joined_acoustic_gradient_figures:
         model_comparison_df_all = "outputs/causal46_joined/acoustic_univariate_gradient/model_comparison_df_all.parquet",
         ax_discrimination_all   = "outputs/causal46_joined/acoustic_ax_discrimination/ax_discrimination_df_all.parquet",
         phon_peaks_all          = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet",
-        manifest                = "outputs/causal46_joined/filtered_manifest.csv",
+        manifest                = "outputs/causal46_joined/manual_annotations/filtered_manifest.csv",
         notebook                = "notebooks/causal46_joined/acoustic_gradient_figures.py",
 
     output:
@@ -1419,7 +1427,7 @@ rule joined_multivariate_gradient_perception:
     input:
         epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
         phon_peaks = "outputs/causal6/acoustic_decoding_peaks/{subject}/phon_peaks.parquet",
-        manifest   = "outputs/causal46_joined/filtered_manifest.csv",
+        manifest   = "outputs/causal46_joined/manual_annotations/filtered_manifest.csv",
         helper     = "notebooks/causal46_joined/_gradient_pool.py",
         notebook   = "notebooks/causal46_joined/multivariate_gradient_perception.py",
 
@@ -1499,7 +1507,7 @@ rule early_window_site_types:
     """Per-subject early-window A/B₁/B₂ bootstraps and site-type assignment."""
     input:
         epochs        = "outputs/epochs_preprocessed/{subject}_epo.fif",
-        manifest      = "outputs/causal46_joined/filtered_manifest.csv",
+        manifest      = "outputs/causal46_joined/manual_annotations/filtered_manifest.csv",
         trial_balance = "outputs/causal46_joined/trial_balance_index.csv",
         phon_peaks    = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet",
         helper        = "notebooks/causal46_joined/_within_completion.py",
