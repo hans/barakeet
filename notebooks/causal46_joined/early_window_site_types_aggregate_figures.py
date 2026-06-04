@@ -139,7 +139,7 @@ relabel_df = (
     site_types_roi
     .select(_avail_cols)
     .with_columns(pl.lit("").alias("site_type_override"))
-    .sort(["subject", "phoneme_pair", "electrode_idx"])
+    .sort(["subject", "electrode_idx", "phoneme_pair"])
 )
 _relabel_path = OUT_DIR / "site_type_relabel.csv"
 relabel_df.write_csv(_relabel_path)
