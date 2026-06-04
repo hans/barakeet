@@ -4,7 +4,7 @@
 
 ## Motivation
 
-Manual annotation of `outputs/causal46_joined/t_tests/star_plots_filtered/b4_powered.pdf` (annotated CSV at `~/freesurfer_subjects/barakeet/causal46_pipeline/filtered_manifest.csv`; schema at `notebooks/causal46_joined/manual_annotation_schema.md`) surfaced a robust pattern:
+Manual annotation of `outputs/causal46_joined/t_tests/star_plots_filtered/b4_powered.pdf` (annotated CSV at `outputs/causal46_joined/manual_annotations/filtered_manifest.csv`; schema at `notebooks/causal46_joined/manual_annotation_schema.md`) surfaced a robust pattern:
 
 - For site×phoneme_pair groups where the annotator marked **matched/mirrored morphology across both word_ends** (`match_we=y`, n=23 pairs), the per-WE bootstrap effect sizes are tightly coupled in **magnitude** but their **signs are roughly independent**:
   - `|best_mean_diff_aligned_med|` across the two WEs: Spearman r = **0.72, p = 1e-4**
@@ -141,7 +141,7 @@ The implementing agent should propose 2–3 specific plots and pick the most inf
 
 ### Validation
 
-- [ ] **Sanity check against manual annotation.** Load `~/freesurfer_subjects/barakeet/causal46_pipeline/filtered_manifest.csv`, restrict to `match_we_y = (matched/mirrored morphology across WE? == 'y')`. The 23 matched-WE pairs should have systematically tighter pair-level CIs than 23 random non-matched pairs. Print medians of `pair_ci_lo, pair_ci_hi, pair_emp_p` for both subsets; verify the matched subset's lower bound exceeds the random subset's. If not, surface this rather than burying it.
+- [ ] **Sanity check against manual annotation.** Load `outputs/causal46_joined/manual_annotations/filtered_manifest.csv`, restrict to `match_we_y = (matched/mirrored morphology across WE? == 'y')`. The 23 matched-WE pairs should have systematically tighter pair-level CIs than 23 random non-matched pairs. Print medians of `pair_ci_lo, pair_ci_hi, pair_emp_p` for both subsets; verify the matched subset's lower bound exceeds the random subset's. If not, surface this rather than burying it.
 - [ ] **Sanity check for hypothesis lift.** Of the matched-WE pairs that were not individually significant on either WE under the per-cell CI (9 from the annotation), report how many become `pair_ci_excludes_zero=True`. The user expects roughly half. If it's 0 or all 9, surface this.
 - [ ] **Confirm 1-WE pairs are handled.** Make sure `n_we_contributing=1` rows exist in the output and the per-cell augmentation handled missing-pair-partner cases without errors.
 - [ ] Run the full notebook end-to-end via `uv run` (per project preference). Confirm no exceptions, all output files present, page counts look right.
@@ -155,7 +155,7 @@ The implementing agent should propose 2–3 specific plots and pick the most inf
 ## Reference: relevant prior work
 
 - Implementation backbone: `notebooks/causal46_joined/t_tests.py` (this plan modifies it in place).
-- Annotation source for the cross-WE pattern: `notebooks/causal46_joined/manual_annotation_schema.md` + `~/freesurfer_subjects/barakeet/causal46_pipeline/filtered_manifest.csv`.
+- Annotation source for the cross-WE pattern: `notebooks/causal46_joined/manual_annotation_schema.md` + `outputs/causal46_joined/manual_annotations/filtered_manifest.csv`.
 - Earlier t-tests spec (for format and conventions): `docs/superpowers/plans/2026-05-22-causal46-ttests-calibration.md`.
 - Star plot gallery (consumes per-cell results, will need light tweak if filtered-gallery annotations change): `notebooks/causal46_joined/_within_completion.py:matched_n_star_plot`.
 

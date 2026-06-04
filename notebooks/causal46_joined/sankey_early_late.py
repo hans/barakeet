@@ -47,7 +47,7 @@ import pandas as pd
 
 # %% tags=["parameters"]
 annotations_path = "outputs_prod/causal46_joined/manual_annotations/early_acoustic_window.csv"
-filtered_manifest_path = "outputs_prod/causal46_joined/filtered_manifest.csv"
+filtered_manifest_path = "outputs_prod/causal46_joined/manual_annotations/filtered_manifest.csv"
 output_dir = "outputs/causal46_joined/sankey_early_late"
 
 # %%

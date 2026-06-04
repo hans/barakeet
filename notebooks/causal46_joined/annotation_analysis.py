@@ -17,7 +17,7 @@
 # # Annotation manifest — scratch analyses
 #
 # Explores relationships in the hand-annotated b4 star-plot review at
-# `~/freesurfer_subjects/barakeet/causal46_pipeline/filtered_manifest.csv`.
+# `outputs/causal46_joined/manual_annotations/filtered_manifest.csv`.
 #
 # Schema doc: `notebooks/causal46_joined/manual_annotation_schema.md`.
 #
@@ -47,7 +47,7 @@ from src.stimuli import WORD_END_TO_PHONEME_PAIR
 
 ROI_DIR = Path("/Users/jon/freesurfer_subjects/barakeet/causal6_speech_responsive_pipeline/find_speech_responsive")
 
-CSV = Path("/Users/jon/freesurfer_subjects/barakeet/causal46_pipeline/filtered_manifest.csv")
+CSV = Path("outputs/causal46_joined/manual_annotations/filtered_manifest.csv")
 df = pl.read_csv(CSV)
 print(f"loaded {df.height} rows")
 

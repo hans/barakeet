@@ -2,7 +2,7 @@
 
 Three notebooks in this directory (acoustic_ax_discrimination.py,
 acoustic_univariate_gradient.py, multivariate_gradient_perception.py) operate
-on the same pool: manifest-curated cells from `filtered_manifest.csv`,
+on the same pool: manifest-curated cells from `manual_annotations/filtered_manifest.csv`,
 collapsed to (subject, electrode_idx, phoneme_pair), with the peak acoustic
 window (`smin`/`smax`) attached from causal6's `phon_peaks.parquet`.
 
@@ -26,7 +26,7 @@ def load_acoustic_pool(
     Parameters
     ----------
     manifest_path
-        Path to `filtered_manifest.csv` (causal46_joined curated cells).
+        Path to `manual_annotations/filtered_manifest.csv` (causal46_joined curated cells).
     phon_peaks_path
         Path to a per-subject causal6 `phon_peaks.parquet` (must contain
         ``subject``, ``electrode_idx``, ``phoneme_pair``, ``smin``, ``smax``).

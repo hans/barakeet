@@ -47,7 +47,7 @@ from src.stimuli import OFFSET_DICT, PHONEME_PAIR_TO_WORD_ENDS, POD_dict
 from src.viz_provisional import load_epochs_dict
 
 # %% tags=["parameters"]
-manifest_path = "outputs_prod/causal46_joined/filtered_manifest.csv"
+manifest_path = "outputs_prod/causal46_joined/manual_annotations/filtered_manifest.csv"
 output_dir = "outputs/causal46_joined/contrast_plot"
 phoneme_pair = None   # None = aggregate all pairs; "bm"/"dn"/"pb" for per-pair
 bootstrap_r = 1000

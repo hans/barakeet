@@ -61,7 +61,7 @@ subject = "EC250"
 
 epochs_path = f"outputs/epochs_preprocessed/{subject}_epo.fif"
 phon_peaks_path = "outputs/causal6/acoustic_decoding_peaks/EC250/phon_peaks.parquet"
-manifest_path = "outputs/causal46_joined/filtered_manifest.csv"
+manifest_path = "outputs/causal46_joined/manual_annotations/filtered_manifest.csv"
 outdir = "."
 
 pca_num_components = "auto"

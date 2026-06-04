@@ -89,7 +89,7 @@ trial_df_path            = "outputs/causal46_joined/acoustic_univariate_gradient
 model_comparison_df_path = "outputs/causal46_joined/acoustic_univariate_gradient/model_comparison_df_all.parquet"
 ax_discrimination_path   = "outputs/causal46_joined/acoustic_ax_discrimination/ax_discrimination_df_all.parquet"
 phon_peaks_path          = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet"
-manifest_path            = "outputs/causal46_joined/filtered_manifest.csv"
+manifest_path            = "outputs/causal46_joined/manual_annotations/filtered_manifest.csv"
 outdir                   = "outputs/causal46_joined/acoustic_gradient_figures"
 n_sample                 = 24        # sites for catplots
 ```
@@ -162,7 +162,7 @@ rule joined_acoustic_gradient_figures:
         model_comparison_df_all = "outputs/causal46_joined/acoustic_univariate_gradient/model_comparison_df_all.parquet",
         ax_discrimination_all   = "outputs/causal46_joined/acoustic_ax_discrimination/ax_discrimination_df_all.parquet",
         phon_peaks_all          = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet",
-        manifest                = "outputs/causal46_joined/filtered_manifest.csv",
+        manifest                = "outputs/causal46_joined/manual_annotations/filtered_manifest.csv",
         notebook                = "notebooks/causal46_joined/acoustic_gradient_figures.py",
 
     output:

@@ -82,7 +82,7 @@ from _within_completion import (  # noqa: E402
 
 # %% tags=["parameters"]
 subject = "EC250"
-manifest_path = "outputs/causal46_joined/filtered_manifest.csv"
+manifest_path = "outputs/causal46_joined/manual_annotations/filtered_manifest.csv"
 phon_peaks_path = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet"
 epoch_dir = "outputs/epochs_preprocessed"
 trial_balance_path = "outputs/causal46_joined/trial_balance_index.csv"

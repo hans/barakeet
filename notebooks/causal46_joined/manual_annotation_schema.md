@@ -5,7 +5,7 @@ Schema for hand-coded review of the per-site star-plot gallery produced by
 (`outputs/causal46_joined/t_tests/star_plots_filtered/b4_powered.pdf`).
 
 The annotated CSV lives at
-`~/freesurfer_subjects/barakeet/causal46_pipeline/filtered_manifest.csv`
+`outputs/causal46_joined/manual_annotations/filtered_manifest.csv`
 (one row per `subject × electrode × phoneme_pair × word_end` cell, matching the
 auto-generated `filtered_manifest.csv` written by `t_tests.py`). Hand-added
 columns are listed below; auto columns (e.g. `best_smin`, `best_emp_p_aligned`)

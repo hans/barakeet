@@ -43,7 +43,7 @@ no aligned-sign claim is made for these sites.
 
 1. **Epochs**: `outputs/epochs_preprocessed/{subject}_epo.fif` — for trial-level
    HGA. Loaded via MNE; metadata enriched with `add_metadata_features()`.
-2. **Filtered manifest**: `outputs/causal46_joined/filtered_manifest.csv` —
+2. **Filtered manifest**: `outputs/causal46_joined/manual_annotations/filtered_manifest.csv` —
    per-cell manual annotation. Used for:
    - Restricting the analyzed site pool to those that appear in the manifest
      (already QC-filtered).
@@ -215,7 +215,7 @@ Concat per-subject parquets → population-level outputs in
 rule early_window_site_types:
     input:
         epochs        = "outputs/epochs_preprocessed/{subject}_epo.fif",
-        manifest      = "outputs/causal46_joined/filtered_manifest.csv",
+        manifest      = "outputs/causal46_joined/manual_annotations/filtered_manifest.csv",
         trial_balance = "outputs/causal46_joined/trial_balance/{subject}.parquet",  # check actual path
         helper        = "notebooks/causal46_joined/_within_completion.py",
         notebook      = "notebooks/causal46_joined/early_window_site_types.py",
@@ -356,10 +356,10 @@ between A and B in early-window perceptual analyzers.
    and aligned with no anti-aligned signal; type-3 = exactly one;
    grab-bag = any anti-aligned.
 6. **Complex acoustic responses retained**: sourced from
-   `outputs/causal46_joined/filtered_manifest.csv` `acoustic tuning` column,
+   `outputs/causal46_joined/manual_annotations/filtered_manifest.csv` `acoustic tuning` column,
    values in `{both, complex, two peaks}`. Reported with raw (unsigned) B
    contrasts; not entered into types 1–3/grab-bag.
-7. **Site pool**: only sites that appear in `filtered_manifest.csv` (already
+7. **Site pool**: only sites that appear in `manual_annotations/filtered_manifest.csv` (already
    QC-filtered). Sites without manifest entries are out of scope for this
    analysis.
 
@@ -381,6 +381,6 @@ between A and B in early-window perceptual analyzers.
    contiguous significant windows) or cluster-based correction. Note this
    for later — start with the simple criterion.
 5. **Smoke test**: pick one subject with known type-2 examples (consult
-   filtered_manifest.csv `behav @ac` non-empty rows) and verify the new
+   manual_annotations/filtered_manifest.csv `behav @ac` non-empty rows) and verify the new
    notebook reproduces the manual classification on those sites before
    running the full pipeline.
