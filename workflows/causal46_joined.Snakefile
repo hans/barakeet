@@ -1412,6 +1412,7 @@ rule joined_acoustic_gradient_figures:
                 phon_peaks_path=str(input.phon_peaks_all),
                 manifest_path=str(input.manifest),
                 outdir=str(outdir),
+                n_sample=24,
             ),
         )
 
