@@ -417,7 +417,7 @@ pie_colors   = [COLORS.get(t, "#999999") for t in pie_types]
 
 f, ax = plt.subplots(figsize=(3.5, 3.5))
 ax.pie(pie_counts, labels=pie_labels, colors=pie_colors,
-       autopct=lambda x: int(x / 100. * sum(pie_counts)))
+       autopct=lambda x: round(x / 100. * sum(pie_counts)))
 
 # %% [markdown]
 # ## Plot — one page per response type
