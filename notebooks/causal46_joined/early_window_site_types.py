@@ -72,6 +72,7 @@ sys.path.insert(0, str(Path(".").resolve() / "notebooks" / "causal46_joined"))
 from _within_completion import (  # noqa: E402
     bootstrap_A_site,
     early_window_star_plot,
+    early_window_star_plot_compact,
     extract_hga,
     n_per_class_from_per_step,
     per_step_class_counts,
@@ -946,6 +947,91 @@ with PdfPages(pdf_path_gallery) as _pdf:
 print(f"star_plots_early.pdf: {_n_plotted} pages  ({len(_failures_plot)} failures)")
 if _failures_plot:
     for _ei, _pp, _err in _failures_plot:
+        print(f"  e{_ei} {_pp}: {_err}")
+
+# %% [markdown]
+# ## Compact star plot gallery (for slides)
+#
+# Same content as the full gallery above but rendered as horizontal 3-panel
+# strips (~8.5 × 2.8 in each).  Several of these can be tiled on one slide.
+
+# %%
+pdf_path_compact = OUT_DIR / "star_plots_early_compact.pdf"
+_n_compact = 0
+_failures_compact: list[tuple] = []
+
+with PdfPages(pdf_path_compact) as _pdf_c:
+    if not sorted_sites:
+        _fig0c, _ax0c = plt.subplots(figsize=(8.5, 2.8))
+        _ax0c.text(0.5, 0.5, f"{subject}: no sites in manifest",
+                   ha="center", va="center", fontsize=10)
+        _ax0c.axis("off")
+        _pdf_c.savefig(_fig0c)
+        plt.close(_fig0c)
+    for _row in tqdm(sorted_sites, desc="compact star plots"):
+        _ei = int(_row["electrode_idx"])
+        _pp = _row["phoneme_pair"]
+        _we0 = _row.get("B1_word_end") or ""
+        _we1 = _row.get("B2_word_end") or ""
+        _b1_steps = [int(float(s)) for s in (_row["B1_qualifying_steps"] or "").split(",") if s]
+        _b2_steps = [int(float(s)) for s in (_row["B2_qualifying_steps"] or "").split(",") if s]
+        _a_sign = float(_row["acoustic_sign"]) if _row["acoustic_sign"] is not None else float("nan")
+
+        _site_a_pw = (
+            A_per_window.filter(
+                (pl.col("electrode_idx") == _ei) & (pl.col("phoneme_pair") == _pp)
+            ) if A_per_window.height > 0 else pl.DataFrame()
+        )
+        _site_b1_pw = (
+            B_per_window.filter(
+                (pl.col("electrode_idx") == _ei)
+                & (pl.col("phoneme_pair") == _pp)
+                & (pl.col("word_end") == _we0)
+            ) if B_per_window.height > 0 and _we0 else pl.DataFrame()
+        )
+        _site_b2_pw = (
+            B_per_window.filter(
+                (pl.col("electrode_idx") == _ei)
+                & (pl.col("phoneme_pair") == _pp)
+                & (pl.col("word_end") == _we1)
+            ) if B_per_window.height > 0 and _we1 else pl.DataFrame()
+        )
+
+        try:
+            _fig_c = early_window_star_plot_compact(
+                subject, _ei, _pp,
+                ep=ep,
+                bhv_col=bhv_col,
+                a_per_window=_site_a_pw,
+                b1_per_window=_site_b1_pw,
+                b2_per_window=_site_b2_pw,
+                we0=_we0,
+                we1=_we1,
+                b1_qualifying_steps=_b1_steps,
+                b2_qualifying_steps=_b2_steps,
+                b1_n_per_class=int(_row.get("B1_n_per_class") or 0),
+                b2_n_per_class=int(_row.get("B2_n_per_class") or 0),
+                a_n_step1=int(_row.get("A_n_step1") or 0),
+                a_n_step6=int(_row.get("A_n_step6") or 0),
+                acoustic_sign=_a_sign,
+                site_type=str(_row.get("site_type") or "unknown"),
+                manifest_tuning=str(_row.get("manifest_tuning") or ""),
+                acoustic_peak_auc=phon_auc.get((_ei, _pp)),
+                search_smin=SMIN_LO,
+                search_smax=PAIR_SMAX_HI.get(_pp, SMAX_HI_ABS),
+                b_search_smin=B_SEARCH_SMIN,
+                b_search_smax=B_SEARCH_SMAX,
+            )
+            _pdf_c.savefig(_fig_c, bbox_inches="tight")
+            plt.close(_fig_c)
+            _n_compact += 1
+        except Exception as _exc:
+            _failures_compact.append((_ei, _pp, repr(_exc)))
+            plt.close("all")
+
+print(f"star_plots_early_compact.pdf: {_n_compact} pages  ({len(_failures_compact)} failures)")
+if _failures_compact:
+    for _ei, _pp, _err in _failures_compact:
         print(f"  e{_ei} {_pp}: {_err}")
 
 # %% [markdown]
