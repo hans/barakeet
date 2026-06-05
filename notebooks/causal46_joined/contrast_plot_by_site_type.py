@@ -139,6 +139,7 @@ LABELS = {
     "A_unsigned":                      "A unsigned",
     "problematic":                     "Problematic",
     "interesting":                     "Interesting",
+    "etc":                             "Other",
 }
 
 COLORS = {
@@ -150,7 +151,11 @@ COLORS = {
     "A_unsigned":                      "#AAAAAA",
     "problematic":                     "#EDC948",
     "interesting":                     "#D4A6C8",
+    "etc":                             "#AAAAAA",
 }
+
+# Types collapsed into "etc" in the pie chart (matching the Sankey grouping).
+PIE_ETC_MEMBERS = ["A_unsigned", "problematic", "interesting"]
 
 # %%
 def _to_bool(series: pd.Series) -> pd.Series:
@@ -400,11 +405,15 @@ if review_flags_mode == "page" and review_types_present:
     ordered_types = ordered_types + ["review_flags"]
 
 # %%
-# Pie uses ALL annotation rows (matching Sankey), not just orientable plotted types.
-pie_types  = [t for t in PREFERRED_ORDER if (ann["site_type_relabel"] == t).any()]
-pie_counts = [int((ann["site_type_relabel"] == t).sum()) for t in pie_types]
-pie_labels = [LABELS.get(t, t) for t in pie_types]
-pie_colors = [COLORS.get(t, "#999999") for t in pie_types]
+# Pie uses ALL annotation rows with the same grouping as the Sankey:
+# "A_unsigned", "problematic", "interesting" are collapsed into "etc" / "Other".
+_pie_relabel = ann["site_type_relabel"].replace({m: "etc" for m in PIE_ETC_MEMBERS})
+_pie_named   = [t for t in PREFERRED_ORDER if t not in PIE_ETC_MEMBERS
+                and (_pie_relabel == t).any()]
+pie_types    = _pie_named + (["etc"] if (_pie_relabel == "etc").any() else [])
+pie_counts   = [int((_pie_relabel == t).sum()) for t in pie_types]
+pie_labels   = [LABELS.get(t, t) for t in pie_types]
+pie_colors   = [COLORS.get(t, "#999999") for t in pie_types]
 
 f, ax = plt.subplots(figsize=(3.5, 3.5))
 ax.pie(pie_counts, labels=pie_labels, colors=pie_colors,
