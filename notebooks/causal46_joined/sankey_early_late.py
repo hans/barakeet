@@ -35,15 +35,15 @@ from __future__ import annotations
 from pathlib import Path
 
 import matplotlib
-matplotlib.use("Agg")
+# matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import PathPatch, Rectangle
 from matplotlib.path import Path as MplPath
 import pandas as pd
 
 # %% tags=["parameters"]
-annotations_path = "outputs_prod/causal46_joined/manual_annotations/early_acoustic_window.csv"
-filtered_manifest_path = "outputs_prod/causal46_joined/manual_annotations/filtered_manifest.csv"
+annotations_path = "outputs/causal46_joined/manual_annotations/early_acoustic_window.csv"
+filtered_manifest_path = "outputs/causal46_joined/manual_annotations/filtered_manifest.csv"
 output_dir = "outputs/causal46_joined/sankey_early_late"
 
 # %%
@@ -56,6 +56,11 @@ Path(output_dir).mkdir(parents=True, exist_ok=True)
 early = pd.read_csv(annotations_path)
 manifest = pd.read_csv(filtered_manifest_path)
 
+# "etc" is a catch-all for all the untyped cases, which we don't have enough of any one type to justify separate categories for.
+# We can break it down into subtypes in the future if we want, but for now it's easier to lump them together and give them a single color.
+EARLY_TYPE_GROUPS = {
+    "etc": ["A_unsigned", "problematic", "interesting"],
+}
 # Ordered bottom→top in the Sankey: typed categories first, then "other" above.
 EARLY_TYPES = [
     "type1_acoustic_only",
@@ -63,9 +68,7 @@ EARLY_TYPES = [
     "type3_asymmetric",
     "type4_early_perceptual_mirrored",
     "type5_behav_only",
-    "A_unsigned",
-    "problematic",
-    "interesting",
+    "etc",
 ]
 EARLY_LABELS = {
     "type1_acoustic_only":              "Acoustic only",
@@ -73,9 +76,7 @@ EARLY_LABELS = {
     "type3_asymmetric":                 "Acoustic+perceptual\n(one-sided)",
     "type4_early_perceptual_mirrored":  "Acoustic+perceptual\n(mirrored)",
     "type5_behav_only":                 "Perceptual only",
-    "A_unsigned":                       "A unsigned",
-    "problematic":                      "Problematic",
-    "interesting":                      "Interesting",
+    "etc":                              "Other",
 }
 EARLY_COLORS = {
     "type1_acoustic_only":             "#4E79A7",
@@ -83,9 +84,7 @@ EARLY_COLORS = {
     "type3_asymmetric":                "#F28E2B",
     "type4_early_perceptual_mirrored": "#B07AA1",
     "type5_behav_only":                "#E15759",
-    "A_unsigned":                      "#AAAAAA",
-    "problematic":                     "#EDC948",
-    "interesting":                     "#D4A6C8",
+    "etc":                             "#AAAAAA",
 }
 # Right column: absent → one-sided → two-sided (bottom to top)
 LATE_ORDER  = ["absent", "one-sided", "two-sided"]
@@ -121,13 +120,19 @@ late_pres = (
 merged = early.merge(
     late_pres, on=["subject", "electrode_idx", "phoneme_pair"], how="left"
 )
+
+early_category_map = {}
+for group, members in EARLY_TYPE_GROUPS.items():
+    for m in members:
+        early_category_map[m] = group
+merged["early_category"] = merged["site_type_relabel"].replace(early_category_map)
 merged["late_category"] = merged["late_category"].fillna("absent")
 
 print(f"Site×pair cells total: {len(merged)}")
 print("\nFlow table (rows=early type, cols=late category):")
 ct = (
     merged
-    .groupby(["site_type_relabel", "late_category"])
+    .groupby(["early_category", "late_category"])
     .size()
     .unstack(fill_value=0)
     .reindex(EARLY_TYPES)
@@ -169,13 +174,13 @@ X_LEFT     = 0.35
 X_RIGHT    = 0.65
 PLOT_H     = 1.0
 
-active_left  = [t for t in EARLY_TYPES if (merged["site_type_relabel"] == t).any()]
+active_left  = [t for t in EARLY_TYPES if (merged["early_category"] == t).any()]
 active_right = LATE_ORDER
 N_LEFT  = len(active_left)
 N_RIGHT = len(active_right)
 grand   = len(merged)
 
-left_totals  = {t:  (merged["site_type_relabel"] == t).sum()   for t in active_left}
+left_totals  = {t:  (merged["early_category"] == t).sum()      for t in active_left}
 right_totals = {lc: (merged["late_category"] == lc).sum()      for lc in active_right}
 
 left_scale  = (PLOT_H - NODE_GAP * (N_LEFT  - 1)) / grand
@@ -214,7 +219,7 @@ right_fill = {lc: 0.0 for lc in active_right}
 
 for t in active_left:
     for lc in active_right:
-        n = ((merged["site_type_relabel"] == t) & (merged["late_category"] == lc)).sum()
+        n = ((merged["early_category"] == t) & (merged["late_category"] == lc)).sum()
         if n == 0:
             continue
         lh = n * left_scale
