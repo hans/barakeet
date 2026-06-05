@@ -1,10 +1,8 @@
 """Re-order compact star-plot pages by manual annotation.
 
-Reads the filled-in ``site_type_relabel.csv`` (produced by the aggregate
-figures notebook and then hand-annotated), determines the effective site type
-for every (subject × electrode × phoneme_pair) entry (``site_type_override``
-takes precedence over ``site_type``), and writes a new PDF whose pages are
-ordered by:
+Reads ``manual_annotations/early_acoustic_window.csv`` and uses the
+``site_type_relabel`` column (the hand-annotated type) to determine the
+ordering of pages.  Pages are sorted by:
 
     (site_type_sort_key, subject, electrode_idx, phoneme_pair)
 
@@ -14,7 +12,7 @@ then "Acoustic only", then "Other".
 Usage
 -----
     uv run python scripts/reorder_star_plots_by_annotation.py \\
-        --relabel  outputs/causal46_joined/early_window_site_types/site_type_relabel.csv \\
+        --relabel  outputs/causal46_joined/manual_annotations/early_acoustic_window.csv \\
         --star-dir outputs/causal46_joined/early_window_site_types \\
         --out      outputs/causal46_joined/early_window_site_types/star_plots_by_annotation.pdf
 
@@ -42,7 +40,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--relabel", required=True,
-                   help="Path to filled-in site_type_relabel.csv")
+                   help="Path to manual_annotations/early_acoustic_window.csv")
     p.add_argument("--star-dir", required=True,
                    help="Directory containing per-subject subdirs with "
                         "star_plots_early_compact.pdf files")
@@ -70,26 +68,15 @@ def main() -> None:
     # Load annotation table
     # ------------------------------------------------------------------
     ann = pl.read_csv(relabel_path)
-    required = {"subject", "electrode_idx", "phoneme_pair", "site_type"}
+    required = {"subject", "electrode_idx", "phoneme_pair", "site_type_relabel"}
     missing = required - set(ann.columns)
     if missing:
-        sys.exit(f"site_type_relabel.csv is missing columns: {missing}")
+        sys.exit(f"early_acoustic_window.csv is missing columns: {missing}")
 
-    has_override = "site_type_override" in ann.columns
-
-    # Resolve effective site type: use override if non-empty, else original
-    if has_override:
-        ann = ann.with_columns(
-            pl.when(
-                pl.col("site_type_override").is_not_null()
-                & (pl.col("site_type_override").str.strip_chars() != "")
-            )
-            .then(pl.col("site_type_override").str.strip_chars())
-            .otherwise(pl.col("site_type"))
-            .alias("effective_type")
-        )
-    else:
-        ann = ann.with_columns(pl.col("site_type").alias("effective_type"))
+    # Use the manual site_type_relabel column directly as the effective type
+    ann = ann.with_columns(
+        pl.col("site_type_relabel").str.strip_chars().alias("effective_type")
+    )
 
     # Attach sort key
     ann = ann.with_columns(
