@@ -126,15 +126,30 @@ PREFERRED_ORDER = [
     "type5_behav_only",
     "A_unsigned",
     "complex",
+    "problematic",
+    "interesting",
 ]
 
 LABELS = {
-    "type1_acoustic_only": "Acoustic only",
-    "type2_early_perceptual": "Acoustic+perceptual",
-    "type3_asymmetric": "Acoustic+perceptual one-sided",
-    "type4_early_perceptual_mirrored": "Acoustic+perceptual mirrored",
-    "type5_behav_only": "Perceptual only",
-    "A_unsigned": "Complex acoustic",
+    "type1_acoustic_only":             "Acoustic only",
+    "type2_early_perceptual":          "Acoustic+perceptual",
+    "type3_asymmetric":                "Acoustic+perceptual\n(one-sided)",
+    "type4_early_perceptual_mirrored": "Acoustic+perceptual\n(mirrored)",
+    "type5_behav_only":                "Perceptual only",
+    "A_unsigned":                      "A unsigned",
+    "problematic":                     "Problematic",
+    "interesting":                     "Interesting",
+}
+
+COLORS = {
+    "type1_acoustic_only":             "#4E79A7",
+    "type2_early_perceptual":          "#59A14F",
+    "type3_asymmetric":                "#F28E2B",
+    "type4_early_perceptual_mirrored": "#B07AA1",
+    "type5_behav_only":                "#E15759",
+    "A_unsigned":                      "#AAAAAA",
+    "problematic":                     "#EDC948",
+    "interesting":                     "#D4A6C8",
 }
 
 # %%
@@ -385,11 +400,15 @@ if review_flags_mode == "page" and review_types_present:
     ordered_types = ordered_types + ["review_flags"]
 
 # %%
-counts = [results[t]["n_sites"] for t in ordered_types]
+# Pie uses ALL annotation rows (matching Sankey), not just orientable plotted types.
+pie_types  = [t for t in PREFERRED_ORDER if (ann["site_type_relabel"] == t).any()]
+pie_counts = [int((ann["site_type_relabel"] == t).sum()) for t in pie_types]
+pie_labels = [LABELS.get(t, t) for t in pie_types]
+pie_colors = [COLORS.get(t, "#999999") for t in pie_types]
 
 f, ax = plt.subplots(figsize=(3.5, 3.5))
-# show pie chart with counts
-ax.pie(counts, labels=[LABELS[t] for t in ordered_types], autopct=lambda x: int(x / 100. * sum(counts)))
+ax.pie(pie_counts, labels=pie_labels, colors=pie_colors,
+       autopct=lambda x: int(x / 100. * sum(pie_counts)))
 
 # %% [markdown]
 # ## Plot — one page per response type
