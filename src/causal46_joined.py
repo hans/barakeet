@@ -4,6 +4,18 @@ The joined pipeline restricts behavior and ganong decoders to electrodes that
 are acoustic-significant (AS) per the causal6 acoustic peak test. This module
 exposes the pure-Python core of the AS-filter checkpoint so it is testable
 without ploomber.
+
+Site-type display constants
+---------------------------
+``SITE_TYPE_ORDER``, ``SITE_TYPE_LABELS``, ``SITE_TYPE_COLORS``, and
+``ETC_SITE_TYPES`` are the canonical definitions shared across all notebooks
+and scripts that visualise early-window site classifications.  They match the
+Sankey / contrast-plot palette exactly.
+
+``site_type_display_label(raw)`` maps a raw ``site_type`` value (as it appears
+in parquet outputs and CSVs) to the human-readable label used in figures.
+``site_type_sort_key(raw)`` returns an integer that places types in the
+preferred slide/figure order.
 """
 
 from __future__ import annotations
@@ -12,6 +24,75 @@ from typing import Mapping
 
 import pandas as pd
 import polars as pl
+
+# ---------------------------------------------------------------------------
+# Canonical site-type display constants
+# ---------------------------------------------------------------------------
+
+# Preferred display order (typed categories first, then catch-all "etc" / Other)
+SITE_TYPE_ORDER: list[str] = [
+    "type2_early_perceptual",
+    "type3_asymmetric",
+    "type4_early_perceptual_mirrored",
+    "type5_behav_only",
+    "type1_acoustic_only",
+    "etc",
+    # raw values that map into "etc":
+    "A_unsigned",
+    "problematic",
+    "interesting",
+    # remaining auto-assigned values kept at end
+    "complex",
+    "unknown",
+    "grab_bag",
+]
+
+# Human-readable labels for figures / legends
+SITE_TYPE_LABELS: dict[str, str] = {
+    "type1_acoustic_only":             "Acoustic only",
+    "type2_early_perceptual":          "Acoustic+perceptual",
+    "type3_asymmetric":                "Acoustic+perceptual\n(one-sided)",
+    "type4_early_perceptual_mirrored": "Acoustic+perceptual\n(mirrored)",
+    "type5_behav_only":                "Perceptual only",
+    "etc":                             "Other",
+    "A_unsigned":                      "Other",
+    "problematic":                     "Other",
+    "interesting":                     "Other",
+    "complex":                         "Complex",
+    "unknown":                         "Unknown",
+    "grab_bag":                        "Grab-bag",
+}
+
+# Colors matching the Sankey / contrast-plot palette
+SITE_TYPE_COLORS: dict[str, str] = {
+    "type1_acoustic_only":             "#4E79A7",
+    "type2_early_perceptual":          "#59A14F",
+    "type3_asymmetric":                "#F28E2B",
+    "type4_early_perceptual_mirrored": "#B07AA1",
+    "type5_behav_only":                "#E15759",
+    "etc":                             "#AAAAAA",
+    "A_unsigned":                      "#AAAAAA",
+    "problematic":                     "#AAAAAA",
+    "interesting":                     "#AAAAAA",
+    "complex":                         "#762a83",
+    "unknown":                         "#d9d9d9",
+    "grab_bag":                        "#d73027",
+}
+
+# Raw site_type values that are collapsed into "etc" / "Other" in figures
+ETC_SITE_TYPES: list[str] = ["A_unsigned", "problematic", "interesting"]
+
+_SORT_KEY: dict[str, int] = {t: i for i, t in enumerate(SITE_TYPE_ORDER)}
+
+
+def site_type_display_label(raw: str) -> str:
+    """Human-readable label for a raw site_type string."""
+    return SITE_TYPE_LABELS.get(str(raw), str(raw))
+
+
+def site_type_sort_key(raw: str) -> int:
+    """Integer sort key placing types in the preferred figure order."""
+    return _SORT_KEY.get(str(raw), len(SITE_TYPE_ORDER))
 
 
 def compute_as_filter(

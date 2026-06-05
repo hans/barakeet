@@ -51,6 +51,10 @@ except ImportError:
 
 sys.path.insert(0, str(Path(".").resolve() / "src"))
 from data import get_electrode_df  # noqa: E402
+from causal46_joined import (  # noqa: E402
+    SITE_TYPE_ORDER, SITE_TYPE_LABELS, SITE_TYPE_COLORS, ETC_SITE_TYPES,
+    site_type_sort_key,
+)
 
 # %% tags=["parameters"]
 site_types_path    = "outputs/causal46_joined/early_window_site_types/site_type_assignments_all.parquet"
@@ -149,26 +153,8 @@ print(f"wrote {_relabel_path}  ({relabel_df.height} rows)")
 # ## 1. Population site-type counts bar chart
 
 # %%
-_TYPE_ORDER = [
-    "type2_early_perceptual",
-    "type3_asymmetric",
-    "grab_bag",
-    "type1_acoustic_only",
-    "complex",
-    "A_unsigned",
-    "unknown",
-    "unclassifiable_B_power",
-]
-_TYPE_COLORS = {
-    "type2_early_perceptual":   "#1a9850",
-    "type3_asymmetric":         "#91cf60",
-    "grab_bag":                 "#d73027",
-    "type1_acoustic_only":      "#4393c3",
-    "complex":                  "#762a83",
-    "A_unsigned":               "#b2b2b2",
-    "unknown":                  "#d9d9d9",
-    "unclassifiable_B_power":   "#f5f5f5",
-}
+_TYPE_ORDER = SITE_TYPE_ORDER
+_TYPE_COLORS = SITE_TYPE_COLORS
 
 counts = (
     site_types_roi
@@ -206,7 +192,7 @@ if bar_groups.height > 0:
         ax_bar.barh(
             y_labels, bar_vals_arr, left=lefts,
             color=_TYPE_COLORS.get(stype, "#aaaaaa"),
-            label=stype, edgecolor="none", height=0.7,
+            label=SITE_TYPE_LABELS.get(stype, stype), edgecolor="none", height=0.7,
         )
         for i, (v, l) in enumerate(zip(bar_vals_arr, lefts)):
             if v >= 1:
@@ -364,6 +350,40 @@ else:
     (OUT_DIR / "star_plots_all.pdf").write_bytes(b"")
 
 # %% [markdown]
+# ## 4. Compact star-plot gallery (for slides)
+#
+# Concatenates per-subject `star_plots_early_compact.pdf` files in the same
+# subject-major order as the full gallery above.
+
+# %%
+_per_subj_compact_pdfs = sorted(
+    _star_plots_dir.glob("*/star_plots_early_compact.pdf"),
+    key=lambda p: p.parent.name,
+)
+print(f"Per-subject star_plots_early_compact.pdf files found: {len(_per_subj_compact_pdfs)}")
+
+if _per_subj_compact_pdfs and _HAS_PYPDF:
+    _writer_c = PdfWriter()
+    _n_pages_c = 0
+    for _pdf_path_c in tqdm(_per_subj_compact_pdfs, desc="concatenating compact"):
+        try:
+            _reader_c = PdfReader(str(_pdf_path_c))
+            for _page_c in _reader_c.pages:
+                _writer_c.add_page(_page_c)
+            _n_pages_c += len(_reader_c.pages)
+        except Exception as exc:
+            print(f"  ⚠ failed to read {_pdf_path_c}: {exc}")
+    _out_path_c = OUT_DIR / "star_plots_all_compact.pdf"
+    with _out_path_c.open("wb") as fh:
+        _writer_c.write(fh)
+    print(f"wrote star_plots_all_compact.pdf  ({_n_pages_c} pages from {len(_per_subj_compact_pdfs)} subjects)")
+elif not _HAS_PYPDF:
+    print("⚠ pypdf not installed — star_plots_all_compact.pdf skipped")
+else:
+    print("⚠ no per-subject compact PDFs found — star_plots_all_compact.pdf skipped")
+    (OUT_DIR / "star_plots_all_compact.pdf").write_bytes(b"")
+
+# %% [markdown]
 # ## Done
 
 # %%
@@ -372,7 +392,8 @@ print(f"Output dir: {OUT_DIR}")
 print(f"site_types: {site_types.height} rows across {site_types['subject'].n_unique()} subjects")
 print("Files written:")
 for _f in ["site_type_relabel.csv",
-           "population_site_type_counts.pdf", "A_vs_B_scatter.pdf", "star_plots_all.pdf"]:
+           "population_site_type_counts.pdf", "A_vs_B_scatter.pdf",
+           "star_plots_all.pdf", "star_plots_all_compact.pdf"]:
     _p = OUT_DIR / _f
     print(f"  {_f}: {'ok' if _p.exists() and _p.stat().st_size > 0 else 'MISSING/EMPTY'}")
 print("=" * 70)
