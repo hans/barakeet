@@ -88,10 +88,10 @@ analysis:
 
 
 causal46_joined:
-  min_class_k: 4            # minimum per-class trials to include a cell
-  window_size: 10           # searchlight window in samples (100ms at 100 Hz)
-  stride: 10
-  ac_p_value_threshold: 0.001   # uncorrected p-value cutoff for AS-site inclusion
+  min_class_k: 3            # minimum per-class trials to include a cell
+  window_size: 5           # searchlight window in samples (100ms at 100 Hz)
+  stride: 5
+  ac_p_value_threshold: 0.01   # uncorrected p-value cutoff for AS-site inclusion
 
 
 causal6:
