@@ -1267,12 +1267,10 @@ rule sankey_early_late:
 
 
 rule joined_acoustic_ax_discrimination:
-    """Per-site adjacent-step decoders at peak acoustic window — manifest-restricted."""
+    """Per-site adjacent-step decoders at peak acoustic window — phon_peaks pool."""
     input:
         epochs      = "outputs/epochs_preprocessed/{subject}_epo.fif",
         phon_peaks  = "outputs/causal6/acoustic_decoding_peaks/{subject}/phon_peaks.parquet",
-        manifest    = "outputs/causal46_joined/manual_annotations/filtered_manifest.csv",
-        helper      = "notebooks/causal46_joined/_gradient_pool.py",
         notebook    = "notebooks/causal46_joined/acoustic_ax_discrimination.py",
 
     output:
@@ -1287,7 +1285,6 @@ rule joined_acoustic_ax_discrimination:
             parameters=dict(
                 epochs_path=str(input.epochs),
                 phon_peaks_path=str(input.phon_peaks),
-                manifest_path=str(input.manifest),
                 outdir=str(outdir),
                 n_jobs=config["analysis"]["decoding"]["n_jobs"],
             ),
@@ -1313,12 +1310,10 @@ rule joined_acoustic_ax_discrimination_aggregate:
 
 
 rule joined_acoustic_univariate_gradient:
-    """Per-site sigmoid neurometric fit on HGA across morph steps — manifest-restricted."""
+    """Per-site sigmoid neurometric fit on HGA across morph steps — phon_peaks pool."""
     input:
         epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
         phon_peaks = "outputs/causal6/acoustic_decoding_peaks/{subject}/phon_peaks.parquet",
-        manifest   = "outputs/causal46_joined/manual_annotations/filtered_manifest.csv",
-        helper     = "notebooks/causal46_joined/_gradient_pool.py",
         notebook   = "notebooks/causal46_joined/acoustic_univariate_gradient.py",
 
     output:
@@ -1334,7 +1329,6 @@ rule joined_acoustic_univariate_gradient:
             parameters=dict(
                 epochs_path=str(input.epochs),
                 phon_peaks_path=str(input.phon_peaks),
-                manifest_path=str(input.manifest),
                 outdir=str(outdir),
                 endpoint_separation_floor=0.1,
                 min_distinct_steps=5,
@@ -1418,7 +1412,7 @@ rule joined_acoustic_gradient_figures:
 
 
 rule joined_multivariate_gradient_perception:
-    """Per-(subject, phoneme_pair) population logistic+PCA on endpoints — manifest-restricted.
+    """Per-(subject, phoneme_pair) population logistic+PCA on endpoints — phon_peaks pool.
 
     Trains on endpoint trials (resampled ∈ {1, 6}) across the pair's AS
     population; applies to held-out endpoint folds, all ambiguous trials, and
@@ -1428,8 +1422,6 @@ rule joined_multivariate_gradient_perception:
     input:
         epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
         phon_peaks = "outputs/causal6/acoustic_decoding_peaks/{subject}/phon_peaks.parquet",
-        manifest   = "outputs/causal46_joined/manual_annotations/filtered_manifest.csv",
-        helper     = "notebooks/causal46_joined/_gradient_pool.py",
         notebook   = "notebooks/causal46_joined/multivariate_gradient_perception.py",
 
     output:
@@ -1447,7 +1439,6 @@ rule joined_multivariate_gradient_perception:
             parameters=dict(
                 epochs_path=str(input.epochs),
                 phon_peaks_path=str(input.phon_peaks),
-                manifest_path=str(input.manifest),
                 outdir=str(outdir),
                 pca_num_components=config["analysis"]["multivariate"]["pca_num_components"],
                 n_jobs=config["analysis"]["multivariate"]["n_jobs"],

@@ -43,9 +43,6 @@ import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
 
-sys.path.insert(0, str(Path(".").resolve() / "notebooks" / "causal46_joined"))
-from _gradient_pool import load_acoustic_pool  # noqa: E402
-
 from src.data import add_metadata_features
 from src.models.sigmoid import (
     EFFECTIVELY_LINEAR_K,
@@ -60,7 +57,6 @@ subject = "EC250"
 
 epochs_path = f"outputs/epochs_preprocessed/{subject}_epo.fif"
 phon_peaks_path = "outputs/causal6/acoustic_decoding_peaks/EC250/phon_peaks.parquet"
-manifest_path = "outputs/causal46_joined/manual_annotations/filtered_manifest.csv"
 outdir = "."
 
 # Drop sites where |mean_step1 − mean_step6| < endpoint_separation_floor *
@@ -85,8 +81,12 @@ outdir.mkdir(parents=True, exist_ok=True)
 # ## Build site pool
 
 # %%
-pool = load_acoustic_pool(manifest_path, phon_peaks_path, subject=subject)
-print(f"{subject}: {len(pool)} (electrode, phoneme_pair) sites in manifest+phon_peaks pool")
+pool = (
+    pd.read_parquet(phon_peaks_path)[["subject", "electrode_idx", "phoneme_pair", "smin", "smax"]]
+    .drop_duplicates(subset=["subject", "electrode_idx", "phoneme_pair"])
+    .reset_index(drop=True)
+)
+print(f"{subject}: {len(pool)} (electrode, phoneme_pair) sites in phon_peaks pool")
 
 # %% [markdown]
 # ## Extract trial-level HGA at each site's peak window
