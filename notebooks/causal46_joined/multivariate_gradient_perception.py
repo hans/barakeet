@@ -60,6 +60,7 @@ epochs_path = f"outputs/epochs_preprocessed/{subject}_epo.fif"
 phon_peaks_path = "outputs/causal6/acoustic_decoding_peaks/EC250/phon_peaks.parquet"
 outdir = "."
 
+ac_p_value_threshold = 0.001  # uncorrected; matches t_tests AC_P_VALUE_THRESHOLD
 pca_num_components = "auto"
 n_jobs = 4
 num_repeats = 5
@@ -90,11 +91,14 @@ outdir.mkdir(parents=True, exist_ok=True)
 
 # %%
 pool = (
-    pd.read_parquet(phon_peaks_path)[["subject", "electrode_idx", "phoneme_pair", "smin", "smax"]]
+    pd.read_parquet(phon_peaks_path)
+    .query("p_value < @ac_p_value_threshold")
+    [["subject", "electrode_idx", "phoneme_pair", "smin", "smax"]]
     .drop_duplicates(subset=["subject", "electrode_idx", "phoneme_pair"])
     .reset_index(drop=True)
 )
-print(f"{subject}: {len(pool)} (electrode, phoneme_pair) sites in phon_peaks pool")
+print(f"{subject}: {len(pool)} (electrode, phoneme_pair) sites "
+      f"with p_value < {ac_p_value_threshold}")
 
 sites_by_pp = (
     pool.groupby("phoneme_pair", observed=True)["electrode_idx"]

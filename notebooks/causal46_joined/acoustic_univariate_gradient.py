@@ -59,6 +59,8 @@ epochs_path = f"outputs/epochs_preprocessed/{subject}_epo.fif"
 phon_peaks_path = "outputs/causal6/acoustic_decoding_peaks/EC250/phon_peaks.parquet"
 outdir = "."
 
+ac_p_value_threshold = 0.001  # uncorrected; matches t_tests AC_P_VALUE_THRESHOLD
+
 # Drop sites where |mean_step1 − mean_step6| < endpoint_separation_floor *
 # pooled within-endpoint std. Inherited from causal5.
 endpoint_separation_floor = 0.1
@@ -82,11 +84,14 @@ outdir.mkdir(parents=True, exist_ok=True)
 
 # %%
 pool = (
-    pd.read_parquet(phon_peaks_path)[["subject", "electrode_idx", "phoneme_pair", "smin", "smax"]]
+    pd.read_parquet(phon_peaks_path)
+    .query("p_value < @ac_p_value_threshold")
+    [["subject", "electrode_idx", "phoneme_pair", "smin", "smax"]]
     .drop_duplicates(subset=["subject", "electrode_idx", "phoneme_pair"])
     .reset_index(drop=True)
 )
-print(f"{subject}: {len(pool)} (electrode, phoneme_pair) sites in phon_peaks pool")
+print(f"{subject}: {len(pool)} (electrode, phoneme_pair) sites "
+      f"with p_value < {ac_p_value_threshold}")
 
 # %% [markdown]
 # ## Extract trial-level HGA at each site's peak window

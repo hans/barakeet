@@ -1286,6 +1286,7 @@ rule joined_acoustic_ax_discrimination:
                 epochs_path=str(input.epochs),
                 phon_peaks_path=str(input.phon_peaks),
                 outdir=str(outdir),
+                ac_p_value_threshold=config["causal46_joined"]["ac_p_value_threshold"],
                 n_jobs=config["analysis"]["decoding"]["n_jobs"],
             ),
         )
@@ -1330,6 +1331,7 @@ rule joined_acoustic_univariate_gradient:
                 epochs_path=str(input.epochs),
                 phon_peaks_path=str(input.phon_peaks),
                 outdir=str(outdir),
+                ac_p_value_threshold=config["causal46_joined"]["ac_p_value_threshold"],
                 endpoint_separation_floor=0.1,
                 min_distinct_steps=5,
             ),
@@ -1440,6 +1442,7 @@ rule joined_multivariate_gradient_perception:
                 epochs_path=str(input.epochs),
                 phon_peaks_path=str(input.phon_peaks),
                 outdir=str(outdir),
+                ac_p_value_threshold=config["causal46_joined"]["ac_p_value_threshold"],
                 pca_num_components=config["analysis"]["multivariate"]["pca_num_components"],
                 n_jobs=config["analysis"]["multivariate"]["n_jobs"],
                 num_repeats=5,
