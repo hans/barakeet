@@ -1231,12 +1231,13 @@ rule sankey_early_late:
     word-ends).  Unit is site×pair cell.
     """
     input:
-        annotations = "outputs/causal46_joined/manual_annotations/early_acoustic_window.csv",
-        manifest    = "outputs/causal46_joined/manual_annotations/filtered_manifest.csv",
-        notebook    = "notebooks/causal46_joined/sankey_early_late.py",
+        annotations    = "outputs/causal46_joined/manual_annotations/early_acoustic_window.csv",
+        manifest       = "outputs/causal46_joined/manual_annotations/filtered_manifest.csv",
+        phon_peaks_all = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet",
+        notebook       = "notebooks/causal46_joined/sankey_early_late.py",
     output:
-        notebook    = "outputs/causal46_joined/sankey_early_late/notebook.ipynb",
-        figure      = "outputs/causal46_joined/sankey_early_late/sankey_early_late.pdf",
+        notebook       = "outputs/causal46_joined/sankey_early_late/notebook.ipynb",
+        figure         = "outputs/causal46_joined/sankey_early_late/sankey_early_late.pdf",
     run:
         outdir = str(Path(output.notebook).parent)
         Path(outdir).mkdir(parents=True, exist_ok=True)
@@ -1246,6 +1247,7 @@ rule sankey_early_late:
             parameters=dict(
                 annotations_path=str(input.annotations),
                 filtered_manifest_path=str(input.manifest),
+                phon_peaks_path=str(input.phon_peaks_all),
                 output_dir=outdir,
             ),
         )

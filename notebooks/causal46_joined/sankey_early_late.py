@@ -40,10 +40,12 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import PathPatch, Rectangle
 from matplotlib.path import Path as MplPath
 import pandas as pd
+import seaborn as sns
 
 # %% tags=["parameters"]
 annotations_path = "outputs/causal46_joined/manual_annotations/early_acoustic_window.csv"
 filtered_manifest_path = "outputs/causal46_joined/manual_annotations/filtered_manifest.csv"
+phon_peaks_path = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet"
 output_dir = "outputs/causal46_joined/sankey_early_late"
 
 # %%
@@ -55,6 +57,7 @@ Path(output_dir).mkdir(parents=True, exist_ok=True)
 # %%
 early = pd.read_csv(annotations_path)
 manifest = pd.read_csv(filtered_manifest_path)
+phon_peaks = pd.read_parquet(phon_peaks_path)
 
 # "etc" is a catch-all for all the untyped cases, which we don't have enough of any one type to justify separate categories for.
 # We can break it down into subtypes in the future if we want, but for now it's easier to lump them together and give them a single color.
@@ -128,6 +131,14 @@ for group, members in EARLY_TYPE_GROUPS.items():
 merged["early_category"] = merged["site_type_relabel"].replace(early_category_map)
 merged["late_category"] = merged["late_category"].fillna("absent")
 
+# Add phon peaks
+merged = merged.merge(
+    phon_peaks[["subject", "electrode_idx", "phoneme_pair", "test_roc_auc", "smax"]].rename(columns={"test_roc_auc": "phon_peak_roc_auc", "smax": "phon_peak_smax"}),
+    on=["subject", "electrode_idx", "phoneme_pair"],
+    how="left",
+    validate="1:1",
+)
+
 print(f"Site×pair cells total: {len(merged)}")
 print("\nFlow table (rows=early type, cols=late category):")
 ct = (
@@ -139,6 +150,17 @@ ct = (
     [LATE_ORDER]
 )
 print(ct)
+
+# %% [markdown]
+# ## Draw decoding stats
+
+# %%
+g = sns.catplot(data=merged, x="early_category", y="phon_peak_roc_auc", order=EARLY_TYPES, height=3, aspect=3)
+g.set_xticklabels(rotation=25, ha="right")
+
+# %%
+sns.displot(data=merged, x="phon_peak_roc_auc", hue="early_category", hue_order=EARLY_TYPES, kind="kde", height=3, aspect=3)
+
 
 # %% [markdown]
 # ## Draw Sankey
