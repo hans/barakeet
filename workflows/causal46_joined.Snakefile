@@ -1385,7 +1385,6 @@ rule joined_acoustic_gradient_figures:
         model_comparison_df_all = "outputs/causal46_joined/acoustic_univariate_gradient/model_comparison_df_all.parquet",
         ax_discrimination_all   = "outputs/causal46_joined/acoustic_ax_discrimination/ax_discrimination_df_all.parquet",
         phon_peaks_all          = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet",
-        manifest                = "outputs/causal46_joined/manual_annotations/filtered_manifest.csv",
         notebook                = "notebooks/causal46_joined/acoustic_gradient_figures.py",
 
     output:
@@ -1412,7 +1411,6 @@ rule joined_acoustic_gradient_figures:
                 model_comparison_df_path=str(input.model_comparison_df_all),
                 ax_discrimination_path=str(input.ax_discrimination_all),
                 phon_peaks_path=str(input.phon_peaks_all),
-                manifest_path=str(input.manifest),
                 outdir=str(outdir),
                 n_sample=24,
             ),
