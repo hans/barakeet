@@ -192,11 +192,18 @@ endpoint_stats["hga_low"] = endpoint_stats[
 endpoint_stats["hga_high"] = endpoint_stats[
     ["mean_hga_step1", "mean_hga_step6"]
 ].max(axis=1)
+# d-prime scale: how many pooled-endpoint SDs separate the two endpoint means.
+# Stored per site so figures can convert hga_norm → d-prime units on the fly:
+#   hga_dprime = hga_endpoint_dprime * (hga_norm − 0.5)
+endpoint_stats["hga_endpoint_dprime"] = (
+    (endpoint_stats["hga_high"] - endpoint_stats["hga_low"])
+    / endpoint_stats["hga_endpoint_std"].replace(0, np.nan)
+)
 
 trial_df = trial_df.merge(
     endpoint_stats[
         ["subject", "electrode_idx", "phoneme_pair",
-         "hga_polarity", "hga_low", "hga_high"]
+         "hga_polarity", "hga_low", "hga_high", "hga_endpoint_dprime"]
     ],
     on=["subject", "electrode_idx", "phoneme_pair"],
     how="inner",
@@ -259,6 +266,7 @@ for _, site_row in tqdm(site_keys.iterrows(), total=len(site_keys), desc="Sigmoi
         "smin": int(site_row["smin"]),
         "smax": int(site_row["smax"]),
         "n_trials_fit": int(len(x_all)),
+        "hga_endpoint_dprime": float(site_trials["hga_endpoint_dprime"].iloc[0]),
     }
 
     if popt is not None:
@@ -290,7 +298,8 @@ for _, site_row in tqdm(site_keys.iterrows(), total=len(site_keys), desc="Sigmoi
 
 _model_schema = (
     ["subject", "electrode_idx", "phoneme_pair", "smin", "smax",
-     "n_trials_fit", "sigmoid_x0", "sigmoid_k", "sigmoid_r2",
+     "n_trials_fit", "hga_endpoint_dprime",
+     "sigmoid_x0", "sigmoid_k", "sigmoid_r2",
      "sigmoid_effectively_linear"]
     + [f"norm_proba_step{int(s)}" for s in steps_all]
 )

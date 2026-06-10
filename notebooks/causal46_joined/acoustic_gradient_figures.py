@@ -93,6 +93,18 @@ print(f"ax_df:     {len(ax_df)} step-pair rows, "
       f"{ax_df[SITE_KEY].drop_duplicates().shape[0]} sites")
 
 # %%
+# d-prime display units: hga_dprime = d' × (hga_norm − 0.5)
+# d' (hga_endpoint_dprime) is the number of pooled-endpoint SDs separating
+# the two endpoint means. This gives a comparable y-axis across sites:
+# 0 = acoustically ambiguous, ±d'/2 = endpoint means, units = endpoint SDs.
+# The sigmoid fits remain in [0,1] space; overlays are rescaled via d'.
+if "hga_endpoint_dprime" in trial_df.columns:
+    trial_df["hga_dprime"] = trial_df["hga_endpoint_dprime"] * (trial_df["hga_norm"] - 0.5)
+else:
+    trial_df["hga_dprime"] = trial_df["hga_norm"] - 0.5
+    print("WARNING: hga_endpoint_dprime not found; hga_dprime is unscaled (hga_norm - 0.5)")
+
+# %%
 steps_all   = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
 step_pairs  = [(1, 2), (2, 3), (3, 4), (4, 5), (5, 6)]
 
@@ -105,7 +117,7 @@ rng = np.random.default_rng(0)
 # ## Section 1 — HGA confidence
 
 # %%
-trial_df["confidence"] = (trial_df["hga_norm"] - 0.5).abs()
+trial_df["confidence"] = trial_df["hga_dprime"].abs()
 
 site_stats = (
     trial_df
@@ -130,6 +142,7 @@ conf_by_step = [
     trial_df.loc[trial_df["resampled"] == s, "confidence"].dropna().values
     for s in range(1, 7)
 ]
+# note: confidence = |hga_dprime|, units = endpoint SDs
 
 bp = ax.boxplot(
     conf_by_step,
@@ -142,9 +155,9 @@ for patch, step in zip(bp["boxes"], range(1, 7)):
     patch.set_facecolor("steelblue" if step in (1, 6) else "lightyellow")
     patch.set_edgecolor("black")
 
-ax.axhline(0, color="gray", linestyle="--", linewidth=1, label="midpoint (hga_norm=0.5)")
+ax.axhline(0, color="gray", linestyle="--", linewidth=1, label="midpoint (d′ = 0)")
 ax.set_xlabel("Morph step (1 = clear /d/ endpoint, 6 = clear /n/ endpoint)")
-ax.set_ylabel("HGA confidence  |hga_norm − 0.5|")
+ax.set_ylabel("HGA confidence  |hga_dprime|  (endpoint SDs)")
 ax.set_title("Acoustic HGA confidence by morph step\n(across all manifest sites)")
 ax.legend(fontsize=9)
 plt.tight_layout()
@@ -170,8 +183,8 @@ lim = [0, site_stats[["mean_endpoint_confidence", "mean_ambig_confidence"]].valu
 ax.plot(lim, lim, "k--", linewidth=1, label="equal confidence")
 ax.set_xlim(lim)
 ax.set_ylim(lim)
-ax.set_xlabel("Mean confidence on endpoints (steps 1 & 6)")
-ax.set_ylabel("Mean confidence on ambiguous trials (steps 2–5)")
+ax.set_xlabel("Mean |hga_dprime| on endpoints (steps 1 & 6)  [endpoint SDs]")
+ax.set_ylabel("Mean |hga_dprime| on ambiguous trials (steps 2–5)  [endpoint SDs]")
 ax.set_title("Representational commitment:\nendpoints vs. ambiguous steps")
 ax.legend(fontsize=9)
 plt.colorbar(sc, ax=ax, label="phon_roc_auc")
@@ -252,19 +265,25 @@ axes_flat = axes.flatten()
 for ax_idx, (_, site_row) in enumerate(sample_sites.iterrows()):
     ax = axes_flat[ax_idx]
     site_data = sample_trials[sample_trials["site_label"] == site_row["site_label"]].dropna(
-        subset=["resampled", "hga_norm"]
+        subset=["resampled", "hga_dprime"]
     )
 
-    # Per-step scatter colored by step
+    # Faint per-step scatter (background context)
     for step in range(1, 7):
         mask = site_data["resampled"] == step
         xvals = step + rng.uniform(-0.2, 0.2, mask.sum())
-        ax.scatter(xvals, site_data.loc[mask, "hga_norm"],
-                   c=[step_colors[step]], alpha=0.3, s=8, linewidths=0)
+        ax.scatter(xvals, site_data.loc[mask, "hga_dprime"],
+                   c=[step_colors[step]], alpha=0.12, s=6, linewidths=0)
 
-    # Mean neurometric line
-    means = site_data.groupby("resampled")["hga_norm"].mean().sort_index()
-    ax.plot(means.index, means.values, "k-o", linewidth=1.5, markersize=4, zorder=5)
+    # Mean ± SEM neurometric line
+    step_stats = (
+        site_data.groupby("resampled")["hga_dprime"]
+        .agg(["mean", "sem"])
+        .reindex(range(1, 7))
+        .dropna()
+    )
+    ax.errorbar(step_stats.index, step_stats["mean"], yerr=step_stats["sem"],
+                fmt="k-o", linewidth=1.5, markersize=4, capsize=3, zorder=5)
 
     # AX discrimination on secondary y-axis
     site_ax = ax_df[
@@ -282,13 +301,13 @@ for ax_idx, (_, site_row) in enumerate(sample_sites.iterrows()):
         if ax_idx % n_cols == n_cols - 1:
             ax2.set_ylabel("AX discrim. AUC", color="green", fontsize=7)
 
-    ax.axhline(0.5, color="gray", linestyle="--", linewidth=0.8)
+    ax.axhline(0, color="gray", linestyle="--", linewidth=0.8)
     ax.set_xticks([1, 2, 3, 4, 5, 6])
     ax.set_xlim(0.5, 6.5)
     ax.set_title(f"{site_row['site_label']}\nAUC={site_row['phon_roc_auc']:.2f}", fontsize=7.5)
     ax.set_xlabel("Morph step")
     if ax_idx % n_cols == 0:
-        ax.set_ylabel("Normalized HGA")
+        ax.set_ylabel("HGA d-prime (endpoint SDs)")
 
 step_handles = [
     plt.Line2D([0], [0], color=step_colors[s], linewidth=2, label=f"step {s}")
@@ -310,7 +329,7 @@ print("Saved catplots_sample.pdf")
 # ## Section 4 — Per-site gallery: neurometric + AX discrimination
 #
 # One page per (subject × electrode × phoneme_pair) site.
-# Top panel: hga_norm scatter + mean + sigmoid overlay.
+# Top panel: hga_dprime mean ± SEM + sigmoid overlay (scaled to d-prime space).
 # Bottom panel: AX discrimination AUC per step pair with std bars.
 # Sorted by phoneme_pair, then phon_roc_auc descending.
 
@@ -354,29 +373,44 @@ with PdfPages(outdir / "ax_per_site_gallery.pdf") as pdf:
         fig.subplots_adjust(hspace=0.4)
 
         # ---------- Top panel: neurometric + sigmoid ----------
+        site_dprime = site_row.get("hga_endpoint_dprime", np.nan)
+        if not (isinstance(site_dprime, float) and np.isnan(site_dprime)):
+            site_dprime = float(site_dprime) if site_dprime is not None else np.nan
+
         if len(site_trials) > 0:
+            site_trials = site_trials.copy()
+            site_trials["hga_dprime"] = site_trials["hga_endpoint_dprime"] * (site_trials["hga_norm"] - 0.5)
+
             for step in range(1, 7):
                 mask = site_trials["resampled"] == step
                 xvals = step + rng.uniform(-0.2, 0.2, mask.sum())
-                ax_top.scatter(xvals, site_trials.loc[mask, "hga_norm"],
-                               c=[step_colors[step]], alpha=0.3, s=8, linewidths=0)
+                ax_top.scatter(xvals, site_trials.loc[mask, "hga_dprime"],
+                               c=[step_colors[step]], alpha=0.12, s=6, linewidths=0)
 
-            means = site_trials.groupby("resampled")["hga_norm"].mean().sort_index()
-            ax_top.plot(means.index, means.values, "k-o", linewidth=1.5, markersize=4, zorder=5)
+            step_stats = (
+                site_trials.groupby("resampled")["hga_dprime"]
+                .agg(["mean", "sem"])
+                .reindex(range(1, 7))
+                .dropna()
+            )
+            ax_top.errorbar(step_stats.index, step_stats["mean"], yerr=step_stats["sem"],
+                            fmt="k-o", linewidth=1.5, markersize=4, capsize=3, zorder=5)
 
-        # sigmoid overlay
+        # sigmoid overlay (scaled to d-prime space)
         sig_label = ""
         x0, k, r2 = site_row.get("sigmoid_x0"), site_row.get("sigmoid_k"), site_row.get("sigmoid_r2")
-        if x0 is not None and k is not None and not (np.isnan(x0) or np.isnan(k)):
-            ax_top.plot(x_fine, sigmoid_model_2p(x_fine, x0, k),
-                        color="tomato", linewidth=2.0, zorder=4, label="sigmoid fit")
+        if (x0 is not None and k is not None
+                and not (np.isnan(x0) or np.isnan(k))
+                and site_dprime is not None and not np.isnan(site_dprime)):
+            y_sig = site_dprime * (sigmoid_model_2p(x_fine, x0, k) - 0.5)
+            ax_top.plot(x_fine, y_sig, color="tomato", linewidth=2.0, zorder=4, label="sigmoid fit")
             sig_label = f"  PSE={x0:.2f}  k={k:.2f}  R²={r2:.2f}"
             ax_top.legend(fontsize=7, loc="upper left")
 
-        ax_top.axhline(0.5, color="gray", linestyle="--", linewidth=0.8)
+        ax_top.axhline(0, color="gray", linestyle="--", linewidth=0.8)
         ax_top.set_xticks([1, 2, 3, 4, 5, 6])
         ax_top.set_xlim(0.5, 6.5)
-        ax_top.set_ylabel("Normalized HGA")
+        ax_top.set_ylabel("HGA d-prime (endpoint SDs)")
         ax_top.set_xlabel("Morph step")
         ax_top.set_title(
             f"Neurometric function\n{sig_label}",
@@ -611,22 +645,24 @@ if len(_candidates_df) > 0:
                 st = pd.DataFrame()
 
             if len(st) > 0:
+                st = st.copy()
+                st["hga_dprime"] = st["hga_endpoint_dprime"] * (st["hga_norm"] - 0.5)
                 xvals = (st["resampled"].values + _dodge_pos[ei_idx]
                          + rng.uniform(-_jitter_h, _jitter_h, len(st)))
-                ax.scatter(xvals, st["hga_norm"].values,
-                           c=[color], alpha=0.3, s=8, linewidths=0, zorder=1)
+                ax.scatter(xvals, st["hga_dprime"].values,
+                           c=[color], alpha=0.12, s=6, linewidths=0, zorder=1)
 
-            ax.plot(x_fine, sigmoid_model_2p(x_fine, x0_s, k_s),
-                    color=color, linewidth=2.0, zorder=3)
+            site_dprime_s = site["hga_endpoint_dprime"] if "hga_endpoint_dprime" in site.index else 1.0
+            y_sig = site_dprime_s * (sigmoid_model_2p(x_fine, x0_s, k_s) - 0.5)
+            ax.plot(x_fine, y_sig, color=color, linewidth=2.0, zorder=3)
             ax.axvline(x0_s, color=color, linestyle=":", linewidth=1.0, alpha=0.6, zorder=2)
 
-        ax.axhline(0.5, color="gray", linestyle="--", linewidth=0.8)
+        ax.axhline(0, color="gray", linestyle="--", linewidth=0.8)
         ax.set_xticks([1, 2, 3, 4, 5, 6])
         ax.set_xlim(0.5, 6.5)
-        ax.set_ylim(-0.5, 1.5)
         ax.set_xlabel("Morph step")
         if ci % _n_cols_ov == 0:
-            ax.set_ylabel("Normalized HGA")
+            ax.set_ylabel("HGA d-prime (endpoint SDs)")
         ax.set_title(f"{sub} / {pp} — {n_elec} electrodes", fontsize=9)
 
     for ai in range(_n_cands, len(_ax_flat)):
@@ -727,42 +763,50 @@ axes_flat = axes.flatten()
 for ax_idx, (_, site_row) in enumerate(sample_sites.iterrows()):
     ax = axes_flat[ax_idx]
     site_data = sample_trials[sample_trials["site_label"] == site_row["site_label"]].dropna(
-        subset=["resampled", "hga_norm"]
+        subset=["resampled", "hga_dprime"]
     )
 
-    # Per-step scatter
+    # Faint per-step scatter
     for step in range(1, 7):
         mask = site_data["resampled"] == step
         xvals = step + rng.uniform(-0.2, 0.2, mask.sum())
-        ax.scatter(xvals, site_data.loc[mask, "hga_norm"],
-                   c=[step_colors[step]], alpha=0.3, s=8, linewidths=0)
+        ax.scatter(xvals, site_data.loc[mask, "hga_dprime"],
+                   c=[step_colors[step]], alpha=0.12, s=6, linewidths=0)
 
-    # Mean line
-    means = site_data.groupby("resampled")["hga_norm"].mean().sort_index()
-    ax.plot(means.index, means.values, "k-o", linewidth=1.5, markersize=4, zorder=3)
+    # Mean ± SEM line
+    step_stats = (
+        site_data.groupby("resampled")["hga_dprime"]
+        .agg(["mean", "sem"])
+        .reindex(range(1, 7))
+        .dropna()
+    )
+    ax.errorbar(step_stats.index, step_stats["mean"], yerr=step_stats["sem"],
+                fmt="k-o", linewidth=1.5, markersize=4, capsize=3, zorder=3)
 
-    # Sigmoid overlay
+    # Sigmoid overlay (scaled to d-prime space)
     key = (site_row["subject"], site_row["electrode_idx"], site_row["phoneme_pair"])
     mc_row = mc_lookup.get(key)
     sig_label = ""
     if mc_row is not None:
-        x0_v = mc_row.get("sigmoid_x0")
-        k_v  = mc_row.get("sigmoid_k")
-        r2_v = mc_row.get("sigmoid_r2")
-        if x0_v is not None and k_v is not None and not (np.isnan(float(x0_v)) or np.isnan(float(k_v))):
-            ax.plot(x_fine, sigmoid_model_2p(x_fine, float(x0_v), float(k_v)),
-                    color="tomato", linewidth=2.0, zorder=4)
+        x0_v  = mc_row.get("sigmoid_x0")
+        k_v   = mc_row.get("sigmoid_k")
+        r2_v  = mc_row.get("sigmoid_r2")
+        dp_v  = mc_row.get("hga_endpoint_dprime")
+        if (x0_v is not None and k_v is not None and dp_v is not None
+                and not (np.isnan(float(x0_v)) or np.isnan(float(k_v)) or np.isnan(float(dp_v)))):
+            y_sig = float(dp_v) * (sigmoid_model_2p(x_fine, float(x0_v), float(k_v)) - 0.5)
+            ax.plot(x_fine, y_sig, color="tomato", linewidth=2.0, zorder=4)
             sig_label = (f"  PSE={float(x0_v):.2f}  k={float(k_v):.2f}\n"
                          f"R²={float(r2_v):.2f}")
 
-    ax.axhline(0.5, color="gray", linestyle="--", linewidth=0.8)
+    ax.axhline(0, color="gray", linestyle="--", linewidth=0.8)
     ax.set_xticks([1, 2, 3, 4, 5, 6])
     ax.set_xlim(0.5, 6.5)
     ax.set_title(f"{site_row['site_label']}\nAUC={site_row['phon_roc_auc']:.2f}{sig_label}",
                  fontsize=7.5)
     ax.set_xlabel("Morph step")
     if ax_idx % n_cols == 0:
-        ax.set_ylabel("Normalized HGA")
+        ax.set_ylabel("HGA d-prime (endpoint SDs)")
 
 fig.legend(
     handles=[
