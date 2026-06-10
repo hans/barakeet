@@ -6,7 +6,7 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.1
 #   kernelspec:
 #     display_name: Python 3
 #     language: python
@@ -41,23 +41,28 @@ os.environ["NUMEXPR_MAX_THREADS"] = "1"
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import mne
 import numpy as np
 import pandas as pd
 import scipy.stats
 import seaborn as sns
 from matplotlib.backends.backend_pdf import PdfPages
 
+from src.data import add_metadata_features
 from src.models.sigmoid import (
     EFFECTIVELY_LINEAR_K,
     sigmoid_model_2p,
 )
 
 # %% tags=["parameters"]
+preprocessed_epochs_dir  = "outputs/epochs_preprocessed"
 trial_df_path            = "outputs/causal46_joined/acoustic_univariate_gradient/trial_df_all.parquet"
 model_comparison_df_path = "outputs/causal46_joined/acoustic_univariate_gradient/model_comparison_df_all.parquet"
 ax_discrimination_path   = "outputs/causal46_joined/acoustic_ax_discrimination/ax_discrimination_df_all.parquet"
 phon_peaks_path          = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet"
 outdir                   = "outputs/causal46_joined/acoustic_gradient_figures"
+
+ac_p_value_threshold     = 0.01
 n_sample                 = 24  # sites for catplot galleries
 
 # %%
@@ -100,6 +105,112 @@ step_cmap   = plt.cm.RdBu_r
 step_colors = {int(s): step_cmap(i / 5) for i, s in enumerate(range(1, 7))}
 
 rng = np.random.default_rng(0)
+
+# %% [markdown]
+# ## Section 0 — Sites dropped by separation floor
+#
+# Sites in the p < alpha acoustic pool whose |mean_step1 − mean_step6| HGA is
+# too small relative to endpoint spread to normalize reliably (separation floor
+# = 0.1 × pooled endpoint std).  These sites have significant acoustic *decoding*
+# but no clear mean-amplitude gradient.
+#
+# Visualization: step 1 vs step 6 mean ± SEM HGA timecourse, zoomed around
+# the site's acoustic peak window (green shading).
+
+# %%
+from src.viz_paper import epoch_sfreq, epoch_tmin
+
+_AC_P = 0.001
+
+# Reconstruct dropped sites: in p < 0.001 pool but absent from trial_df.
+# phon_peaks_all has one row per searchlight window; drop_duplicates keeps
+# the first (lowest smin) window for each site — same logic as the per-subject
+# acoustic_univariate_gradient notebook.
+_peaks_raw = (
+    pd.read_parquet(phon_peaks_path)
+    .query("p_value < @_AC_P")[SITE_KEY + ["smin", "smax", "test_roc_auc"]]
+    .drop_duplicates(subset=SITE_KEY)
+    .reset_index(drop=True)
+)
+_passed = trial_df[SITE_KEY].drop_duplicates()
+_dropped = (
+    _peaks_raw.merge(_passed, on=SITE_KEY, how="left", indicator=True)
+    .query("_merge == 'left_only'")
+    .drop(columns="_merge")
+    .reset_index(drop=True)
+)
+
+print(f"Separation-floor drops: {len(_dropped)} / {len(_peaks_raw)} pool sites "
+      f"(AUC range {_dropped['test_roc_auc'].min():.3f}–{_dropped['test_roc_auc'].max():.3f})")
+
+# %%
+_epochs_cache: dict = {}
+
+def _get_ep(subject):
+    if subject not in _epochs_cache:
+        ep = mne.read_epochs(Path(preprocessed_epochs_dir) / f"{subject}_epo.fif",
+                             preload=True, verbose=False)
+        ep.apply_baseline((None, 0))
+        _epochs_cache[subject] = ep
+    return _epochs_cache[subject]
+
+_n_drop = len(_dropped)
+_n_cols = min(4, _n_drop)
+_n_rows = int(np.ceil(_n_drop / _n_cols)) if _n_drop > 0 else 1
+fig, axes = plt.subplots(_n_rows, _n_cols,
+                         figsize=(4 * _n_cols, 3.5 * _n_rows),
+                         sharey=False, squeeze=False)
+_axes_flat = axes.flatten()
+
+for _i, (_, _sr) in enumerate(_dropped.iterrows()):
+    ax = _axes_flat[_i]
+    _subj = _sr["subject"]
+    _ei   = int(_sr["electrode_idx"])
+    _pp   = _sr["phoneme_pair"]
+    _sm, _sx = int(_sr["smin"]), int(_sr["smax"])
+
+    _ep = _get_ep(_subj)
+    _md = add_metadata_features(_ep.metadata).reset_index(drop=True)
+    _times = _ep.times
+    _hga = _ep.get_data(picks=[_ei]).squeeze(1)   # (n_trials, n_times)
+    _pp_mask = (_md["phoneme_pair"] == _pp).values
+
+    for _step, _color in [(1, step_colors[1]), (6, step_colors[6])]:
+        _mask = _pp_mask & (_md["resampled"] == _step).values
+        if not _mask.any():
+            continue
+        _tr = _hga[_mask]
+        _m  = _tr.mean(0)
+        _se = _tr.std(0) / np.sqrt(_mask.sum())
+        ax.plot(_times, _m, color=_color, lw=1.5,
+                label=f"step {_step}  (n={_mask.sum()})")
+        ax.fill_between(_times, _m - _se, _m + _se, color=_color, alpha=0.18)
+
+    _t_lo = _sm / epoch_sfreq + epoch_tmin
+    _t_hi = _sx / epoch_sfreq + epoch_tmin
+    ax.axvspan(_t_lo, _t_hi, color="#4dac26", alpha=0.20, label="peak window")
+    ax.axhline(0, color="k", lw=0.5, ls=":")
+    ax.set_xlim(_t_lo - 0.15, _t_hi + 0.25)
+    ax.set_xlabel("Time (s)", fontsize=7)
+    if _i % _n_cols == 0:
+        ax.set_ylabel("HGA (z)", fontsize=7)
+    ax.set_title(f"{_subj} e{_ei} {_pp}\nAUC={_sr['test_roc_auc']:.3f}", fontsize=8)
+    ax.legend(fontsize=6, loc="upper left", framealpha=0.6)
+    ax.tick_params(labelsize=6)
+
+for ax in _axes_flat[_n_drop:]:
+    ax.set_visible(False)
+
+fig.suptitle(
+    "Sites dropped by separation floor\n"
+    "(acoustic decoding significant, but steps 1 vs 6 mean HGA nearly identical)\n"
+    "Green = acoustic peak window",
+    fontsize=10,
+)
+plt.tight_layout()
+fig.savefig(outdir / "dropped_separation_floor.pdf", bbox_inches="tight")
+plt.close(fig)
+print(f"Saved dropped_separation_floor.pdf  ({_n_drop} sites)")
 
 # %% [markdown]
 # ## Section 1 — HGA confidence
