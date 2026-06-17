@@ -74,6 +74,7 @@ from _within_completion import (  # noqa: E402
     early_window_star_plot,
     early_window_star_plot_compact,
     extract_hga,
+    load_behav_decoding_scores,
     n_per_class_from_per_step,
     per_step_class_counts,
     resolve_behavior_col,
@@ -158,6 +159,9 @@ md = add_metadata_features(md_raw).reset_index(drop=True)
 ep.metadata = md
 bhv_col = resolve_behavior_col(md)
 print(f"Loaded {len(ep)} epochs; behavior col: {bhv_col}")
+
+behav_decoding_df = load_behav_decoding_scores(subject)
+print(f"behavioral decoding scores: {'loaded' if behav_decoding_df is not None else 'not found'}")
 
 # %% [markdown]
 # ## Helper — per-window aggregate (A and B)
@@ -901,11 +905,12 @@ with PdfPages(pdf_path_gallery) as _pdf:
                 search_smax=PAIR_SMAX_HI.get(_pp, SMAX_HI_ABS),
                 b_search_smin=B_SEARCH_SMIN,
                 b_search_smax=B_SEARCH_SMAX,
+                behav_decoding_df=behav_decoding_df,
             )
             # Overlay cross-WE pooled pair bar on the B₂ panel (axes[2]).
             _pair_smin = _row.get("pair_smin")
-            if _pair_smin is not None and len(_fig.axes) >= 3:
-                _ax_b2 = _fig.axes[2]
+            _ax_b2 = getattr(_fig, "_ax_b2", _fig.axes[2] if len(_fig.axes) >= 3 else None)
+            if _pair_smin is not None and _ax_b2 is not None:
                 _ymin_p, _ymax_p = _ax_b2.get_ylim()
                 _bar_h_p = (_ymax_p - _ymin_p) * 0.04
                 _bar_y_p = _ymin_p + (_ymax_p - _ymin_p) * 0.82
@@ -1021,6 +1026,7 @@ with PdfPages(pdf_path_compact) as _pdf_c:
                 search_smax=PAIR_SMAX_HI.get(_pp, SMAX_HI_ABS),
                 b_search_smin=B_SEARCH_SMIN,
                 b_search_smax=B_SEARCH_SMAX,
+                behav_decoding_df=behav_decoding_df,
             )
             _pdf_c.savefig(_fig_c, bbox_inches="tight")
             plt.close(_fig_c)

@@ -278,6 +278,112 @@ def bootstrap_A_site(
     return rows, n_lo, n_hi
 
 
+def load_behav_decoding_scores(subject: str, prod_dir: str = "outputs_prod"):
+    """Load and join behavioral decoding window_mean_scores for one subject.
+
+    Reads from:
+      {prod_dir}/causal6/behavior_decoding_single_electrode_summarize/{subject}/window_mean_scores.parquet
+      {prod_dir}/causal6/behavior_decoding_single_electrode_hga_only_summarize/{subject}/window_mean_scores.parquet
+
+    Returns a polars DataFrame with per-(site × window) columns:
+      diff (full−baseline), full_roc_auc, baseline_roc_auc, test_roc_auc (HGA-only).
+    Returns None if neither file exists.
+    """
+    import polars as pl
+    from pathlib import Path
+
+    root = Path(prod_dir) / "causal6"
+    full_path = (root / "behavior_decoding_single_electrode_summarize"
+                 / subject / "window_mean_scores.parquet")
+    hga_path = (root / "behavior_decoding_single_electrode_hga_only_summarize"
+                / subject / "window_mean_scores.parquet")
+
+    on_keys = ["subject", "electrode_idx", "phoneme_pair", "word_end", "smin", "smax"]
+    full_df = pl.read_parquet(full_path) if full_path.exists() else None
+    hga_df = (
+        pl.read_parquet(hga_path).select(on_keys + ["test_roc_auc"])
+        if hga_path.exists() else None
+    )
+    if full_df is not None and hga_df is not None:
+        return full_df.join(hga_df, on=on_keys, how="left")
+    if full_df is not None:
+        return full_df.with_columns(pl.lit(None).cast(pl.Float32).alias("test_roc_auc"))
+    if hga_df is not None:
+        return hga_df.with_columns(
+            pl.lit(None).cast(pl.Float32).alias("diff"),
+            pl.lit(None).cast(pl.Float32).alias("full_roc_auc"),
+            pl.lit(None).cast(pl.Float32).alias("baseline_roc_auc"),
+        )
+    return None
+
+
+def _mark_decoding_peaks(ax, t_centers, vals, t_split, color, FS):
+    """Vertical dotted lines + value labels at the early and late decoding peaks."""
+    for mask in (t_centers <= t_split, t_centers > t_split):
+        if not mask.any():
+            continue
+        t_sub, v_sub = t_centers[mask], vals[mask]
+        i_pk = int(np.argmax(v_sub))
+        peak_t, peak_v = float(t_sub[i_pk]), float(v_sub[i_pk])
+        ax.axvline(peak_t, color=color, lw=0.7, ls=":", alpha=0.65)
+        va = "bottom" if peak_v >= 0 else "top"
+        ax.text(peak_t, peak_v, f" {peak_v:.3f}", ha="left", va=va,
+                fontsize=max(FS - 2, 5), color=color, clip_on=True)
+
+
+def _draw_behav_decoding_panel(ax, site_df, *, early_smax_s: int, FS: int = 7):
+    """Plot full−baseline and HGA-only behavioral decoding advantage curves.
+
+    site_df: polars DataFrame for one (electrode_idx × phoneme_pair × word_end) cell,
+             columns smin, smax, diff (full−baseline), test_roc_auc (HGA-only).
+    early_smax_s: sample index marking the early / late window boundary.
+    Both metrics are expressed as "advantage" referenced to zero:
+      full−baseline is already centered; HGA-only AUC is shifted by −0.5.
+    """
+    import polars as pl
+
+    ax.tick_params(labelsize=FS - 1)
+    ax.set_ylabel("dec.\nadv.", fontsize=FS)
+    ax.axhline(0, color="k", lw=0.5, ls=":")
+
+    if site_df is None or site_df.height == 0:
+        ax.text(0.5, 0.5, "no data", ha="center", va="center",
+                transform=ax.transAxes, fontsize=FS, color="gray")
+        return
+
+    COLOR_FULL = "#7b3294"   # purple: full−baseline
+    COLOR_HGA = "#1b7837"    # dark green: HGA-only
+    t_early = early_smax_s / epoch_sfreq + epoch_tmin
+
+    smin_arr = site_df["smin"].to_numpy()
+    smax_arr = site_df["smax"].to_numpy()
+    order = np.argsort(smin_arr)
+    t_centers = (smin_arr + smax_arr)[order] / 2 / epoch_sfreq + epoch_tmin
+
+    ax.axvline(t_early, color="k", lw=0.6, ls="--", alpha=0.35)
+
+    if "diff" in site_df.columns:
+        diff_vals = site_df["diff"].to_numpy()[order]
+        finite = np.isfinite(diff_vals)
+        if finite.any():
+            ax.plot(t_centers[finite], diff_vals[finite], color=COLOR_FULL,
+                    lw=1.1, ls="-", label="full−base")
+            _mark_decoding_peaks(ax, t_centers[finite], diff_vals[finite],
+                                 t_early, COLOR_FULL, FS)
+
+    if "test_roc_auc" in site_df.columns:
+        hga_vals = site_df["test_roc_auc"].to_numpy()[order] - 0.5
+        finite = np.isfinite(hga_vals)
+        if finite.any():
+            ax.plot(t_centers[finite], hga_vals[finite], color=COLOR_HGA,
+                    lw=1.1, ls="--", label="HGA−only")
+            _mark_decoding_peaks(ax, t_centers[finite], hga_vals[finite],
+                                 t_early, COLOR_HGA, FS)
+
+    ax.legend(fontsize=max(FS - 2, 5), loc="upper right", framealpha=0.6,
+              handlelength=1.2, ncol=2)
+
+
 def matched_n_star_plot(
     subject,
     electrode_idx,
@@ -298,6 +404,8 @@ def matched_n_star_plot(
     sig_windows=None,
     mean_diff_arrays=None,
     xlim=None,
+    behav_decoding_df=None,
+    early_smax_s=None,
 ):
     """Two-panel B4 star plot.
 
@@ -332,7 +440,17 @@ def matched_n_star_plot(
 
     we_mask = (md_pp["word_end"] == word_end).values
 
-    fig, (ax_top, ax_bot) = plt.subplots(2, 1, figsize=figsize, sharex=True)
+    _add_dec = behav_decoding_df is not None
+    if _add_dec:
+        fig, (ax_top, ax_bot, ax_dec) = plt.subplots(
+            3, 1,
+            figsize=(figsize[0], figsize[1] + 1.5),
+            gridspec_kw={"height_ratios": [1, 1, 0.45]},
+            sharex=True,
+        )
+    else:
+        fig, (ax_top, ax_bot) = plt.subplots(2, 1, figsize=figsize, sharex=True)
+        ax_dec = None
 
     # Top: unambiguous step 1 & 6, restricted to this word_end.
     step_colors = {1: "#2166ac", 6: "#d73027"}
@@ -408,7 +526,7 @@ def matched_n_star_plot(
 
     ax_bot.axhline(0, color="k", lw=0.5, ls=":")
     ax_bot.set_ylabel("HGA (z)")
-    ax_bot.set_xlabel("Time (s, post word onset)")
+    ax_bot.set_xlabel("" if _add_dec else "Time (s, post word onset)")
     ax_bot.set_title(
         f"Per-step class-balanced — steps {list(qualifying_steps)}  "
         f"({n_per_class} per class)",
@@ -442,6 +560,19 @@ def matched_n_star_plot(
                         height=bar_h, color="gray", alpha=0.6,
                         edgecolor="none", zorder=5)
 
+    # Behavioral decoding panel (thin, below ax_bot).
+    if _add_dec:
+        import polars as pl
+        _site_dec = behav_decoding_df.filter(
+            (pl.col("electrode_idx") == electrode_idx)
+            & (pl.col("phoneme_pair") == phoneme_pair)
+            & (pl.col("word_end") == word_end)
+        )
+        _early_s = early_smax_s if early_smax_s is not None else phon_search_smax
+        _draw_behav_decoding_panel(ax_dec, _site_dec, early_smax_s=_early_s)
+        ax_dec.set_xlabel("Time (s, post word onset)")
+
+    fig._ax_behav = ax_bot
     fig.tight_layout()
     return fig
 
@@ -474,6 +605,7 @@ def early_window_star_plot(
     b_search_smax: int | None = None,
     figsize: tuple = (8.5, 10.0),
     R_plot: int = 200,
+    behav_decoding_df=None,
 ) -> "plt.Figure":
     """Three-panel early-window star plot for one (subject × electrode × phoneme_pair) site.
 
@@ -511,7 +643,17 @@ def early_window_star_plot(
     t_b_lo = _bsmin / epoch_sfreq + epoch_tmin
     t_b_hi = _bsmax / epoch_sfreq + epoch_tmin
 
-    fig, (ax_top, ax_mid, ax_bot) = plt.subplots(3, 1, figsize=figsize, sharex=True)
+    _add_dec = behav_decoding_df is not None
+    if _add_dec:
+        fig, (ax_top, ax_mid, ax_mid_dec, ax_bot, ax_bot_dec) = plt.subplots(
+            5, 1,
+            figsize=(figsize[0], figsize[1] + 2.5),
+            gridspec_kw={"height_ratios": [1, 1, 0.4, 1, 0.4]},
+            sharex=True,
+        )
+    else:
+        fig, (ax_top, ax_mid, ax_bot) = plt.subplots(3, 1, figsize=figsize, sharex=True)
+        ax_mid_dec = ax_bot_dec = None
 
     # ── Top: A (endpoint steps 1 vs 6, pooled word_ends) ────────────────────
     ax_top.axvspan(t_search_lo, t_search_hi, color="gray", alpha=0.08, zorder=0)
@@ -627,13 +769,33 @@ def early_window_star_plot(
     _draw_b_panel(ax_mid, we0, b1_qualifying_steps, b1_n_per_class, b1_per_window, "B₁")
     _draw_b_panel(ax_bot, we1, b2_qualifying_steps, b2_n_per_class, b2_per_window, "B₂")
 
-    ax_bot.set_xlabel("Time (s, post word onset)")
+    # Behavioral decoding panels (thin rows below each B panel).
+    if _add_dec:
+        _dec_b1 = behav_decoding_df.filter(
+            (pl.col("electrode_idx") == electrode_idx)
+            & (pl.col("phoneme_pair") == phoneme_pair)
+            & (pl.col("word_end") == we0)
+        ) if we0 else pl.DataFrame()
+        _dec_b2 = behav_decoding_df.filter(
+            (pl.col("electrode_idx") == electrode_idx)
+            & (pl.col("phoneme_pair") == phoneme_pair)
+            & (pl.col("word_end") == we1)
+        ) if we1 else pl.DataFrame()
+        _draw_behav_decoding_panel(ax_mid_dec, _dec_b1 if _dec_b1.height > 0 else None,
+                                   early_smax_s=_bsmax)
+        _draw_behav_decoding_panel(ax_bot_dec, _dec_b2 if _dec_b2.height > 0 else None,
+                                   early_smax_s=_bsmax)
+        ax_bot_dec.set_xlabel("Time (s, post word onset)")
+    else:
+        ax_bot.set_xlabel("Time (s, post word onset)")
+
     xlim = max(
         OFFSET_DICT.get(we0, 1.0) if we0 else 1.0,
         OFFSET_DICT.get(we1, 1.0) if we1 else 1.0,
     ) + 0.15
     ax_top.set_xlim(0.0, xlim)
 
+    fig._ax_b2 = ax_bot
     fig.tight_layout()
     return fig
 
@@ -666,6 +828,7 @@ def early_window_star_plot_compact(
     b_search_smax: int | None = None,
     figsize: tuple = (3.5, 8.5),
     R_plot: int = 200,
+    behav_decoding_df=None,
 ) -> "plt.Figure":
     """Compact vertical version of early_window_star_plot for slide tiling.
 
@@ -689,7 +852,17 @@ def early_window_star_plot_compact(
     t_b_lo = _bsmin / epoch_sfreq + epoch_tmin
     t_b_hi = _bsmax / epoch_sfreq + epoch_tmin
 
-    fig, (ax_top, ax_mid, ax_bot) = plt.subplots(3, 1, figsize=figsize, sharex=True)
+    _add_dec = behav_decoding_df is not None
+    if _add_dec:
+        fig, (ax_top, ax_mid, ax_mid_dec, ax_bot, ax_bot_dec) = plt.subplots(
+            5, 1,
+            figsize=(figsize[0], figsize[1] + 2.0),
+            gridspec_kw={"height_ratios": [1, 1, 0.35, 1, 0.35]},
+            sharex=True,
+        )
+    else:
+        fig, (ax_top, ax_mid, ax_bot) = plt.subplots(3, 1, figsize=figsize, sharex=True)
+        ax_mid_dec = ax_bot_dec = None
 
     FS = 6   # base font size for compact layout
 
@@ -803,12 +976,32 @@ def early_window_star_plot_compact(
     _draw_b_compact(ax_mid, we0, b1_qualifying_steps, b1_n_per_class, b1_per_window, "B₁")
     _draw_b_compact(ax_bot, we1, b2_qualifying_steps, b2_n_per_class, b2_per_window, "B₂")
 
-    ax_bot.set_xlabel("Time (s)", fontsize=FS)
+    # Behavioral decoding panels (thin rows below each B panel).
+    if _add_dec:
+        _dec_b1 = behav_decoding_df.filter(
+            (pl.col("electrode_idx") == electrode_idx)
+            & (pl.col("phoneme_pair") == phoneme_pair)
+            & (pl.col("word_end") == we0)
+        ) if we0 else pl.DataFrame()
+        _dec_b2 = behav_decoding_df.filter(
+            (pl.col("electrode_idx") == electrode_idx)
+            & (pl.col("phoneme_pair") == phoneme_pair)
+            & (pl.col("word_end") == we1)
+        ) if we1 else pl.DataFrame()
+        _draw_behav_decoding_panel(ax_mid_dec, _dec_b1 if _dec_b1.height > 0 else None,
+                                   early_smax_s=_bsmax, FS=FS)
+        _draw_behav_decoding_panel(ax_bot_dec, _dec_b2 if _dec_b2.height > 0 else None,
+                                   early_smax_s=_bsmax, FS=FS)
+        ax_bot_dec.set_xlabel("Time (s)", fontsize=FS)
+    else:
+        ax_bot.set_xlabel("Time (s)", fontsize=FS)
+
     xlim = max(
         OFFSET_DICT.get(we0, 1.0) if we0 else 1.0,
         OFFSET_DICT.get(we1, 1.0) if we1 else 1.0,
     ) + 0.15
     ax_top.set_xlim(0.0, xlim)
 
+    fig._ax_b2 = ax_bot
     fig.tight_layout(pad=0.5, h_pad=0.6)
     return fig

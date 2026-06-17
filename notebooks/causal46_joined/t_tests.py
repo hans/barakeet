@@ -78,6 +78,7 @@ sys.path.insert(0, str(Path(".").resolve() / "notebooks" / "causal46_joined"))
 from _within_completion import (  # noqa: E402
     acoustic_preferred_class,
     extract_hga,
+    load_behav_decoding_scores,
     matched_n_star_plot,
     n_per_class_from_per_step,
     per_step_class_counts,
@@ -142,6 +143,14 @@ print(f"trial_balance: {trial_balance.height} rows")
 
 epochs_dict = load_epochs_dict(EPOCH_DIR)
 print(f"epochs loaded: {sorted(epochs_dict)}")
+
+# Behavioral decoding scores for star plot overlay
+_behav_dec_by_subject: dict = {}
+for _subj in sorted(epochs_dict):
+    _df = load_behav_decoding_scores(_subj)
+    if _df is not None:
+        _behav_dec_by_subject[_subj] = _df
+print(f"behavioral decoding scores loaded for: {sorted(_behav_dec_by_subject)}")
 
 # %% [markdown]
 # ## Word-end behavioral search bound (samples)
@@ -1290,6 +1299,8 @@ def write_annotated_pdfs(
                 sig_windows=sig_wins,
                 mean_diff_arrays=mda,
                 xlim=group_xlim[key],
+                behav_decoding_df=_behav_dec_by_subject.get(row["subject"]),
+                early_smax_s=AC_SEARCH_SMAX,
             )
             # Cross-WE pooled test bar on ax_bot (matches sig_windows style,
             # different color so it's visually distinct from per-cell gray bars).
@@ -1299,7 +1310,7 @@ def write_annotated_pdfs(
                 )
                 pr = pair_lookup.get(pair_key_lut)
                 if pr is not None:
-                    ax_bot = fig2.axes[1]
+                    ax_bot = getattr(fig2, "_ax_behav", fig2.axes[1])
                     ymin, ymax = ax_bot.get_ylim()
                     bar_h = (ymax - ymin) * 0.04
                     # Sit just below the per-cell gray bars (which are at 0.95)
