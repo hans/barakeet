@@ -92,6 +92,7 @@ phon_peaks_path = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parque
 epoch_dir = "outputs/epochs_preprocessed"
 trial_balance_path = "outputs/causal46_joined/trial_balance_index.csv"
 outdir = "outputs/causal46_joined/t_tests"
+behav_decoding_dir = "outputs_prod"
 min_class_k = 4
 window_size = 10
 stride = 10
@@ -147,7 +148,7 @@ print(f"epochs loaded: {sorted(epochs_dict)}")
 # Behavioral decoding scores for star plot overlay
 _behav_dec_by_subject: dict = {}
 for _subj in sorted(epochs_dict):
-    _df = load_behav_decoding_scores(_subj)
+    _df = load_behav_decoding_scores(_subj, prod_dir=behav_decoding_dir)
     if _df is not None:
         _behav_dec_by_subject[_subj] = _df
 print(f"behavioral decoding scores loaded for: {sorted(_behav_dec_by_subject)}")
