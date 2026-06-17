@@ -1064,13 +1064,21 @@ rule joined_trial_balance_index:
 rule joined_t_tests:
     """B4 bootstrap CIs for within-completion HGA contrast at AS sites."""
     input:
-        phon_peaks_all  = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet",
-        trial_balance   = "outputs/causal46_joined/trial_balance_index.csv",
-        epoch_fifs      = expand(
+        phon_peaks_all      = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet",
+        trial_balance       = "outputs/causal46_joined/trial_balance_index.csv",
+        epoch_fifs          = expand(
             "outputs/epochs_preprocessed/{subject}_epo.fif",
             subject=config["data"]["subjects"],
         ),
-        notebook        = "notebooks/causal46_joined/t_tests.py",
+        behav_dec_full      = expand(
+            "outputs/causal6/behavior_decoding_single_electrode_summarize/{subject}/window_mean_scores.parquet",
+            subject=config["data"]["subjects"],
+        ),
+        behav_dec_hga_only  = expand(
+            "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/{subject}/window_mean_scores.parquet",
+            subject=config["data"]["subjects"],
+        ),
+        notebook            = "notebooks/causal46_joined/t_tests.py",
 
     output:
         notebook           = "outputs/causal46_joined/t_tests/notebook.ipynb",
@@ -1093,7 +1101,7 @@ rule joined_t_tests:
                 epoch_dir=str(Path(input.epoch_fifs[0]).parent),
                 trial_balance_path=str(input.trial_balance),
                 outdir=str(outdir),
-                behav_decoding_dir=str(Path(input.phon_peaks_all).parents[2]),
+                behav_decoding_dir=str(Path(input.behav_dec_full[0]).parents[3]),
                 min_class_k=C46["min_class_k"],
                 window_size=C46["window_size"],
                 stride=C46["stride"],
@@ -1505,12 +1513,14 @@ rule joined_multivariate_gradient_perception_aggregate:
 rule early_window_site_types:
     """Per-subject early-window A/B₁/B₂ bootstraps and site-type assignment."""
     input:
-        epochs        = "outputs/epochs_preprocessed/{subject}_epo.fif",
-        manifest      = "outputs/causal46_joined/manual_annotations/filtered_manifest.csv",
-        trial_balance = "outputs/causal46_joined/trial_balance_index.csv",
-        phon_peaks    = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet",
-        helper        = "notebooks/causal46_joined/_within_completion.py",
-        notebook      = "notebooks/causal46_joined/early_window_site_types.py",
+        epochs              = "outputs/epochs_preprocessed/{subject}_epo.fif",
+        manifest            = "outputs/causal46_joined/manual_annotations/filtered_manifest.csv",
+        trial_balance       = "outputs/causal46_joined/trial_balance_index.csv",
+        phon_peaks          = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet",
+        behav_dec_full      = "outputs/causal6/behavior_decoding_single_electrode_summarize/{subject}/window_mean_scores.parquet",
+        behav_dec_hga_only  = "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/{subject}/window_mean_scores.parquet",
+        helper              = "notebooks/causal46_joined/_within_completion.py",
+        notebook            = "notebooks/causal46_joined/early_window_site_types.py",
 
     output:
         notebook              = "outputs/causal46_joined/early_window_site_types/{subject}/notebook.ipynb",
@@ -1532,7 +1542,7 @@ rule early_window_site_types:
                 epoch_dir=str(Path(input.epochs).parent),
                 trial_balance_path=str(input.trial_balance),
                 outdir=str(outdir),
-                behav_decoding_dir=str(Path(input.phon_peaks).parents[2]),
+                behav_decoding_dir=str(Path(input.behav_dec_full).parents[3]),
                 min_class_k=C46["min_class_k"],
                 window_size=C46["window_size"],
                 stride=C46["stride"],
