@@ -386,7 +386,7 @@ def _draw_behav_decoding_panel(ax, site_df, *, early_smax_s: int, FS: int = 7):
     smin_arr = site_df["smin"].to_numpy()
     smax_arr = site_df["smax"].to_numpy()
     order = np.argsort(smin_arr)
-    t_centers = (smin_arr + smax_arr)[order] / 2 / epoch_sfreq + epoch_tmin
+    t_centers = smax_arr[order] / epoch_sfreq + epoch_tmin
 
     ax.axvline(t_early, color="k", lw=0.6, ls="--", alpha=0.35)
 
