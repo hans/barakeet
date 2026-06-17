@@ -279,31 +279,63 @@ def bootstrap_A_site(
 
 
 def load_behav_decoding_scores(full_path, hga_path=None):
-    """Load and join behavioral decoding window_mean_scores from explicit file paths.
+    """Load and aggregate behavioral decoding scores from causal46_joined scores.parquet files.
 
-    full_path : path to behavior_decoding_single_electrode_summarize/.../window_mean_scores.parquet
-    hga_path  : path to behavior_decoding_single_electrode_hga_only_summarize/.../window_mean_scores.parquet
+    full_path : path to behavior_decoding_single_electrode/{subject}/scores.parquet
+                (contains model ∈ {full, baseline}, one row per fold × window)
+    hga_path  : path to behavior_decoding_single_electrode_hga_only/{subject}/scores.parquet
+                (contains model = full, one row per fold × window)
 
-    Returns a polars DataFrame with per-(site × window) columns:
-      diff (full−baseline), full_roc_auc, baseline_roc_auc, test_roc_auc (HGA-only).
+    Returns a polars DataFrame with per-(site × window) fold-mean columns:
+      full_roc_auc, baseline_roc_auc, diff (full−baseline), hga_roc_auc (HGA-only mean AUC).
     Returns None if neither file exists.
     """
     import polars as pl
     from pathlib import Path
 
+    # full model: per-window rows; baseline: one row per phoneme_pair×word_end (electrode_idx=-1)
+    window_keys = ["subject", "electrode_idx", "phoneme_pair", "word_end", "smin", "smax"]
+    baseline_keys = ["subject", "phoneme_pair", "word_end"]
     full_path = Path(full_path) if full_path is not None else None
     hga_path = Path(hga_path) if hga_path is not None else None
 
-    on_keys = ["subject", "electrode_idx", "phoneme_pair", "word_end", "smin", "smax"]
-    full_df = pl.read_parquet(full_path) if full_path is not None and full_path.exists() else None
-    hga_df = (
-        pl.read_parquet(hga_path).select(on_keys + ["test_roc_auc"])
-        if hga_path is not None and hga_path.exists() else None
-    )
+    full_df = None
+    if full_path is not None and full_path.exists():
+        raw = pl.read_parquet(full_path)
+        per_window = (
+            raw.filter((pl.col("model") == "full") & (pl.col("smin") >= 0))
+            .group_by(window_keys)
+            .agg(pl.col("test_roc_auc").mean().alias("full_roc_auc"))
+        )
+        per_baseline = (
+            raw.filter(pl.col("model") == "baseline")
+            .group_by(baseline_keys)
+            .agg(pl.col("test_roc_auc").mean().alias("baseline_roc_auc"))
+        )
+        full_df = (
+            per_window
+            .join(per_baseline, on=baseline_keys, how="left")
+            .with_columns(
+                (pl.col("full_roc_auc") - pl.col("baseline_roc_auc")).alias("diff")
+            )
+        )
+
+    hga_df = None
+    if hga_path is not None and hga_path.exists():
+        hga_df = (
+            pl.read_parquet(hga_path)
+            .filter((pl.col("model") == "full") & (pl.col("smin") >= 0))
+            .group_by(window_keys)
+            .agg(pl.col("test_roc_auc").mean())
+        )
+
     if full_df is not None and hga_df is not None:
-        return full_df.join(hga_df, on=on_keys, how="left")
+        return full_df.join(
+            hga_df.rename({"test_roc_auc": "hga_roc_auc"}),
+            on=window_keys, how="left",
+        )
     if full_df is not None:
-        return full_df.with_columns(pl.lit(None).cast(pl.Float32).alias("test_roc_auc"))
+        return full_df.with_columns(pl.lit(None).cast(pl.Float32).alias("hga_roc_auc"))
     if hga_df is not None:
         return hga_df.with_columns(
             pl.lit(None).cast(pl.Float32).alias("diff"),
@@ -331,7 +363,7 @@ def _draw_behav_decoding_panel(ax, site_df, *, early_smax_s: int, FS: int = 7):
     """Plot full−baseline and HGA-only behavioral decoding advantage curves.
 
     site_df: polars DataFrame for one (electrode_idx × phoneme_pair × word_end) cell,
-             columns smin, smax, diff (full−baseline), test_roc_auc (HGA-only).
+             columns smin, smax, diff (full−baseline), hga_roc_auc (HGA-only).
     early_smax_s: sample index marking the early / late window boundary.
     Both metrics are expressed as "advantage" referenced to zero:
       full−baseline is already centered; HGA-only AUC is shifted by −0.5.
@@ -367,8 +399,8 @@ def _draw_behav_decoding_panel(ax, site_df, *, early_smax_s: int, FS: int = 7):
             _mark_decoding_peaks(ax, t_centers[finite], diff_vals[finite],
                                  t_early, COLOR_FULL, FS)
 
-    if "test_roc_auc" in site_df.columns:
-        hga_vals = site_df["test_roc_auc"].to_numpy()[order] - 0.5
+    if "hga_roc_auc" in site_df.columns:
+        hga_vals = site_df["hga_roc_auc"].to_numpy()[order] - 0.5
         finite = np.isfinite(hga_vals)
         if finite.any():
             ax.plot(t_centers[finite], hga_vals[finite], color=COLOR_HGA,
