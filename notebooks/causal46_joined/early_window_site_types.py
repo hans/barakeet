@@ -89,7 +89,8 @@ phon_peaks_path = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parque
 epoch_dir = "outputs/epochs_preprocessed"
 trial_balance_path = "outputs/causal46_joined/trial_balance_index.csv"
 outdir = "outputs/causal46_joined/early_window_site_types/EC250"
-behav_decoding_dir = "outputs_prod"
+behav_dec_full_path = "outputs_prod/causal6/behavior_decoding_single_electrode_summarize/EC250/window_mean_scores.parquet"
+behav_dec_hga_only_path = "outputs_prod/causal6/behavior_decoding_single_electrode_hga_only_summarize/EC250/window_mean_scores.parquet"
 min_class_k = 4
 window_size = 10
 stride = 10
@@ -161,7 +162,7 @@ ep.metadata = md
 bhv_col = resolve_behavior_col(md)
 print(f"Loaded {len(ep)} epochs; behavior col: {bhv_col}")
 
-behav_decoding_df = load_behav_decoding_scores(subject, prod_dir=behav_decoding_dir)
+behav_decoding_df = load_behav_decoding_scores(behav_dec_full_path, behav_dec_hga_only_path)
 print(f"behavioral decoding scores: {'loaded' if behav_decoding_df is not None else 'not found'}")
 
 # %% [markdown]

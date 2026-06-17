@@ -278,12 +278,11 @@ def bootstrap_A_site(
     return rows, n_lo, n_hi
 
 
-def load_behav_decoding_scores(subject: str, prod_dir: str = "outputs_prod"):
-    """Load and join behavioral decoding window_mean_scores for one subject.
+def load_behav_decoding_scores(full_path, hga_path=None):
+    """Load and join behavioral decoding window_mean_scores from explicit file paths.
 
-    Reads from:
-      {prod_dir}/causal6/behavior_decoding_single_electrode_summarize/{subject}/window_mean_scores.parquet
-      {prod_dir}/causal6/behavior_decoding_single_electrode_hga_only_summarize/{subject}/window_mean_scores.parquet
+    full_path : path to behavior_decoding_single_electrode_summarize/.../window_mean_scores.parquet
+    hga_path  : path to behavior_decoding_single_electrode_hga_only_summarize/.../window_mean_scores.parquet
 
     Returns a polars DataFrame with per-(site × window) columns:
       diff (full−baseline), full_roc_auc, baseline_roc_auc, test_roc_auc (HGA-only).
@@ -292,17 +291,14 @@ def load_behav_decoding_scores(subject: str, prod_dir: str = "outputs_prod"):
     import polars as pl
     from pathlib import Path
 
-    root = Path(prod_dir) / "causal6"
-    full_path = (root / "behavior_decoding_single_electrode_summarize"
-                 / subject / "window_mean_scores.parquet")
-    hga_path = (root / "behavior_decoding_single_electrode_hga_only_summarize"
-                / subject / "window_mean_scores.parquet")
+    full_path = Path(full_path) if full_path is not None else None
+    hga_path = Path(hga_path) if hga_path is not None else None
 
     on_keys = ["subject", "electrode_idx", "phoneme_pair", "word_end", "smin", "smax"]
-    full_df = pl.read_parquet(full_path) if full_path.exists() else None
+    full_df = pl.read_parquet(full_path) if full_path is not None and full_path.exists() else None
     hga_df = (
         pl.read_parquet(hga_path).select(on_keys + ["test_roc_auc"])
-        if hga_path.exists() else None
+        if hga_path is not None and hga_path.exists() else None
     )
     if full_df is not None and hga_df is not None:
         return full_df.join(hga_df, on=on_keys, how="left")
