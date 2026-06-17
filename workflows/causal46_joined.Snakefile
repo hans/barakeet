@@ -1089,6 +1089,7 @@ rule joined_t_tests:
         population_summary = "outputs/causal46_joined/t_tests/population_summary.csv",
         population_pdf     = "outputs/causal46_joined/t_tests/population_summary.pdf",
         filtered_manifest  = "outputs/causal46_joined/t_tests/star_plots_filtered/filtered_manifest.csv",
+        b4_powered         = "outputs/causal46_joined/t_tests/star_plots_filtered/b4_powered.pdf",
 
     run:
         outdir = Path(output.notebook).parent
@@ -1109,6 +1110,29 @@ rule joined_t_tests:
                 ac_p_value_threshold=C46["ac_p_value_threshold"],
             ),
         )
+
+
+rule reorder_t_test_star_plots_by_type:
+    """Re-order b4_powered.pdf pages by (early_type × late_type) with bookmarks."""
+    input:
+        t_tests_manifest = "outputs/causal46_joined/t_tests/star_plots_filtered/filtered_manifest.csv",
+        src              = "outputs/causal46_joined/t_tests/star_plots_filtered/b4_powered.pdf",
+        early            = "outputs/causal46_joined/manual_annotations/early_acoustic_window.csv",
+        late             = "outputs/causal46_joined/manual_annotations/filtered_manifest.csv",
+        script           = "scripts/reorder_t_test_star_plots_by_type.py",
+
+    output:
+        pdf = "outputs/causal46_joined/t_tests/star_plots_filtered/b4_powered_by_type.pdf",
+
+    shell:
+        """
+        uv run python {input.script} \
+            --t-tests-manifest {input.t_tests_manifest} \
+            --early {input.early} \
+            --late  {input.late} \
+            --src   {input.src} \
+            --out   {output.pdf}
+        """
 
 
 # =============================================================================
@@ -1527,8 +1551,9 @@ rule early_window_site_types:
         notebook              = "outputs/causal46_joined/early_window_site_types/{subject}/notebook.ipynb",
         A_per_window          = "outputs/causal46_joined/early_window_site_types/{subject}/A_per_window.parquet",
         B_per_window          = "outputs/causal46_joined/early_window_site_types/{subject}/B_per_window.parquet",
-        site_type_assignments = "outputs/causal46_joined/early_window_site_types/{subject}/site_type_assignments.parquet",
-        star_plots_early      = "outputs/causal46_joined/early_window_site_types/{subject}/star_plots_early.pdf",
+        site_type_assignments  = "outputs/causal46_joined/early_window_site_types/{subject}/site_type_assignments.parquet",
+        star_plots_early       = "outputs/causal46_joined/early_window_site_types/{subject}/star_plots_early.pdf",
+        star_plots_early_compact = "outputs/causal46_joined/early_window_site_types/{subject}/star_plots_early_compact.pdf",
 
     run:
         outdir = Path(output.notebook).parent
@@ -1639,3 +1664,29 @@ rule early_window_site_types_figures:
                 outdir=outdir,
             ),
         )
+
+
+rule reorder_star_plots_by_annotation:
+    """Re-order compact early-window star-plot pages by manual site-type annotation."""
+    input:
+        relabel   = "outputs/causal46_joined/manual_annotations/early_acoustic_window.csv",
+        star_pdfs = expand(
+            "outputs/causal46_joined/early_window_site_types/{subject}/star_plots_early_compact.pdf",
+            subject=config["data"]["subjects"],
+        ),
+        site_types = expand(
+            "outputs/causal46_joined/early_window_site_types/{subject}/site_type_assignments.parquet",
+            subject=config["data"]["subjects"],
+        ),
+        script    = "scripts/reorder_star_plots_by_annotation.py",
+
+    output:
+        pdf = "outputs/causal46_joined/early_window_site_types/star_plots_by_annotation.pdf",
+
+    shell:
+        """
+        uv run python {input.script} \
+            --relabel   {input.relabel} \
+            --star-dir  outputs/causal46_joined/early_window_site_types \
+            --out       {output.pdf}
+        """
