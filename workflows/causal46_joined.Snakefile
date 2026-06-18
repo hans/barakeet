@@ -1305,6 +1305,7 @@ rule joined_acoustic_ax_discrimination:
     input:
         epochs      = "outputs/epochs_preprocessed/{subject}_epo.fif",
         phon_peaks  = "outputs/causal6/acoustic_decoding_peaks/{subject}/phon_peaks.parquet",
+        trial_df    = "outputs/causal46_joined/acoustic_univariate_gradient/trial_df_all.parquet",
         notebook    = "notebooks/causal46_joined/acoustic_ax_discrimination.py",
 
     output:
@@ -1319,6 +1320,7 @@ rule joined_acoustic_ax_discrimination:
             parameters=dict(
                 epochs_path=str(input.epochs),
                 phon_peaks_path=str(input.phon_peaks),
+                trial_df_path=str(input.trial_df),
                 outdir=str(outdir),
                 ac_p_value_threshold=config["causal46_joined"]["ac_p_value_threshold"],
                 n_jobs=config["analysis"]["decoding"]["n_jobs"],

@@ -68,7 +68,7 @@ outdir.mkdir(parents=True, exist_ok=True)
 pool = (
     pd.read_parquet(phon_peaks_path)
     .query("p_value < @ac_p_value_threshold")
-    [["subject", "electrode_idx", "phoneme_pair", "smin", "smax"]]
+    [["subject", "electrode_idx", "phoneme_pair", "smin", "smax", "test_roc_auc"]]
     .drop_duplicates(subset=["subject", "electrode_idx", "phoneme_pair"])
     .reset_index(drop=True)
 )
@@ -153,13 +153,19 @@ trial_df["site_label"] = trial_df.subject.str.cat(trial_df.electrode_idx.astype(
 trial_df["hga_dprime"] = trial_df["hga_endpoint_dprime"] * (trial_df["hga_norm"] - 0.5)
 
 pool["site_label"] = pool.subject.str.cat(pool.electrode_idx.astype(str), sep="-").str.cat(pool.phoneme_pair, sep=": ")
-n_sample = min(24, len(pool))
+
+# Sample evenly across the AUC range (same approach as acoustic_gradient_figures)
+_pool_sorted = pool.sort_values("test_roc_auc").reset_index(drop=True)
+n_sample = min(24, len(_pool_sorted))
+_sample_idx = np.round(np.linspace(0, len(_pool_sorted) - 1, n_sample)).astype(int)
+pool_sample = _pool_sorted.iloc[_sample_idx].copy().reset_index(drop=True)
+
 n_cols = 4
 n_rows = int(np.ceil(n_sample / n_cols))
 fig, axes = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols, 4 * n_rows), sharey=False)
 axes_flat = axes.flatten()
 
-for ax_idx, (_, site_row) in enumerate(pool.iterrows()):
+for ax_idx, (_, site_row) in enumerate(pool_sample.iterrows()):
     ax = axes_flat[ax_idx]
     site_data = trial_df[trial_df["site_label"] == site_row["site_label"]].dropna(
         subset=["resampled", "hga_dprime"]
@@ -201,7 +207,7 @@ for ax_idx, (_, site_row) in enumerate(pool.iterrows()):
     ax.axhline(0, color="gray", linestyle="--", linewidth=0.8)
     ax.set_xticks([1, 2, 3, 4, 5, 6])
     ax.set_xlim(0.5, 6.5)
-    ax.set_title(f"{site_row['site_label']}\nAUC={site_row['phon_roc_auc']:.2f}", fontsize=7.5)
+    ax.set_title(f"{site_row['site_label']}\nAUC={site_row['test_roc_auc']:.2f}", fontsize=7.5)
     ax.set_xlabel("Morph step")
     if ax_idx % n_cols == 0:
         ax.set_ylabel("HGA d-prime (endpoint SDs)")
