@@ -38,7 +38,6 @@ The project distinguishes two responses observable at single electrodes:
    - Temporally diffuse, peaks near or after point of disambiguation (POD),
      can extend beyond word offset
    - 58 of 64 acoustic sites (91%) also show perceptual selectivity
-   - 80/110 perceptual responses emerge ONLY for ambiguous trials
 
 ## Key indices
 - **ASI (Acoustic Selectivity Index)**: HGA difference between clear /d/ and /n/
@@ -67,8 +66,12 @@ The project distinguishes two responses observable at single electrodes:
 
 ## Theoretical framing
 The project evaluates four candidate mechanisms:
-1. **Reactivation**: Same code re-expressed later. RULED OUT by code inconsistency
-   and ambiguity dependence.
+1. **Reactivation**: Same code re-expressed later. Tentatively disfavored by code
+   inconsistency (transfer bimodality). The "ambiguity dependence" argument that
+   previously also counted against it rested on a claim now retracted as unreliable
+   (perceptual responses emerging only for ambiguous trials); whether a single
+   belief-driven generator accounts for both ambiguous and unambiguous responses is
+   an OPEN question under active test, not ruled out.
 2. **Interactive processing**: Top-down feedback overwrites acoustic representation.
    RULED OUT by code inconsistency (if same population, codes should match).
 3. **Distal integration**: Perceptual resolution in a different brain region.
