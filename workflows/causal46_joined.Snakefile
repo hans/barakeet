@@ -1438,7 +1438,7 @@ rule joined_acoustic_gradient_figures:
             str(input.notebook),
             str(output.notebook),
             parameters=dict(
-                epochs_dir=str(input.epochs_dir),
+                preprocessed_epochs_dir=str(input.epochs_dir),
                 trial_df_path=str(input.trial_df_all),
                 model_comparison_df_path=str(input.model_comparison_df_all),
                 ax_discrimination_path=str(input.ax_discrimination_all),
