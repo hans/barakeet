@@ -35,9 +35,10 @@ phoneme_pair = "dn"
 word_end = "necessary"
 
 # --- New window onset ---
-# new_window_onset_s takes priority when set (seconds post word onset).
-# Set to None to use new_window_onset_sample instead.
-new_window_onset_s = 0.6        # seconds post word onset
+# If both are None the window is auto-resolved from the peak b4 behavioral
+# contrast (b4_per_window_path must point to a valid parquet).
+# new_window_onset_s takes priority over new_window_onset_sample when set.
+new_window_onset_s = None       # seconds post word onset (or None for b4 auto-resolve)
 new_window_onset_sample = None  # fallback sample offset into epoch
 
 # --- Source-window override (for sites without a recorded peak) ---
@@ -49,6 +50,7 @@ source_smax = None
 config_path = "config.yaml"
 reg_lambda_winners_path = "outputs/causal6/reg_lambda_sweep/reg_lambda_winners.json"
 phon_peaks_path = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet"
+b4_per_window_path = "outputs/causal46_joined/t_tests/b4_per_window.parquet"
 epoch_dir = "outputs/epochs_preprocessed"
 behav_dec_full_root = "outputs/causal46_joined/behavior_decoding_single_electrode"
 behav_dec_hga_only_root = "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only"
@@ -91,6 +93,7 @@ from _within_completion import (
 from _acoustic_window_inspect import (
     build_new_window,
     compute_transfer_auc,
+    pick_window_from_b4,
     resolve_source_and_peak_windows,
 )
 
@@ -130,6 +133,9 @@ print(f"Epochs loaded: {sorted(epochs_dict)}")
 phon_peaks = pl.read_parquet(phon_peaks_path)
 print(f"Peak rows: {phon_peaks.height}")
 
+b4_per_window = pl.read_parquet(b4_per_window_path) if Path(b4_per_window_path).exists() else None
+print(f"B4 per-window rows: {b4_per_window.height if b4_per_window is not None else 'n/a (file not found)'}")
+
 behav_decoding_df = load_behav_decoding_scores(
     f"{behav_dec_full_root}/{subject}/scores.parquet",
     f"{behav_dec_hga_only_root}/{subject}/scores.parquet",
@@ -158,15 +164,36 @@ peak_smin, peak_smax, peak_auc, source_smin_eff, source_smax_eff, width = (
     )
 )
 
-new_smin, new_smax = build_new_window(
-    onset_s=new_window_onset_s,
-    onset_sample=new_window_onset_sample,
-    width=width,
-    epoch_tmin=epoch_tmin,
-    epoch_sfreq=epoch_sfreq,
-    min_sample=min_sample,
-    n_times=n_times,
-)
+_b4_peak_info = None  # (b4_smin, b4_smax, contrast_med) if auto-resolved
+
+if new_window_onset_s is None and new_window_onset_sample is None:
+    if b4_per_window is None:
+        raise RuntimeError(
+            "new_window_onset_s and new_window_onset_sample are both None, "
+            "but b4_per_window_path does not exist. "
+            "Set new_window_onset_s to an explicit value."
+        )
+    new_smin, new_smax, _b4_smin, _b4_smax, _b4_contrast = pick_window_from_b4(
+        b4_per_window, subject, electrode_idx, phoneme_pair, word_end,
+        width, epoch_tmin, epoch_sfreq, min_sample, n_times,
+    )
+    _b4_peak_info = (_b4_smin, _b4_smax, _b4_contrast)
+    print(
+        f"Auto-resolved new window from b4 peak behavioral contrast:\n"
+        f"  b4 peak: smin={_b4_smin} smax={_b4_smax}  "
+        f"({_b4_smin/epoch_sfreq+epoch_tmin:.3f}s–{_b4_smax/epoch_sfreq+epoch_tmin:.3f}s)  "
+        f"mean_diff_aligned_med={_b4_contrast:.4f}"
+    )
+else:
+    new_smin, new_smax = build_new_window(
+        onset_s=new_window_onset_s,
+        onset_sample=new_window_onset_sample,
+        width=width,
+        epoch_tmin=epoch_tmin,
+        epoch_sfreq=epoch_sfreq,
+        min_sample=min_sample,
+        n_times=n_times,
+    )
 
 print(f"Peak window:   smin={peak_smin}  smax={peak_smax}  "
       f"({peak_smin/epoch_sfreq+epoch_tmin:.3f}s – {peak_smax/epoch_sfreq+epoch_tmin:.3f}s)  "

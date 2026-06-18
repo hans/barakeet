@@ -120,6 +120,92 @@ def build_new_window(
     return smin, smax
 
 
+def pick_window_from_b4(
+    b4_df,
+    subject: str,
+    electrode_idx: int,
+    phoneme_pair: str,
+    word_end: str,
+    width: int,
+    epoch_tmin: float,
+    epoch_sfreq: float,
+    min_sample: int,
+    n_times: int,
+) -> tuple:
+    """Choose new acoustic window centered on the peak b4 behavioral contrast.
+
+    Filters b4_per_window to this cell, selects the window with the largest
+    ``|mean_diff_aligned_med|`` (NaN-safe; falls back to ``|mean_diff_raw_med|``
+    if all aligned values are NaN), then centers a ``width``-sample acoustic
+    window on that b4 window's midpoint.
+
+    Parameters
+    ----------
+    b4_df : polars DataFrame
+        Loaded from b4_per_window.parquet.
+    width : int
+        Acoustic window width in samples (= source window width).
+    epoch_tmin, epoch_sfreq : float
+        Epoch time axis constants.
+    min_sample, n_times : int
+        Valid epoch-sample bounds for clamping.
+
+    Returns
+    -------
+    (new_smin, new_smax, b4_peak_smin, b4_peak_smax, contrast_med)
+        new_smin/smax : acoustic window centered on the b4 peak.
+        b4_peak_smin/smax : the b4 bootstrap window that drove the choice.
+        contrast_med : the |mean_diff_aligned_med| (or raw) value at the peak.
+
+    Raises
+    ------
+    ValueError
+        If no b4_per_window rows exist for this (subject, electrode_idx,
+        phoneme_pair, word_end) combination.
+    """
+    import polars as pl
+
+    cell_df = b4_df.filter(
+        (pl.col("subject") == subject)
+        & (pl.col("electrode_idx") == electrode_idx)
+        & (pl.col("phoneme_pair") == phoneme_pair)
+        & (pl.col("word_end") == word_end)
+    )
+    if cell_df.height == 0:
+        raise ValueError(
+            f"No b4_per_window rows for {subject} e{electrode_idx} "
+            f"{phoneme_pair} {word_end}. "
+            "Set new_window_onset_s or new_window_onset_sample explicitly."
+        )
+
+    valid = cell_df.filter(pl.col("mean_diff_aligned_med").is_not_nan())
+    if valid.height > 0:
+        sort_col = "mean_diff_aligned_med"
+    else:
+        valid = cell_df.filter(pl.col("mean_diff_raw_med").is_not_nan())
+        sort_col = "mean_diff_raw_med"
+
+    peak_row = valid.sort(pl.col(sort_col).abs(), descending=True).head(1)
+    b4_smin = int(peak_row["smin"][0])
+    b4_smax = int(peak_row["smax"][0])
+    contrast_med = float(peak_row[sort_col][0])
+
+    # Center the acoustic window on the b4 window's midpoint.
+    b4_center = (b4_smin + b4_smax) / 2
+    smin = max(min_sample, int(round(b4_center - width / 2)))
+    smax = smin + width
+    if smax > n_times:
+        smax = n_times
+        smin = smax - width
+    if smin < min_sample:
+        raise ValueError(
+            f"b4 peak [{b4_smin}:{b4_smax}] is too early to fit a "
+            f"{width}-sample acoustic window with min_sample={min_sample}."
+        )
+
+    return smin, smax, b4_smin, b4_smax, contrast_med
+
+
 def compute_transfer_auc(
     epoch_data: np.ndarray,
     phoneme_pair: str,
