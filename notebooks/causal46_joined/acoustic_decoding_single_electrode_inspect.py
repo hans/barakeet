@@ -1,3 +1,19 @@
+# ---
+# jupyter:
+#   jupytext:
+#     cell_metadata_filter: tags,-all
+#     formats: ipynb,py:percent
+#     text_representation:
+#       extension: .py
+#       format_name: percent
+#       format_version: '1.3'
+#       jupytext_version: 1.19.1
+#   kernelspec:
+#     display_name: barakeet
+#     language: python
+#     name: python3
+# ---
+
 # %% [markdown]
 # # Acoustic decoding — single-electrode window inspector
 #
@@ -13,15 +29,15 @@
 # %% tags=["parameters"]
 
 # --- Site ---
-subject = "EC250"
-electrode_idx = 215
+subject = "EC282"
+electrode_idx = 106
 phoneme_pair = "dn"
 word_end = "necessary"
 
 # --- New window onset ---
 # new_window_onset_s takes priority when set (seconds post word onset).
 # Set to None to use new_window_onset_sample instead.
-new_window_onset_s = 0.3        # seconds post word onset
+new_window_onset_s = 0.6        # seconds post word onset
 new_window_onset_sample = None  # fallback sample offset into epoch
 
 # --- Source-window override (for sites without a recorded peak) ---
@@ -31,18 +47,17 @@ source_smax = None
 
 # --- Paths ---
 config_path = "config.yaml"
-reg_lambda_winners_path = "outputs_prod/causal6/reg_lambda_sweep/reg_lambda_winners.json"
-phon_peaks_path = "outputs_prod/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet"
+reg_lambda_winners_path = "outputs/causal6/reg_lambda_sweep/reg_lambda_winners.json"
+phon_peaks_path = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet"
 epoch_dir = "outputs/epochs_preprocessed"
-behav_dec_full_root = "outputs_prod/causal46_joined/behavior_decoding_single_electrode"
-behav_dec_hga_only_root = "outputs_prod/causal46_joined/behavior_decoding_single_electrode_hga_only"
+behav_dec_full_root = "outputs/causal46_joined/behavior_decoding_single_electrode"
+behav_dec_hga_only_root = "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only"
 # Full acoustic searchlight scores for this subject (timecourse plot in cell 7).
 # Defaults to the causal6 per-subject scores parquet; set to None to skip.
 acoustic_scores_path = None  # auto-resolved below if left None
 
 # --- Fit options ---
 device = "cpu"           # "cuda" for GPU; "cpu" is sufficient for 1 electrode × 2 windows
-min_class_k = 4          # min trials per class per step for qualifying_steps
 
 # %% [markdown]
 # ## Load config and resolve hyperparameters
@@ -82,7 +97,10 @@ from _acoustic_window_inspect import (
 # %%
 _cfg = yaml.safe_load(Path(config_path).read_text())
 C6 = _cfg["causal6"]
+C46 = _cfg["causal46_joined"]
 DEC = _cfg["analysis"]["decoding"]
+
+min_class_k = int(C46["min_class_k"])         # min trials per class per step for qualifying_steps
 
 _winners = json.loads(Path(reg_lambda_winners_path).read_text())
 reg_lambda = float(_winners["reg_lambda_acoustic"])
@@ -95,6 +113,7 @@ cv_random_state = int(C6["cv_random_state"])
 tol = float(C6["tol"])
 max_iter = int(C6["max_iter"])
 
+print(f"min_class_k={min_class_k}")
 print(
     f"reg_lambda={reg_lambda}  window_size={window_size}  stride={stride}"
     f"  min_sample={min_sample}"
@@ -275,6 +294,25 @@ print("Both windows present in scores. Done.")
 # epoch_data: (N_total_epochs, N_times) indexed by metadata index labels.
 # Mirrors evaluate_phonetic_transfer's `t_epoch_data[epoch_idxs]` pattern.
 _epoch_data = ep.get_data(picks=[electrode_idx]).squeeze(1)
+
+# sanity check: transfer from source -> source should match original AUC.
+orig_mean, orig_folds = compute_transfer_auc(
+    epoch_data=_epoch_data,
+    phoneme_pair=phoneme_pair,
+    source_smin=source_smin_eff,
+    source_smax=source_smax_eff,
+    new_smin=source_smin_eff,  # use source window as "new" for original AUC
+    new_smax=source_smax_eff,
+    predictions=predictions,
+    coefficients=coefficients,
+    n_folds=n_folds,
+)
+print(f"Original AUC (source → source): {orig_mean:.4f}  "
+      f"fold AUCs={[round(a, 4) for a in orig_folds]}")
+assert np.isclose(orig_mean, peak_auc, atol=1e-4), (
+    f"Original AUC {orig_mean:.4f} does not match peak AUC {peak_auc:.4f} — "
+    f"check that source window is correctly aligned with scored window."
+)
 
 transfer_mean, transfer_folds = compute_transfer_auc(
     epoch_data=_epoch_data,
