@@ -47,14 +47,14 @@ from src.stimuli import OFFSET_DICT, PHONEME_PAIR_TO_WORD_ENDS, POD_dict
 from src.viz_provisional import load_epochs_dict
 
 # %% tags=["parameters"]
-manifest_path = "outputs_prod/causal46_joined/manual_annotations/filtered_manifest.csv"
+manifest_path = "outputs/causal46_joined/manual_annotations/filtered_manifest.csv"
 output_dir = "outputs/causal46_joined/contrast_plot"
 phoneme_pair = None   # None = aggregate all pairs; "bm"/"dn"/"pb" for per-pair
 bootstrap_r = 1000
 bootstrap_seed = 42
-min_class_k = 4
-ttest_window_size = 15
-ttest_window_stride = 15
+min_class_k = 3
+ttest_window_size = 5
+ttest_window_stride = 5
 pval_thresholds = (0.00001, 0.0001, 0.001)
 epochs_dir = "outputs/epochs_preprocessed"
 # "annotated": sign-correct using consensus tuning letter from manifest
@@ -291,6 +291,9 @@ if phoneme_pair is not None:
     xlim = max(OFFSET_DICT[we] for we in _wes) + 0.1
 else:
     xlim = max(OFFSET_DICT.values()) + 0.1
+
+# DEV
+xlim = 3.0
 
 # %%
 fig, ax = plt.subplots(figsize=(7, 4))
