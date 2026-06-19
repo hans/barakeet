@@ -75,13 +75,14 @@ from _within_completion import (  # noqa: E402
 # ── Cell + claimed window (EDIT THESE) ───────────────────────────────────────
 # Default = an illustrative cell: strong reliable late percept slope (β_amb≈+2.3)
 # but no matching late endpoint response → the test rules out a single generator.
-subject = "EC287"
-electrode_idx = 25
+subject = "EC243"
+electrode_idx = 101
 phoneme_pair = "dn"
 word_end = "necessary"
 # Claimed behaviorally-selective window, in seconds post word onset:
-claim_tmin_s = 0.55
-claim_tmax_s = 0.70
+claim_smin = 95
+claim_tmin_s = claim_smin / 100 - 0.4
+claim_tmax_s = (claim_smin + 15) / 100 - 0.4
 
 # ── Data sources (prod-canonical outputs/; the raw bootstrap is not synced) ──
 b4_bootstrap_path = "outputs/causal46_joined/t_tests/b4_bootstrap.parquet"
@@ -93,7 +94,7 @@ textgrid_dir = "textgrids"  # available on prod; render step needs it
 R_UNAMB = 1000        # endpoint bootstrap replicates
 N_RATIO_MC = 50_000   # Monte-Carlo draws for the difference / ratio CI
 CI_LOW, CI_HIGH = 2.5, 97.5
-MIN_ENDPOINT_N = 4    # min trials per endpoint step (within word_end)
+MIN_ENDPOINT_N = 3    # min trials per endpoint step (within word_end)
 
 CELL = dict(subject=subject, electrode_idx=electrode_idx,
             phoneme_pair=phoneme_pair, word_end=word_end)
@@ -132,7 +133,7 @@ if cell_boot.height == 0:
         f"({avail.height} cells available). First rows:\n{avail.head(20)}"
     )
 
-qualifying_steps = [int(s) for s in cell_boot["qualifying_steps"][0]]
+qualifying_steps = [int(s) for s in cell_boot["qualifying_steps"][0].split(",")]
 n_per_class = int(cell_boot["n_per_class"][0])
 ac_peak_auc = float(cell_boot["acoustic_peak_auc"][0])
 print(f"qualifying ambiguous steps: {qualifying_steps}")
