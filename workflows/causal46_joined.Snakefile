@@ -1142,6 +1142,7 @@ rule joined_behavioral_discriminative_windows:
                 ci_low=2.5,
                 ci_high=97.5,
                 decoder_window_size=config["analysis"]["decoding"]["window_size"],
+                manual_override_path=None,
             ),
         )
 
