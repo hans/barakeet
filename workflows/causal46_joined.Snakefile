@@ -1124,6 +1124,7 @@ rule joined_behavioral_discriminative_windows:
         b4_bootstrap = "outputs/causal46_joined/t_tests/b4_bootstrap.parquet",
         b4_per_cell  = "outputs/causal46_joined/t_tests/b4_per_cell.parquet",
         notebook     = "notebooks/causal46_joined/behavioral_discriminative_windows.py",
+        manual_annotations = "outputs/causal46_joined/manual_annotations/filtered_manifest.csv",
 
     output:
         notebook        = "outputs/causal46_joined/behavioral_discriminative_windows/notebook.ipynb",
@@ -1142,6 +1143,7 @@ rule joined_behavioral_discriminative_windows:
                 ci_low=2.5,
                 ci_high=97.5,
                 decoder_window_size=config["analysis"]["decoding"]["window_size"],
+                filtered_manifest_path=str(input.manual_annotations),
                 manual_override_path=None,
             ),
         )
@@ -1215,6 +1217,7 @@ rule joined_acoustic_transfer:
             str(input.notebook),
             str(output.notebook),
             parameters=dict(
+                subject=wildcards.subject,
                 epochs_path=str(input.epochs),
                 b_windows_path=str(input.b_windows),
                 reg_lambda_winners_path=str(input.winners),
