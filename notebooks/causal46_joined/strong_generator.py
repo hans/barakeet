@@ -66,7 +66,6 @@ from _within_completion import (  # noqa: E402
     bootstrap_endpoint_beta,
     extract_hga,
     matched_n_star_plot,
-    resolve_behavior_col,
     summarize_replicate_array,
 )
 from sankey_early_late import EARLY_TYPES, EARLY_LABELS, early_category_map
@@ -87,6 +86,20 @@ early_types_df = pd.read_csv(early_annotations_path)
 early_types_df["early_category"] = early_types_df.site_type_relabel.replace(early_category_map)
 
 filtered_manifest_df = pd.read_csv(filtered_manifest_path)
+
+# Canonical qualifying-step set per cell, as used by the behavioral
+# discriminative window search (strict `is_ambiguous_step`: min_class > 2 per
+# step; derived from cell_manifest). Star plots MUST use this, not a looser
+# on-the-fly recompute, so the displayed steps/trials match the steps the
+# search and β_ambig actually used.
+QUALIFYING_STEPS_LOOKUP: dict[tuple, list[int]] = {
+    (r["subject"], int(r["electrode_idx"]), r["phoneme_pair"], r["word_end"]): [
+        int(s) for s in str(r["qualifying_steps"]).split(",") if s != ""
+    ]
+    for _, r in filtered_manifest_df.iterrows()
+    if isinstance(r["qualifying_steps"], str) and r["qualifying_steps"] != ""
+}
+print(f"qualifying-step lookup: {len(QUALIFYING_STEPS_LOOKUP)} cells")
 
 # %% [markdown]
 # ## Compute β_unamb for each behavioral window
@@ -226,15 +239,6 @@ else:
 
     _ep_cache = {}
 
-    def _qualifying_steps_from_md(md_pp, word_end, bhv_col):
-        we = md_pp["word_end"] == word_end
-        qs = []
-        for s in range(2, 6):
-            mask = we & (md_pp["resampled"] == s)
-            if mask.sum() > 0 and len(md_pp.loc[mask, bhv_col].dropna().unique()) >= 2:
-                qs.append(s)
-        return qs
-
     for _, ex in _examples.iterrows():
         subj = ex["subject"]
         pp = ex["phoneme_pair"]
@@ -253,14 +257,10 @@ else:
             ep.metadata = add_metadata_features(ep.metadata.copy())
             _ep_cache[subj] = ep
         ep_full_ex = _ep_cache[subj]
-        md_ex = ep_full_ex.metadata
-        bhv_col_ex = resolve_behavior_col(md_ex)
 
-        pp_mask = (md_ex["phoneme_pair"] == pp).values
-        md_pp_ex = md_ex[pp_mask].reset_index(drop=True)
-        qs = _qualifying_steps_from_md(md_pp_ex, we, bhv_col_ex)
+        qs = QUALIFYING_STEPS_LOOKUP.get((subj, eidx, pp, we))
         if not qs:
-            print(f"  skip {subj} e{eidx} {pp}·{we}: no qualifying steps")
+            print(f"  skip {subj} e{eidx} {pp}·{we}: no qualifying steps in manifest")
             continue
 
         phon_s = int(ex["phon_smin"]) if "phon_smin" in ex.index and pd.notna(ex["phon_smin"]) else None
