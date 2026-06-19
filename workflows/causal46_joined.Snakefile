@@ -1146,6 +1146,68 @@ rule joined_behavioral_discriminative_windows:
         )
 
 
+rule joined_acoustic_transfer:
+    """Acoustic transfer decoding: phonemic peak window vs. behavioral target window.
+
+    For each row in b_windows.parquet (one per cell × window_id), fits an
+    acoustic decoder (categorical_acoustic_cue) on both the phonemic peak
+    window and the behavioral target window in a single run_acoustic_searchlight
+    call. Behavioral sub-window width is fixed at window_size; position is
+    either taken from behav_decoder_smin/smax (narrow unions) or chosen by
+    argmax |mean_d − mean_n| on unambiguous trials (wide unions).
+
+    Output: fold-level AUCs for both windows, one-to-one with b_windows rows.
+    """
+    input:
+        epochs   = "outputs/epochs_preprocessed/{subject}_epo.fif",
+        b_windows = "outputs/causal46_joined/behavioral_discriminative_windows/b_windows.parquet",
+        winners  = "outputs/causal6/reg_lambda_sweep/reg_lambda_winners.json",
+        notebook = "notebooks/causal46_joined/acoustic_transfer.py",
+
+    output:
+        notebook = "outputs/causal46_joined/acoustic_transfer/{subject}/notebook.ipynb",
+        scores   = "outputs/causal46_joined/acoustic_transfer/{subject}/scores.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        outdir.mkdir(parents=True, exist_ok=True)
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                epochs_path=str(input.epochs),
+                b_windows_path=str(input.b_windows),
+                reg_lambda_winners_path=str(input.winners),
+                outdir=str(outdir),
+                window_size=config["analysis"]["decoding"]["window_size"],
+                n_folds=C6["n_folds"],
+                cv_random_state=C6["cv_random_state"],
+                device=C6["device"],
+                tol=C6["tol"],
+                max_iter=C6["max_iter"],
+            ),
+        )
+
+
+rule joined_acoustic_transfer_aggregate:
+    """Concatenate per-subject acoustic transfer scores into a single parquet."""
+    input:
+        per_subject = expand(
+            "outputs/causal46_joined/acoustic_transfer/{subject}/scores.parquet",
+            subject=config["data"]["subjects"],
+        ),
+
+    output:
+        scores_all = "outputs/causal46_joined/acoustic_transfer/scores_all.parquet",
+
+    run:
+        import polars as pl
+        dfs = [pl.read_parquet(p) for p in input.per_subject]
+        out = pl.concat([d for d in dfs if d.height > 0]) if any(d.height > 0 for d in dfs) else dfs[0]
+        out.write_parquet(output.scores_all)
+        print(f"Wrote {out.height} rows from {len(dfs)} subjects.")
+
+
 rule reorder_t_test_star_plots_by_type:
     """Re-order b4_powered.pdf pages by (early_type × late_type) with bookmarks."""
     input:
@@ -1196,6 +1258,8 @@ rule causal46_joined_all:
         "outputs/causal46_joined/t_tests/population_summary.csv",
         # Behavioral discriminative windows (pure post-processing over b4_bootstrap)
         "outputs/causal46_joined/behavioral_discriminative_windows/b_windows.parquet",
+        # Acoustic transfer: phonemic peak window vs. behavioral target window
+        "outputs/causal46_joined/acoustic_transfer/scores_all.parquet",
 
 
 # =============================================================================
