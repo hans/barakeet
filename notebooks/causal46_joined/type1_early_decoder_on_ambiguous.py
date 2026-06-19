@@ -68,6 +68,11 @@ sys.path.insert(0, str(REPO / "notebooks" / "causal46_joined"))
 from src.data import add_metadata_features
 from src.models.causal6 import run_acoustic_searchlight
 from src.stimuli import PHONEME_PAIR_TO_WORD_ENDS
+from _within_completion import (
+    n_per_class_from_per_step,
+    per_step_class_counts,
+    select_cell_trials_bootstrap,
+)
 
 from _within_completion import resolve_behavior_col
 
@@ -463,12 +468,11 @@ else:
 if all_rows:
     _DEFAULT_COLORS = ["#2166ac", "#d6604d"]
 
-    bhv_col = resolve_behavior_col(trial_df)
+    # trial_df uses "behavior_categorical_forced" (built above); don't call
+    # resolve_behavior_col which looks for different column names.
+    bhv_col = "behavior_categorical_forced"
 
-    def _ci95_bootstrap(x: np.ndarray, n_boot: int = 2000, rng_seed: int = 0) -> tuple[float, float]:
-        rng = np.random.default_rng(rng_seed)
-        boots = rng.choice(x, size=(n_boot, len(x)), replace=True).mean(axis=1)
-        return float(np.percentile(boots, 2.5)), float(np.percentile(boots, 97.5))
+    R_PLOT = 200  # bootstrap replicates for mean ± SE overlay
 
     site_order_for_pdf = sorted(trial_df["site_label"].unique())
 
@@ -493,68 +497,109 @@ if all_rows:
                 if we is not None:
                     sub_df = site_df[site_df["word_end"] == we]
                     qs_str = sub_df["qualifying_steps"].iloc[0] if len(sub_df) else ""
-                    ax.set_title(f"{we}  (ambig steps: {qs_str})", fontsize=9)
                 else:
                     sub_df = site_df
-                    ax.set_title("(all word_ends)", fontsize=9)
+                    qs_str = ""
 
-                steps = sorted(sub_df["resampled"].dropna().unique())
-                steps_cat = [str(int(s)) for s in steps]
-                bhv_vals  = sorted(sub_df[bhv_col].dropna().unique())
-                colors    = _DEFAULT_COLORS[:len(bhv_vals)]
-
-                for bi, bval in enumerate(bhv_vals):
-                    blabel = _bhv_label(pp, bval)
-                    color  = colors[bi]
-                    x_dodge = (bi - (len(bhv_vals) - 1) / 2) * 0.15
-
-                    # means, lo95, hi95 = [], [], []
-                    for step in steps:
-                        mask = (sub_df["resampled"] == step) & (sub_df[bhv_col] == bval)
-                        vals = sub_df.loc[mask, "decoder_proba"].values
-                        if len(vals) == 0:
-                            # means.append(np.nan); lo95.append(np.nan); hi95.append(np.nan)
-                            continue
-                        # m = float(vals.mean())
-                        # means.append(m)
-                        # if len(vals) >= 5:
-                        #     lo, hi = _ci95_bootstrap(vals)
-                        # else:
-                        #     lo, hi = m, m
-                        # lo95.append(lo); hi95.append(hi)
-
-                        x_strip = np.full(len(vals), steps.index(step)) + x_dodge
-                        x_jitter = x_strip + np.random.default_rng(42).uniform(-0.06, 0.06, len(vals))
-                        ax.scatter(x_jitter, vals, color=color, alpha=0.25, s=10, zorder=1)
-
-                    
-                    # ax.plot(x_line, means, color=color, lw=1.5, label=blabel, zorder=3)
-                    # ax.errorbar(
-                    #     x_line, means,
-                    #     yerr=[
-                    #         np.array(means) - np.array(lo95),
-                    #         np.array(hi95) - np.array(means),
-                    #     ],
-                    #     fmt="none", color=color, capsize=3, zorder=3,
-                    # )
-
-                # plot mean activation at different resampled steps, not split by behavior
-                means = sub_df.groupby("resampled")["decoder_proba"].mean().reindex(steps).values
-                overall_bootstrap = sub_df.groupby("resampled")["decoder_proba"].apply(lambda x: _ci95_bootstrap(x.to_numpy())).reindex(steps)
-                overall_lo95 = [lo for lo, hi in overall_bootstrap]
-                overall_hi95 = [hi for lo, hi in overall_bootstrap]
-                x_line = np.arange(len(steps)) + x_dodge
-                
-                ax.plot(x_line, sub_df.groupby("resampled")["decoder_proba"].mean().reindex(steps).values,
-                        color="black", lw=2.0, zorder=2)
-                ax.errorbar(
-                    x_line, means,
-                    yerr=[
-                        means - np.array(overall_lo95),
-                        np.array(overall_hi95) - means,
-                    ],
-                    fmt="none", color="black", capsize=5, zorder=3,
+                qualifying_steps_ints = (
+                    [int(s) for s in qs_str.split(",") if s.strip()]
+                    if qs_str else []
                 )
+                sub_df_reset = sub_df.reset_index(drop=True)
+
+                if not qualifying_steps_ints or len(sub_df_reset) == 0:
+                    title_we = we if we else "(all word_ends)"
+                    ax.set_title(f"{title_we}  (no qualifying steps)", fontsize=9)
+                    continue
+
+                # word_end for per_step_class_counts: sub_df is already filtered to
+                # this we, so the internal we_mask is all-True; pass the real value
+                # so the function's column check works.
+                _we_for_counts = we if we is not None else str(sub_df_reset["word_end"].iloc[0])
+                per_step = per_step_class_counts(
+                    sub_df_reset,
+                    word_end=_we_for_counts,
+                    qualifying_steps=qualifying_steps_ints,
+                    group_col=bhv_col,
+                )
+                n_per_class = n_per_class_from_per_step(per_step)
+
+                title_we = we if we else "(all word_ends)"
+                ax.set_title(
+                    f"{title_we}  steps:{qs_str}  n≈{n_per_class}/class",
+                    fontsize=9,
+                )
+
+                steps = sorted(per_step.keys())
+                steps_cat = [str(s) for s in steps]
+                bhv_vals = sorted(sub_df_reset[bhv_col].dropna().unique())
+                colors = _DEFAULT_COLORS[:len(bhv_vals)]
+
+                # --- Bootstrap replicates: per-step per-class mean decoder_proba ---
+                boot_step_class: dict = {s: {int(b): [] for b in bhv_vals} for s in steps}
+                for r_i in range(R_PLOT):
+                    rng_r = np.random.default_rng(r_i)
+                    for step, by_class in per_step.items():
+                        n_s = min(len(v) for v in by_class.values())
+                        if n_s == 0:
+                            continue
+                        for cls, idxs in by_class.items():
+                            drawn = rng_r.choice(idxs, size=n_s, replace=True)
+                            boot_step_class[step][cls].append(
+                                float(sub_df_reset.loc[drawn, "decoder_proba"].values.mean())
+                            )
+
+                # --- Scatter: one balanced draw (seed=0), split by class ---
+                draws0 = select_cell_trials_bootstrap(per_step, rng=np.random.default_rng(0))
+                for bi, bval in enumerate(bhv_vals):
+                    bval_int = int(bval)
+                    color = colors[bi]
+                    blabel = _bhv_label(pp, bval)
+                    if bval_int not in draws0:
+                        continue
+                    idx0 = draws0[bval_int]
+                    y_all = sub_df_reset.loc[idx0, "decoder_proba"].values
+                    step_all = sub_df_reset.loc[idx0, "resampled"].values
+                    x_dodge = (bi - (len(bhv_vals) - 1) / 2) * 0.15
+                    first = True
+                    for step_i, step in enumerate(steps):
+                        mask_s = step_all == step
+                        y_s = y_all[mask_s]
+                        if len(y_s) == 0:
+                            continue
+                        jitter = np.random.default_rng(42 + step_i * 10 + bi).uniform(
+                            -0.06, 0.06, len(y_s)
+                        )
+                        ax.scatter(
+                            np.full(len(y_s), step_i) + x_dodge + jitter,
+                            y_s,
+                            color=color, alpha=0.30, s=10, zorder=1,
+                            label=blabel if first else None,
+                        )
+                        first = False
+
+                # --- Mean ± bootstrap SE overlay per class ---
+                for bi, bval in enumerate(bhv_vals):
+                    bval_int = int(bval)
+                    color = colors[bi]
+                    x_line, means_b, ses_b = [], [], []
+                    for step_i, step in enumerate(steps):
+                        reps = boot_step_class[step].get(bval_int, [])
+                        if not reps:
+                            continue
+                        arr = np.array(reps)
+                        x_line.append(step_i)
+                        means_b.append(float(arr.mean()))
+                        ses_b.append(float(arr.std()))
+                    if x_line:
+                        x_dodge = (bi - (len(bhv_vals) - 1) / 2) * 0.15
+                        xl = [x + x_dodge for x in x_line]
+                        ax.plot(xl, means_b, color=color, lw=1.5, zorder=3)
+                        ax.errorbar(
+                            xl, means_b,
+                            yerr=np.array(ses_b),
+                            fmt="none", color=color, capsize=3, zorder=3,
+                        )
 
                 ax.set_xticks(range(len(steps)))
                 ax.set_xticklabels(steps_cat)
