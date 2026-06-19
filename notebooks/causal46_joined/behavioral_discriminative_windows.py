@@ -38,7 +38,9 @@
 # %% tags=["parameters"]
 b4_bootstrap_path = "outputs/causal46_joined/t_tests/b4_bootstrap.parquet"
 b4_per_cell_path = "outputs/causal46_joined/t_tests/b4_per_cell.parquet"
+filtered_manifest_path = "outputs/causal46_joined/manual_annotations/filtered_manifest.csv"
 outdir = "outputs/causal46_joined/behavioral_discriminative_windows"
+
 ci_low = 2.5
 ci_high = 97.5
 decoder_window_size = 15
@@ -84,6 +86,37 @@ for col in ("phon_smin", "phon_smax"):
         "This column is only written when t_tests.py has non-empty paired data "
         "(t_tests.py:722-732). Re-run t_tests with complete data."
     )
+
+# %% [markdown]
+# ## Filter cells to those with a post-acoustic behavioral label
+#
+# Only cells annotated with `behav @ac slightly late` or `behav @late` in the
+# filtered_manifest are processed. `behav @ac` is excluded — that timing bin
+# overlaps the acoustic window and is not a "behavioral discriminative window."
+
+# %%
+manifest = pl.read_csv(filtered_manifest_path)
+print(f"filtered_manifest: {manifest.height} rows")
+
+behav_post_ac = manifest.filter(
+    pl.col("behav @ac slightly late").is_not_null()
+    | pl.col("behav @late").is_not_null()
+)
+behav_keys: set[tuple] = {
+    (r["subject"], int(r["electrode_idx"]), r["phoneme_pair"], r["word_end"])
+    for r in behav_post_ac.iter_rows(named=True)
+}
+print(f"cells with behav @ac slightly late or @late: {len(behav_keys)}")
+
+n_before = b4_per_cell.height
+b4_per_cell = b4_per_cell.filter(
+    pl.struct(["subject", "electrode_idx", "phoneme_pair", "word_end"]).map_elements(
+        lambda r: (r["subject"], int(r["electrode_idx"]), r["phoneme_pair"], r["word_end"])
+                  in behav_keys,
+        return_dtype=pl.Boolean,
+    )
+)
+print(f"b4_per_cell after manifest filter: {b4_per_cell.height} / {n_before} cells")
 
 # %% [markdown]
 # ## Global grid validation
