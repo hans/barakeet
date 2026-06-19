@@ -68,6 +68,7 @@ from src.viz_paper import epoch_sfreq, epoch_tmin
 
 sys.path.insert(0, str(Path(".").resolve() / "notebooks" / "causal46_joined"))
 from _within_completion import (  # noqa: E402
+    bootstrap_endpoint_beta,
     extract_hga,
     matched_n_star_plot,
     resolve_behavior_col,
@@ -233,24 +234,20 @@ print(f"acoustic window: [{s_to_t(AC_SMIN):.3f}, {s_to_t(AC_SMAX):.3f}]s "
 
 # %%
 we_mask = (md_pp["word_end"] == word_end).values
-lo_idx = np.where(we_mask & (md_pp["resampled"] == 1).values)[0]   # step1 = /d/ side
-hi_idx = np.where(we_mask & (md_pp["resampled"] == 6).values)[0]   # step6 = /n/ side
-print(f"endpoint trials within {word_end}: step1 n={lo_idx.size}, step6 n={hi_idx.size}")
-if lo_idx.size < MIN_ENDPOINT_N or hi_idx.size < MIN_ENDPOINT_N:
+n_lo = int((we_mask & (md_pp["resampled"] == 1).values).sum())
+n_hi = int((we_mask & (md_pp["resampled"] == 6).values).sum())
+print(f"endpoint trials within {word_end}: step1 n={n_lo}, step6 n={n_hi}")
+n_bal = min(n_lo, n_hi)
+
+beta_unamb_arr = bootstrap_endpoint_beta(
+    hga, md_pp,
+    word_end=word_end, smin=SMIN, smax=SMAX,
+    R=R_UNAMB, min_n=MIN_ENDPOINT_N,
+)
+if beta_unamb_arr is None:
     raise SystemExit(
         f"Too few endpoint trials within word_end (need ≥{MIN_ENDPOINT_N} each)."
     )
-
-win_lo = hga[lo_idx, SMIN:SMAX].mean(axis=1)   # same snapped window as β_amb
-win_hi = hga[hi_idx, SMIN:SMAX].mean(axis=1)
-n_bal = min(lo_idx.size, hi_idx.size)
-
-beta_unamb_arr = np.empty(R_UNAMB)
-for r in range(R_UNAMB):
-    rng = np.random.default_rng(r)
-    draw_lo = rng.choice(win_lo, size=n_bal, replace=True).mean()
-    draw_hi = rng.choice(win_hi, size=n_bal, replace=True).mean()
-    beta_unamb_arr[r] = draw_hi - draw_lo   # fixed: step6 − step1 (= /n/ − /d/)
 
 beta_unamb_med = float(np.median(beta_unamb_arr))
 beta_unamb_ci = np.percentile(beta_unamb_arr, [CI_LOW, CI_HIGH])
