@@ -30,6 +30,9 @@
 
 # %% tags=["parameters"]
 b_windows_path = "outputs/causal46_joined/behavioral_discriminative_windows/b_windows.parquet"
+early_annotations_path = "outputs/causal46_joined/manual_annotations/early_acoustic_window.csv"
+filtered_manifest_path = "outputs/causal46_joined/manual_annotations/filtered_manifest.csv"
+
 epoch_dir = "outputs/epochs_preprocessed"
 textgrid_dir = "textgrids"
 outdir = "outputs/causal46_joined/strong_generator"
@@ -37,7 +40,9 @@ R_unamb = 1000
 ci_low = 2.5
 ci_high = 97.5
 min_endpoint_n = 3
-n_star_plot_examples = 8
+n_star_plot_examples = 20
+
+include_fallback = False
 
 # %%
 from __future__ import annotations
@@ -46,7 +51,6 @@ import sys
 from pathlib import Path
 
 import matplotlib
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -65,16 +69,24 @@ from _within_completion import (  # noqa: E402
     resolve_behavior_col,
     summarize_replicate_array,
 )
+from sankey_early_late import EARLY_TYPES, EARLY_LABELS, early_category_map
 
 # %%
 OUT_DIR = Path(outdir)
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 b_windows_pd = pl.read_parquet(b_windows_path).to_pandas()
+
 print(f"b_windows: {len(b_windows_pd)} rows  cols: {list(b_windows_pd.columns)}")
 print(f"  subjects:      {sorted(b_windows_pd['subject'].unique())}")
 print(f"  phoneme_pairs: {sorted(b_windows_pd['phoneme_pair'].unique())}")
 print(f"  word_ends:     {sorted(b_windows_pd['word_end'].unique())}")
+
+# %%
+early_types_df = pd.read_csv(early_annotations_path)
+early_types_df["early_category"] = early_types_df.site_type_relabel.replace(early_category_map)
+
+filtered_manifest_df = pd.read_csv(filtered_manifest_path)
 
 # %% [markdown]
 # ## Compute β_unamb for each behavioral window
@@ -148,6 +160,12 @@ result_df = (
     if rows_out
     else pd.DataFrame(columns=_COLS)
 )
+
+result_df = result_df.merge(
+    early_types_df[["subject", "electrode_idx", "phoneme_pair", "early_category"]],
+    on=["subject", "electrode_idx", "phoneme_pair"],
+    how="left")
+
 out_path = OUT_DIR / "strong_generator.parquet"
 result_df.to_parquet(str(out_path), index=False)
 print(f"Saved {len(result_df)} rows → {out_path}")
@@ -201,7 +219,10 @@ else:
     _valid_joined = _valid_joined.assign(
         abs_beta_ambig=_valid_joined["beta_ambig_mean"].abs()
     )
-    _examples = _valid_joined.nlargest(n_star_plot_examples, "abs_beta_ambig")
+
+    # DEV
+    _examples = _valid_joined.sample(n=min(n_star_plot_examples, len(_valid_joined)))
+    # _examples = _valid_joined.assign(contrast=lambda x: x.beta_ambig_mean - x.beta_unambig_mean).nlargest(n_star_plot_examples, "contrast")
 
     _ep_cache = {}
 
@@ -284,6 +305,15 @@ else:
 # Each point is one behavioral window (subject × electrode × phoneme_pair × word_end ×
 # window_id). Error bars are 95 % bootstrap CIs. The dashed identity line (y = x) is
 # the strong-generator prediction.
+
+# %%
+import seaborn as sns
+g = sns.lmplot(data=result_df, x="beta_ambig_mean", y="beta_unambig_mean",
+               hue="early_category", height=6, aspect=1.2)
+
+# add gridlines
+for ax in g.axes.flat:
+    ax.grid(True, which="both", ls="--", lw=0.5, alpha=0.7)
 
 # %%
 PP_COLORS = {"dn": "#1b7837", "bm": "#762a83", "pb": "#e08214"}
