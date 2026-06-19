@@ -8,7 +8,7 @@
 #       format_version: '1.3'
 #       jupytext_version: 1.19.1
 #   kernelspec:
-#     display_name: Python 3
+#     display_name: barakeet
 #     language: python
 #     name: python3
 # ---
@@ -51,7 +51,6 @@ import sys
 from pathlib import Path
 
 import matplotlib
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import mne
 import numpy as np
@@ -63,9 +62,12 @@ from matplotlib.backends.backend_pdf import PdfPages
 
 REPO = Path(".").resolve()
 sys.path.insert(0, str(REPO))
+sys.path.insert(0, str(REPO / "notebooks" / "causal46_joined"))
 
 from src.data import add_metadata_features
 from src.models.causal6 import run_acoustic_searchlight
+
+from _within_completion import resolve_behavior_col
 
 # %%
 _cfg = yaml.safe_load(Path(config_path).read_text())
@@ -137,9 +139,9 @@ print(type1_sites["subject"].value_counts())
 
 # %%
 _PHONEME_LABELS = {
-    "dn": {-1.0: "heard /d/", 1.0: "heard /n/"},
-    "bm": {-1.0: "heard /b/", 1.0: "heard /m/"},
-    "pb": {-1.0: "heard /p/", 1.0: "heard /b/"},
+    "dn": {0: "heard /d/", 1.0: "heard /n/"},
+    "bm": {0: "heard /b/", 1.0: "heard /m/"},
+    "pb": {0: "heard /p/", 1.0: "heard /b/"},
 }
 
 def _bhv_label(phoneme_pair: str, val: float) -> str:
@@ -186,6 +188,7 @@ for subject in sorted(subjects_in_annotations):
     if ep is None:
         continue
 
+    assert ep.metadata is not None
     md = ep.metadata
     # Assert contiguous 0..N-1 index (needed for get_data positional slicing in Tier A).
     assert list(md.index) == list(range(len(md))), (
@@ -207,9 +210,8 @@ for subject in sorted(subjects_in_annotations):
     # We call it per phoneme_pair to avoid combining phoneme pairs in one batch.
     pp_groups = subject_sites.group_by("phoneme_pair")
 
-    for pp_rows in pp_groups:
+    for (phoneme_pair,), pp_rows in pp_groups:
         # pp_rows is a DataFrame of sites for one phoneme_pair.
-        phoneme_pair = pp_rows["phoneme_pair"][0]
         electrode_idxs_pp = pp_rows["electrode_idx"].to_list()
 
         # Gather (smin, smax) windows from phon_peaks for these electrodes.
@@ -341,6 +343,7 @@ for subject in sorted(subjects_in_annotations):
                     "resampled":                 float(md_row["resampled"]),
                     "word_end":                  str(md_row["word_end"]) if "word_end" in md.columns else "",
                     "behavior_categorical_forced": float(md_row["behavior_categorical_forced"]),
+                    "behavior_dummy_forced":     md_row["behavior_dummy_forced"],
                     "decoder_proba":             decoder_proba,
                     "decoder_proba_aligned":     aligned,
                     "split":                     "endpoint",
@@ -376,6 +379,7 @@ for subject in sorted(subjects_in_annotations):
                     "resampled":                 float(md_row["resampled"]),
                     "word_end":                  str(md_row["word_end"]) if "word_end" in md.columns else "",
                     "behavior_categorical_forced": float(md_row["behavior_categorical_forced"]),
+                    "behavior_dummy_forced":     md_row["behavior_dummy_forced"],
                     "decoder_proba":             decoder_proba,
                     "decoder_proba_aligned":     aligned,
                     "split":                     "ambiguous",
@@ -414,9 +418,11 @@ if all_rows:
     _BHV_COLORS = {
         "heard /d/": "#2166ac", "heard /n/": "#d6604d",
         "heard /b/": "#2166ac", "heard /m/": "#d6604d",
-        "heard /p/": "#2166ac",
+        "heard /p/": "#2166ac", "heard /b/": "#d6604d",
     }
     _DEFAULT_COLORS = ["#2166ac", "#d6604d"]
+
+    bhv_col = resolve_behavior_col(trial_df)
 
     def _ci95_bootstrap(x: np.ndarray, n_boot: int = 2000, rng_seed: int = 0) -> tuple[float, float]:
         rng = np.random.default_rng(rng_seed)
@@ -448,7 +454,7 @@ if all_rows:
 
                 steps = sorted(sub_df["resampled"].dropna().unique())
                 steps_cat = [str(int(s)) for s in steps]
-                bhv_vals  = sorted(sub_df["behavior_categorical_forced"].dropna().unique())
+                bhv_vals  = sorted(sub_df[bhv_col].dropna().unique())
                 colors    = _DEFAULT_COLORS[:len(bhv_vals)]
 
                 for bi, bval in enumerate(bhv_vals):
@@ -456,35 +462,53 @@ if all_rows:
                     color  = colors[bi]
                     x_dodge = (bi - (len(bhv_vals) - 1) / 2) * 0.15
 
-                    means, lo95, hi95 = [], [], []
+                    # means, lo95, hi95 = [], [], []
                     for step in steps:
-                        mask = (sub_df["resampled"] == step) & (sub_df["behavior_categorical_forced"] == bval)
+                        mask = (sub_df["resampled"] == step) & (sub_df[bhv_col] == bval)
                         vals = sub_df.loc[mask, "decoder_proba"].values
                         if len(vals) == 0:
-                            means.append(np.nan); lo95.append(np.nan); hi95.append(np.nan)
+                            # means.append(np.nan); lo95.append(np.nan); hi95.append(np.nan)
                             continue
-                        m = float(vals.mean())
-                        means.append(m)
-                        if len(vals) >= 5:
-                            lo, hi = _ci95_bootstrap(vals)
-                        else:
-                            lo, hi = m, m
-                        lo95.append(lo); hi95.append(hi)
+                        # m = float(vals.mean())
+                        # means.append(m)
+                        # if len(vals) >= 5:
+                        #     lo, hi = _ci95_bootstrap(vals)
+                        # else:
+                        #     lo, hi = m, m
+                        # lo95.append(lo); hi95.append(hi)
 
                         x_strip = np.full(len(vals), steps.index(step)) + x_dodge
                         x_jitter = x_strip + np.random.default_rng(42).uniform(-0.06, 0.06, len(vals))
                         ax.scatter(x_jitter, vals, color=color, alpha=0.25, s=10, zorder=1)
 
-                    x_line = np.arange(len(steps)) + x_dodge
-                    ax.plot(x_line, means, color=color, lw=1.5, label=blabel, zorder=3)
-                    ax.errorbar(
-                        x_line, means,
-                        yerr=[
-                            np.array(means) - np.array(lo95),
-                            np.array(hi95) - np.array(means),
-                        ],
-                        fmt="none", color=color, capsize=3, zorder=3,
-                    )
+                    
+                    # ax.plot(x_line, means, color=color, lw=1.5, label=blabel, zorder=3)
+                    # ax.errorbar(
+                    #     x_line, means,
+                    #     yerr=[
+                    #         np.array(means) - np.array(lo95),
+                    #         np.array(hi95) - np.array(means),
+                    #     ],
+                    #     fmt="none", color=color, capsize=3, zorder=3,
+                    # )
+
+                # plot mean activation at different resampled steps, not split by behavior
+                means = sub_df.groupby("resampled")["decoder_proba"].mean().reindex(steps).values
+                overall_bootstrap = sub_df.groupby("resampled")["decoder_proba"].apply(lambda x: _ci95_bootstrap(x.to_numpy())).reindex(steps)
+                overall_lo95 = [lo for lo, hi in overall_bootstrap]
+                overall_hi95 = [hi for lo, hi in overall_bootstrap]
+                x_line = np.arange(len(steps)) + x_dodge
+                
+                ax.plot(x_line, sub_df.groupby("resampled")["decoder_proba"].mean().reindex(steps).values,
+                        color="black", lw=2.0, zorder=2)
+                ax.errorbar(
+                    x_line, means,
+                    yerr=[
+                        means - np.array(overall_lo95),
+                        np.array(overall_hi95) - means,
+                    ],
+                    fmt="none", color="black", capsize=5, zorder=3,
+                )
 
                 ax.set_xticks(range(len(steps)))
                 ax.set_xticklabels(steps_cat)
