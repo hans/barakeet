@@ -1146,6 +1146,45 @@ rule joined_behavioral_discriminative_windows:
         )
 
 
+rule joined_strong_generator:
+    """Strong-generator test: compare β_ambig vs β_unamb for each behavioral window.
+
+    For each row in b_windows.parquet, bootstraps the endpoint (step6 − step1)
+    HGA difference in the same [smin, smax] window and word_end as the stored
+    β_ambig. Outputs a 12-column parquet with both beta distributions summarised.
+    """
+    input:
+        b_windows  = "outputs/causal46_joined/behavioral_discriminative_windows/b_windows.parquet",
+        epoch_fifs = expand(
+            "outputs/epochs_preprocessed/{subject}_epo.fif",
+            subject=config["data"]["subjects"],
+        ),
+        helper   = "notebooks/causal46_joined/_within_completion.py",
+        notebook = "notebooks/causal46_joined/strong_generator.py",
+
+    output:
+        notebook = "outputs/causal46_joined/strong_generator/notebook.ipynb",
+        results  = "outputs/causal46_joined/strong_generator/strong_generator.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                b_windows_path=str(input.b_windows),
+                epoch_dir=str(Path(input.epoch_fifs[0]).parent),
+                textgrid_dir="textgrids",
+                outdir=str(outdir),
+                R_unamb=1000,
+                ci_low=2.5,
+                ci_high=97.5,
+                min_endpoint_n=3,
+                n_star_plot_examples=8,
+            ),
+        )
+
+
 rule joined_acoustic_transfer:
     """Acoustic transfer decoding: phonemic peak window vs. behavioral target window.
 
@@ -1260,6 +1299,8 @@ rule causal46_joined_all:
         "outputs/causal46_joined/behavioral_discriminative_windows/b_windows.parquet",
         # Acoustic transfer: phonemic peak window vs. behavioral target window
         "outputs/causal46_joined/acoustic_transfer/scores_all.parquet",
+        # Strong-generator test: β_ambig vs β_unamb per behavioral window
+        "outputs/causal46_joined/strong_generator/strong_generator.parquet",
 
 
 # =============================================================================

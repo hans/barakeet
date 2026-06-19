@@ -278,6 +278,62 @@ def bootstrap_A_site(
     return rows, n_lo, n_hi
 
 
+def bootstrap_endpoint_beta(
+    hga: np.ndarray,
+    md_pp: pd.DataFrame,
+    *,
+    word_end: str,
+    smin: int,
+    smax: int,
+    endpoints: tuple = (1, 6),
+    R: int = 1000,
+    min_n: int = 3,
+    base_seed: int = 0,
+) -> np.ndarray | None:
+    """Bootstrap the endpoint step difference in a fixed time window.
+
+    Computes step hi − step lo (default: step6 − step1 = /n/ − /d/) within
+    `word_end`, using the same fixed /n/−/d/ reference as β_ambig. Each
+    replicate draws min(n_lo, n_hi) trials with replacement from each endpoint.
+
+    Parameters
+    ----------
+    hga : (n_trials, n_times) array, aligned to md_pp integer index.
+    md_pp : metadata for the ep_pp subset, reset_index(drop=True).
+    word_end : completion to restrict trials to (e.g. 'necessary').
+    smin, smax : sample-index bounds (half-open: hga[:, smin:smax].mean(axis=1)).
+    endpoints : (lo_step, hi_step) — lo subtracted from hi.
+    R : number of bootstrap replicates.
+    min_n : minimum trials per endpoint within word_end; returns None if either
+            endpoint falls below this threshold.
+    base_seed : RNG seed offset (replicate r uses seed base_seed + r).
+
+    Returns
+    -------
+    np.ndarray of shape (R,) with per-replicate hi−lo differences,
+    or None if either endpoint has < min_n trials.
+    """
+    lo, hi = endpoints
+    we_mask = (md_pp["word_end"] == word_end).values
+    lo_idx = np.where(we_mask & (md_pp["resampled"] == lo).values)[0]
+    hi_idx = np.where(we_mask & (md_pp["resampled"] == hi).values)[0]
+    if lo_idx.size < min_n or hi_idx.size < min_n:
+        return None
+
+    win_lo = hga[lo_idx, smin:smax].mean(axis=1)
+    win_hi = hga[hi_idx, smin:smax].mean(axis=1)
+    n_bal = min(lo_idx.size, hi_idx.size)
+
+    out = np.empty(R)
+    for r in range(R):
+        rng = np.random.default_rng(base_seed + r)
+        out[r] = (
+            rng.choice(win_hi, size=n_bal, replace=True).mean()
+            - rng.choice(win_lo, size=n_bal, replace=True).mean()
+        )
+    return out
+
+
 def load_behav_decoding_scores(full_path, hga_path=None):
     """Load and aggregate behavioral decoding scores from causal46_joined scores.parquet files.
 
