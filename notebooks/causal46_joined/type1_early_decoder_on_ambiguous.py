@@ -34,13 +34,14 @@
 # file are skipped with a warning. Run in production where all subjects' files are present.
 
 # %% tags=["parameters"]
-annotations_path = "outputs/causal46_joined/manual_annotations/early_acoustic_window.csv"
-phon_peaks_root  = "outputs/causal6/acoustic_decoding_peaks"
-epoch_dir        = "outputs/epochs_preprocessed"
-config_path      = "config.yaml"
+annotations_path    = "outputs/causal46_joined/manual_annotations/early_acoustic_window.csv"
+trial_balance_path  = "outputs/causal46_joined/trial_balance_index.csv"
+phon_peaks_root     = "outputs/causal6/acoustic_decoding_peaks"
+epoch_dir           = "outputs/epochs_preprocessed"
+config_path         = "config.yaml"
 reg_lambda_winners_path = "outputs/causal6/reg_lambda_sweep/reg_lambda_winners.json"
-outdir           = "outputs/causal46_joined/type1_early_decoder_on_ambiguous"
-device           = "cpu"
+outdir              = "outputs/causal46_joined/type1_early_decoder_on_ambiguous"
+device              = "cpu"
 
 # %% [markdown]
 # ## Imports and configuration
@@ -66,6 +67,7 @@ sys.path.insert(0, str(REPO / "notebooks" / "causal46_joined"))
 
 from src.data import add_metadata_features
 from src.models.causal6 import run_acoustic_searchlight
+from src.stimuli import PHONEME_PAIR_TO_WORD_ENDS
 
 from _within_completion import resolve_behavior_col
 
@@ -133,6 +135,32 @@ n_ok    = int((type1_sites["status"] == "ok").sum())
 L.info(f"Type1 sites: {n_type1} total ({n_ok} ok, {n_type1 - n_ok} non-ok status)")
 print(type1_sites["status"].value_counts())
 print(type1_sites["subject"].value_counts())
+
+# %% [markdown]
+# ## Load trial balance and build qualifying-steps lookup
+#
+# `is_ambiguous_step` is electrode-independent (purely behavioral), so we can
+# build the lookup from any electrode and use it for all type1 sites.
+
+# %%
+_trial_balance = pl.read_csv(trial_balance_path)
+_ambig_rows = (
+    _trial_balance
+    .filter(pl.col("is_ambiguous_step"))
+    .select(["subject", "phoneme_pair", "word_end", "resampled"])
+    .unique()
+)
+# step_lookup[(subject, phoneme_pair, word_end)] → sorted list of qualifying resampled steps
+step_lookup: dict[tuple, list[float]] = {}
+for _r in _ambig_rows.iter_rows(named=True):
+    _key = (_r["subject"], _r["phoneme_pair"], _r["word_end"])
+    step_lookup.setdefault(_key, []).append(float(_r["resampled"]))
+for _key in step_lookup:
+    step_lookup[_key] = sorted(step_lookup[_key])
+
+print(f"step_lookup: {len(step_lookup)} (subject, phoneme_pair, word_end) combinations")
+print("Example (EC243, dn, necessary):",
+      step_lookup.get(("EC243", "dn", "necessary"), "not found"))
 
 # %% [markdown]
 # ## Phoneme-pair → label mapping
@@ -323,10 +351,11 @@ for subject in sorted(subjects_in_annotations):
                     f"refitted={refitted_auc:.4f} logged={logged_auc:.4f}"
                 )
 
-            # ---------- Endpoint predictions (steps 1 and 6) from test-fold held-out preds ----------
-            pp_ep_mask = (md["phoneme_pair"] == phoneme_pair).values & md["resampled"].isin([1, 6]).values
-            ep_md_endpt = md[pp_ep_mask]
-            endpt_epoch_idxs = ep_md_endpt.index.to_numpy()
+            # ---------- Ambiguous trials: per word_end, using subject-specific qualifying steps ----------
+            # qualifying steps come from trial_balance_index.csv (is_ambiguous_step==True),
+            # which reflects where the subject actually gave both response types.
+            pp_word_ends = PHONEME_PAIR_TO_WORD_ENDS.get(phoneme_pair, [])
+            any_ambig = False
 
             preds_pp_pd = preds_pp.to_pandas()
             # Each endpoint trial appears exactly once across folds.
@@ -351,42 +380,57 @@ for subject in sorted(subjects_in_annotations):
                     "logged_auc":                logged_auc,
                     "site_label":                f"{subject} e{eidx} {phoneme_pair}",
                 })
+            for we in pp_word_ends:
+                qualifying_steps = step_lookup.get((subject, phoneme_pair, we), [])
+                if not qualifying_steps:
+                    L.warning(
+                        f"[{subject} e{eidx} {phoneme_pair} {we}] "
+                        "No qualifying ambiguous steps in trial_balance"
+                    )
+                    continue
 
-            # ---------- Ambiguous trials (steps 2-5) ----------
-            pp_ambig_mask = (
-                (md["phoneme_pair"] == phoneme_pair).values
-                & md["resampled"].isin([2, 3, 4, 5]).values
-            )
-            if pp_ambig_mask.sum() == 0:
-                L.warning(f"[{subject} e{eidx} {phoneme_pair}] No ambiguous trials found")
-                continue
+                pp_we_mask = (
+                    (md["phoneme_pair"] == phoneme_pair).values
+                    & (md["word_end"] == we).values
+                    & md["resampled"].isin(qualifying_steps).values
+                )
+                if pp_we_mask.sum() == 0:
+                    L.warning(
+                        f"[{subject} e{eidx} {phoneme_pair} {we}] "
+                        f"Qualifying steps {qualifying_steps} but no matching epochs"
+                    )
+                    continue
 
-            X_ambig = epoch_data_full[pp_ambig_mask, eidx, smin:smax].astype(np.float64)
-            proba_ambig = _reconstruct_proba(coefs_pp, X_ambig)
+                any_ambig = True
+                X_ambig = epoch_data_full[pp_we_mask, eidx, smin:smax].astype(np.float64)
+                proba_ambig = _reconstruct_proba(coefs_pp, X_ambig)
 
-            md_ambig = md[pp_ambig_mask].copy()
-            md_ambig_epoch_idxs = md_ambig.index.to_numpy()
+                md_ambig = md[pp_we_mask].copy()
+                qualifying_steps_str = ",".join(str(int(s)) for s in qualifying_steps)
 
-            for i, ep_idx in enumerate(md_ambig_epoch_idxs):
-                md_row = md_ambig.iloc[i]
-                decoder_proba = float(proba_ambig[i])
-                aligned = decoder_proba if acoustic_sign >= 0 else 1.0 - decoder_proba
-                all_rows.append({
-                    "subject":                   subject,
-                    "electrode_idx":             eidx,
-                    "phoneme_pair":              phoneme_pair,
-                    "epoch_idx":                 int(ep_idx),
-                    "resampled":                 float(md_row["resampled"]),
-                    "word_end":                  str(md_row["word_end"]) if "word_end" in md.columns else "",
-                    "behavior_categorical_forced": float(md_row["behavior_categorical_forced"]),
-                    "behavior_dummy_forced":     md_row["behavior_dummy_forced"],
-                    "decoder_proba":             decoder_proba,
-                    "decoder_proba_aligned":     aligned,
-                    "split":                     "ambiguous",
-                    "acoustic_sign":             acoustic_sign,
-                    "logged_auc":                logged_auc,
-                    "site_label":                f"{subject} e{eidx} {phoneme_pair}",
-                })
+                for i, (_, md_row) in enumerate(md_ambig.iterrows()):
+                    decoder_proba = float(proba_ambig[i])
+                    aligned = decoder_proba if acoustic_sign >= 0 else 1.0 - decoder_proba
+                    all_rows.append({
+                        "subject":                   subject,
+                        "electrode_idx":             eidx,
+                        "phoneme_pair":              phoneme_pair,
+                        "epoch_idx":                 int(ep_idx),
+                        "resampled":                 float(md_row["resampled"]),
+                        "word_end":                  str(md_row["word_end"]) if "word_end" in md.columns else "",
+                        "behavior_categorical_forced": float(md_row["behavior_categorical_forced"]),
+                        "behavior_dummy_forced":     md_row["behavior_dummy_forced"],
+                        "decoder_proba":             decoder_proba,
+                        "decoder_proba_aligned":     aligned,
+                        "split":                     "ambiguous",
+                        "qualifying_steps":           qualifying_steps_str,
+                        "acoustic_sign":             acoustic_sign,
+                        "logged_auc":                logged_auc,
+                        "site_label":                f"{subject} e{eidx} {phoneme_pair}",
+                    })
+
+            if not any_ambig:
+                L.warning(f"[{subject} e{eidx} {phoneme_pair}] No qualifying ambiguous trials across any word_end")
 
 # %% [markdown]
 # ## Concatenate and write trial_df.parquet
@@ -410,16 +454,13 @@ else:
 # %% [markdown]
 # ## Figure 1 — Per-site catplots
 #
-# One page per site. x-axis = resampled step (categorical), y-axis = decoder_proba.
-# Hue = behavioral response. Two columns = word_end facets.
+# One page per site. x-axis = qualifying ambiguous resampled steps (subject-specific),
+# y-axis = decoder_proba. Hue = behavioral response. Two columns = word_end facets.
+# Only `split == "ambiguous"` trials are shown — these are steps where the subject
+# gave both response types (from trial_balance_index.csv).
 
 # %%
 if all_rows:
-    _BHV_COLORS = {
-        "heard /d/": "#2166ac", "heard /n/": "#d6604d",
-        "heard /b/": "#2166ac", "heard /m/": "#d6604d",
-        "heard /p/": "#2166ac", "heard /b/": "#d6604d",
-    }
     _DEFAULT_COLORS = ["#2166ac", "#d6604d"]
 
     bhv_col = resolve_behavior_col(trial_df)
@@ -433,7 +474,11 @@ if all_rows:
 
     with PdfPages(outdir_path / "per_site_catplots.pdf") as pdf:
         for site_label in site_order_for_pdf:
-            site_df = trial_df[trial_df["site_label"] == site_label]
+            site_df = trial_df[
+                (trial_df["site_label"] == site_label) & (trial_df["split"] == "ambiguous")
+            ]
+            if len(site_df) == 0:
+                continue
             subject   = str(site_df["subject"].iloc[0])
             eidx      = int(site_df["electrode_idx"].iloc[0])
             pp        = str(site_df["phoneme_pair"].iloc[0])
@@ -447,7 +492,8 @@ if all_rows:
                 ax = axes[0, col_i]
                 if we is not None:
                     sub_df = site_df[site_df["word_end"] == we]
-                    ax.set_title(we, fontsize=9)
+                    qs_str = sub_df["qualifying_steps"].iloc[0] if len(sub_df) else ""
+                    ax.set_title(f"{we}  (ambig steps: {qs_str})", fontsize=9)
                 else:
                     sub_df = site_df
                     ax.set_title("(all word_ends)", fontsize=9)
@@ -532,21 +578,25 @@ if all_rows:
 # %% [markdown]
 # ## Figure 2 — Aggregate summary
 #
-# One column per site (sorted by AUC descending), one dot per resampled step,
-# colored by step using a diverging colormap.
+# One column per site (sorted by AUC descending), one dot per qualifying ambiguous
+# resampled step, colored by step using a diverging colormap.
+# Only `split == "ambiguous"` trials are shown.
 
 # %%
 if all_rows:
+    ambig_df = trial_df[trial_df["split"] == "ambiguous"]
+
     # Site order: sort by logged_auc descending.
     site_auc = (
-        trial_df.groupby("site_label")["logged_auc"].first()
+        ambig_df.groupby("site_label")["logged_auc"].first()
         .sort_values(ascending=False)
     )
     site_order = list(site_auc.index)
     n_sites = len(site_order)
 
-    step_values = [1, 2, 3, 4, 5, 6]
-    step_colors = plt.cm.RdBu_r(np.linspace(0.05, 0.95, len(step_values)))
+    # Step values derived from data (typically 2-5 but subject-specific).
+    step_values = sorted(ambig_df["resampled"].dropna().unique())
+    step_colors = plt.cm.RdBu_r(np.linspace(0.15, 0.85, len(step_values)))
 
     fig, axes = plt.subplots(2, 1, figsize=(max(10, n_sites * 0.35), 7), sharex=True)
 
@@ -556,33 +606,33 @@ if all_rows:
         x_base = np.arange(n_sites) + step_i * 0.12
         site_means = []
         for sl in site_order:
-            vals = trial_df.loc[
-                (trial_df["site_label"] == sl) & (trial_df["resampled"] == step),
+            vals = ambig_df.loc[
+                (ambig_df["site_label"] == sl) & (ambig_df["resampled"] == step),
                 "decoder_proba_aligned"
             ].values
             site_means.append(float(vals.mean()) if len(vals) > 0 else np.nan)
         ax.scatter(
             x_base, site_means,
-            color=step_colors[step_i], s=20, alpha=0.85, label=f"step {step}",
+            color=step_colors[step_i], s=20, alpha=0.85, label=f"step {int(step)}",
         )
     ax.set_ylabel("decoder_proba_aligned")
-    ax.set_title("All trials pooled")
+    ax.set_title("Ambiguous trials — pooled behavior")
     ax.axhline(0.5, color="gray", ls="--", lw=0.5)
     ax.set_ylim(-0.05, 1.05)
     ax.legend(title="resampled step", loc="upper right", fontsize=7, ncol=3)
 
     # --- Panel B: split by behavior (-1 vs +1) ---
     ax = axes[1]
-    bhv_styles = {-1.0: dict(marker="v", alpha=0.5), 1.0: dict(marker="^", alpha=0.5)}
+    bhv_styles = {0: dict(marker="v", alpha=0.5), 1: dict(marker="^", alpha=0.5)}
     for step_i, step in enumerate(step_values):
-        for bi, bval in enumerate([-1.0, 1.0]):
+        for bi, bval in enumerate([0, 1]):
             x_base = np.arange(n_sites) + step_i * 0.12 + bi * 0.04
             site_means = []
             for sl in site_order:
-                vals = trial_df.loc[
-                    (trial_df["site_label"] == sl)
-                    & (trial_df["resampled"] == step)
-                    & (trial_df["behavior_categorical_forced"] == bval),
+                vals = ambig_df.loc[
+                    (ambig_df["site_label"] == sl)
+                    & (ambig_df["resampled"] == step)
+                    & (ambig_df["behavior_categorical_forced"] == bval),
                     "decoder_proba_aligned",
                 ].values
                 site_means.append(float(vals.mean()) if len(vals) > 0 else np.nan)
@@ -592,7 +642,7 @@ if all_rows:
                 **bhv_styles[bval],
             )
     ax.set_ylabel("decoder_proba_aligned")
-    ax.set_title("Split by behavior (▲=+1, ▼=−1)")
+    ax.set_title("Ambiguous trials — split by behavior (▲=+1, ▼=−1)")
     ax.axhline(0.5, color="gray", ls="--", lw=0.5)
     ax.set_ylim(-0.05, 1.05)
     ax.set_xticks(np.arange(n_sites))
