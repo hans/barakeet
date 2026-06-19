@@ -1033,3 +1033,46 @@ def early_window_star_plot_compact(
     fig._ax_b2 = ax_bot
     fig.tight_layout(pad=0.5, h_pad=0.6)
     return fig
+
+
+# =============================================================================
+# Bootstrap CI helper
+# =============================================================================
+
+
+def summarize_replicate_array(
+    arr: np.ndarray,
+    ci_low: float = 2.5,
+    ci_high: float = 97.5,
+) -> dict:
+    """Summarize a 1-D bootstrap replicate array.
+
+    Uses np.percentile (linear interpolation), matching strong_generator_demo.py.
+    NOTE: t_tests.py per_window_summary uses polars .quantile() (nearest by
+    default), so CIs from this helper may differ by one interpolation step at
+    bound-near-zero. The gating check (comparing against stored b4_per_window
+    ci_raw_excludes_zero) requires the outputs_prod/ mount and is deferred.
+
+    Returns dict with keys:
+        mean, median, ci_lo, ci_hi, emp_p, ci_excludes_zero
+    """
+    arr = np.asarray(arr, dtype=float)
+    finite = arr[np.isfinite(arr)]
+    if finite.size == 0:
+        return dict(
+            mean=float("nan"), median=float("nan"),
+            ci_lo=float("nan"), ci_hi=float("nan"),
+            emp_p=float("nan"), ci_excludes_zero=False,
+        )
+    ci_lo, ci_hi = np.percentile(finite, [ci_low, ci_high])
+    frac_le0 = float(np.mean(finite <= 0))
+    frac_ge0 = float(np.mean(finite >= 0))
+    emp_p = min(2.0 * min(frac_le0, frac_ge0), 1.0)
+    return dict(
+        mean=float(np.mean(finite)),
+        median=float(np.median(finite)),
+        ci_lo=float(ci_lo),
+        ci_hi=float(ci_hi),
+        emp_p=emp_p,
+        ci_excludes_zero=bool(ci_lo > 0 or ci_hi < 0),
+    )
