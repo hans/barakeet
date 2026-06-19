@@ -147,10 +147,19 @@ The CI/`ci_raw_excludes_zero`/`emp_p` computation currently lives **inline** in
 `t_tests.py:per_window_summary` (lines ~449-492). Extract it into a notebook-local
 helper — `summarize_replicate_array(arr, ci_low=2.5, ci_high=97.5) -> dict` returning
 `mean, median, ci_lo, ci_hi, emp_p, ci_excludes_zero` — placed in `_within_completion.py`
-(or a new `_windows.py`), and refactor `t_tests.py` to import it. This guarantees
-"significant" means bit-identically the same thing in both files (project convention:
-extract shared logic, then both import it). Verify B4 outputs are unchanged after the
-refactor.
+(or a new `_windows.py`), and **both** files import + use it.
+
+**GATING: resolve interpolation mismatch before writing helper.** Polars `.quantile()`
+and `np.percentile` differ in interpolation (nearest vs. linear by default). At a CI
+bound near zero this can flip `ci_raw_excludes_zero`. The helper must use the same
+method as B4's stored CIs — and `strong_generator_demo.py` already uses `np.percentile`
+(linear). The gating check (once `outputs_prod/` is mounted): load prod
+`b4_bootstrap.parquet` + `b4_per_window.parquet`, run `summarize_replicate_array` on
+each window's replicate array, compare `ci_excludes_zero` against the stored
+`ci_raw_excludes_zero`. If full agreement → canonicalize on `np.percentile` (linear)
+and proceed. If any disagreement → surface to user (the two requirements — match
+`strong_generator` vs. reproduce stored B4 CIs — may conflict). Until confirmed,
+use `np.percentile` (matching `strong_generator_demo.py`) and document the choice.
 
 ## Manual override hook (schema now, guarded stub)
 
@@ -172,14 +181,26 @@ optional `manual_override_path`. Add `b_windows.parquet` to the
 
 ## Sequencing
 
-1. Extract `summarize_replicate_array` helper; refactor + verify `t_tests.py`.
-2. Build `behavioral_discriminative_windows.py` (automated path) + outputs.
+0. **After `outputs_prod/` is mounted**: run the gating check (compare numpy helper
+   CIs against stored `b4_per_window.parquet` `ci_raw_excludes_zero`) and resolve
+   interpolation method. Then proceed:
+1. Extract `summarize_replicate_array` helper into `_within_completion.py`; refactor
+   `t_tests.py`'s `per_window_summary` to use it (replace inline polars quantile with
+   `map_elements` or restructure to loop — or at minimum confirm the two computations
+   agree on prod data before shipping the new notebook). Iterate B4 cells from
+   `b4_per_cell` (already has `phon_smax`, `n_per_class`, `acoustic_peak_auc`, `R_replicates`);
+   slice `b4_bootstrap` only for the replicate arrays.
+2. Build `behavioral_discriminative_windows.py` (automated path) + outputs. Only touch
+   `mean_diff_raw` (fixed /n/−/d/ reference); never `mean_diff_aligned`.
 3. Wire the Snakefile rule; `uv run snakemake -n` to validate the DAG.
 4. (Later) implement the manual merge body; build strong-generator + transfer rules
    on top of `b_windows*.parquet`.
 
 ## Open / verify
 
+- **`outputs_prod/` must be mounted before running the gating check.** All downstream
+  verification (interpolation agreement, CI counts, β histograms) requires prod parquets.
+  Container restart required to mount — plan was updated 2026-06-19 pending that.
 - causal6 decoder window width = **15 samples** (`config.yaml:50`), stride 2 — locked.
   Sets `narrower_than_decoder` (need ≥3 contiguous b4 grid windows for a transferable
   union).
