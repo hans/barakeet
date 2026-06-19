@@ -152,75 +152,78 @@ rng = np.random.default_rng(0)
 trial_df["site_label"] = trial_df.subject.str.cat(trial_df.electrode_idx.astype(str), sep="-").str.cat(trial_df.phoneme_pair, sep=": ")
 trial_df["hga_dprime"] = trial_df["hga_endpoint_dprime"] * (trial_df["hga_norm"] - 0.5)
 
-pool["site_label"] = pool.subject.str.cat(pool.electrode_idx.astype(str), sep="-").str.cat(pool.phoneme_pair, sep=": ")
+if len(pool) == 0:
+    print(f"{subject}: no acoustic sites in pool, skipping visualization")
+else:
+    pool["site_label"] = pool.subject.str.cat(pool.electrode_idx.astype(str), sep="-").str.cat(pool.phoneme_pair, sep=": ")
 
-# Sample evenly across the AUC range (same approach as acoustic_gradient_figures)
-_pool_sorted = pool.sort_values("test_roc_auc").reset_index(drop=True)
-n_sample = min(24, len(_pool_sorted))
-_sample_idx = np.round(np.linspace(0, len(_pool_sorted) - 1, n_sample)).astype(int)
-pool_sample = _pool_sorted.iloc[_sample_idx].copy().reset_index(drop=True)
+    # Sample evenly across the AUC range (same approach as acoustic_gradient_figures)
+    _pool_sorted = pool.sort_values("test_roc_auc").reset_index(drop=True)
+    n_sample = min(24, len(_pool_sorted))
+    _sample_idx = np.round(np.linspace(0, len(_pool_sorted) - 1, n_sample)).astype(int)
+    pool_sample = _pool_sorted.iloc[_sample_idx].copy().reset_index(drop=True)
 
-n_cols = 4
-n_rows = int(np.ceil(n_sample / n_cols))
-fig, axes = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols, 4 * n_rows), sharey=False)
-axes_flat = axes.flatten()
+    n_cols = 4
+    n_rows = int(np.ceil(n_sample / n_cols))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols, 4 * n_rows), sharey=False)
+    axes_flat = axes.flatten()
 
-for ax_idx, (_, site_row) in enumerate(pool_sample.iterrows()):
-    ax = axes_flat[ax_idx]
-    site_data = trial_df[trial_df["site_label"] == site_row["site_label"]].dropna(
-        subset=["resampled", "hga_dprime"]
-    )
+    for ax_idx, (_, site_row) in enumerate(pool_sample.iterrows()):
+        ax = axes_flat[ax_idx]
+        site_data = trial_df[trial_df["site_label"] == site_row["site_label"]].dropna(
+            subset=["resampled", "hga_dprime"]
+        )
 
-    # Faint per-step scatter (background context)
-    for step in range(1, 7):
-        mask = site_data["resampled"] == step
-        xvals = step + rng.uniform(-0.2, 0.2, mask.sum())
-        ax.scatter(xvals, site_data.loc[mask, "hga_dprime"],
-                   c=[step_colors[step]], alpha=0.12, s=6, linewidths=0)
+        # Faint per-step scatter (background context)
+        for step in range(1, 7):
+            mask = site_data["resampled"] == step
+            xvals = step + rng.uniform(-0.2, 0.2, mask.sum())
+            ax.scatter(xvals, site_data.loc[mask, "hga_dprime"],
+                       c=[step_colors[step]], alpha=0.12, s=6, linewidths=0)
 
-    # Mean ± SEM neurometric line
-    step_stats = (
-        site_data.groupby("resampled")["hga_dprime"]
-        .agg(["mean", "sem"])
-        .reindex(range(1, 7))
-        .dropna()
-    )
-    ax.errorbar(step_stats.index, step_stats["mean"], yerr=step_stats["sem"],
-                fmt="k-o", linewidth=1.5, markersize=4, capsize=3, zorder=5)
+        # Mean ± SEM neurometric line
+        step_stats = (
+            site_data.groupby("resampled")["hga_dprime"]
+            .agg(["mean", "sem"])
+            .reindex(range(1, 7))
+            .dropna()
+        )
+        ax.errorbar(step_stats.index, step_stats["mean"], yerr=step_stats["sem"],
+                    fmt="k-o", linewidth=1.5, markersize=4, capsize=3, zorder=5)
 
-    # AX discrimination on secondary y-axis
-    site_ax = ax_discrimination_df[
-        (ax_discrimination_df["subject"] == site_row["subject"])
-        & (ax_discrimination_df["electrode_idx"] == site_row["electrode_idx"])
-        & (ax_discrimination_df["phoneme_pair"] == site_row["phoneme_pair"])
+        # AX discrimination on secondary y-axis
+        site_ax = ax_discrimination_df[
+            (ax_discrimination_df["subject"] == site_row["subject"])
+            & (ax_discrimination_df["electrode_idx"] == site_row["electrode_idx"])
+            & (ax_discrimination_df["phoneme_pair"] == site_row["phoneme_pair"])
+        ]
+        if len(site_ax) > 0:
+            ax2 = ax.twinx()
+            midpoints = (site_ax["step_a"].values + site_ax["step_b"].values) / 2.0
+            ax2.plot(midpoints, site_ax["roc_auc"].values, "D--",
+                     color="green", linewidth=1.2, markersize=4, alpha=0.8, zorder=6)
+            ax2.set_ylim(0.4, 1.0)
+            ax2.tick_params(axis="y", labelcolor="green", labelsize=6)
+            if ax_idx % n_cols == n_cols - 1:
+                ax2.set_ylabel("AX discrim. AUC", color="green", fontsize=7)
+
+        ax.axhline(0, color="gray", linestyle="--", linewidth=0.8)
+        ax.set_xticks([1, 2, 3, 4, 5, 6])
+        ax.set_xlim(0.5, 6.5)
+        ax.set_title(f"{site_row['site_label']}\nAUC={site_row['test_roc_auc']:.2f}", fontsize=7.5)
+        ax.set_xlabel("Morph step")
+        if ax_idx % n_cols == 0:
+            ax.set_ylabel("HGA d-prime (endpoint SDs)")
+
+    step_handles = [
+        plt.Line2D([0], [0], color=step_colors[s], linewidth=2, label=f"step {s}")
+        for s in range(1, 7)
     ]
-    if len(site_ax) > 0:
-        ax2 = ax.twinx()
-        midpoints = (site_ax["step_a"].values + site_ax["step_b"].values) / 2.0
-        ax2.plot(midpoints, site_ax["roc_auc"].values, "D--",
-                 color="green", linewidth=1.2, markersize=4, alpha=0.8, zorder=6)
-        ax2.set_ylim(0.4, 1.0)
-        ax2.tick_params(axis="y", labelcolor="green", labelsize=6)
-        if ax_idx % n_cols == n_cols - 1:
-            ax2.set_ylabel("AX discrim. AUC", color="green", fontsize=7)
-
-    ax.axhline(0, color="gray", linestyle="--", linewidth=0.8)
-    ax.set_xticks([1, 2, 3, 4, 5, 6])
-    ax.set_xlim(0.5, 6.5)
-    ax.set_title(f"{site_row['site_label']}\nAUC={site_row['test_roc_auc']:.2f}", fontsize=7.5)
-    ax.set_xlabel("Morph step")
-    if ax_idx % n_cols == 0:
-        ax.set_ylabel("HGA d-prime (endpoint SDs)")
-
-step_handles = [
-    plt.Line2D([0], [0], color=step_colors[s], linewidth=2, label=f"step {s}")
-    for s in range(1, 7)
-]
-step_handles.append(
-    plt.Line2D([0], [0], color="green", linewidth=1.2, linestyle="--",
-               marker="D", markersize=4, label="AX discrim. AUC")
-)
-fig.legend(handles=step_handles, loc="lower right", fontsize=8, ncol=4)
-fig.suptitle("Neurometric function at individual acoustic sites (sorted by AUC, low→high)\n"
-             "colored by morph step (percept label not available)", fontsize=11)
-plt.tight_layout()
+    step_handles.append(
+        plt.Line2D([0], [0], color="green", linewidth=1.2, linestyle="--",
+                   marker="D", markersize=4, label="AX discrim. AUC")
+    )
+    fig.legend(handles=step_handles, loc="lower right", fontsize=8, ncol=4)
+    fig.suptitle("Neurometric function at individual acoustic sites (sorted by AUC, low→high)\n"
+                 "colored by morph step (percept label not available)", fontsize=11)
+    plt.tight_layout()
