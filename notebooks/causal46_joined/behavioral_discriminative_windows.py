@@ -36,13 +36,13 @@
 # See: docs/superpowers/plans/2026-06-19-causal46-behavioral-discriminative-windows.md
 
 # %% tags=["parameters"]
-b4_bootstrap_path: str = "outputs/causal46_joined/t_tests/b4_bootstrap.parquet"
-b4_per_cell_path: str = "outputs/causal46_joined/t_tests/b4_per_cell.parquet"
-outdir: str = "outputs/causal46_joined/behavioral_discriminative_windows"
-ci_low: float = 2.5
-ci_high: float = 97.5
-decoder_window_size: int = 15
-manual_override_path: str | None = None
+b4_bootstrap_path = "outputs/causal46_joined/t_tests/b4_bootstrap.parquet"
+b4_per_cell_path = "outputs/causal46_joined/t_tests/b4_per_cell.parquet"
+outdir = "outputs/causal46_joined/behavioral_discriminative_windows"
+ci_low = 2.5
+ci_high = 97.5
+decoder_window_size = 15
+manual_override_path = None
 
 # %%
 import sys
