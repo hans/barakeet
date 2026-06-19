@@ -1112,6 +1112,40 @@ rule joined_t_tests:
         )
 
 
+rule joined_behavioral_discriminative_windows:
+    """Infer behaviorally-discriminative windows per B4 cell (pure post-processing).
+
+    For each (subject, electrode, phoneme_pair, word_end) cell, finds time
+    window(s) beyond the acoustic peak with reliable within-completion HGA
+    contrast (β_ambig). No epoch reload — pure post-processing over
+    b4_bootstrap.parquet.
+    """
+    input:
+        b4_bootstrap = "outputs/causal46_joined/t_tests/b4_bootstrap.parquet",
+        b4_per_cell  = "outputs/causal46_joined/t_tests/b4_per_cell.parquet",
+        notebook     = "notebooks/causal46_joined/behavioral_discriminative_windows.py",
+
+    output:
+        notebook        = "outputs/causal46_joined/behavioral_discriminative_windows/notebook.ipynb",
+        b_windows       = "outputs/causal46_joined/behavioral_discriminative_windows/b_windows.parquet",
+        b_windows_boot  = "outputs/causal46_joined/behavioral_discriminative_windows/b_windows_bootstrap.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                b4_bootstrap_path=str(input.b4_bootstrap),
+                b4_per_cell_path=str(input.b4_per_cell),
+                outdir=str(outdir),
+                ci_low=2.5,
+                ci_high=97.5,
+                decoder_window_size=config["analysis"]["decoding"]["window_size"],
+            ),
+        )
+
+
 rule reorder_t_test_star_plots_by_type:
     """Re-order b4_powered.pdf pages by (early_type × late_type) with bookmarks."""
     input:
@@ -1160,6 +1194,8 @@ rule causal46_joined_all:
         # Trial balance index + B4 bootstrap t-tests
         "outputs/causal46_joined/trial_balance_index.csv",
         "outputs/causal46_joined/t_tests/population_summary.csv",
+        # Behavioral discriminative windows (pure post-processing over b4_bootstrap)
+        "outputs/causal46_joined/behavioral_discriminative_windows/b_windows.parquet",
 
 
 # =============================================================================
