@@ -26,11 +26,13 @@
 #    your claimed window on every facet.
 # 2. **β_amb** — reads the ambiguous within-completion slope straight from the
 #    t-test output (`b4_bootstrap.parquet`), at the grid window nearest your
-#    claim. This is the per-step-balanced, acoustic-sign-aligned percept
-#    difference (binary report; belief difference ≡ 1).
-# 3. **β_unamb** — computes the *same-window* endpoint (step 1 vs 6) difference on
-#    the unambiguous trials of this word_end, sign-aligned the same way, with a
-#    matched balanced bootstrap.
+#    claim. This is the per-step-balanced percept difference on a FIXED reference
+#    (heard-/n/ − heard-/d/; binary report, belief difference ≡ 1), with no
+#    per-electrode acoustic-polarity alignment so signs are comparable across
+#    electrodes.
+# 3. **β_unamb** — computes the *same-window* endpoint (step 1 vs 6 = /n/ − /d/)
+#    difference on the unambiguous trials of this word_end, same fixed reference,
+#    with a matched balanced bootstrap.
 # 4. **Applies** the ambiguous slope to the unambiguous window. **Primary
 #    statistic = the difference `β_amb − β_unamb`** (well-defined even when the
 #    late-window endpoint response β_unamb straddles zero). The strong
@@ -165,13 +167,16 @@ print(f"claimed center {s_to_t(claim_center_s):.3f}s → snapped window "
 # %% [markdown]
 # ## β_amb — ambiguous within-completion slope (from the t-test output)
 #
-# Per-replicate `mean_diff_aligned` at the snapped window: per-step-balanced,
-# sign-aligned so the acoustic-preferred percept is positive. We keep the full
-# bootstrap array so the downstream difference/ratio CIs are exact.
+# Per-replicate `mean_diff_raw` at the snapped window: per-step-balanced, on a
+# FIXED reference HGA[behavior=1] − HGA[behavior=0] = heard-/n/ − heard-/d/ (and
+# the analogous step6-side − step1-side for bm/pb). No per-electrode acoustic
+# polarity — the reference is consistent across electrodes, so signs are
+# comparable for any population aggregation. We keep the full bootstrap array so
+# the downstream difference/ratio CIs are exact.
 
 # %%
 beta_amb_arr = (cell_boot.filter((pl.col("smin") == SMIN) & (pl.col("smax") == SMAX))
-                ["mean_diff_aligned"].to_numpy())
+                ["mean_diff_raw"].to_numpy())
 beta_amb_arr = beta_amb_arr[np.isfinite(beta_amb_arr)]
 if beta_amb_arr.size == 0:
     raise SystemExit(f"No finite β_amb replicates at window (smin={SMIN}, smax={SMAX}).")
@@ -186,9 +191,9 @@ print(f"  CI excludes zero: {beta_amb_reliable}")
 # %% [markdown]
 # ## Load epochs (single subject) and the acoustic window for this site
 #
-# The acoustic window (causal6 peak) only sets the sign convention: the endpoint
-# step with higher HGA there is the acoustic-preferred step, made positive —
-# exactly how `mean_diff_aligned` is aligned in the t-test.
+# The acoustic window (causal6 peak) is only used for the star plot's green
+# "acoustic peak" shading — it plays no role in β now that both slopes use the
+# fixed /n/−/d/ reference.
 
 # %%
 import mne  # noqa: E402
@@ -219,28 +224,22 @@ print(f"acoustic window: [{s_to_t(AC_SMIN):.3f}, {s_to_t(AC_SMAX):.3f}]s "
 
 
 # %% [markdown]
-# ## β_unamb — same-window endpoint (step 1 vs 6) difference, sign-aligned
+# ## β_unamb — same-window endpoint difference, fixed /n/−/d/ reference
 #
 # Within this word_end only (matches the star plot's top facet; suffix acoustics
-# held fixed). Balanced bootstrap between the two endpoint steps; aligned so the
-# acoustic-preferred endpoint is positive.
+# held fixed). Balanced bootstrap between the two endpoint steps; fixed reference
+# `step6 − step1` (= /n/ − /d/ at endpoints), the SAME physical convention as
+# β_amb — no acoustic-polarity alignment.
 
 # %%
 we_mask = (md_pp["word_end"] == word_end).values
-lo_idx = np.where(we_mask & (md_pp["resampled"] == 1).values)[0]
-hi_idx = np.where(we_mask & (md_pp["resampled"] == 6).values)[0]
+lo_idx = np.where(we_mask & (md_pp["resampled"] == 1).values)[0]   # step1 = /d/ side
+hi_idx = np.where(we_mask & (md_pp["resampled"] == 6).values)[0]   # step6 = /n/ side
 print(f"endpoint trials within {word_end}: step1 n={lo_idx.size}, step6 n={hi_idx.size}")
 if lo_idx.size < MIN_ENDPOINT_N or hi_idx.size < MIN_ENDPOINT_N:
     raise SystemExit(
         f"Too few endpoint trials within word_end (need ≥{MIN_ENDPOINT_N} each)."
     )
-
-m_lo_ac = hga[lo_idx, AC_SMIN:AC_SMAX].mean()
-m_hi_ac = hga[hi_idx, AC_SMIN:AC_SMAX].mean()
-pref_step = 6 if m_hi_ac > m_lo_ac else 1
-sign_unamb = 1.0 if pref_step == 6 else -1.0
-print(f"acoustic-window HGA: step1={m_lo_ac:.3f}, step6={m_hi_ac:.3f} "
-      f"→ preferred endpoint = step {pref_step}")
 
 win_lo = hga[lo_idx, SMIN:SMAX].mean(axis=1)   # same snapped window as β_amb
 win_hi = hga[hi_idx, SMIN:SMAX].mean(axis=1)
@@ -251,7 +250,7 @@ for r in range(R_UNAMB):
     rng = np.random.default_rng(r)
     draw_lo = rng.choice(win_lo, size=n_bal, replace=True).mean()
     draw_hi = rng.choice(win_hi, size=n_bal, replace=True).mean()
-    beta_unamb_arr[r] = sign_unamb * (draw_hi - draw_lo)  # aligned: pref positive
+    beta_unamb_arr[r] = draw_hi - draw_lo   # fixed: step6 − step1 (= /n/ − /d/)
 
 beta_unamb_med = float(np.median(beta_unamb_arr))
 beta_unamb_ci = np.percentile(beta_unamb_arr, [CI_LOW, CI_HIGH])
@@ -379,7 +378,7 @@ ax.axhline(beta_amb_med, color="#2166ac", lw=1.0, ls="--", alpha=0.7,
 ax.axhline(0, color="k", lw=0.5, ls=":")
 ax.set_xticks([0, 1])
 ax.set_xticklabels(labels, fontsize=8)
-ax.set_ylabel("aligned HGA difference (z)\n(acoustic-preferred positive)", fontsize=8)
+ax.set_ylabel("HGA difference (z)\n(heard-/n/ − heard-/d/)", fontsize=8)
 _ratio_str = (f"   ratio={ratio_point:+.2f}[{ratio_ci[0]:+.2f},{ratio_ci[1]:+.2f}]"
               if ratio_meaningful else "   (ratio N/A)")
 ax.set_title(
