@@ -229,8 +229,24 @@ for cell_row in b4_per_cell.iter_rows(named=True):
 
     R = int(cell_boot["replicate"].max()) + 1  # replicates are 0-indexed
 
-    # Candidate windows: grid windows with smin >= phon_smax
-    cand_windows = [(smin, smax) for smin, smax in all_grid_windows if smin >= phon_smax]
+    # Upper bound: per-WE word offset + 0.1 s, matching matched_n_star_plot xlim.
+    # t_tests.py uses PAIR_SMAX (pair-level max), so b4_bootstrap may contain
+    # windows past this word_end's offset. Restrict here to the per-WE limit.
+    we_offset_s = OFFSET_DICT.get(we)
+    we_offset_sample: int | None = (
+        int(round((we_offset_s - epoch_tmin) * epoch_sfreq))
+        if we_offset_s is not None else None
+    )
+    we_search_smax: int | None = (
+        int(round((we_offset_s + 0.1 - epoch_tmin) * epoch_sfreq))
+        if we_offset_s is not None else None
+    )
+
+    # Candidate windows: post-acoustic, within the per-WE search bound.
+    cand_windows = [
+        (smin, smax) for smin, smax in all_grid_windows
+        if smin >= phon_smax and (we_search_smax is None or smax <= we_search_smax)
+    ]
     if not cand_windows:
         n_no_candidates += 1
         continue
@@ -268,13 +284,6 @@ for cell_row in b4_per_cell.iter_rows(named=True):
         union_list = [_fallback_run(cand_windows, w_medians)]
         is_fallback = True
         n_fallback += 1
-
-    # Word-end offset sample for post_word_offset flag
-    we_offset_s = OFFSET_DICT.get(we)
-    we_offset_sample: int | None = (
-        int(round((we_offset_s - epoch_tmin) * epoch_sfreq))
-        if we_offset_s is not None else None
-    )
 
     for window_id, comp_windows in enumerate(union_list):
         component_smins = [smin for smin, _ in comp_windows]
