@@ -1164,6 +1164,7 @@ rule joined_early_perceptual_windows:
         b4_per_cell        = "outputs/causal46_joined/t_tests/b4_per_cell.parquet",
         notebook           = "notebooks/causal46_joined/early_perceptual_windows.py",
         manual_annotations = "outputs/causal46_joined/manual_annotations/filtered_manifest.csv",
+        early_annotations  = "outputs/causal46_joined/manual_annotations/early_acoustic_window.csv",
 
     output:
         notebook   = "outputs/causal46_joined/early_perceptual_windows/notebook.ipynb",
@@ -1181,6 +1182,7 @@ rule joined_early_perceptual_windows:
                 ci_low=2.5,
                 ci_high=97.5,
                 filtered_manifest_path=str(input.manual_annotations),
+                early_annotations_path=str(input.early_annotations),
             ),
         )
 
