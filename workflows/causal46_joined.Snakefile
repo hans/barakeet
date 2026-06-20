@@ -1230,22 +1230,31 @@ rule joined_acoustic_transfer:
 
 
 rule joined_acoustic_transfer_aggregate:
-    """Concatenate per-subject acoustic transfer scores into a single parquet."""
+    """Concatenate per-subject acoustic transfer scores and produce summary plots."""
     input:
         per_subject = expand(
             "outputs/causal46_joined/acoustic_transfer/{subject}/scores.parquet",
             subject=config["data"]["subjects"],
         ),
+        notebook = "notebooks/causal46_joined/acoustic_transfer_aggregate.py",
 
     output:
-        scores_all = "outputs/causal46_joined/acoustic_transfer/scores_all.parquet",
+        notebook     = "outputs/causal46_joined/acoustic_transfer/notebook.ipynb",
+        scores_all   = "outputs/causal46_joined/acoustic_transfer/scores_all.parquet",
+        summary_pdf  = "outputs/causal46_joined/acoustic_transfer/transfer_summary.pdf",
+        timing_pdf   = "outputs/causal46_joined/acoustic_transfer/transfer_timing.pdf",
 
     run:
-        import polars as pl
-        dfs = [pl.read_parquet(p) for p in input.per_subject]
-        out = pl.concat([d for d in dfs if d.height > 0]) if any(d.height > 0 for d in dfs) else dfs[0]
-        out.write_parquet(output.scores_all)
-        print(f"Wrote {out.height} rows from {len(dfs)} subjects.")
+        outdir = Path(output.notebook).parent
+        outdir.mkdir(parents=True, exist_ok=True)
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                per_subject_paths=list(input.per_subject),
+                outdir=str(outdir),
+            ),
+        )
 
 
 rule reorder_t_test_star_plots_by_type:
@@ -1300,6 +1309,8 @@ rule causal46_joined_all:
         "outputs/causal46_joined/behavioral_discriminative_windows/b_windows.parquet",
         # Acoustic transfer: phonemic peak window vs. behavioral target window
         "outputs/causal46_joined/acoustic_transfer/scores_all.parquet",
+        "outputs/causal46_joined/acoustic_transfer/transfer_summary.pdf",
+        "outputs/causal46_joined/acoustic_transfer/transfer_timing.pdf",
         # Strong-generator test: β_ambig vs β_unamb per behavioral window
         "outputs/causal46_joined/strong_generator/strong_generator.parquet",
 
