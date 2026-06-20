@@ -1200,6 +1200,10 @@ rule joined_strong_generator:
             "outputs/epochs_preprocessed/{subject}_epo.fif",
             subject=config["data"]["subjects"],
         ),
+
+        early_annotations  = "outputs/causal46_joined/manual_annotations/early_acoustic_window.csv",
+        filtered_manifest  = "outputs/causal46_joined/manual_annotations/filtered_manifest.csv",
+
         helper   = "notebooks/causal46_joined/_within_completion.py",
         notebook = "notebooks/causal46_joined/strong_generator.py",
 
@@ -1222,6 +1226,9 @@ rule joined_strong_generator:
                 ci_high=97.5,
                 min_endpoint_n=3,
                 n_star_plot_examples=8,
+                early_annotations_path=str(input.early_annotations),
+                filtered_manifest_path=str(input.filtered_manifest),
+                include_fallbacks=False,
             ),
         )
 
@@ -1331,23 +1338,28 @@ rule causal46_joined_all:
     input:
         "outputs/causal46_joined/electrodes_as_filtered/subjects_with_as.txt",
         # Behavior with control — 4 flavors
-        "outputs/causal46_joined/behavior_decoding_single_electrode_summarize/peak_summary_all.parquet",
-        "outputs/causal46_joined/behavior_decoding_single_electrode_summarize/peak_summary_tstat_maxstat_all.parquet",
-        "outputs/causal46_joined/behavior_decoding_single_electrode_summarize/peak_summary_foldmean_tfce_all.parquet",
-        "outputs/causal46_joined/behavior_decoding_single_electrode_summarize/peak_summary_tstat_tfce_all.parquet",
-        # Behavior HGA-only — 4 flavors
-        "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only_summarize/peak_summary_all.parquet",
-        "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only_summarize/peak_summary_tstat_maxstat_all.parquet",
-        "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only_summarize/peak_summary_foldmean_tfce_all.parquet",
-        "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only_summarize/peak_summary_tstat_tfce_all.parquet",
-        # Ganong (single v1 flavor each)
-        "outputs/causal46_joined/ganong_decoding_summarize/peak_summary_all.parquet",
-        "outputs/causal46_joined/ganong_decoding_hga_only_summarize/peak_summary_all.parquet",
+        # "outputs/causal46_joined/behavior_decoding_single_electrode_summarize/peak_summary_all.parquet",
+        # "outputs/causal46_joined/behavior_decoding_single_electrode_summarize/peak_summary_tstat_maxstat_all.parquet",
+        # "outputs/causal46_joined/behavior_decoding_single_electrode_summarize/peak_summary_foldmean_tfce_all.parquet",
+        # "outputs/causal46_joined/behavior_decoding_single_electrode_summarize/peak_summary_tstat_tfce_all.parquet",
+        # # Behavior HGA-only — 4 flavors
+        # "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only_summarize/peak_summary_all.parquet",
+        # "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only_summarize/peak_summary_tstat_maxstat_all.parquet",
+        # "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only_summarize/peak_summary_foldmean_tfce_all.parquet",
+        # "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only_summarize/peak_summary_tstat_tfce_all.parquet",
+        # # Ganong (single v1 flavor each)
+        # "outputs/causal46_joined/ganong_decoding_summarize/peak_summary_all.parquet",
+        # "outputs/causal46_joined/ganong_decoding_hga_only_summarize/peak_summary_all.parquet",
         # Trial balance index + B4 bootstrap t-tests
         "outputs/causal46_joined/trial_balance_index.csv",
         "outputs/causal46_joined/t_tests/population_summary.csv",
         # Behavioral discriminative windows (pure post-processing over b4_bootstrap)
         "outputs/causal46_joined/behavioral_discriminative_windows/b_windows.parquet",
+        # early window site types
+        "outputs/causal46_joined/early_window_site_types/star_plots_by_annotation.pdf",
+        # t-tests and star plots
+        "outputs/causal46_joined/t_tests/star_plots_filtered/b4_powered.pdf",
+        "outputs/causal46_joined/t_tests/star_plots_filtered/b4_powered_by_type.pdf",
         # Early perceptual windows: [t=0, phon_smax] behav @ac cells
         "outputs/causal46_joined/early_perceptual_windows/ep_windows.parquet",
         # Acoustic transfer: phonemic peak window vs. behavioral target window
@@ -1356,6 +1368,13 @@ rule causal46_joined_all:
         "outputs/causal46_joined/acoustic_transfer/transfer_timing.pdf",
         # Strong-generator test: β_ambig vs β_unamb per behavioral window
         "outputs/causal46_joined/strong_generator/strong_generator.parquet",
+        # sankey early late
+        "outputs/causal46_joined/sankey_early_late/notebook.ipynb",
+        # contrast plots
+        "outputs/causal46_joined/contrast_plot/contrast_plot.ipynb",
+        "outputs/causal46_joined/contrast_plot/bm_contrast_plot.ipynb",
+        "outputs/causal46_joined/contrast_plot/dn_contrast_plot.ipynb",
+        "outputs/causal46_joined/contrast_plot/pb_contrast_plot.ipynb",
 
 
 # =============================================================================
