@@ -1112,6 +1112,50 @@ rule joined_t_tests:
         )
 
 
+rule joined_acoustic_bootstrap:
+    """Acoustic endpoint bootstrap for type1 / acoustic-only sites.
+
+    Runs bootstrap_A_site (step6 − step1, unambiguous endpoint trials) in
+    [t=0, phon_smax] for each type1 site in the early_acoustic_window manifest,
+    using the same window_size / stride as b4_bootstrap (causal46_joined config).
+    Feeds joined_early_perceptual_windows for apples-to-apples timing comparison.
+    """
+    input:
+        epoch_fifs        = expand(
+            "outputs/epochs_preprocessed/{subject}_epo.fif",
+            subject=config["data"]["subjects"],
+        ),
+        phon_peaks_all    = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet",
+        early_annotations = "outputs/causal46_joined/manual_annotations/early_acoustic_window.csv",
+        helper            = "notebooks/causal46_joined/_within_completion.py",
+        notebook          = "notebooks/causal46_joined/acoustic_bootstrap.py",
+
+    output:
+        notebook    = "outputs/causal46_joined/acoustic_bootstrap/notebook.ipynb",
+        a_bootstrap = "outputs/causal46_joined/acoustic_bootstrap/a_bootstrap.parquet",
+        a_per_site  = "outputs/causal46_joined/acoustic_bootstrap/a_per_site.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        C46 = config["causal46_joined"]
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                early_annotations_path=str(input.early_annotations),
+                phon_peaks_path=str(input.phon_peaks_all),
+                epoch_dir=str(Path(input.epoch_fifs[0]).parent),
+                outdir=str(outdir),
+                R=1000,
+                window_size=C46["window_size"],
+                stride=C46["stride"],
+                min_n=4,
+                ci_low=2.5,
+                ci_high=97.5,
+            ),
+        )
+
+
 rule joined_behavioral_discriminative_windows:
     """Infer behaviorally-discriminative windows per B4 cell (pure post-processing).
 
@@ -1165,6 +1209,8 @@ rule joined_early_perceptual_windows:
         notebook           = "notebooks/causal46_joined/early_perceptual_windows.py",
         manual_annotations = "outputs/causal46_joined/manual_annotations/filtered_manifest.csv",
         early_annotations  = "outputs/causal46_joined/manual_annotations/early_acoustic_window.csv",
+        a_bootstrap        = "outputs/causal46_joined/acoustic_bootstrap/a_bootstrap.parquet",
+        a_per_site         = "outputs/causal46_joined/acoustic_bootstrap/a_per_site.parquet",
 
     output:
         notebook   = "outputs/causal46_joined/early_perceptual_windows/notebook.ipynb",
@@ -1183,6 +1229,8 @@ rule joined_early_perceptual_windows:
                 ci_high=97.5,
                 filtered_manifest_path=str(input.manual_annotations),
                 early_annotations_path=str(input.early_annotations),
+                a_bootstrap_path=str(input.a_bootstrap),
+                a_per_site_path=str(input.a_per_site),
             ),
         )
 
@@ -1348,6 +1396,8 @@ rule causal46_joined_all:
         "outputs/causal46_joined/t_tests/population_summary.csv",
         # Behavioral discriminative windows (pure post-processing over b4_bootstrap)
         "outputs/causal46_joined/behavioral_discriminative_windows/b_windows.parquet",
+        # Acoustic bootstrap: endpoint contrast for type1 sites (feeds early_perceptual_windows)
+        "outputs/causal46_joined/acoustic_bootstrap/a_bootstrap.parquet",
         # Early perceptual windows: [t=0, phon_smax] behav @ac cells
         "outputs/causal46_joined/early_perceptual_windows/ep_windows.parquet",
         # Acoustic transfer: phonemic peak window vs. behavioral target window
