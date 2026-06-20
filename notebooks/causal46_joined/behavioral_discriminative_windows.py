@@ -90,7 +90,7 @@ for col in ("phon_smin", "phon_smax"):
 # %% [markdown]
 # ## Filter cells to those with a post-acoustic behavioral label
 #
-# Only cells annotated with `behav @ac slightly late` or `behav @late` in the
+# Only cells annotated with `behav @late` in the
 # filtered_manifest are processed. `behav @ac` is excluded — that timing bin
 # overlaps the acoustic window and is not a "behavioral discriminative window."
 
@@ -99,14 +99,13 @@ manifest = pl.read_csv(filtered_manifest_path)
 print(f"filtered_manifest: {manifest.height} rows")
 
 behav_post_ac = manifest.filter(
-    pl.col("behav @ac slightly late").is_not_null()
-    | pl.col("behav @late").is_not_null()
+    pl.col("behav @late").is_not_null()
 )
 behav_keys: set[tuple] = {
     (r["subject"], int(r["electrode_idx"]), r["phoneme_pair"], r["word_end"])
     for r in behav_post_ac.iter_rows(named=True)
 }
-print(f"cells with behav @ac slightly late or @late: {len(behav_keys)}")
+print(f"cells with behav @late: {len(behav_keys)}")
 
 n_before = b4_per_cell.height
 b4_per_cell = b4_per_cell.filter(
