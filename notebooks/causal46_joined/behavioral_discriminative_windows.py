@@ -62,6 +62,7 @@ from src.viz_paper import epoch_sfreq, epoch_tmin
 
 sys.path.insert(0, str(Path(".").resolve() / "notebooks" / "causal46_joined"))
 from _within_completion import summarize_replicate_array  # noqa: E402
+from _windows import _find_maximal_runs, _window_sign  # noqa: E402
 
 OUT_DIR = Path(outdir)
 OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -166,32 +167,6 @@ for row in b4_per_cell.iter_rows(named=True):
 # ## Helper functions
 
 # %%
-def _window_sign(median: float) -> int:
-    return 1 if median >= 0 else -1
-
-
-def _find_maximal_runs(
-    sig_windows: list[tuple[int, int]],
-    medians: dict[int, float],
-) -> list[list[tuple[int, int]]]:
-    """Maximal runs of adjacent + significant + same-sign candidate windows."""
-    runs: list[list[tuple[int, int]]] = []
-    if not sig_windows:
-        return runs
-    current = [sig_windows[0]]
-    for w in sig_windows[1:]:
-        prev = current[-1]
-        adjacent = (prev[1] == w[0])
-        same_sign = (_window_sign(medians[prev[0]]) == _window_sign(medians[w[0]]))
-        if adjacent and same_sign:
-            current.append(w)
-        else:
-            runs.append(current)
-            current = [w]
-    runs.append(current)
-    return runs
-
-
 def _fallback_run(
     cand_windows: list[tuple[int, int]],
     medians: dict[int, float],

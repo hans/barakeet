@@ -1149,6 +1149,42 @@ rule joined_behavioral_discriminative_windows:
         )
 
 
+rule joined_early_perceptual_windows:
+    """Infer early perceptual windows per B4 cell (pure post-processing).
+
+    For each (subject, electrode, phoneme_pair, word_end) cell annotated with
+    `behav @ac` in the manual manifest, finds time window(s) in [t=0, phon_smax]
+    with a reliable within-completion HGA contrast. Mirror of
+    joined_behavioral_discriminative_windows, which searches *beyond* the acoustic
+    peak. No epoch reload — pure post-processing over b4_bootstrap.parquet.
+    No fallback: cells with no significant early window emit zero rows.
+    """
+    input:
+        b4_bootstrap       = "outputs/causal46_joined/t_tests/b4_bootstrap.parquet",
+        b4_per_cell        = "outputs/causal46_joined/t_tests/b4_per_cell.parquet",
+        notebook           = "notebooks/causal46_joined/early_perceptual_windows.py",
+        manual_annotations = "outputs/causal46_joined/manual_annotations/filtered_manifest.csv",
+
+    output:
+        notebook   = "outputs/causal46_joined/early_perceptual_windows/notebook.ipynb",
+        ep_windows = "outputs/causal46_joined/early_perceptual_windows/ep_windows.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                b4_bootstrap_path=str(input.b4_bootstrap),
+                b4_per_cell_path=str(input.b4_per_cell),
+                outdir=str(outdir),
+                ci_low=2.5,
+                ci_high=97.5,
+                filtered_manifest_path=str(input.manual_annotations),
+            ),
+        )
+
+
 rule joined_strong_generator:
     """Strong-generator test: compare β_ambig vs β_unamb for each behavioral window.
 
@@ -1310,6 +1346,8 @@ rule causal46_joined_all:
         "outputs/causal46_joined/t_tests/population_summary.csv",
         # Behavioral discriminative windows (pure post-processing over b4_bootstrap)
         "outputs/causal46_joined/behavioral_discriminative_windows/b_windows.parquet",
+        # Early perceptual windows: [t=0, phon_smax] behav @ac cells
+        "outputs/causal46_joined/early_perceptual_windows/ep_windows.parquet",
         # Acoustic transfer: phonemic peak window vs. behavioral target window
         "outputs/causal46_joined/acoustic_transfer/scores_all.parquet",
         "outputs/causal46_joined/acoustic_transfer/transfer_summary.pdf",
