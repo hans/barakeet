@@ -8,7 +8,7 @@
 #       format_version: '1.3'
 #       jupytext_version: 1.19.1
 #   kernelspec:
-#     display_name: Python 3
+#     display_name: barakeet
 #     language: python
 #     name: python3
 # ---
@@ -80,9 +80,9 @@ ax_df      = pd.read_parquet(ax_discrimination_path)
 # Keep one row per (subject, electrode_idx, phoneme_pair) from phon_peaks: highest AUC
 peaks_all  = (
     pd.read_parquet(phon_peaks_path)[
-        ["subject", "electrode_idx", "phoneme_pair", "phon_roc_auc"]
+        ["subject", "electrode_idx", "phoneme_pair", "test_roc_auc"]
     ]
-    .sort_values("phon_roc_auc", ascending=False)
+    .sort_values("test_roc_auc", ascending=False)
     .drop_duplicates(subset=["subject", "electrode_idx", "phoneme_pair"])
 )
 
@@ -236,7 +236,7 @@ site_stats = (
     .apply(lambda g: pd.Series({
         "mean_endpoint_confidence": g.loc[g["resampled"].isin([1, 6]), "confidence"].mean(),
         "mean_ambig_confidence":    g.loc[g["resampled"].isin([2, 3, 4, 5]), "confidence"].mean(),
-        "phon_roc_auc":             g["phon_roc_auc"].iloc[0],
+        "test_roc_auc":             g["test_roc_auc"].iloc[0],
     }), include_groups=False)
     .reset_index()
     .dropna(subset=["mean_endpoint_confidence", "mean_ambig_confidence"])
@@ -284,7 +284,7 @@ fig, ax = plt.subplots(figsize=(5, 5))
 sc = ax.scatter(
     site_stats["mean_endpoint_confidence"],
     site_stats["mean_ambig_confidence"],
-    c=site_stats["phon_roc_auc"],
+    c=site_stats["test_roc_auc"],
     cmap="viridis",
     alpha=0.7,
     edgecolors="k",
@@ -347,8 +347,8 @@ print("Saved ax_discrimination_population.pdf")
 
 # %%
 _mc_sorted = (
-    model_df.dropna(subset=["phon_roc_auc"])
-    .sort_values("phon_roc_auc")
+    model_df.dropna(subset=["test_roc_auc"])
+    .sort_values("test_roc_auc")
     .reset_index(drop=True)
 )
 sample_idx   = np.round(np.linspace(0, len(_mc_sorted) - 1, n_sample)).astype(int)
@@ -415,7 +415,7 @@ for ax_idx, (_, site_row) in enumerate(sample_sites.iterrows()):
     ax.axhline(0, color="gray", linestyle="--", linewidth=0.8)
     ax.set_xticks([1, 2, 3, 4, 5, 6])
     ax.set_xlim(0.5, 6.5)
-    ax.set_title(f"{site_row['site_label']}\nAUC={site_row['phon_roc_auc']:.2f}", fontsize=7.5)
+    ax.set_title(f"{site_row['site_label']}\nAUC={site_row['test_roc_auc']:.2f}", fontsize=7.5)
     ax.set_xlabel("Morph step")
     if ax_idx % n_cols == 0:
         ax.set_ylabel("HGA d-prime (endpoint SDs)")
@@ -445,10 +445,10 @@ print("Saved catplots_sample.pdf")
 # Sorted by phoneme_pair, then phon_roc_auc descending.
 
 # %%
-# Build a per-site index from model_df (has sigmoid params + phon_roc_auc)
+# Build a per-site index from model_df (has sigmoid params + test_roc_auc)
 gallery_sites = (
-    model_df.dropna(subset=["phon_roc_auc"])
-    .sort_values(["phoneme_pair", "phon_roc_auc"], ascending=[True, False])
+    model_df.dropna(subset=["test_roc_auc"])
+    .sort_values(["phoneme_pair", "test_roc_auc"], ascending=[True, False])
     .reset_index(drop=True)
 )
 
@@ -549,7 +549,7 @@ with PdfPages(outdir / "ax_per_site_gallery.pdf") as pdf:
         ax_bot.legend(fontsize=7)
 
         fig.suptitle(
-            f"{sub} / elec {ei} / {pp}  |  phon_roc_auc={site_row['phon_roc_auc']:.3f}",
+            f"{sub} / elec {ei} / {pp}  |  phon_roc_auc={site_row['test_roc_auc']:.3f}",
             fontsize=10, fontweight="bold",
         )
         pdf.savefig(fig, bbox_inches="tight")
