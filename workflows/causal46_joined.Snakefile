@@ -1276,7 +1276,7 @@ rule joined_strong_generator:
                 n_star_plot_examples=8,
                 early_annotations_path=str(input.early_annotations),
                 filtered_manifest_path=str(input.filtered_manifest),
-                include_fallbacks=False,
+                include_fallback=False,
             ),
         )
 
