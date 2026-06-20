@@ -40,6 +40,8 @@
 b4_bootstrap_path = "outputs/causal46_joined/t_tests/b4_bootstrap.parquet"
 b4_per_cell_path = "outputs/causal46_joined/t_tests/b4_per_cell.parquet"
 filtered_manifest_path = "outputs/causal46_joined/manual_annotations/filtered_manifest.csv"
+early_annotations_path = "outputs/causal46_joined/manual_annotations/early_acoustic_window.csv"
+phon_peaks_path = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet"
 outdir = "outputs/causal46_joined/early_perceptual_windows"
 
 ci_low = 2.5
@@ -51,10 +53,11 @@ import warnings
 from pathlib import Path
 
 import matplotlib
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import polars as pl
+import seaborn as sns
 
 from src.viz_paper import epoch_sfreq, epoch_tmin
 
@@ -87,11 +90,19 @@ for col in ("phon_smin", "phon_smax"):
         "Re-run t_tests with complete data."
     )
 
+# %%
+phon_peaks_df = pl.read_parquet(phon_peaks_path)
+phon_peaks_df
+
 # %% [markdown]
 # ## Filter cells to those with a `behav @ac` annotation
 #
 # Only cells with a non-null `behav @ac` value in the filtered manifest qualify.
 # The letter encodes the behavioral category with higher HGA at the acoustic window.
+
+# %%
+early_annotation_df = pl.read_csv(early_annotations_path)
+print(f"early_annotation_df: {early_annotation_df.height} rows, cols: {early_annotation_df.columns}")
 
 # %%
 manifest = pl.read_csv(filtered_manifest_path)
@@ -324,7 +335,50 @@ ep_windows.write_parquet(OUT_DIR / "ep_windows.parquet")
 print(f"ep_windows: {ep_windows.height} rows")
 if ep_windows.height > 0:
     print(f"  ci_excludes_zero: {ep_windows['ci_excludes_zero'].sum()}")
+
     print(ep_windows.select(CELL_KEYS + ["window_id", "smin", "smax", "ci_excludes_zero", "behav_ac_tuning"]))
+
+# %%
+ep_windows_perceptual = (
+    ep_windows
+    .join(early_annotation_df.select(["subject", "electrode_idx", "phoneme_pair", "site_type_relabel"]),
+          on=["subject", "electrode_idx", "phoneme_pair"], how="left")
+    .filter((pl.col("site_type_relabel") == "type2_early_perceptual") | (pl.col("site_type_relabel") == "type3_asymmetric"))
+    .group_by(CELL_KEYS).first()
+)
+
+# %%
+ep_windows_acoustic = (
+    phon_peaks_df
+    .join(early_annotation_df.select(["subject", "electrode_idx", "phoneme_pair", "site_type_relabel"]),
+          on=["subject", "electrode_idx", "phoneme_pair"], how="left")
+    .filter(pl.col("site_type_relabel") == "type1_acoustic_only")
+    .group_by(["subject", "electrode_idx", "phoneme_pair"]).first()
+)
+
+# %%
+from scipy.stats import ttest_ind
+
+ttest_ind(ep_windows_acoustic["smin"].to_numpy(), ep_windows_perceptual["smin"].to_numpy())
+
+# %%
+sns.displot(data=pd.concat([
+    ep_windows_acoustic.select(["smin"]).to_pandas().assign(type="acoustic"),
+    ep_windows_perceptual.select(["smin"]).to_pandas().assign(type="perceptual")]),
+    x="smin", hue="type", kind="kde")
+
+# %% [markdown]
+# ### Acoustic vs perceptual timing within-site
+
+# %%
+ttest_df = ep_windows_perceptual.select(["smin", "smax", "phon_smin", "phon_smax"]).to_pandas()
+from scipy.stats import ttest_rel
+ttest_res = ttest_rel(ttest_df["smin"], ttest_df["phon_smin"])
+print(f"t-test smin vs phon_smin: t={ttest_res.statistic:.3f}, p={ttest_res.pvalue:.3e}")
+
+# %%
+g = sns.lmplot(data=ep_windows_perceptual.to_pandas(), x="smin", y="phon_smin")
+g.ax.plot(list(g.ax.get_xlim()), list(g.ax.get_xlim()), color="gray", linestyle="--")
 
 # %% [markdown]
 # ## Optional QC figures
@@ -379,7 +433,6 @@ try:
 
     fig.tight_layout()
     fig.savefig(OUT_DIR / "ep_windows_summary.pdf")
-    plt.close(fig)
     print("Saved ep_windows_summary.pdf")
 except Exception as _qc_exc:
     warnings.warn(f"QC PDF skipped: {_qc_exc}")
