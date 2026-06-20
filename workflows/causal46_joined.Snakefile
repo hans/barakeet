@@ -1646,6 +1646,51 @@ rule joined_acoustic_gradient_figures:
         )
 
 
+rule joined_type1_ambiguous_hga_coding:
+    """Type-1 sites: HGA coding of ambiguous input (graded vs committed).
+
+    Recomputes pooled within-condition σ (normalization fix), then for each
+    qualifying ambiguous step computes location (O1 vs O2a) and variance ratio
+    (O2a vs O2b). Epoch fallback for sites absent from trial_df_all. Behaviour
+    split uses within-completion epoch metadata.
+    """
+    input:
+        annotations_path    = "outputs/causal46_joined/manual_annotations/early_acoustic_window.csv",
+        trial_balance_path  = "outputs/causal46_joined/trial_balance_index.csv",
+        trial_df_path       = "outputs/causal46_joined/acoustic_univariate_gradient/trial_df_all.parquet",
+        ax_discrimination_path = "outputs/causal46_joined/acoustic_ax_discrimination/ax_discrimination_df_all.parquet",
+        phon_peaks_path     = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet",
+        epochs_dir          = "outputs/epochs_preprocessed",
+        notebook            = "notebooks/causal46_joined/type1_ambiguous_hga_coding.py",
+
+    output:
+        notebook                = "outputs/causal46_joined/type1_ambiguous_hga_coding/notebook.ipynb",
+        site_dprime             = "outputs/causal46_joined/type1_ambiguous_hga_coding/site_dprime.parquet",
+        ambiguous_step_stats    = "outputs/causal46_joined/type1_ambiguous_hga_coding/ambiguous_step_stats.parquet",
+        location_per_site       = "outputs/causal46_joined/type1_ambiguous_hga_coding/location_per_site.pdf",
+        location_histogram      = "outputs/causal46_joined/type1_ambiguous_hga_coding/location_histogram.pdf",
+        location_spread_scatter = "outputs/causal46_joined/type1_ambiguous_hga_coding/location_spread_scatter.pdf",
+        per_step_spread         = "outputs/causal46_joined/type1_ambiguous_hga_coding/per_step_spread.pdf",
+        tuning_categoricity     = "outputs/causal46_joined/type1_ambiguous_hga_coding/tuning_categoricity.pdf",
+        behavior_split          = "outputs/causal46_joined/type1_ambiguous_hga_coding/behavior_split.pdf",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                annotations_path=str(input.annotations_path),
+                trial_balance_path=str(input.trial_balance_path),
+                trial_df_path=str(input.trial_df_path),
+                ax_discrimination_path=str(input.ax_discrimination_path),
+                phon_peaks_path=str(input.phon_peaks_path),
+                epoch_dir=str(input.epochs_dir),
+                outdir=str(outdir),
+            ),
+        )
+
+
 rule joined_multivariate_gradient_perception:
     """Per-(subject, phoneme_pair) population logistic+PCA on endpoints — phon_peaks pool.
 
