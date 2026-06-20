@@ -1149,6 +1149,42 @@ rule joined_behavioral_discriminative_windows:
         )
 
 
+rule joined_early_perceptual_windows:
+    """Infer early perceptual windows per B4 cell (pure post-processing).
+
+    For each (subject, electrode, phoneme_pair, word_end) cell annotated with
+    `behav @ac` in the manual manifest, finds time window(s) in [t=0, phon_smax]
+    with a reliable within-completion HGA contrast. Mirror of
+    joined_behavioral_discriminative_windows, which searches *beyond* the acoustic
+    peak. No epoch reload — pure post-processing over b4_bootstrap.parquet.
+    No fallback: cells with no significant early window emit zero rows.
+    """
+    input:
+        b4_bootstrap       = "outputs/causal46_joined/t_tests/b4_bootstrap.parquet",
+        b4_per_cell        = "outputs/causal46_joined/t_tests/b4_per_cell.parquet",
+        notebook           = "notebooks/causal46_joined/early_perceptual_windows.py",
+        manual_annotations = "outputs/causal46_joined/manual_annotations/filtered_manifest.csv",
+
+    output:
+        notebook   = "outputs/causal46_joined/early_perceptual_windows/notebook.ipynb",
+        ep_windows = "outputs/causal46_joined/early_perceptual_windows/ep_windows.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                b4_bootstrap_path=str(input.b4_bootstrap),
+                b4_per_cell_path=str(input.b4_per_cell),
+                outdir=str(outdir),
+                ci_low=2.5,
+                ci_high=97.5,
+                filtered_manifest_path=str(input.manual_annotations),
+            ),
+        )
+
+
 rule joined_strong_generator:
     """Strong-generator test: compare β_ambig vs β_unamb for each behavioral window.
 
@@ -1310,6 +1346,8 @@ rule causal46_joined_all:
         "outputs/causal46_joined/t_tests/population_summary.csv",
         # Behavioral discriminative windows (pure post-processing over b4_bootstrap)
         "outputs/causal46_joined/behavioral_discriminative_windows/b_windows.parquet",
+        # Early perceptual windows: [t=0, phon_smax] behav @ac cells
+        "outputs/causal46_joined/early_perceptual_windows/ep_windows.parquet",
         # Acoustic transfer: phonemic peak window vs. behavioral target window
         "outputs/causal46_joined/acoustic_transfer/scores_all.parquet",
         "outputs/causal46_joined/acoustic_transfer/transfer_summary.pdf",
@@ -1604,6 +1642,51 @@ rule joined_acoustic_gradient_figures:
                 outdir=str(outdir),
                 n_sample=24,
                 ac_p_value_threshold=config["causal46_joined"]["ac_p_value_threshold"],
+            ),
+        )
+
+
+rule joined_type1_ambiguous_hga_coding:
+    """Type-1 sites: HGA coding of ambiguous input (graded vs committed).
+
+    Recomputes pooled within-condition σ (normalization fix), then for each
+    qualifying ambiguous step computes location (O1 vs O2a) and variance ratio
+    (O2a vs O2b). Epoch fallback for sites absent from trial_df_all. Behaviour
+    split uses within-completion epoch metadata.
+    """
+    input:
+        annotations_path    = "outputs/causal46_joined/manual_annotations/early_acoustic_window.csv",
+        trial_balance_path  = "outputs/causal46_joined/trial_balance_index.csv",
+        trial_df_path       = "outputs/causal46_joined/acoustic_univariate_gradient/trial_df_all.parquet",
+        ax_discrimination_path = "outputs/causal46_joined/acoustic_ax_discrimination/ax_discrimination_df_all.parquet",
+        phon_peaks_path     = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet",
+        epochs_dir          = "outputs/epochs_preprocessed",
+        notebook            = "notebooks/causal46_joined/type1_ambiguous_hga_coding.py",
+
+    output:
+        notebook                = "outputs/causal46_joined/type1_ambiguous_hga_coding/notebook.ipynb",
+        site_dprime             = "outputs/causal46_joined/type1_ambiguous_hga_coding/site_dprime.parquet",
+        ambiguous_step_stats    = "outputs/causal46_joined/type1_ambiguous_hga_coding/ambiguous_step_stats.parquet",
+        location_per_site       = "outputs/causal46_joined/type1_ambiguous_hga_coding/location_per_site.pdf",
+        location_histogram      = "outputs/causal46_joined/type1_ambiguous_hga_coding/location_histogram.pdf",
+        location_spread_scatter = "outputs/causal46_joined/type1_ambiguous_hga_coding/location_spread_scatter.pdf",
+        per_step_spread         = "outputs/causal46_joined/type1_ambiguous_hga_coding/per_step_spread.pdf",
+        tuning_categoricity     = "outputs/causal46_joined/type1_ambiguous_hga_coding/tuning_categoricity.pdf",
+        behavior_split          = "outputs/causal46_joined/type1_ambiguous_hga_coding/behavior_split.pdf",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                annotations_path=str(input.annotations_path),
+                trial_balance_path=str(input.trial_balance_path),
+                trial_df_path=str(input.trial_df_path),
+                ax_discrimination_path=str(input.ax_discrimination_path),
+                phon_peaks_path=str(input.phon_peaks_path),
+                epoch_dir=str(input.epochs_dir),
+                outdir=str(outdir),
             ),
         )
 
