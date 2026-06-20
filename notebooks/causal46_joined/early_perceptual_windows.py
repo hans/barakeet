@@ -41,6 +41,8 @@ b4_bootstrap_path = "outputs/causal46_joined/t_tests/b4_bootstrap.parquet"
 b4_per_cell_path = "outputs/causal46_joined/t_tests/b4_per_cell.parquet"
 filtered_manifest_path = "outputs/causal46_joined/manual_annotations/filtered_manifest.csv"
 early_annotations_path = "outputs/causal46_joined/manual_annotations/early_acoustic_window.csv"
+a_bootstrap_path = "outputs/causal46_joined/acoustic_bootstrap/a_bootstrap.parquet"
+a_per_site_path = "outputs/causal46_joined/acoustic_bootstrap/a_per_site.parquet"
 outdir = "outputs/causal46_joined/early_perceptual_windows"
 
 ci_low = 2.5
@@ -115,9 +117,8 @@ behav_ac_tuning: dict[tuple, str] = {
 }
 print(f"cells with behav @ac: {len(behav_keys)}")
 
-b4_per_cell_all = b4_per_cell  # full table, needed for type1 comparison below
-n_before = b4_per_cell_all.height
-b4_per_cell = b4_per_cell_all.filter(
+n_before = b4_per_cell.height
+b4_per_cell = b4_per_cell.filter(
     pl.struct(["subject", "electrode_idx", "phoneme_pair", "word_end"]).map_elements(
         lambda r: (r["subject"], int(r["electrode_idx"]), r["phoneme_pair"], r["word_end"])
                   in behav_keys,
@@ -335,88 +336,75 @@ if ep_windows.height > 0:
     print(ep_windows.select(CELL_KEYS + ["window_id", "smin", "smax", "ci_excludes_zero", "behav_ac_tuning"]))
 
 # %% [markdown]
-# ## Type1 (acoustic-only) processing — same bootstrap algorithm
+# ## Type1 (acoustic-only) processing — acoustic bootstrap
 #
-# Run the identical window-finding procedure on acoustic-only sites so that the
-# comparison with early perceptual sites is apples-to-apples: both groups use
-# the behavioral bootstrap CI to find their earliest significant window in
-# [t=0, phon_smax], rather than mixing bootstrap onsets with decoder-peak onsets.
+# `a_bootstrap.parquet` was computed by `acoustic_bootstrap.py` using
+# `bootstrap_A_site` (step6 − step1, endpoint trials only — no ambiguous trials).
+# We apply the same window-significance algorithm here so the acoustic-onset
+# timing is measured with the same method as the perceptual onset above.
 
 # %%
-type1_site_keys: set[tuple] = {
-    (r["subject"], int(r["electrode_idx"]), r["phoneme_pair"])
-    for r in early_annotation_df.filter(
-        pl.col("site_type_relabel") == "type1_acoustic_only"
-    ).iter_rows(named=True)
+a_bootstrap = pl.read_parquet(a_bootstrap_path)
+a_per_site  = pl.read_parquet(a_per_site_path)
+print(f"a_bootstrap: {a_bootstrap.height:,} rows")
+print(f"a_per_site:  {a_per_site.height} rows")
+
+# %%
+_a_boot_partitioned: dict[tuple, pl.DataFrame] = {
+    (r["subject"], int(r["electrode_idx"]), r["phoneme_pair"]): a_bootstrap.filter(
+        (pl.col("subject") == r["subject"]) &
+        (pl.col("electrode_idx") == r["electrode_idx"]) &
+        (pl.col("phoneme_pair") == r["phoneme_pair"])
+    )
+    for r in a_per_site.iter_rows(named=True)
 }
 
-b4_per_cell_type1 = b4_per_cell_all.filter(
-    pl.struct(["subject", "electrode_idx", "phoneme_pair"]).map_elements(
-        lambda r: (r["subject"], int(r["electrode_idx"]), r["phoneme_pair"])
-                  in type1_site_keys,
-        return_dtype=pl.Boolean,
-    )
-)
-print(f"b4_per_cell_type1: {b4_per_cell_type1.height} cells")
-
 # %%
-_boot_partitioned_type1: dict[tuple, pl.DataFrame] = {}
-for row in b4_per_cell_type1.iter_rows(named=True):
-    key = (row["subject"], row["electrode_idx"], row["phoneme_pair"], row["word_end"])
-    if key not in _boot_partitioned_type1:
-        _boot_partitioned_type1[key] = b4_bootstrap.filter(
-            (pl.col("subject") == key[0]) &
-            (pl.col("electrode_idx") == key[1]) &
-            (pl.col("phoneme_pair") == key[2]) &
-            (pl.col("word_end") == key[3])
-        )
+SITE_KEYS = ["subject", "electrode_idx", "phoneme_pair"]
 
-# %%
 type1_rows: list[dict] = []
 n_type1_no_candidates = 0
 n_type1_no_sig = 0
 
-for cell_row in b4_per_cell_type1.iter_rows(named=True):
-    subj      = cell_row["subject"]
-    eidx      = int(cell_row["electrode_idx"])
-    pp        = cell_row["phoneme_pair"]
-    we        = cell_row["word_end"]
-    phon_smin = int(cell_row["phon_smin"])
-    phon_smax = int(cell_row["phon_smax"])
+for site_row in a_per_site.iter_rows(named=True):
+    subj      = site_row["subject"]
+    eidx      = int(site_row["electrode_idx"])
+    pp        = site_row["phoneme_pair"]
+    phon_smin = int(site_row["phon_smin"])
+    phon_smax = int(site_row["phon_smax"])
 
-    cell_boot = _boot_partitioned_type1.get((subj, eidx, pp, we))
-    if cell_boot is None or cell_boot.height == 0:
+    site_boot = _a_boot_partitioned.get((subj, eidx, pp))
+    if site_boot is None or site_boot.height == 0:
         continue
 
-    R = int(cell_boot["replicate"].max()) + 1
+    R = int(site_boot["replicate"].max()) + 1
 
-    cand_windows = [
-        (smin, smax) for smin, smax in all_grid_windows
-        if smin >= SAMPLE_T0 and smax <= phon_smax
-    ]
-    if not cand_windows:
+    # Candidate windows: all windows in a_bootstrap for this site.
+    # acoustic_bootstrap.py already constrained to [SAMPLE_T0, phon_smax].
+    site_windows = sorted(
+        {(int(r[0]), int(r[1])) for r in site_boot.select(["smin", "smax"]).iter_rows()},
+        key=lambda t: t[0],
+    )
+    if not site_windows:
         n_type1_no_candidates += 1
         continue
 
-    cand_smins_set = {smin for smin, _ in cand_windows}
-    cell_cand_boot = cell_boot.filter(pl.col("smin").is_in(list(cand_smins_set)))
-
     w_medians: dict[int, float] = {}
     w_ci_excl_zero: dict[int, bool] = {}
-    for smin, smax in cand_windows:
-        arr = cell_cand_boot.filter(pl.col("smin") == smin)["mean_diff_raw"].to_numpy()
+    for smin, smax in site_windows:
+        arr = site_boot.filter(pl.col("smin") == smin)["mean_diff_raw"].to_numpy()
         if arr.size == 0:
             continue
         stats = summarize_replicate_array(arr, ci_low=ci_low, ci_high=ci_high)
         w_medians[smin] = stats["median"]
         w_ci_excl_zero[smin] = stats["ci_excludes_zero"]
 
-    cand_windows = [(smin, smax) for smin, smax in cand_windows if smin in w_medians]
-    if not cand_windows:
+    site_windows = [(smin, smax) for smin, smax in site_windows if smin in w_medians]
+    if not site_windows:
         n_type1_no_candidates += 1
         continue
 
-    sig_windows = [(smin, smax) for smin, smax in cand_windows if w_ci_excl_zero[smin]]
+    sig_windows = [(smin, smax) for smin, smax in site_windows if w_ci_excl_zero[smin]]
     if not sig_windows:
         n_type1_no_sig += 1
         continue
@@ -427,7 +415,7 @@ for cell_row in b4_per_cell_type1.iter_rows(named=True):
         union_smax = comp_windows[-1][1]
         n_comp = len(comp_windows)
 
-        union_boot = cell_cand_boot.filter(pl.col("smin").is_in(component_smins))
+        union_boot = site_boot.filter(pl.col("smin").is_in(component_smins))
         union_beta_df = (
             union_boot
             .group_by("replicate")
@@ -441,7 +429,6 @@ for cell_row in b4_per_cell_type1.iter_rows(named=True):
             "subject": subj,
             "electrode_idx": eidx,
             "phoneme_pair": pp,
-            "word_end": we,
             "window_id": window_id,
             "smin": union_smin,
             "smax": union_smax,
@@ -452,7 +439,7 @@ for cell_row in b4_per_cell_type1.iter_rows(named=True):
 
 type1_windows = pl.DataFrame(type1_rows) if type1_rows else pl.DataFrame(
     {c: pl.Series([], dtype=pl.Utf8)
-     for c in ["subject", "electrode_idx", "phoneme_pair", "word_end",
+     for c in ["subject", "electrode_idx", "phoneme_pair",
                "window_id", "smin", "smax", "phon_smin", "phon_smax", "ci_excludes_zero"]}
 ).cast({"electrode_idx": pl.Int64, "window_id": pl.Int64,
         "smin": pl.Int64, "smax": pl.Int64,
@@ -460,8 +447,8 @@ type1_windows = pl.DataFrame(type1_rows) if type1_rows else pl.DataFrame(
         "ci_excludes_zero": pl.Boolean})
 
 print(
-    f"Type1 cells: {b4_per_cell_type1.height} total, "
-    f"{n_type1_no_candidates} no candidates, "
+    f"Type1 sites: {a_per_site.height} total, "
+    f"{n_type1_no_candidates} no candidate windows, "
     f"{n_type1_no_sig} no significant window"
 )
 print(f"type1_windows: {type1_windows.height} rows")
@@ -476,7 +463,7 @@ ep_windows_perceptual = (
 )
 
 # %%
-ep_windows_acoustic = type1_windows.group_by(CELL_KEYS).first()
+ep_windows_acoustic = type1_windows.group_by(SITE_KEYS).first()
 
 # %%
 from scipy.stats import ttest_ind
