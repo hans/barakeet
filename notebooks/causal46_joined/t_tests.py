@@ -57,7 +57,6 @@
 # %%
 from __future__ import annotations
 
-import io
 import sys
 import traceback
 from pathlib import Path
@@ -79,13 +78,13 @@ from _within_completion import (  # noqa: E402
     acoustic_preferred_class,
     extract_hga,
     load_behav_decoding_scores,
-    matched_n_star_plot,
     n_per_class_from_per_step,
     per_step_class_counts,
     resolve_behavior_col,
     searchlight_mean_diff,
     select_cell_trials_bootstrap,
 )
+from _star_gallery import HAS_PYPDF, site_effect_fig, write_annotated_pdfs  # noqa: E402
 
 # %% tags=["parameters"]
 phon_peaks_path = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet"
@@ -1171,186 +1170,13 @@ print(f"wrote {pdf_path}")
 # ## Filtered-gallery hook
 
 # %%
-try:
-    from pypdf import PdfReader, PdfWriter
-    _HAS_PYPDF = True
-except ImportError:
-    PdfReader = PdfWriter = None  # type: ignore[assignment]
-    _HAS_PYPDF = False
+# site_effect_fig and write_annotated_pdfs imported from _star_gallery
+if not HAS_PYPDF:
     print("⚠ pypdf not installed — will emit filtered_manifest.csv only; "
           "filtered PDFs skipped.")
 
 
-def site_effect_fig(row: dict, site_per_window: pl.DataFrame) -> plt.Figure:
-    """CI-trace figure for one cell: bootstrap mean ± CI band across windows."""
-    fig, ax = plt.subplots(figsize=(8.5, 3.2))
-    if site_per_window.height > 0:
-        pw = site_per_window.sort("tmin")
-        tcenter = ((pw["tmin"] + pw["tmax"]) / 2).to_numpy().astype(float)
-        mn = pw["mean_diff_aligned_mean"].to_numpy().astype(float)
-        ci_lo = pw["mean_diff_aligned_ci_lo"].to_numpy().astype(float)
-        ci_hi = pw["mean_diff_aligned_ci_hi"].to_numpy().astype(float)
-        ax.plot(tcenter, mn, color="#2166ac", lw=1.5,
-                label="bootstrap mean aligned diff")
-        ax.fill_between(tcenter, ci_lo, ci_hi, color="#2166ac", alpha=0.22,
-                        label=f"{CI_LOW}–{CI_HIGH}% bootstrap CI")
-        # Highlight best window — spans tmin to tmax so the line center sits inside it
-        if row.get("best_tmin") is not None and row.get("best_tmax") is not None:
-            ax.axvspan(float(row["best_tmin"]), float(row["best_tmax"]),
-                       color="#fdae61", alpha=0.45, label="best window", zorder=0)
-    ax.axhline(0, color="k", lw=0.7, ls="--", alpha=0.6)
-    ax.set_xlabel("Window center (s, post word onset)")
-    ax.set_ylabel("aligned mean_diff (HGA)")
-    ax.legend(fontsize=8, loc="lower left")
-    ax.grid(alpha=0.3)
-    med_val = row.get("best_mean_diff_aligned_med")
-    ci_lo_v = row.get("best_mean_diff_aligned_ci_lo")
-    ci_hi_v = row.get("best_mean_diff_aligned_ci_hi")
-    p_val = row.get("best_emp_p_aligned")
-    sig_str = "CI excludes 0" if row.get("best_ci_aligned_excludes_zero") else "CI includes 0"
-    id_str = (f"{row['subject']} e{row['electrode_idx']} "
-              f"{row['phoneme_pair']} · {row['word_end']}")
-    if row.get("resampled") is not None:
-        id_str += f" step {row['resampled']}"
-    stat_str = ""
-    if med_val is not None:
-        stat_str = (f"  |  effect = {med_val:.3f} [{ci_lo_v:.3f}, {ci_hi_v:.3f}]"
-                    f"  p = {p_val:.3f}  {sig_str}")
-    ax.set_title(id_str + stat_str, fontsize=9)
-    fig.tight_layout()
-    return fig
-
-
-def write_annotated_pdfs(
-    entries: list[dict],
-    per_window: pl.DataFrame,
-    cell_keys: list[str],
-    out_path: Path,
-    epochs_dict: dict | None = None,
-    pair_lookup: dict | None = None,
-) -> int:
-    """Filtered-gallery PDF: regenerated star plot per cell.
-
-    pair_lookup: optional dict keyed by (subject, electrode_idx, phoneme_pair) →
-    b4_per_pair row dict. When provided, a colored banner is added at the top of
-    each page showing the cross-WE pooled test result for that site/pair.
-    """
-    if not entries or not _HAS_PYPDF:
-        return 0
-    # Precompute matched x-axis limit per (subject, electrode_idx, phoneme_pair):
-    # both word_ends in a group share the max offset so plots align vertically.
-    group_xlim: dict[tuple, float] = {}
-    for row in entries:
-        key = (row["subject"], row["electrode_idx"], row["phoneme_pair"])
-        we_xlim = OFFSET_DICT.get(row["word_end"], 1.0) + 0.1
-        group_xlim[key] = max(group_xlim.get(key, 0.0), we_xlim)
-    writer = PdfWriter()
-    n = 0
-    for row in tqdm(entries):
-        filt = (
-            (pl.col("subject") == row["subject"])
-            & (pl.col("electrode_idx") == row["electrode_idx"])
-            & (pl.col("phoneme_pair") == row["phoneme_pair"])
-            & (pl.col("word_end") == row["word_end"])
-        )
-        if "resampled" in cell_keys and row.get("resampled") is not None:
-            filt = filt & (pl.col("resampled") == row["resampled"])
-        site_pw = per_window.filter(filt) if per_window.height else pl.DataFrame()
-
-        sig_wins = None
-        mda = None
-        if site_pw.height:
-            pw_s = site_pw.sort("tmin")
-            sig_list = [
-                (float(r["tmin"]), float(r["tmax"]))
-                for r in pw_s.filter(pl.col("ci_aligned_excludes_zero")).iter_rows(named=True)
-            ]
-            sig_wins = sig_list or None
-            mda = {
-                "tcenter": ((pw_s["tmin"] + pw_s["tmax"]) / 2).to_numpy().astype(float),
-                "mean": pw_s["mean_diff_aligned_mean"].to_numpy().astype(float),
-                "ci_lo": pw_s["mean_diff_aligned_ci_lo"].to_numpy().astype(float),
-                "ci_hi": pw_s["mean_diff_aligned_ci_hi"].to_numpy().astype(float),
-            }
-
-        qs = row.get("qualifying_steps")
-        can_regen = (
-            epochs_dict is not None
-            and row.get("subject") in epochs_dict
-            and qs is not None
-            and row.get("phon_smin") is not None
-        )
-        if not can_regen:
-            print(f"  ⚠ skipping {row['subject']} e{row['electrode_idx']}: "
-                  "cannot regenerate star plot (missing epochs or qualifying_steps)")
-            continue
-        if isinstance(qs, str):
-            qs = [int(s) for s in qs.split(",") if s]
-        key = (row["subject"], row["electrode_idx"], row["phoneme_pair"])
-        try:
-            fig2 = matched_n_star_plot(
-                subject=row["subject"],
-                electrode_idx=int(row["electrode_idx"]),
-                phoneme_pair=row["phoneme_pair"],
-                word_end=row["word_end"],
-                qualifying_steps=list(qs),
-                epochs_dict=epochs_dict,
-                n_per_class=int(row["n_per_class"]),
-                phon_smin=int(row["phon_smin"]),
-                phon_smax=int(row["phon_smax"]),
-                phon_search_smin=AC_SEARCH_SMIN,
-                phon_search_smax=AC_SEARCH_SMAX,
-                acoustic_peak_auc=row.get("acoustic_peak_auc"),
-                sig_windows=sig_wins,
-                mean_diff_arrays=mda,
-                xlim=group_xlim[key],
-                behav_decoding_df=_behav_dec_by_subject.get(row["subject"]),
-                early_smax_s=AC_SEARCH_SMAX,
-            )
-            # Cross-WE pooled test bar on ax_bot (matches sig_windows style,
-            # different color so it's visually distinct from per-cell gray bars).
-            if pair_lookup is not None:
-                pair_key_lut = (
-                    row["subject"], int(row["electrode_idx"]), row["phoneme_pair"]
-                )
-                pr = pair_lookup.get(pair_key_lut)
-                if pr is not None:
-                    ax_bot = getattr(fig2, "_ax_behav", fig2.axes[1])
-                    ymin, ymax = ax_bot.get_ylim()
-                    bar_h = (ymax - ymin) * 0.04
-                    # Sit just below the per-cell gray bars (which are at 0.95)
-                    bar_y = ymin + (ymax - ymin) * 0.90
-                    pair_tmin = pr.get("pair_tmin")
-                    pair_tmax = pr.get("pair_tmax")
-                    pair_sig = bool(pr.get("pair_ci_excludes_zero", False))
-                    emp_p = pr.get("pair_emp_p")
-                    emp_p_str = f"{float(emp_p):.3f}" if emp_p is not None else "?"
-                    if pair_tmin is not None and pair_tmax is not None:
-                        bar_color = "#01665e" if pair_sig else "#c7eae5"
-                        ax_bot.barh(
-                            y=bar_y,
-                            width=float(pair_tmax) - float(pair_tmin),
-                            left=float(pair_tmin),
-                            height=bar_h,
-                            color=bar_color, alpha=0.85,
-                            edgecolor="none", zorder=5,
-                            label=f"cross-WE pooled (p={emp_p_str})",
-                        )
-                        ax_bot.legend(fontsize=7, loc="lower left", framealpha=0.7)
-            buf2 = io.BytesIO()
-            fig2.savefig(buf2, format="pdf", bbox_inches="tight")
-            plt.close(fig2)
-            buf2.seek(0)
-            for page in PdfReader(buf2).pages:
-                writer.add_page(page)
-            n += 1
-        except Exception as exc:
-            print(f"  ⚠ star plot regen failed for {row['subject']} "
-                  f"e{row['electrode_idx']}: {exc}")
-    if n:
-        with out_path.open("wb") as fh:
-            writer.write(fh)
-    return n
+# site_effect_fig and write_annotated_pdfs are imported from _star_gallery
 
 
 filtered_rows: list[dict] = []
@@ -1391,10 +1217,16 @@ if b4_per_cell.height:
     } if b4_per_pair.height else None
     n_p = write_annotated_pdfs(powered_entries, b4_per_window, b4_cell_keys,
                                FILT_DIR / "b4_powered.pdf",
-                               epochs_dict=epochs_dict, pair_lookup=pair_lut)
+                               epochs_dict=epochs_dict, pair_lookup=pair_lut,
+                               ac_search_smin=AC_SEARCH_SMIN,
+                               ac_search_smax=AC_SEARCH_SMAX,
+                               behav_dec_by_subject=_behav_dec_by_subject)
     n_s = write_annotated_pdfs(sig_entries, b4_per_window, b4_cell_keys,
                                FILT_DIR / "b4_powered_significant.pdf",
-                               epochs_dict=epochs_dict, pair_lookup=pair_lut)
+                               epochs_dict=epochs_dict, pair_lookup=pair_lut,
+                               ac_search_smin=AC_SEARCH_SMIN,
+                               ac_search_smax=AC_SEARCH_SMAX,
+                               behav_dec_by_subject=_behav_dec_by_subject)
     print(f"B4 filtered PDFs: powered={n_p}  significant={n_s}")
 
 under = cell_manifest.filter(
