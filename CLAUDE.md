@@ -109,11 +109,25 @@ belief-updating (surprisal/prediction error). Not distinguishable in this design
 
 ## Code structure
 
-### Active pipeline: causal5
-`workflows/causal5.Snakefile` is the live pipeline. causal4 is legacy (kept for
-reference; adds electrode pre-selection steps A/B/C that causal5 drops).
+### Standard pipeline: causal6 + causal46_joined
+`workflows/causal6.Snakefile` (acoustic decoding + speech-responsive selection;
+produces `outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet`) and
+`workflows/causal46_joined.Snakefile` (the joined acoustic + within-completion
+perceptual analyses) are the live pipeline. Notebooks live in
+`notebooks/causal46_joined/` (Jupytext percent-format .py). **causal5 and causal4
+are defunct** — kept only for reference; the causal5 run-order table below is
+retained as a schema/protocol reference where the two pipelines still share
+`src/` code.
 
-**Run order and notebooks** (`notebooks/causal5/` — Jupytext percent-format .py files):
+**Within-completion subsampling (canonical).** The per-step class-balance rule
+(B3 single-step / B4 across-step) that underlies every within-completion
+perceptual contrast — star-plot galleries, bootstrap t-tests, early-window and
+strong-generator analyses — is defined **authoritatively in the module docstring
+of `notebooks/causal46_joined/_within_completion.py`** (imported by 14+
+notebooks). Read it before touching any B3/B4 trial-selection code. Pointer +
+consumer map: `docs/superpowers/plans/2026-07-01-causal46-within-completion-subsampling.md`.
+
+**Legacy causal5 run order** (`notebooks/causal5/` — Jupytext percent-format .py files; retained for reference):
 
 | Rule | Notebook | Key outputs |
 |------|----------|-------------|
@@ -138,6 +152,7 @@ the canonical reference for data schemas and protocols:
 - **Epoch metadata columns**: `src/data.py:add_metadata_features()` docstring — `resampled`, `behavior_categorical_forced`, `ambiguity`, `categorical_acoustic_cue`, etc.
 - **Decoder checkpoint formats**: `src/models/decoding.py` module docstring
 - **Timing constants**: `src/stimuli.py` — `POD_dict`, `OFFSET_DICT`, `WORD_PHASES`
+- **Within-completion B3/B4 subsampling**: `notebooks/causal46_joined/_within_completion.py` module docstring — canonical per-step class-balance rule (both classes bootstrapped with replacement; gallery and t-test share draws)
 - **all_outcomes.parquet schema**: columns `subject, electrode_idx, phoneme_pair, smin, smax, measure, epoch_idx, fold, decoder_target, decoder_proba, decoder_prediction`; `measure` ∈ {`categorical_acoustic_cue`, `subject_specific_acoustics`}; predictions on ALL trials including ambiguous steps
 
 ### Key source files

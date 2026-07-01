@@ -1,5 +1,10 @@
 # causal46 cross-word-end pooled CI test — Implementation Plan
 
+> **ℹ Built on the B4 bootstrap (2026-07-01).** The per-step class-balance
+> subsampling this test consumes is defined canonically in
+> `notebooks/causal46_joined/_within_completion.py` (module docstring); pointer
+> at `docs/superpowers/plans/2026-07-01-causal46-within-completion-subsampling.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. There are explicit **design deliberation** points marked `🟡 DESIGN`; resolve each one before writing the corresponding code, briefly recording the chosen option and reasoning in the plan checkbox.
 
 ## Motivation

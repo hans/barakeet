@@ -1,26 +1,63 @@
-"""Shared trial-selection / HGA-extraction / bootstrap primitives used by
-star_plots.py (JON-43) and t_tests.py (JON-44).
+"""Shared trial-selection / HGA-extraction / bootstrap primitives for the
+causal46_joined within-completion perceptual analyses.
+
+CANONICAL DEFINITION. This module is the source of truth for the per-step
+class-balance subsampling rule used throughout the causal46 evaluation
+pipeline (imported by 14+ notebooks — the gallery, the t-tests, the
+early-window and strong-generator analyses). To learn how B3/B4 trials are
+selected, read here. The dated design docs under `docs/superpowers/plans/`
+are historical records and several predate the current rule; where they
+disagree with this docstring, the code wins. A thin pointer + consumer map
+lives at
+`docs/superpowers/plans/2026-07-01-causal46-within-completion-subsampling.md`.
 
 Notebook-local on purpose: src/ stays untouched while JON-41 Group B is in
-flux. Promote to src/ only if a third caller appears outside this directory.
+flux. Promote to src/ only if a caller appears outside this directory.
 
-The B4 sampling rule on `causal6-speech-responsive-update` is *per-step class
-balance*: at each ambiguous step `s`, draw `min_class[s]` trials per class
-(both classes — both bootstrapped with replacement for the t-test path; in
-the gallery only the majority class is subsampled, with the minority used
-in full). Concat across steps. Both classes share identical step composition
-by construction, so the class-difference trace is free of within-class
-step-acoustic confound.
+── Per-step class-balance rule ──────────────────────────────────────────────
 
-For B3 (single ambiguous step) this collapses to: draw `min_class[s]` of
-each class at that one step, bootstrap both with replacement.
+Every within-completion perceptual contrast is computed per *cell*:
+    B4 cell = (subject, electrode_idx, phoneme_pair, word_end)
+    B3 cell = a B4 cell restricted to a single ambiguous `resampled` step.
+`word_end` is fixed within a cell, so the contrast is within-completion by
+construction (suffix acoustics controlled).
 
-`matched_n_star_plot` (defined here, imported by star_plots.py and t_tests.py)
-does single-draw, minority-in-full visualisation. The t-test code in
-`t_tests.py` does R-replicate bootstrap of *both* classes with replacement.
-The two paths therefore display and test slightly different trial subsets —
-the filtered-gallery hook in `t_tests.py` joins per (site, word_end[,
-resampled]) key only.
+`qualifying_steps` are the ambiguous `resampled` steps for the cell
+(is_ambiguous_step: min_class > 2, endpoints 1/6 excluded — matches
+`src.data.get_ambiguous_resampled_steps`). At each qualifying step `s`:
+    min_class[s] = min(#class0, #class1) trials at that step.
+A bootstrap replicate draws `min_class[s]` trials PER CLASS at step `s` —
+BOTH classes sampled WITH REPLACEMENT (`select_cell_trials_bootstrap`) — then
+concatenates across steps. Per replicate, per class:
+    n_per_class = Σ_s min_class[s]   (constant within a cell).
+
+Because both classes carry the identical step composition (min_class[s]
+trials drawn from each step), the class-0 vs class-1 difference is
+step-matched: any acoustic-step effect is common-mode to both traces and
+cancels in the contrast. Equivalently, the gap is a min_class-weighted
+average of within-step percept contrasts, each evaluated at a fixed acoustic
+step — so it reflects reported percept, not step-acoustic mixture. B3 is the
+single-step special case (cleanest control, lower N).
+
+── One rule, two consumers, same draws ──────────────────────────────────────
+
+The star-plot gallery (`_star_gallery.py` → `matched_n_star_plot` /
+`early_window_star_plot[_compact]`) and the bootstrap t-tests
+(`t_tests.py` → `bootstrap_cell`) call the SAME `select_cell_trials_bootstrap`
+with the SAME seeding: replicate r uses `default_rng(r)`, and
+`bootstrap_cell`'s `base_seed` defaults to 0. So per cell the figure's R_plot
+(=200) class-mean traces ARE the first 200 replicates of the test's R (=1000)
+bootstrap — figure and test see identical trial draws, differing only in R
+and in what is computed from each draw (mean HGA trace for the plot; windowed
+mean-diff for the test). (`bootstrap_cell` additionally derives a
+label-permutation null after the observed draw; that does not perturb the
+observed indices.)
+
+NOTE (historical): earlier docstrings/plans described a single-draw
+"minority-in-full, majority-subsampled" visualisation and a global
+calibration-N (`N_cal`) subsample fed by a `select_cell_trials` helper.
+Neither is live — both consumers now bootstrap both classes with replacement
+under per-step min_class balance.
 """
 from __future__ import annotations
 

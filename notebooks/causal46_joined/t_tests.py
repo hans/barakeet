@@ -17,8 +17,9 @@
 # # B4 within-completion behavior bootstrap CIs (JON-44)
 #
 # Per-AS-site searchlight bootstrap of the within-completion HGA contrast
-# under **per-step class balance** (the same trial-selection rule as the
-# refactored star_plots gallery on `causal6-speech-responsive-update`):
+# under **per-step class balance** (the canonical trial-selection rule; see
+# `_within_completion.py` module docstring — the star-plot gallery
+# `_star_gallery.py` uses the identical rule and shares the bootstrap draws):
 #
 # - For each (site × word_end × qualifying step `s`), pick `min_class[s]`
 #   trials per class. Both classes are bootstrapped with replacement to
@@ -39,8 +40,8 @@
 #   p-value. `ci_excludes_zero` is the headline boolean for cell-window
 #   significance. No FDR for now (TBD).
 #
-# Cells with `n_per_class < K` (= K from star_plots.py) are flagged
-# underpowered and excluded from the bootstrap loop; they appear in the
+# Cells with `n_per_class < K` (K = the `min_class_k` notebook parameter) are
+# flagged underpowered and excluded from the bootstrap loop; they appear in the
 # manifest with status='underpowered'.
 #
 # Outputs:

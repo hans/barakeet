@@ -1,5 +1,13 @@
 # causal4/causal6 Within-Completion Trial-Balance Index — Implementation Plan
 
+> **ℹ Sampling rule now canonical elsewhere (2026-07-01).** This plan's
+> cell/threshold definitions (`min_class`, `meets_threshold_K`,
+> `is_ambiguous_step`) are still current. The downstream B3/B4 bootstrap that
+> consumes them is defined canonically in
+> `notebooks/causal46_joined/_within_completion.py` (module docstring); pointer
+> + consumer map at
+> `docs/superpowers/plans/2026-07-01-causal46-within-completion-subsampling.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Linear:** [JON-42](https://linear.app/jonlab/issue/JON-42/canonical-as-site-list-within-completion-trial-balance-index), sub-task **A2**. Depends on A1's `outputs/causal46_joined/canonical_AS_sites.csv`.

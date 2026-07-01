@@ -1,5 +1,16 @@
 # causal46 AS-Site Star Plots (single-step + matched-N across-step) — Implementation Plan
 
+> **⚠ Sampling rule superseded (2026-07-01).** The B3/B4 per-step class-balance
+> subsampling is now defined canonically in
+> `notebooks/causal46_joined/_within_completion.py` (module docstring); pointer
+> at `docs/superpowers/plans/2026-07-01-causal46-within-completion-subsampling.md`.
+> Two things drifted since this plan: the gallery notebook `star_plots.py` was
+> refactored into `_star_gallery.py` + `_within_completion.py`, and the
+> single-draw "minority-in-full" visualisation was replaced by a both-classes
+> bootstrap-with-replacement (the same draws the t-tests use). Historical record
+> — not rewritten on purpose; where it differs from the module docstring, the
+> code wins.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Linear:** [JON-43](https://linear.app/jonlab/issue/JON-43/star-plots-at-as-sites-single-step-matched-n-across-step), Group B items 3 & 4 of [JON-41](https://linear.app/jonlab/issue/JON-41). AS sites come directly from `outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet` (filtered to `significant`) — the same authority `trial_balance_index.py` uses. Trial balance from [JON-42](https://linear.app/jonlab/issue/JON-42) (`trial_balance_index.csv`, `trial_balance_summary.csv` under `outputs/causal46_joined/`). Do **not** read `canonical_AS_sites.csv` — that CSV is a legacy artifact of the AS-reconciliation notebook and is not the authority.
