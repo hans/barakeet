@@ -76,12 +76,18 @@ def write_annotated_pdfs(
     ci_low: float = 2.5,
     ci_high: float = 97.5,
     behav_dec_by_subject: dict | None = None,
+    acoustic_per_window: pl.DataFrame | None = None,
+    acoustic_R_plot: int = 200,
 ) -> int:
     """Filtered-gallery PDF: regenerated star plot per cell.
 
     pair_lookup: optional dict keyed by (subject, electrode_idx, phoneme_pair) →
     b4_per_pair row dict. When provided, a colored bar is added showing the
     cross-WE pooled test result for that site/pair.
+
+    acoustic_per_window: optional per-window summary for the acoustic-step contrast
+    (b4_acoustic_per_window.parquet). When provided, adds an acoustic panel to
+    each star plot (via matched_n_star_plot acoustic_* params).
     """
     if not entries or not HAS_PYPDF:
         return 0
@@ -119,6 +125,39 @@ def write_annotated_pdfs(
                 "ci_hi": pw_s["mean_diff_aligned_ci_hi"].to_numpy().astype(float),
             }
 
+        # Extract acoustic panel data when acoustic_per_window is available.
+        ac_sig_wins = None
+        ac_mda = None
+        ac_extreme_steps = None
+        if acoustic_per_window is not None and acoustic_per_window.height > 0:
+            ac_filt = (
+                (pl.col("subject") == row["subject"])
+                & (pl.col("electrode_idx") == row["electrode_idx"])
+                & (pl.col("phoneme_pair") == row["phoneme_pair"])
+                & (pl.col("word_end") == row["word_end"])
+            )
+            ac_pw = acoustic_per_window.filter(ac_filt)
+            if ac_pw.height > 0:
+                ac_pw_s = ac_pw.sort("tmin")
+                ac_sig_list = [
+                    (float(r["tmin"]), float(r["tmax"]))
+                    for r in ac_pw_s.filter(
+                        pl.col("ci_aligned_excludes_zero")
+                    ).iter_rows(named=True)
+                ]
+                ac_sig_wins = ac_sig_list or None
+                ac_mda = {
+                    "tcenter": ((ac_pw_s["tmin"] + ac_pw_s["tmax"]) / 2).to_numpy().astype(float),
+                    "mean": ac_pw_s["mean_diff_aligned_mean"].to_numpy().astype(float),
+                    "ci_lo": ac_pw_s["mean_diff_aligned_ci_lo"].to_numpy().astype(float),
+                    "ci_hi": ac_pw_s["mean_diff_aligned_ci_hi"].to_numpy().astype(float),
+                }
+                if "s_lo" in ac_pw_s.columns and "s_hi" in ac_pw_s.columns:
+                    ac_extreme_steps = (
+                        int(ac_pw_s["s_lo"][0]),
+                        int(ac_pw_s["s_hi"][0]),
+                    )
+
         qs = row.get("qualifying_steps")
         can_regen = (
             epochs_dict is not None
@@ -153,6 +192,10 @@ def write_annotated_pdfs(
                 xlim=group_xlim[key],
                 behav_decoding_df=behav_df,
                 early_smax_s=ac_search_smax,
+                acoustic_mean_diff_arrays=ac_mda,
+                acoustic_sig_windows=ac_sig_wins,
+                acoustic_extreme_steps=ac_extreme_steps,
+                acoustic_R_plot=acoustic_R_plot if ac_extreme_steps is not None else None,
             )
             if pair_lookup is not None:
                 pair_key_lut = (

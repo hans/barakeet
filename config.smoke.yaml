@@ -89,3 +89,11 @@ causal6:
   permutation_chunk_size: 6
   n_permutations_stage3: 100           # smoke-test: tiny K3
   stage3_k_gate: 200
+
+
+causal46_joined:
+  min_class_k: 2            # smoke-test: lower threshold to get more cells with 1 subject
+  window_size: 10
+  stride: 10
+  ac_p_value_threshold: 0.001
+  n_bootstrap: 10           # smoke-test: was 1000
