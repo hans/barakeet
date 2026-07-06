@@ -187,8 +187,9 @@ all_site_we = trial_balance.select(
 
 # Pool aggregates across ambiguous steps, per (site, word_end). At each
 # ambiguous step `s`, the per-step class-balanced contribution is
-# `min_class[s]` per class (minority in full; majority subsampled). The cell
-# pool sums those contributions: `n_per_class = sum_s min_class[s]`. Both
+# `min_class[s]` per class (downstream consumers draw both classes WITH
+# REPLACEMENT to that size — see the canonical rule in `_within_completion.py`).
+# The cell pool sums those contributions: `n_per_class = sum_s min_class[s]`. Both
 # classes have the same step composition by construction, so the
 # class0–class1 contrast is free of within-class step-acoustic confounds.
 # `meets_threshold_K = n_per_class >= K` gates cell inclusion downstream.

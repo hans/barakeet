@@ -1112,6 +1112,58 @@ rule joined_t_tests:
         )
 
 
+rule acoustic_on_ambiguous:
+    """Acoustic step contrast on ambiguous trials (behavior-controlled).
+
+    Mirror of joined_t_tests: contrasts s_hi vs s_lo among qualifying ambiguous
+    steps while holding behavioral report at 50/50 per step (same bootstrap draw
+    as the perceptual contrast). Scope: B4 cells with n_qualifying_steps ≥ 2.
+    Produces combined star-plot gallery (behavior + acoustic facets).
+    """
+    input:
+        phon_peaks_all  = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet",
+        trial_balance   = "outputs/causal46_joined/trial_balance_index.csv",
+        b4_per_window   = "outputs/causal46_joined/t_tests/b4_per_window.parquet",
+        b4_per_cell     = "outputs/causal46_joined/t_tests/b4_per_cell.parquet",
+        epoch_fifs      = expand(
+            "outputs/epochs_preprocessed/{subject}_epo.fif",
+            subject=config["data"]["subjects"],
+        ),
+        notebook        = "notebooks/causal46_joined/acoustic_on_ambiguous.py",
+        helper_wc       = "notebooks/causal46_joined/_within_completion.py",
+        helper_contrasts = "notebooks/causal46_joined/_contrasts.py",
+
+    output:
+        notebook               = "outputs/causal46_joined/acoustic_on_ambiguous/notebook.ipynb",
+        b4_acoustic_bootstrap  = "outputs/causal46_joined/acoustic_on_ambiguous/b4_acoustic_bootstrap.parquet",
+        b4_acoustic_per_window = "outputs/causal46_joined/acoustic_on_ambiguous/b4_acoustic_per_window.parquet",
+        b4_acoustic_per_cell   = "outputs/causal46_joined/acoustic_on_ambiguous/b4_acoustic_per_cell.parquet",
+        acoustic_cell_manifest = "outputs/causal46_joined/acoustic_on_ambiguous/acoustic_cell_manifest.parquet",
+        gallery_powered        = "outputs/causal46_joined/acoustic_on_ambiguous/star_plots_both/powered.pdf",
+        gallery_powered_sig    = "outputs/causal46_joined/acoustic_on_ambiguous/star_plots_both/powered_significant.pdf",
+
+    run:
+        outdir = Path(output.notebook).parent
+        C46 = config["causal46_joined"]
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                phon_peaks_path=str(input.phon_peaks_all),
+                epoch_dir=str(Path(input.epoch_fifs[0]).parent),
+                trial_balance_path=str(input.trial_balance),
+                b4_per_window_path=str(input.b4_per_window),
+                b4_per_cell_path=str(input.b4_per_cell),
+                outdir=str(outdir),
+                min_class_k=C46["min_class_k"],
+                window_size=C46["window_size"],
+                stride=C46["stride"],
+                ac_p_value_threshold=C46["ac_p_value_threshold"],
+                n_bootstrap=C46.get("n_bootstrap", 1000),
+            ),
+        )
+
+
 rule joined_acoustic_bootstrap:
     """Acoustic endpoint bootstrap for type1 / acoustic-only sites.
 

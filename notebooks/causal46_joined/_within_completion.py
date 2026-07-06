@@ -1,26 +1,63 @@
-"""Shared trial-selection / HGA-extraction / bootstrap primitives used by
-star_plots.py (JON-43) and t_tests.py (JON-44).
+"""Shared trial-selection / HGA-extraction / bootstrap primitives for the
+causal46_joined within-completion perceptual analyses.
+
+CANONICAL DEFINITION. This module is the source of truth for the per-step
+class-balance subsampling rule used throughout the causal46 evaluation
+pipeline (imported by 14+ notebooks — the gallery, the t-tests, the
+early-window and strong-generator analyses). To learn how B3/B4 trials are
+selected, read here. The dated design docs under `docs/superpowers/plans/`
+are historical records and several predate the current rule; where they
+disagree with this docstring, the code wins. A thin pointer + consumer map
+lives at
+`docs/superpowers/plans/2026-07-01-causal46-within-completion-subsampling.md`.
 
 Notebook-local on purpose: src/ stays untouched while JON-41 Group B is in
-flux. Promote to src/ only if a third caller appears outside this directory.
+flux. Promote to src/ only if a caller appears outside this directory.
 
-The B4 sampling rule on `causal6-speech-responsive-update` is *per-step class
-balance*: at each ambiguous step `s`, draw `min_class[s]` trials per class
-(both classes — both bootstrapped with replacement for the t-test path; in
-the gallery only the majority class is subsampled, with the minority used
-in full). Concat across steps. Both classes share identical step composition
-by construction, so the class-difference trace is free of within-class
-step-acoustic confound.
+── Per-step class-balance rule ──────────────────────────────────────────────
 
-For B3 (single ambiguous step) this collapses to: draw `min_class[s]` of
-each class at that one step, bootstrap both with replacement.
+Every within-completion perceptual contrast is computed per *cell*:
+    B4 cell = (subject, electrode_idx, phoneme_pair, word_end)
+    B3 cell = a B4 cell restricted to a single ambiguous `resampled` step.
+`word_end` is fixed within a cell, so the contrast is within-completion by
+construction (suffix acoustics controlled).
 
-`matched_n_star_plot` (defined here, imported by star_plots.py and t_tests.py)
-does single-draw, minority-in-full visualisation. The t-test code in
-`t_tests.py` does R-replicate bootstrap of *both* classes with replacement.
-The two paths therefore display and test slightly different trial subsets —
-the filtered-gallery hook in `t_tests.py` joins per (site, word_end[,
-resampled]) key only.
+`qualifying_steps` are the ambiguous `resampled` steps for the cell
+(is_ambiguous_step: min_class > 2, endpoints 1/6 excluded — matches
+`src.data.get_ambiguous_resampled_steps`). At each qualifying step `s`:
+    min_class[s] = min(#class0, #class1) trials at that step.
+A bootstrap replicate draws `min_class[s]` trials PER CLASS at step `s` —
+BOTH classes sampled WITH REPLACEMENT (`select_cell_trials_bootstrap`) — then
+concatenates across steps. Per replicate, per class:
+    n_per_class = Σ_s min_class[s]   (constant within a cell).
+
+Because both classes carry the identical step composition (min_class[s]
+trials drawn from each step), the class-0 vs class-1 difference is
+step-matched: any acoustic-step effect is common-mode to both traces and
+cancels in the contrast. Equivalently, the gap is a min_class-weighted
+average of within-step percept contrasts, each evaluated at a fixed acoustic
+step — so it reflects reported percept, not step-acoustic mixture. B3 is the
+single-step special case (cleanest control, lower N).
+
+── One rule, two consumers, same draws ──────────────────────────────────────
+
+The star-plot gallery (`_star_gallery.py` → `matched_n_star_plot` /
+`early_window_star_plot[_compact]`) and the bootstrap t-tests
+(`t_tests.py` → `bootstrap_cell`) call the SAME `select_cell_trials_bootstrap`
+with the SAME seeding: replicate r uses `default_rng(r)`, and
+`bootstrap_cell`'s `base_seed` defaults to 0. So per cell the figure's R_plot
+(=200) class-mean traces ARE the first 200 replicates of the test's R (=1000)
+bootstrap — figure and test see identical trial draws, differing only in R
+and in what is computed from each draw (mean HGA trace for the plot; windowed
+mean-diff for the test). (`bootstrap_cell` additionally derives a
+label-permutation null after the observed draw; that does not perturb the
+observed indices.)
+
+NOTE (historical): earlier docstrings/plans described a single-draw
+"minority-in-full, majority-subsampled" visualisation and a global
+calibration-N (`N_cal`) subsample fed by a `select_cell_trials` helper.
+Neither is live — both consumers now bootstrap both classes with replacement
+under per-step min_class balance.
 """
 from __future__ import annotations
 
@@ -110,6 +147,35 @@ def select_cell_trials_bootstrap(
                 rng.choice(idxs, size=n_s, replace=True)
             )
     return {cls: np.concatenate(parts) for cls, parts in drawn.items()}
+
+
+def select_cell_trials_bootstrap_perstep(
+    per_step: dict[int, dict[int, np.ndarray]],
+    *,
+    rng: np.random.Generator,
+) -> dict[int, dict[int, np.ndarray]]:
+    """One bootstrap draw organized by step — RNG-identical to select_cell_trials_bootstrap.
+
+    Makes EXACTLY the same sequence of rng.choice() calls as
+    select_cell_trials_bootstrap (same step iteration order, same class order,
+    same n_s computation, same zero-count skip), enabling one draw, two orthogonal
+    contrasts from the same replicates:
+
+      Perceptual contrast: pos = concat_s d[s][b_hi], neg = concat_s d[s][b_lo]
+      Acoustic contrast:   pos = concat_b d[s_hi][b], neg = concat_b d[s_lo][b]
+      Per-step profile:    concat_b d[s][b]  for each qualifying step s
+
+    Returns {step: {class: drawn_indices}}.
+    """
+    out: dict[int, dict[int, np.ndarray]] = {}
+    for step, by_class in per_step.items():
+        n_s = min(len(v) for v in by_class.values())
+        if n_s == 0:
+            continue
+        out[int(step)] = {}
+        for cls, idxs in by_class.items():
+            out[int(step)][int(cls)] = rng.choice(idxs, size=n_s, replace=True)
+    return out
 
 
 def n_per_class_from_per_step(per_step: dict[int, dict[int, np.ndarray]]) -> int:
@@ -491,6 +557,10 @@ def matched_n_star_plot(
     xlim=None,
     behav_decoding_df=None,
     early_smax_s=None,
+    acoustic_mean_diff_arrays=None,
+    acoustic_sig_windows=None,
+    acoustic_extreme_steps=None,
+    acoustic_R_plot=None,
 ):
     """Two-panel B4 star plot.
 
@@ -526,15 +596,44 @@ def matched_n_star_plot(
     we_mask = (md_pp["word_end"] == word_end).values
 
     _add_dec = behav_decoding_df is not None
-    if _add_dec:
-        fig, (ax_top, ax_bot, ax_dec) = plt.subplots(
-            3, 1,
-            figsize=(figsize[0], figsize[1] + 1.5),
-            gridspec_kw={"height_ratios": [1, 1, 0.45]},
-            sharex=True,
-        )
+    _add_acoustic = acoustic_extreme_steps is not None
+
+    if _add_acoustic and _add_dec:
+        height_ratios = [1, 1, 1, 0.45]
+        extra_h = 3.0
+        n_panels = 4
+    elif _add_acoustic:
+        height_ratios = [1, 1, 1]
+        extra_h = 1.5
+        n_panels = 3
+    elif _add_dec:
+        height_ratios = [1, 1, 0.45]
+        extra_h = 1.5
+        n_panels = 3
     else:
-        fig, (ax_top, ax_bot) = plt.subplots(2, 1, figsize=figsize, sharex=True)
+        height_ratios = [1, 1]
+        extra_h = 0.0
+        n_panels = 2
+
+    fig, axes = plt.subplots(
+        n_panels, 1,
+        figsize=(figsize[0], figsize[1] + extra_h),
+        gridspec_kw={"height_ratios": height_ratios},
+        sharex=True,
+    )
+    ax_top = axes[0]
+    ax_bot = axes[1]
+    if _add_acoustic and _add_dec:
+        ax_acoustic = axes[2]
+        ax_dec = axes[3]
+    elif _add_acoustic:
+        ax_acoustic = axes[2]
+        ax_dec = None
+    elif _add_dec:
+        ax_acoustic = None
+        ax_dec = axes[2]
+    else:
+        ax_acoustic = None
         ax_dec = None
 
     # Top: unambiguous step 1 & 6, restricted to this word_end.
@@ -611,7 +710,7 @@ def matched_n_star_plot(
 
     ax_bot.axhline(0, color="k", lw=0.5, ls=":")
     ax_bot.set_ylabel("HGA (z)")
-    ax_bot.set_xlabel("" if _add_dec else "Time (s, post word onset)")
+    ax_bot.set_xlabel("" if (_add_dec or _add_acoustic) else "Time (s, post word onset)")
     ax_bot.set_title(
         f"Per-step class-balanced — steps {list(qualifying_steps)}  "
         f"({n_per_class} per class)",
@@ -623,7 +722,7 @@ def matched_n_star_plot(
     textgrid_file = next(iter(
         Path(textgrid_dir).glob(f"*_{word_end}_{phoneme_pair}_*.TextGrid")
     ))
-    for ax in (ax_top, ax_bot):
+    for ax in [a for a in (ax_top, ax_bot, ax_acoustic) if a is not None]:
         add_textgrid(
             ax,
             textgrid_dir=textgrid_dir,
@@ -645,6 +744,84 @@ def matched_n_star_plot(
                         height=bar_h, color="gray", alpha=0.6,
                         edgecolor="none", zorder=5)
 
+    # Acoustic panel: per-step HGA traces (color ramp) + diff overlay + sig bars.
+    if _add_acoustic and ax_acoustic is not None:
+        import matplotlib.cm as cm
+
+        steps_sorted = sorted(qualifying_steps)
+        n_steps = len(steps_sorted)
+        step_cmap = cm.RdYlBu_r
+        step_colors_ac = {
+            s: step_cmap(i / max(1, n_steps - 1))
+            for i, s in enumerate(steps_sorted)
+        }
+        s_lo_ac = int(acoustic_extreme_steps[0])
+        s_hi_ac = int(acoustic_extreme_steps[1])
+
+        # Per-step bootstrap mean HGA traces (same per_step already computed above).
+        if acoustic_R_plot:
+            step_traces_ac: dict[int, list[np.ndarray]] = {s: [] for s in steps_sorted}
+            for r in range(acoustic_R_plot):
+                d_ac = select_cell_trials_bootstrap_perstep(
+                    per_step, rng=np.random.default_rng(r)
+                )
+                for s in steps_sorted:
+                    if s not in d_ac:
+                        continue
+                    step_idx = np.concatenate(list(d_ac[s].values()))
+                    if len(step_idx):
+                        step_traces_ac[s].append(hga[step_idx].mean(0))
+
+            for s in steps_sorted:
+                if not step_traces_ac[s]:
+                    continue
+                arr_ac = np.array(step_traces_ac[s])
+                m_ac = arr_ac.mean(0)
+                se_ac = arr_ac.std(0)
+                color_ac = step_colors_ac[s]
+                is_extreme = s in (s_lo_ac, s_hi_ac)
+                lw_ac = 1.5 if is_extreme else 0.8
+                alpha_ac = 1.0 if is_extreme else 0.55
+                label_ac = f"step {s}" if is_extreme else None
+                ax_acoustic.plot(times, m_ac, color=color_ac, lw=lw_ac,
+                                 alpha=alpha_ac, label=label_ac)
+                ax_acoustic.fill_between(times, m_ac - se_ac, m_ac + se_ac,
+                                         color=color_ac, alpha=0.12 * alpha_ac)
+
+        # Diff overlay.
+        if acoustic_mean_diff_arrays is not None:
+            tc_ac = acoustic_mean_diff_arrays["tcenter"]
+            mv_ac = acoustic_mean_diff_arrays["mean"]
+            cl_ac = acoustic_mean_diff_arrays["ci_lo"]
+            ch_ac = acoustic_mean_diff_arrays["ci_hi"]
+            valid_ac = np.isfinite(mv_ac)
+            if valid_ac.any():
+                ax_acoustic.plot(tc_ac[valid_ac], mv_ac[valid_ac],
+                                 color="#4d4d4d", lw=1.3, ls="--",
+                                 label=f"step {s_hi_ac}−step {s_lo_ac} diff",
+                                 zorder=4)
+                ax_acoustic.fill_between(tc_ac[valid_ac], cl_ac[valid_ac], ch_ac[valid_ac],
+                                         color="#4d4d4d", alpha=0.12, zorder=3)
+
+        ax_acoustic.axhline(0, color="k", lw=0.5, ls=":")
+        ax_acoustic.set_ylabel("HGA (z)")
+        ax_acoustic.set_xlabel("" if _add_dec else "Time (s, post word onset)")
+        ax_acoustic.set_title(
+            f"Acoustic step contrast  steps {s_lo_ac}–{s_hi_ac}  (behavior-controlled)",
+            fontsize=9, pad=20,
+        )
+        ax_acoustic.legend(fontsize=7, loc="upper left", framealpha=0.7)
+
+        # Significance bars for acoustic panel.
+        if acoustic_sig_windows:
+            ymin_ac, ymax_ac = ax_acoustic.get_ylim()
+            bar_h_ac = (ymax_ac - ymin_ac) * 0.04
+            bar_y_ac = ymin_ac + (ymax_ac - ymin_ac) * 0.95
+            for tmin_s, tmax_s in acoustic_sig_windows:
+                ax_acoustic.barh(y=bar_y_ac, width=tmax_s - tmin_s, left=tmin_s,
+                                 height=bar_h_ac, color="gray", alpha=0.6,
+                                 edgecolor="none", zorder=5)
+
     # Behavioral decoding panel (thin, below ax_bot).
     if _add_dec:
         import polars as pl
@@ -658,6 +835,7 @@ def matched_n_star_plot(
         ax_dec.set_xlabel("Time (s, post word onset)")
 
     fig._ax_behav = ax_bot
+    fig._ax_acoustic = ax_acoustic
     fig.tight_layout()
     return fig
 

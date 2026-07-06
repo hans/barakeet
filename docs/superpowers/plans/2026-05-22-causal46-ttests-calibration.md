@@ -1,5 +1,16 @@
 # causal46 Per-Site T-Tests + Global-N Calibration (JON-44) — Implementation Plan
 
+> **⚠ Sampling rule superseded (2026-07-01) — this is the most-drifted plan.**
+> The B3/B4 subsampling is now defined canonically in
+> `notebooks/causal46_joined/_within_completion.py` (module docstring); pointer
+> at `docs/superpowers/plans/2026-07-01-causal46-within-completion-subsampling.md`.
+> In particular, the global calibration-N (`N_cal`) scheme and the
+> `select_cell_trials` helper described below are **not live**: consumers use
+> per-step `min_class[s]` balance via `select_cell_trials_bootstrap` (both
+> classes resampled with replacement; cell gate is `n_per_class = Σ_s
+> min_class[s] ≥ K`, no global N). Historical record — not rewritten on purpose;
+> where it differs from the module docstring, the code wins.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Linear:** [JON-44](https://linear.app/jonlab/issue/JON-44/per-site-t-tests-population-summary-of-within-completion-behavior), Group B items 5 & 6 of [JON-41](https://linear.app/jonlab/issue/JON-41). Consumes the same canonical inputs as [JON-43](https://linear.app/jonlab/issue/JON-43): `outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet` (filtered to `significant`) and `outputs/causal46_joined/trial_balance_index.csv` / `trial_balance_summary.csv` from [JON-42](https://linear.app/jonlab/issue/JON-42).
