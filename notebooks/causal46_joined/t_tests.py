@@ -98,6 +98,7 @@ min_class_k = 4
 window_size = 10
 stride = 10
 ac_p_value_threshold = 0.001
+a_per_window_path = "outputs_prod/causal46_joined/acoustic_bootstrap/a_per_window.parquet"
 
 # %%
 REPO = Path(".").resolve()
@@ -1216,18 +1217,29 @@ if b4_per_cell.height:
         (r["subject"], int(r["electrode_idx"]), r["phoneme_pair"]): r
         for r in b4_per_pair.iter_rows(named=True)
     } if b4_per_pair.height else None
+    _apw_path = Path(a_per_window_path)
+    _a_per_window = pl.read_parquet(_apw_path) if _apw_path.exists() else pl.DataFrame()
+    acoustic_site_sig_windows = {}
+    if _a_per_window.height:
+        for r in _a_per_window.filter(pl.col("ci_aligned_excludes_zero")).iter_rows(named=True):
+            key = (r["subject"], int(r["electrode_idx"]), r["phoneme_pair"])
+            acoustic_site_sig_windows.setdefault(key, []).append(
+                (float(r["tmin"]), float(r["tmax"]))
+            )
     n_p = write_annotated_pdfs(powered_entries, b4_per_window, b4_cell_keys,
                                FILT_DIR / "b4_powered.pdf",
                                epochs_dict=epochs_dict, pair_lookup=pair_lut,
                                ac_search_smin=AC_SEARCH_SMIN,
                                ac_search_smax=AC_SEARCH_SMAX,
-                               behav_dec_by_subject=_behav_dec_by_subject)
+                               behav_dec_by_subject=_behav_dec_by_subject,
+                               acoustic_site_sig_windows=acoustic_site_sig_windows or None)
     n_s = write_annotated_pdfs(sig_entries, b4_per_window, b4_cell_keys,
                                FILT_DIR / "b4_powered_significant.pdf",
                                epochs_dict=epochs_dict, pair_lookup=pair_lut,
                                ac_search_smin=AC_SEARCH_SMIN,
                                ac_search_smax=AC_SEARCH_SMAX,
-                               behav_dec_by_subject=_behav_dec_by_subject)
+                               behav_dec_by_subject=_behav_dec_by_subject,
+                               acoustic_site_sig_windows=acoustic_site_sig_windows or None)
     print(f"B4 filtered PDFs: powered={n_p}  significant={n_s}")
 
 under = cell_manifest.filter(

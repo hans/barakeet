@@ -78,6 +78,7 @@ def write_annotated_pdfs(
     behav_dec_by_subject: dict | None = None,
     acoustic_per_window: pl.DataFrame | None = None,
     acoustic_R_plot: int = 200,
+    acoustic_site_sig_windows: dict | None = None,
 ) -> int:
     """Filtered-gallery PDF: regenerated star plot per cell.
 
@@ -174,6 +175,9 @@ def write_annotated_pdfs(
         key = (row["subject"], row["electrode_idx"], row["phoneme_pair"])
         try:
             behav_df = (behav_dec_by_subject or {}).get(row["subject"])
+            top_sig = (acoustic_site_sig_windows or {}).get(
+                (row["subject"], int(row["electrode_idx"]), row["phoneme_pair"])
+            )
             fig2 = matched_n_star_plot(
                 subject=row["subject"],
                 electrode_idx=int(row["electrode_idx"]),
@@ -192,6 +196,7 @@ def write_annotated_pdfs(
                 xlim=group_xlim[key],
                 behav_decoding_df=behav_df,
                 early_smax_s=ac_search_smax,
+                top_sig_windows=top_sig,
                 acoustic_mean_diff_arrays=ac_mda,
                 acoustic_sig_windows=ac_sig_wins,
                 acoustic_extreme_steps=ac_extreme_steps,

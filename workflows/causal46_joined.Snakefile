@@ -1078,6 +1078,7 @@ rule joined_t_tests:
             "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only/{subject}/scores.parquet",
             subject=config["data"]["subjects"],
         ),
+        a_per_window        = "outputs/causal46_joined/acoustic_bootstrap/a_per_window.parquet",
         notebook            = "notebooks/causal46_joined/t_tests.py",
 
     output:
@@ -1108,6 +1109,7 @@ rule joined_t_tests:
                 window_size=C46["window_size"],
                 stride=C46["stride"],
                 ac_p_value_threshold=C46["ac_p_value_threshold"],
+                a_per_window_path=str(input.a_per_window),
             ),
         )
 
@@ -1180,12 +1182,14 @@ rule joined_acoustic_bootstrap:
         phon_peaks_all    = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet",
         early_annotations = "outputs/causal46_joined/manual_annotations/early_acoustic_window.csv",
         helper            = "notebooks/causal46_joined/_within_completion.py",
+        helper_contrasts  = "notebooks/causal46_joined/_contrasts.py",
         notebook          = "notebooks/causal46_joined/acoustic_bootstrap.py",
 
     output:
-        notebook    = "outputs/causal46_joined/acoustic_bootstrap/notebook.ipynb",
-        a_bootstrap = "outputs/causal46_joined/acoustic_bootstrap/a_bootstrap.parquet",
-        a_per_site  = "outputs/causal46_joined/acoustic_bootstrap/a_per_site.parquet",
+        notebook     = "outputs/causal46_joined/acoustic_bootstrap/notebook.ipynb",
+        a_bootstrap  = "outputs/causal46_joined/acoustic_bootstrap/a_bootstrap.parquet",
+        a_per_site   = "outputs/causal46_joined/acoustic_bootstrap/a_per_site.parquet",
+        a_per_window = "outputs/causal46_joined/acoustic_bootstrap/a_per_window.parquet",
 
     run:
         outdir = Path(output.notebook).parent

@@ -556,6 +556,7 @@ def matched_n_star_plot(
     xlim=None,
     behav_decoding_df=None,
     early_smax_s=None,
+    top_sig_windows=None,
     acoustic_mean_diff_arrays=None,
     acoustic_sig_windows=None,
     acoustic_extreme_steps=None,
@@ -654,6 +655,14 @@ def matched_n_star_plot(
     if phon_smin is not None:
         t_phon = np.array([phon_smin, phon_smax]) / epoch_sfreq + epoch_tmin
         ax_top.axvspan(*t_phon, color="#4dac26", alpha=0.20, label="acoustic peak")
+    if top_sig_windows:
+        ymin, ymax = ax_top.get_ylim()
+        bar_h = (ymax - ymin) * 0.04
+        bar_y = ymin + (ymax - ymin) * 0.95
+        for tmin_s, tmax_s in top_sig_windows:
+            ax_top.barh(y=bar_y, width=tmax_s - tmin_s, left=tmin_s,
+                        height=bar_h, color="#238b45", alpha=0.7,
+                        edgecolor="none", zorder=5)
     ax_top.axhline(0, color="k", lw=0.5, ls=":")
     ax_top.set_ylabel("HGA (z)")
     top_title = (

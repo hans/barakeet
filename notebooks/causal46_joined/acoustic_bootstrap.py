@@ -57,6 +57,7 @@ sys.path.insert(0, str(Path(".").resolve() / "notebooks" / "causal46_joined"))
 from _within_completion import bootstrap_A_site, extract_hga  # noqa: E402
 from _windows import _find_maximal_runs, _window_sign  # noqa: E402
 from _within_completion import summarize_replicate_array  # noqa: E402
+from _contrasts import per_window_summary  # noqa: E402
 
 OUT_DIR = Path(outdir)
 OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -200,7 +201,19 @@ else:
 a_bootstrap.write_parquet(OUT_DIR / "a_bootstrap.parquet")
 a_per_site.write_parquet(OUT_DIR / "a_per_site.parquet")
 
+# Per-window CI summary for star-plot significance bars on ax_top.
+# mean_diff_aligned = mean_diff_raw (step6 > step1 polarity is fixed).
+a_boot_aligned = a_bootstrap.with_columns(
+    pl.col("mean_diff_raw").alias("mean_diff_aligned"),
+    (pl.col("smin") / epoch_sfreq + epoch_tmin).alias("tmin"),
+    (pl.col("smax") / epoch_sfreq + epoch_tmin).alias("tmax"),
+    pl.lit(None).cast(pl.Float64).alias("acoustic_peak_auc"),
+)
+a_per_window = per_window_summary(a_boot_aligned, SITE_KEYS)
+a_per_window.write_parquet(OUT_DIR / "a_per_window.parquet")
+
 print(f"a_bootstrap: {a_bootstrap.height:,} rows")
 print(f"a_per_site:  {a_per_site.height} rows")
+print(f"a_per_window: {a_per_window.height} rows")
 if a_per_site.height > 0:
     print(a_per_site)
