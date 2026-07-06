@@ -63,7 +63,6 @@ import sys
 from pathlib import Path
 
 import matplotlib
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 import mne
@@ -88,6 +87,23 @@ rng = np.random.default_rng(42)
 
 OUT = Path(outdir)
 OUT.mkdir(parents=True, exist_ok=True)
+
+# %%
+matplotlib.rcParams.update(
+    {
+        "figure.dpi": 300,
+        "axes.linewidth": 0.5,
+        "xtick.major.width": 0.5,
+        "ytick.major.width": 0.5,
+        "xtick.minor.width": 0.25,
+        "ytick.minor.width": 0.25,
+        "lines.linewidth": 1.0,
+        "font.family": "Helvetica",
+        "font.sans-serif": ["Helvetica", "Arial"],
+        "savefig.bbox": "tight",
+        "savefig.pad_inches": 0.01,
+    }
+)
 
 # %% [markdown]
 # ## Load type-1 sites
@@ -805,7 +821,7 @@ ax_top.axhline(0.0, color="k", lw=0.5, ls=":")
 ax_top.axhline(1.0, color="k", lw=0.5, ls=":")
 ax_top.set_xlim(0.5, 6.5)
 ax_top.set_ylim(-0.05, 1.05)
-ax_top.set_xlabel("Continuum step", fontsize=8)
+ax_top.set_xlabel("Acoustic step", fontsize=8)
 ax_top.set_ylabel("hga_norm (population mean)", fontsize=8)
 ax_top.set_title("Tuning categoricity (corroboration only)\nDoes NOT adjudicate O1 vs O2a — see location test",
                  fontsize=8)
@@ -992,3 +1008,61 @@ L.info(
     f"(≈1 → O2a, ≫1 → O2b)\n"
     f"===========================================\n"
 )
+
+# %% [markdown]
+# ## Demo plots
+
+# %%
+plot_subject = 'EC250'
+plot_electrode_idx = 216
+plot_phoneme_pair = 'pb'
+
+# %%
+plot_df = combined.query(f"subject == '{plot_subject}' and electrode_idx == {plot_electrode_idx} and phoneme_pair == '{plot_phoneme_pair}'")
+plot_df
+
+# %%
+import seaborn as sns
+g = sns.catplot(data=plot_df.astype({"resampled": "int"}), x="resampled", y="hga_dprime_corr",
+                kind="swarm", height=3, aspect=1.75)
+ax = g.ax
+ax.plot(plot_df.groupby("resampled")["hga_dprime_corr"].mean().values,
+        color="k", lw=3, ls="--", label="mean", zorder=100)
+ax.axhline(0, color="k", lw=0.6, ls=":")
+
+ax2 = ax.twinx()
+plot_steps = np.array(sorted(plot_ax_df["step_a"].unique())) - 0.5
+ax2.plot(plot_steps, plot_ax_df.groupby("step_a")["roc_auc"].mean().values,
+         color="C2", lw=1.5, ls="-", label="AX mean AUC")
+ax2.errorbar(plot_steps, plot_ax_df.groupby("step_a")["roc_auc"].mean().values,
+             yerr=plot_ax_df.groupby("step_a")["roc_auc_std"].mean() / np.sqrt(48),
+             fmt="o", color="C2", ms=5, lw=1.5, label="AX mean ± SEM")
+
+ax2.spines["top"].set_visible(False)
+
+ax.set_xlabel("Acoustic step")
+ax.set_ylabel("$d'$", color="k", rotation=0, labelpad=10, ha="right")
+ax2.set_ylabel("AX discrimination\n(ROC-AUC)", color="C2", rotation=0,
+               labelpad=10, ha="left")
+
+
+# Sigmoid on the d' axis. Mean d' per step, normalized to [0,1] endpoints to match fit_sigmoid's precondition.
+row = sigmoid_df.set_index(SITE_KEYS).loc[(plot_subject, plot_electrode_idx, plot_phoneme_pair)]   # the site you're plotting
+x0, k = row["sig_x0"], row["sig_k"]
+
+if np.isfinite(x0) and np.isfinite(k):
+    # site's d' per step, to anchor the normalized curve back onto the d' axis
+    dp = plot_df.groupby("resampled")["hga_dprime_corr"].mean()
+    d0, d1 = dp.loc[min(SIG_STEPS)], dp.loc[max(SIG_STEPS)]
+
+    xs = np.linspace(min(SIG_STEPS), max(SIG_STEPS), 200)
+    ys = sigmoid_model_2p(xs, x0, k) * (d1 - d0) + d0   # normalized -> d' scale
+    xpos = xs - min(SIG_STEPS)                          # step 1 -> swarm position 0
+    ax.plot(xpos, ys, color="C1", lw=2, zorder=101,
+            label="sigmoid fit")
+
+ax.legend(loc="upper left", frameon=False)
+
+# %%
+print("y_tr range:", y_tr_norm.min(), y_tr_norm.max(), "mean:", y_tr_norm.mean())
+print("yhat range:", yhat.min(), yhat.max())

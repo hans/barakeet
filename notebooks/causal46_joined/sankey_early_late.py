@@ -42,6 +42,23 @@ from matplotlib.path import Path as MplPath
 import pandas as pd
 import seaborn as sns
 
+# %%
+matplotlib.rcParams.update(
+    {
+        "figure.dpi": 300,
+        "axes.linewidth": 0.5,
+        "xtick.major.width": 0.5,
+        "ytick.major.width": 0.5,
+        "xtick.minor.width": 0.25,
+        "ytick.minor.width": 0.25,
+        "lines.linewidth": 1.0,
+        "font.family": "Helvetica",
+        "font.sans-serif": ["Helvetica", "Arial"],
+        "savefig.bbox": "tight",
+        "savefig.pad_inches": 0.01,
+    }
+)
+
 # %% tags=["parameters"]
 annotations_path = "outputs/causal46_joined/manual_annotations/early_acoustic_window.csv"
 filtered_manifest_path = "outputs/causal46_joined/manual_annotations/filtered_manifest.csv"
@@ -74,12 +91,12 @@ EARLY_TYPES = [
     "etc",
 ]
 EARLY_LABELS = {
-    "type1_acoustic_only":              "Acoustic only",
-    "type2_early_perceptual":           "Acoustic+perceptual",
-    "type3_asymmetric":                 "Acoustic+perceptual\n(one-sided)",
-    "type4_early_perceptual_mirrored":  "Acoustic+perceptual\n(mirrored)",
-    "type5_behav_only":                 "Perceptual only",
-    "etc":                              "Other",
+    "type1_acoustic_only":              "Acoustic",
+    "type2_early_perceptual":           "Perceptual",
+    "type3_asymmetric":                 None,#"Acoustic+perceptual\n(one-sided)",
+    "type4_early_perceptual_mirrored":  None,#"Acoustic+perceptual\n(mirrored)",
+    "type5_behav_only":                 None,#"Perceptual only",
+    "etc":                              None,#"Other",
 }
 EARLY_COLORS = {
     "type1_acoustic_only":             "#4E79A7",
@@ -92,9 +109,9 @@ EARLY_COLORS = {
 # Right column: absent → one-sided → two-sided (bottom to top)
 LATE_ORDER  = ["absent", "one-sided", "two-sided"]
 LATE_LABELS = {
-    "absent":     "Late window\nabsent",
-    "one-sided":  "Late window\n(one-sided)",
-    "two-sided":  "Late window\n(two-sided)",
+    "absent":     "Absent",
+    "one-sided":  "One-sided",
+    "two-sided":  "Two-sided",
 }
 LATE_COLORS = {
     "absent":    "#BAB0AC",
@@ -131,6 +148,9 @@ for group, members in EARLY_TYPE_GROUPS.items():
 merged["early_category"] = merged["site_type_relabel"].replace(early_category_map)
 merged["late_category"] = merged["late_category"].fillna("absent")
 
+merged["early_label"] = merged["early_category"].replace(EARLY_LABELS)
+merged["late_label"] = merged["late_category"].replace(LATE_LABELS)
+
 # Add phon peaks
 merged = merged.merge(
     phon_peaks[["subject", "electrode_idx", "phoneme_pair", "test_roc_auc", "smax"]].rename(columns={"test_roc_auc": "phon_peak_roc_auc", "smax": "phon_peak_smax"}),
@@ -138,6 +158,8 @@ merged = merged.merge(
     how="left",
     validate="1:1",
 )
+
+merged = merged.dropna(subset=["early_category", "early_label", "late_category", "late_label"])
 
 print(f"Site×pair cells total: {len(merged)}")
 print("\nFlow table (rows=early type, cols=late category):")
@@ -221,7 +243,7 @@ def _positions(labels, totals, scale):
 left_y  = _positions(active_left,  left_totals,  left_scale)
 right_y = _positions(active_right, right_totals, right_scale)
 
-fig, ax = plt.subplots(figsize=(8, 7))
+fig, ax = plt.subplots(figsize=(3.5, 2.5))
 
 # Nodes
 for t in active_left:
@@ -277,9 +299,9 @@ for lc in active_right:
 
 # Column headers
 header_y = PLOT_H + 0.07
-ax.text(X_LEFT,  header_y, "Early window", ha="center", va="bottom",
+ax.text(X_LEFT,  header_y, "Early\nwindow", ha="center", va="bottom",
         fontsize=10, fontweight="bold")
-ax.text(X_RIGHT, header_y, "Late window",  ha="center", va="bottom",
+ax.text(X_RIGHT, header_y, "Late\nwindow",  ha="center", va="bottom",
         fontsize=10, fontweight="bold")
 
 ax.set_xlim(0, 1)

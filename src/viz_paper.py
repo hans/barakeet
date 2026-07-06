@@ -212,6 +212,7 @@ def add_textgrid(
     fontsize=10,
     include_offset=True,
     vline_extent=1.25,
+    tmax=None,
 ):
     if ep_df is None and textgrid_file is None:
         raise ValueError("Either ep_df or textgrid_file must be provided")
@@ -230,8 +231,11 @@ def add_textgrid(
     ]
     for i, interval in enumerate(plot_intervals):
         if include_phonemes:
+            plotx = interval.minTime + 0.035
+            if tmax is not None and plotx > tmax:
+                continue
             ax.text(
-                interval.minTime + 0.035,
+                plotx,
                 1.025,
                 interval.mark.strip(),
                 rotation=rotation,
@@ -256,14 +260,15 @@ def add_textgrid(
 
         # word offset line
         if include_offset and i == len(plot_intervals) - 1:
-            ax.axvline(
-                interval.maxTime,
-                ymax=vline_extent,
-                linestyle="--",
-                alpha=0.5,
-                color="blue",
-                clip_on=False,
-            )
+            if tmax is None or interval.maxTime <= tmax:
+                ax.axvline(
+                    interval.maxTime,
+                    ymax=vline_extent,
+                    linestyle="--",
+                    alpha=0.5,
+                    color="blue",
+                    clip_on=False,
+                )
 
 
 def _plot_phon_controlled(
@@ -2463,7 +2468,7 @@ def plot_behav_barplot(
     sns.barplot(
         data=behav_barplot_data,
         y="resampled",
-        x="prop",
+        x="prop" if plot_values == "proportion" else "count",
         order=plot_resampled_steps[::-1],
         hue="label_behavior",
         hue_order=list(plot_phoneme_pair)[::-1],
@@ -2515,7 +2520,7 @@ def plot_behav_barplot(
             handlelength=3,
             handleheight=2,
             loc="center right",
-            bbox_to_anchor=(1.25, 0.5),
+            bbox_to_anchor=(1.75, 0.5),
         )
     else:
         ax.get_legend().remove()
