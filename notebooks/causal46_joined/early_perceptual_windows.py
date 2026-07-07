@@ -75,6 +75,23 @@ CELL_KEYS = ["subject", "electrode_idx", "phoneme_pair", "word_end"]
 SAMPLE_T0 = int(round((0.0 - epoch_tmin) * epoch_sfreq))
 print(f"SAMPLE_T0 = {SAMPLE_T0} (t=0 in samples, epoch_tmin={epoch_tmin}, sfreq={epoch_sfreq})")
 
+# %%
+matplotlib.rcParams.update(
+    {
+        "figure.dpi": 300,
+        "axes.linewidth": 0.5,
+        "xtick.major.width": 0.5,
+        "ytick.major.width": 0.5,
+        "xtick.minor.width": 0.25,
+        "ytick.minor.width": 0.25,
+        "lines.linewidth": 1.0,
+        "font.family": "Helvetica",
+        "font.sans-serif": ["Helvetica", "Arial"],
+        "savefig.bbox": "tight",
+        "savefig.pad_inches": 0.01,
+    }
+)
+
 # %% [markdown]
 # ## Load and validate inputs
 
@@ -466,15 +483,23 @@ ep_windows_perceptual = (
 ep_windows_acoustic = type1_windows.group_by(SITE_KEYS).first()
 
 # %%
-from scipy.stats import ttest_ind
-
-ttest_ind(ep_windows_acoustic["smin"].to_numpy(), ep_windows_perceptual["smin"].to_numpy())
+window_size = GRID_WINDOW_SIZE
+plot_df = pd.concat([
+    ep_windows_acoustic.select(["smin", "smax"]).to_pandas().assign(**{"Site type": "Acoustic"}),
+    ep_windows_perceptual.select(["smin", "smax"]).to_pandas().assign(**{"Site type": "Perceptual"})
+])
+plot_df["window_center_sec"] = ((plot_df["smin"] + plot_df["smax"]) / 2) / epoch_sfreq + epoch_tmin
+g = sns.displot(data=plot_df,
+    x="window_center_sec", hue="Site type", kind="kde", common_norm=False,
+    height=2.5, aspect=2, lw=3
+)
+g.set_axis_labels("Peak center (sec after word onset)", "Density")
+g.legend.set_bbox_to_anchor((0.7, 0.7))
 
 # %%
-sns.displot(data=pd.concat([
-    ep_windows_acoustic.select(["smin"]).to_pandas().assign(type="acoustic"),
-    ep_windows_perceptual.select(["smin"]).to_pandas().assign(type="perceptual")]),
-    x="smin", hue="type", kind="kde")
+from scipy.stats import ttest_ind
+
+ttest_ind(plot_df.query("`Site type` == 'Acoustic'")["window_center_sec"], plot_df.query("`Site type` == 'Perceptual'")["window_center_sec"])
 
 # %% [markdown]
 # ### Acoustic vs perceptual timing within-site

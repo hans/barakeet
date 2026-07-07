@@ -468,9 +468,7 @@ else:
 if all_rows:
     _DEFAULT_COLORS = ["#2166ac", "#d6604d"]
 
-    # trial_df uses "behavior_categorical_forced" (built above); don't call
-    # resolve_behavior_col which looks for different column names.
-    bhv_col = "behavior_categorical_forced"
+    bhv_col = resolve_behavior_col(trial_df)
 
     R_PLOT = 200  # bootstrap replicates for mean ± SE overlay
 

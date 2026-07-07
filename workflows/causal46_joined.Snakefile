@@ -1481,6 +1481,8 @@ rule causal46_joined_all:
         "outputs/causal46_joined/contrast_plot/bm_contrast_plot.ipynb",
         "outputs/causal46_joined/contrast_plot/dn_contrast_plot.ipynb",
         "outputs/causal46_joined/contrast_plot/pb_contrast_plot.ipynb",
+        # type1 coding on ambiguous trials
+        "outputs/causal46_joined/type1_ambiguous_hga_coding/notebook.ipynb",
 
 
 # =============================================================================
@@ -1814,6 +1816,8 @@ rule joined_type1_ambiguous_hga_coding:
                 phon_peaks_path=str(input.phon_peaks_path),
                 epoch_dir=str(input.epochs_dir),
                 outdir=str(outdir),
+                R_boot=2000,
+                high_dprime_threshold=1.0
             ),
         )
 

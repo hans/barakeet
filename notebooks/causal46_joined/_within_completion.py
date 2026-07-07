@@ -68,6 +68,7 @@ from typing import Sequence
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import seaborn as sns
 
 from src.stimuli import OFFSET_DICT
 from src.viz_paper import add_textgrid, epoch_sfreq, epoch_tmin
@@ -845,6 +846,213 @@ def matched_n_star_plot(
     fig._ax_behav = ax_bot
     fig._ax_acoustic = ax_acoustic
     fig.tight_layout()
+    return fig
+
+
+def matched_n_star_plot_talk(
+    subject,
+    electrode_idx,
+    phoneme_pair,
+    word_end,
+    qualifying_steps,
+    *,
+    epochs_dict,
+    n_per_class,
+    phon_smin=None,
+    phon_smax=None,
+    phon_search_smin=None,
+    phon_search_smax=None,
+    textgrid_dir="textgrids",
+    figsize=(4.5, 4.5),
+    acoustic_peak_auc=None,
+    R_plot=200,
+    sig_windows=None,
+    mean_diff_arrays=None,
+    xlim=None,
+    top_legend_loc="lower right",
+    bottom_legend_loc="lower right",
+    behav_decoding_df=None,
+    early_smax_s=None,
+    axs=None,
+):
+    """Two-panel B4 star plot.
+
+    Top panel: unambiguous steps 1 & 6 (acoustic anchor).
+    Bottom panel: per-step class-balanced behavioral contrast shown as
+    bootstrap mean ± percentile CI (R_plot replicates, same trial-selection
+    rule as the main t-test bootstrap). Optionally overlays bootstrap mean
+    aligned diff + CI band, and significance bars.
+
+    Parameters
+    ----------
+    R_plot : int
+        Number of bootstrap replicates for the bottom-panel class curves.
+    ci_low, ci_high : float
+        Percentile bounds for the CI bands (default 2.5 / 97.5).
+    sig_windows : list of (tmin, tmax) float tuples, optional
+        Windows where the bootstrap CI excludes zero. Drawn as gray bars at
+        the top of ax_bot.
+    mean_diff_arrays : dict, optional
+        Pre-computed bootstrap mean-diff overlay for ax_bot. Expected keys:
+        ``tcenter``, ``mean``, ``ci_lo``, ``ci_hi`` (all float arrays).
+    """
+
+    if xlim is None:
+        xlim = OFFSET_DICT.get(word_end, 1.0) + 0.1
+
+    ep = epochs_dict[subject]
+    md = ep.metadata
+    bhv_col = resolve_behavior_col(md)
+
+    resampled_cmap = {
+        1: "#85CBDB",
+        6: "#AC579C",
+    }
+
+    pp_mask = (md["phoneme_pair"] == phoneme_pair).values
+    ep_pp = ep[pp_mask]
+    md_pp = md[pp_mask].reset_index(drop=True)
+    hga = extract_hga(ep_pp, electrode_idx)
+    times = ep.times
+
+    we_mask = (md_pp["word_end"] == word_end).values
+
+    if axs is None:
+        fig, (ax_top, ax_bot) = plt.subplots(2, 1, figsize=figsize, sharex=False)
+    else:
+        assert len(axs) == 2
+        ax_top, ax_bot = axs
+        fig = ax_top.get_figure()
+
+    # Top: unambiguous step 1 & 6, restricted to this word_end.
+    step_colors = {1: resampled_cmap[1], 6: resampled_cmap[6]}
+    for step, color in step_colors.items():
+        mask = we_mask & (md_pp["resampled"] == step).values
+        if not mask.any():
+            continue
+        tr = hga[mask]
+        m = tr.mean(0)
+        se = tr.std(0) / np.sqrt(mask.sum())
+        ax_top.plot(times, m, color=color, lw=2,
+                    label=f"step {step}  (n={mask.sum()})")
+        ax_top.fill_between(times, m - se, m + se, color=color, alpha=0.18)
+    if phon_search_smin is not None and phon_search_smax is not None:
+        for s in (phon_search_smin, phon_search_smax):
+            ax_top.axvline(s / epoch_sfreq + epoch_tmin,
+                           color="k", lw=0.6, ls="--", alpha=0.5)
+    if phon_smin is not None:
+        t_phon = np.array([phon_smin, phon_smax]) / epoch_sfreq + epoch_tmin
+        ax_top.axvspan(*t_phon, color="#4dac26", alpha=0.20, label="acoustic peak")
+    ax_top.axhline(0, color="k", lw=0.5, ls=":")
+    ax_top.set_ylabel("HGA (z)")
+    ax_bot.set_xlabel("Time (s, post word onset)")
+
+    fig.suptitle(f"{subject} e{electrode_idx} {phoneme_pair}", fontsize=10, y=0.95)
+    top_title = f"Unambiguous — {word_end}"
+    if acoustic_peak_auc is not None:
+        top_title += f"  (ac={acoustic_peak_auc:.3f})"
+    ax_top.set_title(top_title, fontsize=9, pad=20)
+    ax_top.legend(fontsize=7, loc=top_legend_loc, framealpha=0.7)
+
+    # Bottom: bootstrap-estimated class mean HGA timecourses.
+    # R_plot replicates of per-step balanced sampling (same protocol as the
+    # main t-test bootstrap: both classes drawn with replacement to min_class[s]
+    # per step, concatenated across steps).
+    bhv_colors = [resampled_cmap[1], resampled_cmap[6]]
+    bhv_vals = sorted(md_pp.loc[we_mask, bhv_col].dropna().unique())
+
+    per_step = per_step_class_counts(
+        md_pp, word_end=word_end,
+        qualifying_steps=list(qualifying_steps),
+        group_col=bhv_col,
+    )
+    boot_traces: dict[int, list[np.ndarray]] = {bhv: [] for bhv in bhv_vals}
+    for r in range(R_plot):
+        draws = select_cell_trials_bootstrap(per_step, rng=np.random.default_rng(r))
+        for bhv in bhv_vals:
+            if bhv in draws:
+                boot_traces[bhv].append(hga[draws[bhv]].mean(0))
+
+    # Actual trials entering each bootstrap draw, per class (balanced = min per step).
+    n_draw_per_class = sum(
+        min(len(idx) for idx in counts.values())
+        for counts in per_step.values()
+    )
+
+    for i, bhv in enumerate(bhv_vals):
+        if not boot_traces[bhv]:
+            continue
+        bhv_label = phoneme_pair[bhv]
+
+        arr = np.array(boot_traces[bhv])   # (R_plot, n_times)
+        m = arr.mean(0)
+        se = arr.std(0)   # bootstrap SE ≈ sample SEM
+        color = bhv_colors[i % len(bhv_colors)]
+        ax_bot.plot(times, m, color=color, lw=2,
+                    label=f"Responds /{bhv_label}/ (n={n_draw_per_class})")
+        ax_bot.fill_between(times, m - se, m + se, color=color, alpha=0.18)
+
+    # Bootstrap mean aligned diff overlay (dashed line + CI band).
+    if mean_diff_arrays is not None:
+        tc = mean_diff_arrays["tcenter"]
+        mv = mean_diff_arrays["mean"]
+        cl = mean_diff_arrays["ci_lo"]
+        ch = mean_diff_arrays["ci_hi"]
+        valid = np.isfinite(mv)
+        if valid.any():
+            ax_bot.plot(tc[valid], mv[valid], color="#4d4d4d", lw=1.3, ls="--",
+                        label="bootstrap mean diff (aligned)", zorder=4)
+            ax_bot.fill_between(tc[valid], cl[valid], ch[valid],
+                                color="#4d4d4d", alpha=0.12, zorder=3)
+
+    ax_bot.axhline(0, color="k", lw=0.5, ls=":")
+    ax_bot.set_ylabel("HGA (z)")
+    ax_bot.set_xlabel("Time (s, post word onset)")
+    ax_bot.set_title(
+        f"Ambiguous — {word_end}",
+        fontsize=9,
+        pad=20,
+    )
+    
+    from matplotlib.transforms import blended_transform_factory
+    ax_bot.text(0.05, 0.02, f"steps {list(qualifying_steps)}", ha="left", va="bottom",
+                fontsize=8, color="gray",
+                transform=ax_bot.transAxes)
+    ax_bot.legend(fontsize=7, loc=bottom_legend_loc, framealpha=0.7)
+
+    textgrid_file = next(iter(
+        Path(textgrid_dir).glob(f"*_{word_end}_{phoneme_pair}_*.TextGrid")
+    ))
+    for ax in (ax_top, ax_bot):
+        add_textgrid(
+            ax,
+            textgrid_dir=textgrid_dir,
+            textgrid_file=textgrid_file.name,
+            vline_extent=1.0,
+            tmax=xlim,
+        )
+
+    ax_top.set_xlim(0.0, xlim)
+    ax_bot.set_xlim(0.0, xlim)
+
+    # Significance bars: gray horizontal bars at top of ax_bot for sig windows.
+    if sig_windows:
+        ymin, ymax = ax_bot.get_ylim()
+        bar_h = (ymax - ymin) * 0.04
+        bar_y = ymin + (ymax - ymin) * 0.95
+        for tmin_s, tmax_s in sig_windows:
+            ax_bot.barh(y=bar_y, width=tmax_s - tmin_s, left=tmin_s,
+                        height=bar_h, color="gray", alpha=0.6,
+                        edgecolor="none", zorder=5)
+
+    for ax in (ax_top, ax_bot):
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+
+        ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:.2f}"))
+
+    fig.tight_layout()
+
     return fig
 
 

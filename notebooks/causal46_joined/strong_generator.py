@@ -234,8 +234,8 @@ else:
     )
 
     # DEV
-    _examples = _valid_joined.sample(n=min(n_star_plot_examples, len(_valid_joined)))
-    # _examples = _valid_joined.assign(contrast=lambda x: x.beta_ambig_mean - x.beta_unambig_mean).nlargest(n_star_plot_examples, "contrast")
+    # _examples = _valid_joined.sample(n=min(n_star_plot_examples, len(_valid_joined)))
+    _examples = _valid_joined.assign(contrast=lambda x: x.beta_ambig_mean - x.beta_unambig_mean).nlargest(n_star_plot_examples, "contrast")
 
     _ep_cache = {}
 
@@ -307,9 +307,16 @@ else:
 # the strong-generator prediction.
 
 # %%
+from scipy.stats import pearsonr
+result_df.groupby("early_category").apply(lambda g: pearsonr(g["beta_ambig_mean"], g["beta_unambig_mean"]))
+result_df[result_df.early_category.str.startswith(("type2", "type5"))] \
+    .pipe(lambda df: pearsonr(df["beta_ambig_mean"], df["beta_unambig_mean"]))
+
+# %%
 import seaborn as sns
-g = sns.lmplot(data=result_df, x="beta_ambig_mean", y="beta_unambig_mean",
-               hue="early_category", height=6, aspect=1.2)
+g = sns.lmplot(data=result_df[result_df.early_category.str.startswith(("type1", "type2", "type5"))],
+               x="beta_ambig_mean", y="beta_unambig_mean", hue="early_category",
+               height=6, aspect=1.2)
 
 # add gridlines
 for ax in g.axes.flat:
@@ -371,3 +378,6 @@ ax_sc.set_title(
 ax_sc.legend(fontsize=8, framealpha=0.7)
 fig_sc.tight_layout()
 plt.show()
+
+# %%
+result_df.query("subject == 'EC260' and electrode_idx == 96")
