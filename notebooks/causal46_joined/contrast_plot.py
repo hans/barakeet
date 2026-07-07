@@ -15,24 +15,20 @@
 
 # %% [markdown]
 # # Continuous-time HGA contrast plot (causal46_joined)
-#
-# Population-level acoustic and behavioral HGA contrast trajectories.
-# Acoustic pool: sites with a valid `acoustic tuning` letter in filtered_manifest.csv.
-# Behavioral pool: cells with manual behavioral annotations (behav @ac, etc.).
-#
-# Outputs:
-# - `contrast_plot.pdf` (aggregate) or `{pair}_contrast_plot.pdf` (per-pair)
 
 # %%
 from __future__ import annotations
 
 import ast
+from collections import defaultdict
+import re
 import sys
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import seaborn as sns
 
 sys.path.insert(0, str(Path(".").resolve() / "notebooks" / "causal46_joined"))
 from _contrast import (  # noqa: E402
@@ -47,7 +43,10 @@ from src.stimuli import OFFSET_DICT, PHONEME_PAIR_TO_WORD_ENDS, POD_dict
 from src.viz_provisional import load_epochs_dict
 
 # %% tags=["parameters"]
-manifest_path = "outputs/causal46_joined/manual_annotations/filtered_manifest.csv"
+annotations_path = "outputs/causal46_joined/manual_annotations/early_acoustic_window.csv"
+filtered_manifest_path = "outputs/causal46_joined/manual_annotations/filtered_manifest.csv"
+phon_peaks_path = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet"
+
 output_dir = "outputs/causal46_joined/contrast_plot"
 phoneme_pair = None   # None = aggregate all pairs; "bm"/"dn"/"pb" for per-pair
 bootstrap_r = 1000
@@ -62,6 +61,39 @@ epochs_dir = "outputs/epochs_preprocessed"
 behav_polarity_mode = "annotated"
 
 # %%
+# ls -lh outputs/causal46_joined/acoustic_on_ambiguous/
+
+# %%
+# ls -lh outputs/causal46_joined/t_tests/
+
+# %%
+# bootstrap estimates of difference evoked by BEHAVIORAL contrasts on ambiguous trials,
+# matching acoustic distribution across the behavioral comparison
+b4_by_behavior = pd.read_parquet("outputs/causal46_joined/t_tests/b4_bootstrap.parquet") \
+    .set_index(["subject", "electrode_idx", "phoneme_pair", "word_end"])
+
+# %%
+b4_by_behavior_windows = pd.read_parquet("outputs/causal46_joined/behavioral_discriminative_windows/b_windows.parquet")
+
+# %%
+merged.query("subject == 'EC250' and electrode_idx == 191")
+
+# %%
+b4_by_behavior.pivot_table(
+    index=["subject", "electrode_idx", "phoneme_pair", "word_end", "replicate"],
+    columns=["smin"],
+    values=["mean_diff_raw"]
+)
+
+# %%
+# bootstrap estimates of difference evoked by acoustic contrasts on ambiguous trials,
+# matching behavior distribution across the acoustic comparison
+b4_by_acoustic = pd.read_parquet("outputs/causal46_joined/acoustic_on_ambiguous/b4_acoustic_bootstrap.parquet")
+
+# %%
+b4_by_acoustic
+
+# %%
 PAIR_PHONEMES = {"bm": ("b", "m"), "dn": ("d", "n"), "pb": ("p", "b")}
 
 # papermill serializes tuples as a single string; parse then coerce
@@ -73,14 +105,260 @@ OUT_DIR = Path(output_dir)
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # %%
-manifest = pd.read_csv(manifest_path)
-print(f"manifest: {len(manifest)} rows")
-print(f"manifest columns: {manifest.columns.tolist()}")
+early = pd.read_csv(annotations_path)
+manifest = pd.read_csv(filtered_manifest_path)
+phon_peaks = pd.read_parquet(phon_peaks_path)
+
+# "etc" is a catch-all for all the untyped cases, which we don't have enough of any one type to justify separate categories for.
+# We can break it down into subtypes in the future if we want, but for now it's easier to lump them together and give them a single color.
+EARLY_TYPE_GROUPS = {
+    "etc": ["A_unsigned", "problematic", "interesting"],
+}
+# Ordered bottom→top in the Sankey: typed categories first, then "other" above.
+EARLY_TYPES = [
+    "type1_acoustic_only",
+    "type2_early_perceptual",
+    "type3_asymmetric",
+    "type4_early_perceptual_mirrored",
+    "type5_behav_only",
+    "etc",
+]
+EARLY_LABELS = {
+    "type1_acoustic_only":              "Acoustic",
+    "type2_early_perceptual":           "Perceptual",
+    "type3_asymmetric":                 None,#"Acoustic+perceptual\n(one-sided)",
+    "type4_early_perceptual_mirrored":  None,#"Acoustic+perceptual\n(mirrored)",
+    "type5_behav_only":                 None,#"Perceptual only",
+    "etc":                              None,#"Other",
+}
+EARLY_COLORS = {
+    "type1_acoustic_only":             "#4E79A7",
+    "type2_early_perceptual":          "#F27200",
+    "type3_asymmetric":                "#F28E2B",
+    "type4_early_perceptual_mirrored": "#B07AA1",
+    "type5_behav_only":                "#E15759",
+    "etc":                             "#AAAAAA",
+}
+# Right column: absent → one-sided → two-sided (bottom to top)
+LATE_ORDER  = ["absent", "one-sided", "two-sided"]
+LATE_LABELS = {
+    "absent":     "Absent",
+    "one-sided":  "One-sided",
+    "two-sided":  "Two-sided",
+}
+LATE_COLORS = {
+    "absent":    "#BAB0AC",
+    "one-sided": "#76B7B2",
+    "two-sided": "#4E9F97",
+}
+
+CONJUNCTION_CATEGORIES = {
+    "Acoustic-only": {
+        "early_type": "type1_acoustic_only",
+        "late_type":  "absent",
+    },
+    "Acoustic + integration": {
+        "early_type": "type1_acoustic_only",
+        "late_type": ["two-sided", "one-sided"],
+    },
+    "Perceptual": {
+        "early_type": "type2_early_perceptual",
+        "late_type":  ["two-sided", "one-sided"],
+    }
+}
+
+
+# %%
+def _late_category(x: pd.Series) -> str:
+    n = int(x.notna().sum())
+    if n == 0:
+        return "absent"
+    elif n == 1:
+        return "one-sided"
+    else:
+        return "two-sided"
+
+late_pres = (
+    manifest
+    .groupby(["subject", "electrode_idx", "phoneme_pair"])["behav @late"]
+    .apply(_late_category)
+    .reset_index()
+    .rename(columns={"behav @late": "late_category"})
+)
+
+merged = early.merge(
+    late_pres, on=["subject", "electrode_idx", "phoneme_pair"], how="left"
+)
+
+early_category_map = {}
+for group, members in EARLY_TYPE_GROUPS.items():
+    for m in members:
+        early_category_map[m] = group
+merged["early_category"] = merged["site_type_relabel"].replace(early_category_map)
+merged["late_category"] = merged["late_category"].fillna("absent")
+
+merged["early_label"] = merged["early_category"].replace(EARLY_LABELS)
+merged["late_label"] = merged["late_category"].replace(LATE_LABELS)
+
+# Add phon peaks
+merged = merged.merge(
+    phon_peaks[["subject", "electrode_idx", "phoneme_pair", "test_roc_auc", "smax"]].rename(columns={"test_roc_auc": "phon_peak_roc_auc", "smax": "phon_peak_smax"}),
+    on=["subject", "electrode_idx", "phoneme_pair"],
+    how="left",
+    validate="1:1",
+)
+
+merged = merged.dropna(subset=["early_category", "early_label", "late_category", "late_label"])
+
+merged["conjunction_category"] = None
+for cat_name, cat_def in CONJUNCTION_CATEGORIES.items():
+    early_type = cat_def["early_type"]
+    late_type = cat_def["late_type"]
+    if isinstance(late_type, str):
+        late_type = [late_type]
+    merged.loc[
+        (merged["early_category"] == early_type) & (merged["late_category"].isin(late_type)),
+        "conjunction_category"
+    ] = cat_name
+
+print(f"Site×pair cells total: {len(merged)}")
+print("\nFlow table (rows=early type, cols=late category):")
+ct = (
+    merged
+    .groupby(["early_category", "late_category"])
+    .size()
+    .unstack(fill_value=0)
+    .reindex(EARLY_TYPES)
+    [LATE_ORDER]
+)
+print(ct)
 
 # %%
 # Load epochs (one-time eager load, matches t_tests.py pattern)
 epochs_dict = load_epochs_dict(Path(epochs_dir))
 print(f"epochs loaded: {sorted(epochs_dict)}")
+
+# %% [markdown]
+# ## Plot contrast by behavior
+
+# %%
+# prepare to extract contrast time series per electrode×phoneme_pair×word_end, for plotting
+b4_by_behavior_diffs = b4_by_behavior.pivot_table(
+    index=["subject", "electrode_idx", "phoneme_pair", "word_end", "replicate"],
+    columns=["smin"],
+    values=["mean_diff_raw"]
+)
+
+# %%
+# TODO how to handle sites with multiple behav windows? we'll just take the earliest for now
+behavior_plot_guide_df = pd.merge(
+    b4_by_behavior_windows
+    .groupby(["subject", "electrode_idx", "phoneme_pair", "word_end"])
+    .first(),
+    merged.set_index(["subject", "electrode_idx", "phoneme_pair"]),
+    how="outer", left_index=True, right_index=True, indicator=True
+)
+
+behavior_contrasts = defaultdict(list)
+for (subject, electrode_idx, phoneme_pair, word_end), row in behavior_plot_guide_df.iterrows():
+    ep = epochs_dict[subject]
+    md = ep.metadata
+    assert md is not None
+
+    conjunction_category = row.conjunction_category
+    sign = row.sign
+    if pd.isna(word_end):
+        # this row was present in `merged` but not in `b4_by_behavior_windows`, because
+        # it doesn't have a behavioral window!
+        assert row._merge == "right_only", "assumption violated"
+
+        # .. but we need to draw differences from somewhere. SO we'll pool across the word ends
+        # which are available
+        # (a word end may not be available if there was no sufficiently powered balanced ambiguous cell)
+        b_diffs = b4_by_behavior_diffs.loc[(subject, electrode_idx, phoneme_pair, slice(None))]
+        conjunction_category = "Acoustic-only"
+
+        # and no sign was estimated -- so we'll just pick the sign that maximizes the absolute value of the mean difference across the word ends
+        sign = np.sign(np.nanmean(b_diffs.values))
+
+        print(f"Warning: site×pair {subject}×{electrode_idx}×{phoneme_pair} has no behavioral window; pooling across word ends and using sign={sign}")
+    else:
+        b_diffs = b4_by_behavior_diffs.loc[(subject, electrode_idx, phoneme_pair, word_end)]
+
+        if pd.isna(row.conjunction_category):
+            # print(f"Warning: site×pair×word_end {subject}×{electrode_idx}×{phoneme_pair}×{word_end} has no conjunction category; skipping")
+            continue
+
+    behavior_contrasts[conjunction_category].append(
+        sign * b_diffs.values
+    )
+
+# %%
+plt.axvline(40, color="k", linestyle="--", alpha=0.5)
+plt.axhline(0, color="k", linestyle="--", alpha=0.5)
+
+for cat, contrasts in behavior_contrasts.items():
+    ys = np.concatenate(contrasts).mean(0)
+    xs = b4_by_behavior_diffs.columns.get_level_values("smin").values
+    plt.plot(xs, ys, label=cat)
+
+plt.legend()
+
+
+# %% [markdown]
+# ## Compute acoustic trajectories
+
+# %%
+acoustic_trajectories = []
+acoustic_skipped = 0
+
+for _, row in merged.iterrows():
+    subj = row["subject"]
+    eidx = int(row["electrode_idx"])
+    pair = row["phoneme_pair"]
+
+    # TODO this should be induced from the bootstrap instead
+    if not re.match(r"^[a-z]$", str(row.manifest_tuning).strip()):
+        acoustic_skipped += 1
+        continue
+    acoustic_tuning_letter = str(row["manifest_tuning"]).strip()
+
+    if subj not in epochs_dict:
+        print(f"  SKIP acoustic: no epochs for {subj}")
+        acoustic_skipped += 1
+        continue
+
+    ep = epochs_dict[subj]
+    md = ep.metadata
+    assert md is not None
+    pp_mask = (md["phoneme_pair"] == pair).values
+    ep_pp = ep[pp_mask]
+
+    # # Determine polarity: class 0 = first phoneme, class 1 = second phoneme
+    # first_ph = PAIR_PHONEMES[pair][0]
+    # acoustic_sign = 1 if acoustic_tuning_letter == first_ph else -1
+
+    # step 1 = first phoneme (clear), step 6 = second phoneme (clear)
+    means = acoustic_endpoint_means(ep_pp, eidx)  # (mean_step1, mean_step6)
+    if means is None:
+        print(f"  SKIP acoustic: {subj} e{eidx} {pair} missing endpoint steps")
+        acoustic_skipped += 1
+        continue
+    mean_step1, mean_step6 = means
+
+    # trajectory = acoustic_sign * (mean_step1 - mean_step6)
+    trajectory = np.abs(mean_step1 - mean_step6)
+
+    acoustic_trajectories.append(trajectory)
+
+print(f"\nAcoustic trajectories: {len(acoustic_trajectories)} (skipped: {acoustic_skipped})")
+
+# %%
+ys = np.stack(acoustic_trajectories)
+xs = np.arange(ys.shape[1])  # time steps
+
+plt.plot(xs, ys.mean(0))
+
 
 # %% [markdown]
 # ## Acoustic pool
