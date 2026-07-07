@@ -54,7 +54,7 @@ from _within_completion import (  # noqa: E402
     per_step_class_counts,
     resolve_behavior_col,
 )
-from _contrasts import (  # noqa: E402
+from _acoustic_step_bootstrap import (  # noqa: E402
     bootstrap_cell_acoustic,
     per_cell_best,
     per_window_summary,

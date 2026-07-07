@@ -57,7 +57,7 @@ sys.path.insert(0, str(Path(".").resolve() / "notebooks" / "causal46_joined"))
 from _within_completion import bootstrap_A_site, extract_hga  # noqa: E402
 from _windows import _find_maximal_runs, _window_sign  # noqa: E402
 from _within_completion import summarize_replicate_array  # noqa: E402
-from _contrasts import per_window_summary  # noqa: E402
+from _acoustic_step_bootstrap import per_window_summary  # noqa: E402
 
 OUT_DIR = Path(outdir)
 OUT_DIR.mkdir(parents=True, exist_ok=True)
