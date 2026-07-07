@@ -1133,7 +1133,7 @@ rule acoustic_on_ambiguous:
         ),
         notebook        = "notebooks/causal46_joined/acoustic_on_ambiguous.py",
         helper_wc       = "notebooks/causal46_joined/_within_completion.py",
-        helper_contrasts = "notebooks/causal46_joined/_contrasts.py",
+        helper_contrasts = "notebooks/causal46_joined/_acoustic_step_bootstrap.py",
 
     output:
         notebook               = "outputs/causal46_joined/acoustic_on_ambiguous/notebook.ipynb",
@@ -1182,7 +1182,7 @@ rule joined_acoustic_bootstrap:
         phon_peaks_all    = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet",
         early_annotations = "outputs/causal46_joined/manual_annotations/early_acoustic_window.csv",
         helper            = "notebooks/causal46_joined/_within_completion.py",
-        helper_contrasts  = "notebooks/causal46_joined/_contrasts.py",
+        helper_contrasts  = "notebooks/causal46_joined/_acoustic_step_bootstrap.py",
         notebook          = "notebooks/causal46_joined/acoustic_bootstrap.py",
 
     output:
@@ -1245,6 +1245,44 @@ rule joined_behavioral_discriminative_windows:
                 decoder_window_size=config["analysis"]["decoding"]["window_size"],
                 filtered_manifest_path=str(input.manual_annotations),
                 manual_override_path=None,
+            ),
+        )
+
+
+rule joined_acoustic_discriminative_windows:
+    """Discover acoustic-step discriminative windows per B4 cell (post-processing).
+
+    Companion to joined_behavioral_discriminative_windows: runs the same
+    union-run window-discovery over the acoustic-step bootstrap
+    (b4_acoustic_bootstrap, s_hi−s_lo on ambiguous trials, behavior-controlled)
+    instead of the perceptual bootstrap. Candidate region is the full range
+    [onset, PAIR_SMAX] — the acoustic peak is included. Descriptive only: no
+    decoder-window placement. No epoch reload.
+    """
+    input:
+        ac_bootstrap  = "outputs/causal46_joined/acoustic_on_ambiguous/b4_acoustic_bootstrap.parquet",
+        ac_per_cell   = "outputs/causal46_joined/acoustic_on_ambiguous/b4_acoustic_per_cell.parquet",
+        notebook      = "notebooks/causal46_joined/acoustic_discriminative_windows.py",
+        helper_windows = "notebooks/causal46_joined/_windows.py",
+        helper_wc      = "notebooks/causal46_joined/_within_completion.py",
+
+    output:
+        notebook        = "outputs/causal46_joined/acoustic_discriminative_windows/notebook.ipynb",
+        ad_windows      = "outputs/causal46_joined/acoustic_discriminative_windows/ad_windows.parquet",
+        ad_windows_boot = "outputs/causal46_joined/acoustic_discriminative_windows/ad_windows_bootstrap.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                ac_bootstrap_path=str(input.ac_bootstrap),
+                ac_per_cell_path=str(input.ac_per_cell),
+                outdir=str(outdir),
+                ci_low=2.5,
+                ci_high=97.5,
+                use_fallback=False,
             ),
         )
 

@@ -54,7 +54,6 @@ from pathlib import Path
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import numpy as np
 import polars as pl
 
 from src.stimuli import OFFSET_DICT
@@ -62,7 +61,7 @@ from src.viz_paper import epoch_sfreq, epoch_tmin
 
 sys.path.insert(0, str(Path(".").resolve() / "notebooks" / "causal46_joined"))
 from _within_completion import summarize_replicate_array  # noqa: E402
-from _windows import _find_maximal_runs, _window_sign  # noqa: E402
+from _windows import _fallback_run, _find_maximal_runs, _window_sign  # noqa: E402
 
 OUT_DIR = Path(outdir)
 OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -161,41 +160,6 @@ for row in b4_per_cell.iter_rows(named=True):
             (pl.col("phoneme_pair") == key[2]) &
             (pl.col("word_end") == key[3])
         )
-
-# %% [markdown]
-# ## Helper functions
-
-# %%
-def _fallback_run(
-    cand_windows: list[tuple[int, int]],
-    medians: dict[int, float],
-) -> list[tuple[int, int]]:
-    """Seed at max |median|; grow over adjacent same-sign windows."""
-    abs_meds = [abs(medians[smin]) for smin, _ in cand_windows]
-    seed_idx = int(np.argmax(abs_meds))
-    seed_sign = _window_sign(medians[cand_windows[seed_idx][0]])
-
-    # Grow left (toward smaller smin)
-    left_indices = [seed_idx]
-    for i in range(seed_idx - 1, -1, -1):
-        if cand_windows[i][1] != cand_windows[i + 1][0]:  # gap
-            break
-        if _window_sign(medians[cand_windows[i][0]]) != seed_sign:
-            break
-        left_indices.insert(0, i)
-
-    # Grow right (toward larger smin)
-    right_indices = [seed_idx]
-    for i in range(seed_idx + 1, len(cand_windows)):
-        if cand_windows[i - 1][1] != cand_windows[i][0]:  # gap
-            break
-        if _window_sign(medians[cand_windows[i][0]]) != seed_sign:
-            break
-        right_indices.append(i)
-
-    all_indices = sorted(set(left_indices + right_indices))
-    return [cand_windows[i] for i in all_indices]
-
 
 # %% [markdown]
 # ## Per-cell processing
