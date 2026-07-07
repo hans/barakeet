@@ -1495,15 +1495,18 @@ rule causal46_joined_all:
         # Trial balance index + B4 bootstrap t-tests
         "outputs/causal46_joined/trial_balance_index.csv",
         "outputs/causal46_joined/t_tests/population_summary.csv",
-        # Behavioral discriminative windows (pure post-processing over b4_bootstrap)
-        "outputs/causal46_joined/behavioral_discriminative_windows/b_windows.parquet",
         # early window site types
         "outputs/causal46_joined/early_window_site_types/star_plots_by_annotation.pdf",
-        # t-tests and star plots
+
+        # bootstrapped t-tests and star plots
         "outputs/causal46_joined/t_tests/star_plots_filtered/b4_powered.pdf",
         "outputs/causal46_joined/t_tests/star_plots_filtered/b4_powered_by_type.pdf",
         # Acoustic bootstrap: endpoint contrast for type1 sites (feeds early_perceptual_windows)
         "outputs/causal46_joined/acoustic_bootstrap/a_bootstrap.parquet",
+        # Discover discriminative windows from bootstrap outputs (pure post-processing over b4_bootstrap)
+        "outputs/causal46_joined/acoustic_discriminative_windows/ad_windows.parquet",
+        "outputs/causal46_joined/behavioral_discriminative_windows/b_windows.parquet",
+
         # Early perceptual windows: [t=0, phon_smax] behav @ac cells
         "outputs/causal46_joined/early_perceptual_windows/ep_windows.parquet",
         # Acoustic transfer: phonemic peak window vs. behavioral target window
