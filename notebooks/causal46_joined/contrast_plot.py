@@ -28,6 +28,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import polars as pl
 import seaborn as sns
 
 sys.path.insert(0, str(Path(".").resolve() / "notebooks" / "causal46_joined"))
@@ -38,14 +39,18 @@ from _contrast import (  # noqa: E402
     plot_contrast_axis,
     sliding_ttest,
 )
+from _acoustic_step_bootstrap import per_cell_best  # noqa: E402
 
-from src.stimuli import OFFSET_DICT, PHONEME_PAIR_TO_WORD_ENDS, POD_dict
+from src.stimuli import OFFSET_DICT, POD_dict
 from src.viz_provisional import load_epochs_dict
 
 # %% tags=["parameters"]
 annotations_path = "outputs/causal46_joined/manual_annotations/early_acoustic_window.csv"
 filtered_manifest_path = "outputs/causal46_joined/manual_annotations/filtered_manifest.csv"
 phon_peaks_path = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet"
+# Endpoint (step6 − step1) bootstrap over ALL acoustic sites — fixes the acoustic
+# sign/window from unambiguous trials, independent of the ambiguous data plotted.
+a_per_window_all_path = "outputs/causal46_joined/acoustic_bootstrap/a_per_window_all.parquet"
 
 output_dir = "outputs/causal46_joined/contrast_plot"
 phoneme_pair = None   # None = aggregate all pairs; "bm"/"dn"/"pb" for per-pair
@@ -77,37 +82,6 @@ b4_by_behavior_windows = pd.read_parquet("outputs/causal46_joined/behavioral_dis
 # matching behavior distribution across the acoustic comparison
 b4_by_acoustic = pd.read_parquet("outputs/causal46_joined/acoustic_on_ambiguous/b4_acoustic_bootstrap.parquet") \
     .set_index(["subject", "electrode_idx", "phoneme_pair", "word_end"])
-
-# %%
-b4_by_acoustic_windows = pd.read_parquet("outputs/causal46_joined/acoustic_discriminative_windows/ad_windows.parquet")
-
-# DEV
-b4_by_acoustic_windows = b4_by_acoustic_windows.query("smax <= 68")
-
-# %%
-# TODO paste in significance check from cc here
-ac_bootstrap_sites = b4_by_acoustic.reset_index()[["subject", "electrode_idx", "phoneme_pair", "word_end"]].drop_duplicates()
-ac_significant_sites = b4_by_acoustic_windows[["subject", "electrode_idx", "phoneme_pair", "word_end"]].drop_duplicates()
-
-ac_nonsig_sites = pd.merge(
-    ac_bootstrap_sites, ac_significant_sites,
-    on=["subject", "electrode_idx", "phoneme_pair", "word_end"],
-    how="outer",
-    indicator=True
-).query('_merge == "left_only"').drop(columns="_merge")
-
-# Record those sites which are fully missing from the acoustic windows (i.e., no significant windows for either word end)
-b4_by_acoustic_windows_missing = set(
-    pd.merge(
-        ac_bootstrap_sites, ac_significant_sites,
-        on=["subject", "electrode_idx", "phoneme_pair", "word_end"],
-        how="outer",
-        indicator=True
-    )
-    .groupby(["subject", "electrode_idx", "phoneme_pair"])
-    .apply(lambda df: df._merge.unique().tolist() == ["left_only"])
-    .index.to_list()
-)
 
 # %% [markdown]
 # There is an important mismatch between the two bootstrapping pipelines we need to rectify.
@@ -360,6 +334,18 @@ plt.legend()
 
 # %% [markdown]
 # ## Plot contrast by acoustics
+#
+# Unlike the behavioral panel, the acoustic window and sign are fixed from the
+# **unambiguous endpoint** contrast (step6 − step1) measured in the early
+# acoustic window by `acoustic_bootstrap.py` — independent of the ambiguous data
+# plotted here. Each site is oriented by `sign(median(step6 − step1))` at its best
+# endpoint window, and kept only if that window is reliable (bootstrap CI excludes
+# zero). We then plot the ambiguous, behavior-balanced acoustic contrast
+# (`b4_by_acoustic`, s_hi − s_lo) under that fixed orientation. Positive ⇒ the
+# ambiguous acoustic contrast runs in the same direction as the clean endpoint
+# tuning — an out-of-sample test of acoustic-code consistency. The
+# `ad_windows`/`b4_by_acoustic_windows` (ambiguous-derived) contrast is
+# deliberately NOT used to select or orient here: doing so would double-dip.
 
 # %%
 b4_by_acoustic_diffs = b4_by_acoustic.pivot_table(
@@ -369,45 +355,55 @@ b4_by_acoustic_diffs = b4_by_acoustic.pivot_table(
 )
 
 # %%
-acoustic_plot_guide_df = pd.merge(
-    b4_by_acoustic_windows
-    .groupby(["subject", "electrode_idx", "phoneme_pair", "word_end"])
-    .first(),
-    merged.set_index(["subject", "electrode_idx", "phoneme_pair"]),
-    how="outer", left_index=True, right_index=True, indicator=True
+# Endpoint-derived sign + selection gate, per site (pooled over word ends).
+# `per_cell_best` picks the largest-|median| endpoint window per site;
+# `best_ci_aligned_excludes_zero` is the reliability gate; the sign of
+# `best_mean_diff_aligned_med` (= median(step6 − step1)) is the acoustic tuning.
+a_per_window_all = pl.read_parquet(a_per_window_all_path)
+a_best = per_cell_best(
+    a_per_window_all, ["subject", "electrode_idx", "phoneme_pair"]
+).to_pandas()
+a_best["acoustic_sign_endpoint"] = np.sign(a_best["best_mean_diff_aligned_med"])
+
+endpoint_sign = (
+    a_best[a_best["best_ci_aligned_excludes_zero"]]
+    .set_index(["subject", "electrode_idx", "phoneme_pair"])["acoustic_sign_endpoint"]
 )
+print(f"acoustic sites with a reliable endpoint window: {len(endpoint_sign)}")
 
-# Sanity check: all the sites that are in the acoustic contrast but missing in merged
-# were intentionally dropped because they were assigned a null early_label or a null late_label
-assert set(acoustic_plot_guide_df.query("_merge == 'left_only'").index.droplevel(-1)) <= dropped_sites
-
-# Sanity check: all the sites that are in merged but are missing in the acoustic contrast
-# are because we didn't have a cell that supported the acoustic contrast
-# OR we had a cell but there was no simple contrast that showed up in the bootstrap contrast
-for (subject, electrode_idx, phoneme_pair, _), _ in acoustic_plot_guide_df.query("_merge == 'right_only'").iterrows():
-    word_ends = PHONEME_PAIR_TO_WORD_ENDS[phoneme_pair]
-    print(f"Warning: site×pair {subject}×{electrode_idx}×{phoneme_pair} has no acoustic window; skipping")
-    assert (subject, electrode_idx, phoneme_pair, word_ends[0]) in missing_acoustic_site_keys \
-        or (subject, electrode_idx, phoneme_pair, word_ends[1]) in missing_acoustic_site_keys \
-        or (subject, electrode_idx, phoneme_pair) in b4_by_acoustic_windows_missing
-
-acoustic_plot_guide_df = acoustic_plot_guide_df.query("_merge == 'both'").drop(columns=["_merge"])
+# %%
+# Guide: sites with (i) a conjunction category from the manifest and (ii) a
+# reliable endpoint sign. Sign/window come from endpoints; category from manifest.
+acoustic_plot_guide_df = (
+    merged
+    .set_index(["subject", "electrode_idx", "phoneme_pair"])
+    .join(endpoint_sign, how="inner")
+)
 
 # %%
 acoustic_contrasts = defaultdict(list)
-for (subject, electrode_idx, phoneme_pair, word_end), row in acoustic_plot_guide_df.iterrows():
-    conjunction_category = row.conjunction_category
+n_no_endpoint = 0
+n_no_category = 0
+acoustic_cells = b4_by_acoustic_diffs.index.droplevel("replicate").unique()
+for (subject, electrode_idx, phoneme_pair, word_end) in acoustic_cells:
+    site_key = (subject, electrode_idx, phoneme_pair)
+    if site_key not in acoustic_plot_guide_df.index:
+        # No reliable endpoint acoustic window (or no manifest row) → can't orient.
+        n_no_endpoint += 1
+        continue
+    row = acoustic_plot_guide_df.loc[site_key]
+    if pd.isna(row.conjunction_category):
+        n_no_category += 1
+        continue
+
     b_diffs = b4_by_acoustic_diffs.loc[(subject, electrode_idx, phoneme_pair, word_end)].values
-    b_diff_mean = (row.sign * b_diffs).mean(0)
+    b_diff_mean = (row.acoustic_sign_endpoint * b_diffs).mean(0)
+    acoustic_contrasts[row.conjunction_category].append(b_diff_mean)
 
-    # # DEV
-    # if len(acoustic_contrasts[conjunction_category]) > 0:
-    #     continue
-    # else:
-    #     print("DEV: plotting only one site per conjunction category for now")
-    #     print(conjunction_category, subject, electrode_idx, phoneme_pair, word_end)
-
-    acoustic_contrasts[conjunction_category].append(b_diff_mean)
+print(f"acoustic cells dropped (no reliable endpoint sign): {n_no_endpoint}")
+print(f"acoustic cells dropped (no conjunction category):   {n_no_category}")
+for cat, contrasts in acoustic_contrasts.items():
+    print(f"  {cat}: {len(contrasts)} cells")
 
 # %%
 plt.axvline(0, color="k", linestyle="--", alpha=0.5)

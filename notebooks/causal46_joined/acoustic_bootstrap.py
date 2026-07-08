@@ -14,15 +14,19 @@
 # ---
 
 # %% [markdown]
-# # Acoustic bootstrap for type1 sites
+# # Acoustic bootstrap (endpoint contrast)
 #
-# Runs `bootstrap_A_site` (step6 − step1 endpoint contrast) for each
-# type1 / acoustic-only site in the early_acoustic_window manifest, searching
-# in `[t=0, phon_smax]` with the same window_size and stride as `b4_bootstrap`.
+# Runs `bootstrap_A_site` (step6 − step1 endpoint contrast) for every annotated
+# acoustic site in the early_acoustic_window manifest, searching in
+# `[t=0, phon_smax]` with the same window_size and stride as `b4_bootstrap`.
 #
-# The result (`a_bootstrap.parquet`) feeds the type1 comparison section of
-# `early_perceptual_windows.py`, replacing the previous behavioural-bootstrap
-# proxy so the acoustic-onset timing is measured with a matching method.
+# Two output tiers:
+# - `a_*_all.parquet` — all annotated sites. Consumed by `contrast_plot.py` to
+#   fix each acoustic site's sign/window from the clean endpoint contrast.
+# - `a_*.parquet` — the type1 subset, under the original names, feeding the type1
+#   comparison section of `early_perceptual_windows.py` (which assumes type1-only
+#   rows). Per-site RNG is independent of the site loop, so these are
+#   content-identical to a type1-only run.
 #
 # **No behavioural (ambiguous) trials are used here** — only unambiguous endpoint
 # steps 1 and 6, pooled across both word_ends per phoneme_pair.
@@ -86,13 +90,24 @@ phon_peak_lookup: dict[tuple, tuple[int, int]] = {
 early_annotation_df = pl.read_csv(early_annotations_path)
 print(f"early_annotation_df: {early_annotation_df.height} rows, cols: {early_annotation_df.columns}")
 
+# Run the endpoint bootstrap over ALL annotated acoustic sites (not just type1)
+# so that contrast_plot.py can orient every acoustic site by its endpoint sign.
+# The type1 subset is written back under the original output names for the
+# existing type1-only consumers (early_perceptual_windows.py etc.).
+all_sites = (
+    early_annotation_df
+    .select(SITE_KEYS)
+    .with_columns(pl.col("electrode_idx").cast(pl.Int64))
+    .unique()
+)
 type1_sites = (
     early_annotation_df
     .filter(pl.col("site_type_relabel") == "type1_acoustic_only")
     .select(SITE_KEYS)
+    .with_columns(pl.col("electrode_idx").cast(pl.Int64))
     .unique()
 )
-print(f"type1 sites: {type1_sites.height}")
+print(f"all annotated sites: {all_sites.height}; type1 sites: {type1_sites.height}")
 
 # %% [markdown]
 # ## Per-site acoustic bootstrap
@@ -103,13 +118,13 @@ per_site_rows: list[dict] = []
 n_skipped_no_peaks = 0
 n_skipped_underpowered = 0
 
-for subject, subj_sites in type1_sites.to_pandas().groupby("subject"):
+for subject, subj_sites in all_sites.to_pandas().groupby("subject"):
     ep_path = Path(epoch_dir) / f"{subject}_epo.fif"
     ep_full = mne.read_epochs(str(ep_path), preload=True, verbose="WARNING")
     ep_full.metadata = add_metadata_features(ep_full.metadata.copy())
     md = ep_full.metadata
 
-    print(f"\n{subject}: {len(subj_sites)} type1 sites")
+    print(f"\n{subject}: {len(subj_sites)} sites")
 
     for _, site_row in subj_sites.iterrows():
         eidx = int(site_row["electrode_idx"])
@@ -198,9 +213,6 @@ else:
             "phon_smin": pl.Int64, "phon_smax": pl.Int64,
             "n_lo": pl.Int64, "n_hi": pl.Int64, "n_per_class": pl.Int64})
 
-a_bootstrap.write_parquet(OUT_DIR / "a_bootstrap.parquet")
-a_per_site.write_parquet(OUT_DIR / "a_per_site.parquet")
-
 # Per-window CI summary for star-plot significance bars on ax_top.
 # mean_diff_aligned = mean_diff_raw (step6 > step1 polarity is fixed).
 a_boot_aligned = a_bootstrap.with_columns(
@@ -210,10 +222,30 @@ a_boot_aligned = a_bootstrap.with_columns(
     pl.lit(None).cast(pl.Float64).alias("acoustic_peak_auc"),
 )
 a_per_window = per_window_summary(a_boot_aligned, SITE_KEYS)
-a_per_window.write_parquet(OUT_DIR / "a_per_window.parquet")
 
-print(f"a_bootstrap: {a_bootstrap.height:,} rows")
-print(f"a_per_site:  {a_per_site.height} rows")
-print(f"a_per_window: {a_per_window.height} rows")
+# Full (all-site) outputs — consumed by contrast_plot.py to orient every
+# acoustic site by its endpoint sign.
+a_bootstrap.write_parquet(OUT_DIR / "a_bootstrap_all.parquet")
+a_per_site.write_parquet(OUT_DIR / "a_per_site_all.parquet")
+a_per_window.write_parquet(OUT_DIR / "a_per_window_all.parquet")
+
+
+# Type1 subset under the original names, preserving existing type1-only
+# consumers. Per-site RNG is independent of the site loop, so these rows are
+# content-identical to a type1-only run.
+def _type1_subset(df: pl.DataFrame) -> pl.DataFrame:
+    return df.join(type1_sites, on=SITE_KEYS, how="semi") if df.height else df
+
+
+a_bootstrap_t1 = _type1_subset(a_bootstrap)
+a_per_site_t1 = _type1_subset(a_per_site)
+a_per_window_t1 = _type1_subset(a_per_window)
+a_bootstrap_t1.write_parquet(OUT_DIR / "a_bootstrap.parquet")
+a_per_site_t1.write_parquet(OUT_DIR / "a_per_site.parquet")
+a_per_window_t1.write_parquet(OUT_DIR / "a_per_window.parquet")
+
+print(f"a_bootstrap:  {a_bootstrap.height:,} rows (all)  {a_bootstrap_t1.height:,} rows (type1)")
+print(f"a_per_site:   {a_per_site.height} rows (all)  {a_per_site_t1.height} rows (type1)")
+print(f"a_per_window: {a_per_window.height} rows (all)  {a_per_window_t1.height} rows (type1)")
 if a_per_site.height > 0:
     print(a_per_site)

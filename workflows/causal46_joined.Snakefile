@@ -1167,12 +1167,15 @@ rule acoustic_on_ambiguous:
 
 
 rule joined_acoustic_bootstrap:
-    """Acoustic endpoint bootstrap for type1 / acoustic-only sites.
+    """Acoustic endpoint bootstrap over all annotated acoustic sites.
 
     Runs bootstrap_A_site (step6 − step1, unambiguous endpoint trials) in
-    [t=0, phon_smax] for each type1 site in the early_acoustic_window manifest,
+    [t=0, phon_smax] for every site in the early_acoustic_window manifest,
     using the same window_size / stride as b4_bootstrap (causal46_joined config).
-    Feeds joined_early_perceptual_windows for apples-to-apples timing comparison.
+    Emits two tiers: `a_*_all.parquet` (all sites; feeds contrast_plot's
+    endpoint-orientation of the acoustic panel) and `a_*.parquet` (the type1
+    subset, byte-content-identical to a type1-only run; feeds
+    joined_early_perceptual_windows for apples-to-apples timing comparison).
     """
     input:
         epoch_fifs        = expand(
@@ -1186,10 +1189,13 @@ rule joined_acoustic_bootstrap:
         notebook          = "notebooks/causal46_joined/acoustic_bootstrap.py",
 
     output:
-        notebook     = "outputs/causal46_joined/acoustic_bootstrap/notebook.ipynb",
-        a_bootstrap  = "outputs/causal46_joined/acoustic_bootstrap/a_bootstrap.parquet",
-        a_per_site   = "outputs/causal46_joined/acoustic_bootstrap/a_per_site.parquet",
-        a_per_window = "outputs/causal46_joined/acoustic_bootstrap/a_per_window.parquet",
+        notebook         = "outputs/causal46_joined/acoustic_bootstrap/notebook.ipynb",
+        a_bootstrap      = "outputs/causal46_joined/acoustic_bootstrap/a_bootstrap.parquet",
+        a_per_site       = "outputs/causal46_joined/acoustic_bootstrap/a_per_site.parquet",
+        a_per_window     = "outputs/causal46_joined/acoustic_bootstrap/a_per_window.parquet",
+        a_bootstrap_all  = "outputs/causal46_joined/acoustic_bootstrap/a_bootstrap_all.parquet",
+        a_per_site_all   = "outputs/causal46_joined/acoustic_bootstrap/a_per_site_all.parquet",
+        a_per_window_all = "outputs/causal46_joined/acoustic_bootstrap/a_per_window_all.parquet",
 
     run:
         outdir = Path(output.notebook).parent
@@ -1535,6 +1541,7 @@ rule contrast_plot:
     input:
         notebook="notebooks/causal46_joined/contrast_plot.py",
         manifest="outputs/causal46_joined/manual_annotations/filtered_manifest.csv",
+        a_per_window_all="outputs/causal46_joined/acoustic_bootstrap/a_per_window_all.parquet",
     output:
         notebook="outputs/causal46_joined/contrast_plot/contrast_plot.ipynb",
         figure="outputs/causal46_joined/contrast_plot/contrast_plot.pdf",
@@ -1543,6 +1550,7 @@ rule contrast_plot:
         outdir.mkdir(parents=True, exist_ok=True)
         run_notebook(str(input.notebook), str(output.notebook), parameters=dict(
             manifest_path=str(input.manifest),
+            a_per_window_all_path=str(input.a_per_window_all),
             output_dir=str(outdir),
             phoneme_pair=None,
             bootstrap_r=1000,
@@ -1560,6 +1568,7 @@ rule contrast_plot_per_pair:
     input:
         notebook="notebooks/causal46_joined/contrast_plot.py",
         manifest="outputs/causal46_joined/manual_annotations/filtered_manifest.csv",
+        a_per_window_all="outputs/causal46_joined/acoustic_bootstrap/a_per_window_all.parquet",
     output:
         notebook="outputs/causal46_joined/contrast_plot/{pair}_contrast_plot.ipynb",
         figure="outputs/causal46_joined/contrast_plot/{pair}_contrast_plot.pdf",
@@ -1570,6 +1579,7 @@ rule contrast_plot_per_pair:
         outdir.mkdir(parents=True, exist_ok=True)
         run_notebook(str(input.notebook), str(output.notebook), parameters=dict(
             manifest_path=str(input.manifest),
+            a_per_window_all_path=str(input.a_per_window_all),
             output_dir=str(outdir),
             phoneme_pair=wildcards.pair,
             bootstrap_r=1000,
