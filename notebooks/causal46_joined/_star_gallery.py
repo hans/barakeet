@@ -153,11 +153,16 @@ def write_annotated_pdfs(
                     "ci_lo": ac_pw_s["mean_diff_aligned_ci_lo"].to_numpy().astype(float),
                     "ci_hi": ac_pw_s["mean_diff_aligned_ci_hi"].to_numpy().astype(float),
                 }
+                # Extreme steps are a per-cell constant. Prefer per_window columns
+                # if present, else fall back to the entry row (the acoustic cell
+                # manifest carries s_lo/s_hi; per_window_summary drops them).
                 if "s_lo" in ac_pw_s.columns and "s_hi" in ac_pw_s.columns:
                     ac_extreme_steps = (
                         int(ac_pw_s["s_lo"][0]),
                         int(ac_pw_s["s_hi"][0]),
                     )
+                elif row.get("s_lo") is not None and row.get("s_hi") is not None:
+                    ac_extreme_steps = (int(row["s_lo"]), int(row["s_hi"]))
 
         qs = row.get("qualifying_steps")
         can_regen = (
