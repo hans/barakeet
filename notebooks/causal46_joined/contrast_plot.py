@@ -83,6 +83,12 @@ b4_by_behavior_windows = pd.read_parquet("outputs/causal46_joined/behavioral_dis
 b4_by_acoustic = pd.read_parquet("outputs/causal46_joined/acoustic_on_ambiguous/b4_acoustic_bootstrap.parquet") \
     .set_index(["subject", "electrode_idx", "phoneme_pair", "word_end"])
 
+# %%
+# endpoint (step6 − step1) bootstrap over all acoustic sites, in the early acoustic
+# window. Used to fix the acoustic panel's sign/window from UNAMBIGUOUS trials,
+# independent of the ambiguous data plotted (see "Plot contrast by acoustics").
+a_per_window_all = pl.read_parquet(a_per_window_all_path)
+
 # %% [markdown]
 # There is an important mismatch between the two bootstrapping pipelines we need to rectify.
 #
@@ -356,10 +362,10 @@ b4_by_acoustic_diffs = b4_by_acoustic.pivot_table(
 
 # %%
 # Endpoint-derived sign + selection gate, per site (pooled over word ends).
+# `a_per_window_all` is loaded up in "Prepare bootstrap results".
 # `per_cell_best` picks the largest-|median| endpoint window per site;
 # `best_ci_aligned_excludes_zero` is the reliability gate; the sign of
 # `best_mean_diff_aligned_med` (= median(step6 − step1)) is the acoustic tuning.
-a_per_window_all = pl.read_parquet(a_per_window_all_path)
 a_best = per_cell_best(
     a_per_window_all, ["subject", "electrode_idx", "phoneme_pair"]
 ).to_pandas()
