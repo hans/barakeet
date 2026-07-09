@@ -198,6 +198,37 @@ def extract_hga(ep, electrode_idx: int) -> np.ndarray:
     )
 
 
+def extract_hga_trials(
+    ep,
+    electrode_idx: int,
+    phoneme_pair: str,
+    word_end: str,
+) -> tuple:
+    """Trials × time HGA for one electrode, subset to a single cell.
+
+    Filters to trials matching (phoneme_pair, word_end), applies baseline
+    correction (None, 0), and resets the metadata index so that row i of
+    the returned array corresponds to row i of the returned metadata.
+
+    Returns (hga, md) where:
+        hga  : np.ndarray, shape (n_trials, n_times), baseline-corrected
+        md   : pd.DataFrame, reset-indexed 0..n_trials-1
+    """
+    mask = (
+        (ep.metadata["phoneme_pair"] == phoneme_pair)
+        & (ep.metadata["word_end"] == word_end)
+    )
+    ep_cell = ep[mask]
+    hga = (
+        ep_cell.copy()
+        .apply_baseline((None, 0))
+        .get_data(picks=[electrode_idx])
+        .squeeze(1)
+    )
+    md = ep_cell.metadata.reset_index(drop=True)
+    return hga, md
+
+
 @dataclass
 class MeanDiffWindow:
     smin: int

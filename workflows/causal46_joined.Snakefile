@@ -1293,6 +1293,58 @@ rule joined_acoustic_discriminative_windows:
         )
 
 
+rule joined_mismatch_regression:
+    """Single-trial acoustic×percept mismatch (opponent/conflict) regression.
+
+    For each qualifying cell (acoustic-sig ∩ behaviorally-responsive ∩ ≥2 ambiguous
+    steps with K≥4 trials per class), fits:
+        additive:  HGA ~ step_c + percept_c
+        full:      HGA ~ step_c + percept_c + step_c:percept_c
+    Window is selected from b4_acoustic_per_cell (acoustic best window) to avoid
+    double-dipping on the perceptual contrast. Robustness variant uses a fixed
+    a priori [POD, word_offset] window.
+
+    See: docs/superpowers/plans/2026-07-08-causal46-mismatch-regression.md
+    """
+    input:
+        b4_per_window          = "outputs/causal46_joined/t_tests/b4_per_window.parquet",
+        b4_acoustic_per_cell   = "outputs/causal46_joined/acoustic_on_ambiguous/b4_acoustic_per_cell.parquet",
+        b_windows              = "outputs/causal46_joined/behavioral_discriminative_windows/b_windows.parquet",
+        trial_balance          = "outputs/causal46_joined/trial_balance_index.csv",
+        epoch_fifs             = expand(
+            "outputs/epochs_preprocessed/{subject}_epo.fif",
+            subject=config["data"]["subjects"],
+        ),
+        helper = "notebooks/causal46_joined/_within_completion.py",
+        notebook = "notebooks/causal46_joined/mismatch_regression.py",
+
+    output:
+        notebook           = "outputs/causal46_joined/mismatch_regression/notebook.ipynb",
+        mismatch_per_cell  = "outputs/causal46_joined/mismatch_regression/mismatch_per_cell.parquet",
+        mismatch_cell_table = "outputs/causal46_joined/mismatch_regression/mismatch_cell_table.parquet",
+        mismatch_summary_csv = "outputs/causal46_joined/mismatch_regression/mismatch_summary.csv",
+        mismatch_summary_pdf = "outputs/causal46_joined/mismatch_regression/mismatch_summary.pdf",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                b4_per_window_path=str(input.b4_per_window),
+                b4_acoustic_per_cell_path=str(input.b4_acoustic_per_cell),
+                b_windows_path=str(input.b_windows),
+                trial_balance_path=str(input.trial_balance),
+                epoch_dir=str(Path(input.epoch_fifs[0]).parent),
+                outdir=str(outdir),
+                K_min_per_step=4,
+                min_steps=2,
+                ci_low=2.5,
+                ci_high=97.5,
+            ),
+        )
+
+
 rule joined_early_perceptual_windows:
     """Infer early perceptual windows per B4 cell (pure post-processing).
 
