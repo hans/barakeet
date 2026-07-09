@@ -1307,8 +1307,8 @@ rule joined_mismatch_regression:
     See: docs/superpowers/plans/2026-07-08-causal46-mismatch-regression.md
     """
     input:
-        b4_per_window          = "outputs/causal46_joined/t_tests/b4_per_window.parquet",
         b4_acoustic_per_cell   = "outputs/causal46_joined/acoustic_on_ambiguous/b4_acoustic_per_cell.parquet",
+        b4_acoustic_per_window = "outputs/causal46_joined/acoustic_on_ambiguous/b4_acoustic_per_window.parquet",
         b_windows              = "outputs/causal46_joined/behavioral_discriminative_windows/b_windows.parquet",
         trial_balance          = "outputs/causal46_joined/trial_balance_index.csv",
         epoch_fifs             = expand(
@@ -1331,8 +1331,8 @@ rule joined_mismatch_regression:
             str(input.notebook),
             str(output.notebook),
             parameters=dict(
-                b4_per_window_path=str(input.b4_per_window),
                 b4_acoustic_per_cell_path=str(input.b4_acoustic_per_cell),
+                b4_acoustic_per_window_path=str(input.b4_acoustic_per_window),
                 b_windows_path=str(input.b_windows),
                 trial_balance_path=str(input.trial_balance),
                 epoch_dir=str(Path(input.epoch_fifs[0]).parent),
