@@ -125,6 +125,80 @@ def _permute_per_step(
     return perm
 
 
+def _prepare_cell_data(
+    ep_pp,
+    electrode_idx: int,
+    word_end: str,
+    *,
+    min_class_k: int,
+    candidate_steps: Sequence[int],
+):
+    """Extract HGA and qualifying per-step trial indices for one cell.
+
+    Returns ``(hga, per_step_q)`` or ``(None, None)`` if there are no
+    qualifying steps. Separating extraction from the bootstrap loop lets
+    callers (e.g. ``oriented_group_band``) call ``extract_hga`` once and
+    reuse the array across the observed path and all null replicates.
+
+    hga : (n_trials, n_times) float array
+    per_step_q : {step: {class_val: np.ndarray of trial indices}}
+    """
+    md_pp = ep_pp.metadata.reset_index(drop=True)
+    hga = extract_hga(ep_pp, electrode_idx)
+
+    bhv_col = resolve_behavior_col(md_pp)
+    we_mask = (md_pp["word_end"] == word_end).values
+    candidate = [
+        s for s in candidate_steps
+        if (we_mask & (md_pp["resampled"] == s).values).any()
+    ]
+    per_step = per_step_class_counts(
+        md_pp, word_end=word_end, qualifying_steps=candidate, group_col=bhv_col,
+    )
+    qualifying = [
+        s for s, by_class in per_step.items()
+        if len(by_class) == 2 and min(len(v) for v in by_class.values()) >= min_class_k
+    ]
+    if not qualifying:
+        return None, None
+
+    return hga, {s: per_step[s] for s in qualifying}
+
+
+def _run_bootstrap_meandiff(
+    hga: np.ndarray,
+    per_step_q: dict,
+    *,
+    bootstrap_r: int,
+    bootstrap_seed: int,
+    perm_rng: Optional[np.random.Generator] = None,
+):
+    """Bootstrap mean diff given pre-extracted HGA and per-step trial indices.
+
+    If ``perm_rng`` is not None, class labels are permuted within each step
+    before bootstrapping (null path). Returns ``(mean_diff, status)`` where
+    status ∈ {"ok", "skipped"}.
+    """
+    if perm_rng is not None:
+        per_step_q = _permute_per_step(per_step_q, perm_rng)
+
+    running_sum = np.zeros(hga.shape[1])
+    valid_reps = 0
+    for r in range(bootstrap_r):
+        draws = select_cell_trials_bootstrap(
+            per_step_q, rng=np.random.default_rng(bootstrap_seed + r)
+        )
+        if 0 not in draws or 1 not in draws:
+            continue
+        # class 0 = first phoneme, class 1 = second phoneme (documented order)
+        running_sum += hga[draws[0]].mean(0) - hga[draws[1]].mean(0)
+        valid_reps += 1
+
+    if valid_reps == 0:
+        return None, "skipped"
+    return running_sum / valid_reps, "ok"
+
+
 def behavioral_bootstrap_meandiff(
     ep_pp,
     electrode_idx,
@@ -152,45 +226,19 @@ def behavioral_bootstrap_meandiff(
     This is the null path for ``oriented_group_band``; the observed path leaves
     ``perm_rng`` as None.
     """
-    md_pp = ep_pp.metadata.reset_index(drop=True)
-    hga = extract_hga(ep_pp, electrode_idx)
-
-    bhv_col = resolve_behavior_col(md_pp)
-    we_mask = (md_pp["word_end"] == word_end).values
-    candidate = [
-        s for s in candidate_steps
-        if (we_mask & (md_pp["resampled"] == s).values).any()
-    ]
-    per_step = per_step_class_counts(
-        md_pp, word_end=word_end, qualifying_steps=candidate, group_col=bhv_col,
+    hga, per_step_q = _prepare_cell_data(
+        ep_pp, electrode_idx, word_end,
+        min_class_k=min_class_k,
+        candidate_steps=candidate_steps,
     )
-    qualifying = [
-        s for s, by_class in per_step.items()
-        if len(by_class) == 2 and min(len(v) for v in by_class.values()) >= min_class_k
-    ]
-    if not qualifying:
+    if hga is None:
         return None, "no_qualifying"
-
-    per_step_q = {s: per_step[s] for s in qualifying}
-    if perm_rng is not None:
-        per_step_q = _permute_per_step(per_step_q, perm_rng)
-
-    running_sum = np.zeros(hga.shape[1])
-    valid_reps = 0
-    for r in range(bootstrap_r):
-        draws = select_cell_trials_bootstrap(
-            per_step_q, rng=np.random.default_rng(bootstrap_seed + r)
-        )
-        if 0 not in draws or 1 not in draws:
-            continue
-        # class 0 = first phoneme, class 1 = second phoneme (documented order)
-        diff_r = hga[draws[0]].mean(0) - hga[draws[1]].mean(0)
-        running_sum += diff_r
-        valid_reps += 1
-
-    if valid_reps == 0:
-        return None, "skipped"
-    return running_sum / valid_reps, "ok"
+    return _run_bootstrap_meandiff(
+        hga, per_step_q,
+        bootstrap_r=bootstrap_r,
+        bootstrap_seed=bootstrap_seed,
+        perm_rng=perm_rng,
+    )
 
 
 def oriented_group_band(
@@ -209,26 +257,28 @@ def oriented_group_band(
     For each cell in ``cells`` (a dict with keys subject, electrode_idx,
     phoneme_pair, word_end, smin, smax):
 
-    1. Run ``behavioral_bootstrap_meandiff`` (observed path) → ``mean_diff``.
-    2. In-window sign = ``sign(mean_diff[smin:smax].mean())``.
-    3. Oriented trajectory = sign × mean_diff.
+    Per cell, HGA is extracted once via ``_prepare_cell_data`` and reused
+    across the observed path and all ``n_perm`` null replicates — avoiding
+    the ``n_perm`` redundant ``ep.copy().get_data()`` calls that made the
+    previous implementation slow.
 
-    The null repeats this ``n_perm`` times with within-step label permutation:
-    class labels are shuffled within each step (preserving per-step trial
-    counts) before the bootstrap, destroying the percept↔HGA link while
-    keeping the trial-count structure identical to the observed path. The sign
-    is recomputed from each permuted replicate — this is the critical step that
-    captures the rectification floor (orientation bias from selecting a
-    sign from the same data being averaged). Reusing the observed sign would
+    1. Extract HGA + qualifying per-step trial indices (once per cell).
+    2. Bootstrap observed mean diff; in-window sign = ``sign(diff[smin:smax])``.
+    3. Oriented observed trajectory = sign × mean_diff.
+
+    The null repeats the bootstrap ``n_perm`` times with within-step label
+    permutation, destroying the percept↔HGA link while preserving per-step
+    trial counts. The sign is recomputed from each permuted replicate — this
+    captures the rectification floor (orientation bias from selecting a sign
+    from the same data being averaged). Reusing the observed sign would
     collapse the null to zero mean, hiding the floor.
 
     Cells failing the observed path (no qualifying steps) are excluded from
     both observed and null. No-window cells (``smin`` or ``smax`` undefined)
     must be excluded by the caller.
 
-    Runtime: O(n_perm × bootstrap_r × n_cells) bootstrap iterations. With
-    production defaults (n_perm=1000, bootstrap_r=1000, n_cells~30 per group)
-    expect several minutes per figure.
+    Runtime: O(n_perm × bootstrap_r × n_cells) bootstrap iterations — but
+    ``get_data()`` is called once per cell, not once per replicate.
 
     Parameters
     ----------
@@ -252,12 +302,8 @@ def oriented_group_band(
     n_valid : int
         Number of cells that contributed (skipped cells excluded).
     """
-    kw = dict(
-        min_class_k=min_class_k,
-        bootstrap_r=bootstrap_r,
-        bootstrap_seed=bootstrap_seed,
-        candidate_steps=candidate_steps,
-    )
+    kw_prep = dict(min_class_k=min_class_k, candidate_steps=candidate_steps)
+    kw_boot = dict(bootstrap_r=bootstrap_r, bootstrap_seed=bootstrap_seed)
     n_times: Optional[int] = None
     obs_sum: Optional[np.ndarray] = None
     null_matrix: Optional[np.ndarray] = None
@@ -274,9 +320,15 @@ def oriented_group_band(
         ep = epochs_dict[subject]
         ep_pp = ep[ep.metadata["phoneme_pair"].values == phoneme_pair]
 
-        obs_diff, status = behavioral_bootstrap_meandiff(
-            ep_pp, electrode_idx, word_end, **kw
+        # Extract HGA and per-step indices once; reuse across observed + all
+        # null replicates (avoids n_perm repeated ep.copy().get_data() calls).
+        hga, per_step_q = _prepare_cell_data(
+            ep_pp, electrode_idx, word_end, **kw_prep
         )
+        if hga is None:
+            continue
+
+        obs_diff, status = _run_bootstrap_meandiff(hga, per_step_q, **kw_boot)
         if status != "ok":
             continue
 
@@ -291,8 +343,8 @@ def oriented_group_band(
 
         for p in range(n_perm):
             prng = np.random.default_rng([seed, cell_idx, p])
-            perm_diff, perm_status = behavioral_bootstrap_meandiff(
-                ep_pp, electrode_idx, word_end, perm_rng=prng, **kw
+            perm_diff, perm_status = _run_bootstrap_meandiff(
+                hga, per_step_q, perm_rng=prng, **kw_boot
             )
             if perm_status != "ok":
                 continue
