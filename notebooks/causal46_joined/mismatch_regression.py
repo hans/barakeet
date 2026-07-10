@@ -42,13 +42,19 @@ b4_acoustic_per_window_path = "outputs/causal46_joined/acoustic_on_ambiguous/b4_
 b_windows_path = "outputs/causal46_joined/behavioral_discriminative_windows/b_windows.parquet"
 trial_balance_path = "outputs/causal46_joined/trial_balance_index.csv"
 epoch_dir = "outputs/epochs_preprocessed"
+acoustic_cell_manifest_path = "outputs/causal46_joined/acoustic_on_ambiguous/acoustic_cell_manifest.parquet"
+t_tests_b4_per_window_path = "outputs/causal46_joined/t_tests/b4_per_window.parquet"
+textgrid_dir = "textgrids"
 outdir = "outputs/causal46_joined/mismatch_regression"
 K_min_per_step = 4
 min_steps = 2
 ci_low = 2.5
 ci_high = 97.5
+n_example_plots = 4
+star_plot_R = 100
 
 # %%
+import io
 import sys
 import warnings
 from pathlib import Path
@@ -70,7 +76,14 @@ sys.path.insert(0, str(Path(".").resolve() / "notebooks" / "causal46_joined"))
 from src.data import add_metadata_features
 from src.stimuli import OFFSET_DICT, POD_dict
 from src.viz_paper import epoch_sfreq, epoch_tmin
-from _within_completion import extract_hga_trials, resolve_behavior_col  # noqa: E402
+from _within_completion import extract_hga_trials, matched_n_star_plot, resolve_behavior_col  # noqa: E402
+
+try:
+    from pypdf import PdfReader, PdfWriter
+    _HAS_PYPDF = True
+except ImportError:
+    PdfReader = PdfWriter = None  # type: ignore[assignment]
+    _HAS_PYPDF = False
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
@@ -774,6 +787,267 @@ else:
     plt.close(fig_empty)
 
 # %% [markdown]
+# ## §10: Pedagogical star plots — examples sampling the acoustic × behavioral relationship space
+#
+# Selects `n_example_plots` cells that span the space defined by:
+# - **mirrored signs** (sign(β_step) ≠ sign(β_percept)): acoustic and behavioral
+#   tuning point to opposite sounds — the dominant pattern in this dataset.
+# - **β_interaction direction**: negative → nonlinear conflict/surprisal signal
+#   beyond additive; near-zero → purely additive opponent coding; positive → same-
+#   direction nonlinearity.
+# - **non-mirrored** cells (sign(β_step) = sign(β_percept)): acoustic and behavioral
+#   tuned to the same sound.
+#
+# Each star plot has three panels: [top] step 1 vs step 6 unambiguous HGA traces
+# (acoustic anchor); [middle] class-balanced perceptual contrast (bootstrap mean ±
+# SE); [bottom] acoustic step contrast on ambiguous trials (behavior-controlled).
+# The suptitle shows β_step / β_percept / β_int from the regression.
+
+# %%
+_ac_manifest_path = Path(acoustic_cell_manifest_path)
+_t_tests_bpw_path = Path(t_tests_b4_per_window_path)
+
+_ac_manifest = (
+    pl.read_parquet(_ac_manifest_path) if _ac_manifest_path.exists() else pl.DataFrame()
+)
+_t_tests_bpw = (
+    pl.read_parquet(_t_tests_bpw_path) if _t_tests_bpw_path.exists() else pl.DataFrame()
+)
+
+print(f"acoustic_cell_manifest: {_ac_manifest.height} rows")
+print(f"t_tests b4_per_window:  {_t_tests_bpw.height} rows")
+
+# %%
+# Determine the primary window_source label (notebook may write "behavioral" or "acoustic")
+_primary_source = (
+    "behavioral"
+    if "behavioral" in mismatch_per_cell["window_source"].unique().tolist()
+    else "acoustic"
+)
+_eg_pool = mismatch_per_cell[mismatch_per_cell["window_source"] == _primary_source].copy()
+
+_example_rows: list[dict] = []
+
+if len(_eg_pool) >= 2:
+    _mirrored = _eg_pool[_eg_pool["mirrored_signs"]]
+    _non_mirrored = _eg_pool[~_eg_pool["mirrored_signs"]]
+
+    # Mirrored + strongly negative β_int (conflict) — up to 2
+    if len(_mirrored) > 0:
+        for _, _r in _mirrored.nsmallest(min(2, len(_mirrored)), "beta_int").iterrows():
+            _example_rows.append({**dict(_r), "_label": "mirrored+neg_int"})
+
+    # Mirrored + most positive β_int (congruent nonlinearity or near-zero)
+    if len(_mirrored) > 1:
+        _pos_cand = _mirrored[~_mirrored.index.isin(
+            _mirrored.nsmallest(min(2, len(_mirrored)), "beta_int").index
+        )]
+        if len(_pos_cand) > 0:
+            for _, _r in _pos_cand.nlargest(1, "beta_int").iterrows():
+                _example_rows.append({**dict(_r), "_label": "mirrored+pos_int"})
+
+    # Non-mirrored: pick by largest delta_r²
+    if len(_non_mirrored) > 0:
+        for _, _r in _non_mirrored.nlargest(min(2, len(_non_mirrored)), "delta_r2").iterrows():
+            _example_rows.append({**dict(_r), "_label": "non_mirrored"})
+
+_example_rows = _example_rows[:n_example_plots]
+
+print(f"\nSelected {len(_example_rows)} example cells:")
+for _er in _example_rows:
+    print(
+        f"  [{_er['_label']:20s}]  {_er['subject']} e{_er['electrode_idx']} "
+        f"{_er['phoneme_pair']} {_er['word_end']}  "
+        f"β_step={_er['beta_step']:+.3f}  β_percept={_er['beta_percept']:+.3f}  "
+        f"β_int={_er['beta_int']:+.3f}"
+    )
+
+# %%
+# Load epochs for needed subjects (only those that appear in the selection)
+_needed_subjects = sorted({_er["subject"] for _er in _example_rows})
+_eg_epochs: dict = {}
+for _subj in _needed_subjects:
+    _ep_path = EPOCH_DIR / f"{_subj}_epo.fif"
+    if _ep_path.exists():
+        _ep = mne.read_epochs(str(_ep_path), preload=True, verbose="WARNING")
+        _ep.metadata = add_metadata_features(_ep.metadata.copy())
+        _eg_epochs[_subj] = _ep
+        print(f"  loaded {_subj}")
+    else:
+        print(f"  ⚠ {_subj}: epoch file missing — will skip its plots")
+
+# %%
+_has_textgrid = (
+    Path(textgrid_dir).exists()
+    and bool(list(Path(textgrid_dir).glob("*.TextGrid"))[:1])
+)
+
+if not _has_textgrid:
+    print(f"textgrid_dir '{textgrid_dir}' not found or empty — skipping star plots")
+elif not _example_rows:
+    print("No example cells selected — skipping star plots")
+elif not _eg_epochs:
+    print("No epochs loaded — skipping star plots")
+else:
+    _writer = PdfWriter() if _HAS_PYPDF else None
+    _n_plots = 0
+
+    for _er in _example_rows:
+        _subj = _er["subject"]
+        if _subj not in _eg_epochs:
+            continue
+        _eidx = int(_er["electrode_idx"])
+        _pp = _er["phoneme_pair"]
+        _we = _er["word_end"]
+
+        # Acoustic cell manifest row: qualifying_steps, n_per_class, phon windows, s_lo/s_hi
+        _ac_row = _ac_manifest.filter(
+            (pl.col("subject") == _subj)
+            & (pl.col("electrode_idx") == _eidx)
+            & (pl.col("phoneme_pair") == _pp)
+            & (pl.col("word_end") == _we)
+        )
+        if _ac_row.height == 0:
+            print(f"  ⚠ {_subj} e{_eidx} {_pp}·{_we}: not in acoustic_cell_manifest")
+            continue
+
+        _ac_r = _ac_row.row(0, named=True)
+        _qs_str = _ac_r.get("qualifying_steps", "")
+        _qs = [int(_s) for _s in str(_qs_str).split(",") if str(_s).strip()]
+        if not _qs:
+            print(f"  ⚠ {_subj} e{_eidx}: empty qualifying_steps")
+            continue
+        _n_pc = int(_ac_r.get("n_per_class") or 4)
+        _phon_smin = int(_ac_r["phon_smin"])
+        _phon_smax = int(_ac_r["phon_smax"])
+        _s_lo = int(_ac_r["s_lo"])
+        _s_hi = int(_ac_r["s_hi"])
+        _ac_auc = float(_ac_r.get("acoustic_peak_auc") or 0.0)
+
+        # Behavioral mean_diff overlay from t_tests b4_per_window
+        _beh_mda = None
+        _beh_sig_wins = None
+        if _t_tests_bpw.height > 0:
+            _bpw = _t_tests_bpw.filter(
+                (pl.col("subject") == _subj)
+                & (pl.col("electrode_idx") == _eidx)
+                & (pl.col("phoneme_pair") == _pp)
+                & (pl.col("word_end") == _we)
+            ).sort("tmin")
+            if _bpw.height > 0:
+                _tc_b = ((_bpw["tmin"] + _bpw["tmax"]) / 2).to_numpy().astype(float)
+                _beh_mda = {
+                    "tcenter": _tc_b,
+                    "mean": _bpw["mean_diff_aligned_mean"].to_numpy().astype(float),
+                    "ci_lo": _bpw["mean_diff_aligned_ci_lo"].to_numpy().astype(float),
+                    "ci_hi": _bpw["mean_diff_aligned_ci_hi"].to_numpy().astype(float),
+                }
+                _beh_sig_wins = [
+                    (float(_bpw["tmin"][_i]), float(_bpw["tmax"][_i]))
+                    for _i, _v in enumerate(_bpw["ci_aligned_excludes_zero"].to_list())
+                    if _v
+                ] or None
+
+        # Acoustic mean_diff overlay from b4_acoustic_per_window (loaded earlier)
+        _ac_mda = None
+        _ac_sig_wins = None
+        if b4_acoustic_per_window.height > 0:
+            _apw = b4_acoustic_per_window.filter(
+                (pl.col("subject") == _subj)
+                & (pl.col("electrode_idx") == _eidx)
+                & (pl.col("phoneme_pair") == _pp)
+                & (pl.col("word_end") == _we)
+            ).sort("tmin")
+            if _apw.height > 0:
+                _tc_a = ((_apw["tmin"] + _apw["tmax"]) / 2).to_numpy().astype(float)
+                _ac_mda = {
+                    "tcenter": _tc_a,
+                    "mean": _apw["mean_diff_aligned_mean"].to_numpy().astype(float),
+                    "ci_lo": _apw["mean_diff_aligned_ci_lo"].to_numpy().astype(float),
+                    "ci_hi": _apw["mean_diff_aligned_ci_hi"].to_numpy().astype(float),
+                }
+                _ac_sig_wins = [
+                    (float(_apw["tmin"][_i]), float(_apw["tmax"][_i]))
+                    for _i, _v in enumerate(_apw["ci_aligned_excludes_zero"].to_list())
+                    if _v
+                ] or None
+
+        try:
+            _fig = matched_n_star_plot(
+                subject=_subj,
+                electrode_idx=_eidx,
+                phoneme_pair=_pp,
+                word_end=_we,
+                qualifying_steps=_qs,
+                epochs_dict=_eg_epochs,
+                n_per_class=_n_pc,
+                phon_smin=_phon_smin,
+                phon_smax=_phon_smax,
+                textgrid_dir=textgrid_dir,
+                acoustic_peak_auc=_ac_auc,
+                sig_windows=_beh_sig_wins,
+                mean_diff_arrays=_beh_mda,
+                acoustic_mean_diff_arrays=_ac_mda,
+                acoustic_sig_windows=_ac_sig_wins,
+                acoustic_extreme_steps=(_s_lo, _s_hi),
+                acoustic_R_plot=star_plot_R,
+                R_plot=star_plot_R,
+            )
+        except Exception as _exc:
+            print(f"  ⚠ star plot failed {_subj} e{_eidx} {_pp}·{_we}: {_exc}")
+            plt.close("all")
+            continue
+
+        _fig.suptitle(
+            f"[{_er['_label']}]  "
+            f"β_step={_er['beta_step']:+.3f}  "
+            f"β_percept={_er['beta_percept']:+.3f}  "
+            f"β_int={_er['beta_int']:+.3f}  "
+            f"(p_int={_er['p_int']:.3f})",
+            fontsize=8,
+            y=1.01,
+        )
+
+        if _HAS_PYPDF and _writer is not None:
+            _buf = io.BytesIO()
+            _fig.savefig(_buf, format="pdf", bbox_inches="tight")
+            plt.close(_fig)
+            _buf.seek(0)
+            for _page in PdfReader(_buf).pages:
+                _writer.add_page(_page)
+        else:
+            _fig.savefig(
+                OUT_DIR / f"star_eg_{_subj}_e{_eidx}_{_pp}_{_we}.pdf",
+                bbox_inches="tight",
+            )
+            plt.close(_fig)
+        _n_plots += 1
+
+    _star_out = OUT_DIR / "mismatch_star_examples.pdf"
+    if _n_plots > 0:
+        if _HAS_PYPDF and _writer is not None:
+            with _star_out.open("wb") as _fh:
+                _writer.write(_fh)
+        print(f"Written: {_star_out} ({_n_plots} plots)")
+    else:
+        print("No star plots produced.")
+        _fig_empty, _ax_empty = plt.subplots(1, 1, figsize=(4, 3))
+        _ax_empty.text(0.5, 0.5, "No star plots (textgrids unavailable or no cells)",
+                       ha="center", va="center", transform=_ax_empty.transAxes, fontsize=9)
+        _fig_empty.savefig(_star_out, bbox_inches="tight")
+        plt.close(_fig_empty)
+
+# %%
+# Ensure the output file exists even if the block above was entirely skipped
+_star_out_path = OUT_DIR / "mismatch_star_examples.pdf"
+if not _star_out_path.exists():
+    _fig_empty2, _ax_empty2 = plt.subplots(1, 1, figsize=(4, 3))
+    _ax_empty2.text(0.5, 0.5, "No star plots (no qualifying cells)",
+                    ha="center", va="center", transform=_ax_empty2.transAxes, fontsize=9)
+    _fig_empty2.savefig(_star_out_path, bbox_inches="tight")
+    plt.close(_fig_empty2)
+
+# %% [markdown]
 # ## §8: Controls & caveats
 #
 # **Selection bias**: acoustic-window selection inflates β_step only; percept
@@ -795,5 +1069,5 @@ else:
 #
 # **One window per cell**: no window-level multiple comparisons; fixed-window
 # variant is the guard.
-
-print("Notebook complete.")
+#
+# print("Notebook complete.")

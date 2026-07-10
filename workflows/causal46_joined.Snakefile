@@ -1345,7 +1345,9 @@ rule joined_mismatch_regression:
     input:
         b4_acoustic_per_cell   = "outputs/causal46_joined/acoustic_on_ambiguous/b4_acoustic_per_cell.parquet",
         b4_acoustic_per_window = "outputs/causal46_joined/acoustic_on_ambiguous/b4_acoustic_per_window.parquet",
+        acoustic_cell_manifest = "outputs/causal46_joined/acoustic_on_ambiguous/acoustic_cell_manifest.parquet",
         b_windows              = "outputs/causal46_joined/behavioral_discriminative_windows/b_windows.parquet",
+        t_tests_b4_per_window  = "outputs/causal46_joined/t_tests/b4_per_window.parquet",
         trial_balance          = "outputs/causal46_joined/trial_balance_index.csv",
         epoch_fifs             = expand(
             "outputs/epochs_preprocessed/{subject}_epo.fif",
@@ -1355,11 +1357,12 @@ rule joined_mismatch_regression:
         notebook = "notebooks/causal46_joined/mismatch_regression.py",
 
     output:
-        notebook           = "outputs/causal46_joined/mismatch_regression/notebook.ipynb",
-        mismatch_per_cell  = "outputs/causal46_joined/mismatch_regression/mismatch_per_cell.parquet",
-        mismatch_cell_table = "outputs/causal46_joined/mismatch_regression/mismatch_cell_table.parquet",
-        mismatch_summary_csv = "outputs/causal46_joined/mismatch_regression/mismatch_summary.csv",
-        mismatch_summary_pdf = "outputs/causal46_joined/mismatch_regression/mismatch_summary.pdf",
+        notebook              = "outputs/causal46_joined/mismatch_regression/notebook.ipynb",
+        mismatch_per_cell     = "outputs/causal46_joined/mismatch_regression/mismatch_per_cell.parquet",
+        mismatch_cell_table   = "outputs/causal46_joined/mismatch_regression/mismatch_cell_table.parquet",
+        mismatch_summary_csv  = "outputs/causal46_joined/mismatch_regression/mismatch_summary.csv",
+        mismatch_summary_pdf  = "outputs/causal46_joined/mismatch_regression/mismatch_summary.pdf",
+        mismatch_star_examples = "outputs/causal46_joined/mismatch_regression/mismatch_star_examples.pdf",
 
     run:
         outdir = Path(output.notebook).parent
@@ -1369,7 +1372,9 @@ rule joined_mismatch_regression:
             parameters=dict(
                 b4_acoustic_per_cell_path=str(input.b4_acoustic_per_cell),
                 b4_acoustic_per_window_path=str(input.b4_acoustic_per_window),
+                acoustic_cell_manifest_path=str(input.acoustic_cell_manifest),
                 b_windows_path=str(input.b_windows),
+                t_tests_b4_per_window_path=str(input.t_tests_b4_per_window),
                 trial_balance_path=str(input.trial_balance),
                 epoch_dir=str(Path(input.epoch_fifs[0]).parent),
                 outdir=str(outdir),
