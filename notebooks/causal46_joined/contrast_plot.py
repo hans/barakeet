@@ -25,6 +25,7 @@ import re
 import sys
 from pathlib import Path
 
+import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -44,6 +45,23 @@ from _acoustic_step_bootstrap import per_cell_best  # noqa: E402
 from src.stimuli import OFFSET_DICT, POD_dict
 from src.viz_provisional import load_epochs_dict
 
+# %%
+matplotlib.rcParams.update(
+    {
+        "figure.dpi": 300,
+        "axes.linewidth": 0.5,
+        "xtick.major.width": 0.5,
+        "ytick.major.width": 0.5,
+        "xtick.minor.width": 0.25,
+        "ytick.minor.width": 0.25,
+        "lines.linewidth": 1.0,
+        "font.family": "Helvetica",
+        "font.sans-serif": ["Helvetica", "Arial"],
+        "savefig.bbox": "tight",
+        "savefig.pad_inches": 0.01,
+    }
+)
+
 # %% tags=["parameters"]
 annotations_path = "outputs/causal46_joined/manual_annotations/early_acoustic_window.csv"
 filtered_manifest_path = "outputs/causal46_joined/manual_annotations/filtered_manifest.csv"
@@ -54,12 +72,7 @@ a_per_window_all_path = "outputs/causal46_joined/acoustic_bootstrap/a_per_window
 
 output_dir = "outputs/causal46_joined/contrast_plot"
 phoneme_pair = None   # None = aggregate all pairs; "bm"/"dn"/"pb" for per-pair
-bootstrap_r = 1000
-bootstrap_seed = 42
-min_class_k = 3
-ttest_window_size = 5
-ttest_window_stride = 5
-pval_thresholds = (0.00001, 0.0001, 0.001)
+
 epochs_dir = "outputs/epochs_preprocessed"
 # "annotated": sign-correct using consensus tuning letter from manifest
 # "abs":       take absolute value of mean diff (no manifest label needed)
@@ -110,10 +123,10 @@ print(f"Behavioral sites that are missing from acoustic sites: {len(missing_acou
 # %%
 PAIR_PHONEMES = {"bm": ("b", "m"), "dn": ("d", "n"), "pb": ("p", "b")}
 
-# papermill serializes tuples as a single string; parse then coerce
-if isinstance(pval_thresholds, str):
-    pval_thresholds = ast.literal_eval(pval_thresholds)
-pval_thresholds = tuple(float(p) for p in pval_thresholds)
+PDF_SAVEFIG_KWARGS = dict(
+    bbox_inches="tight",
+    dpi=300,
+)
 
 OUT_DIR = Path(output_dir)
 OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -183,6 +196,8 @@ CONJUNCTION_CATEGORIES = {
         "late_type":  ["two-sided", "one-sided"],
     }
 }
+
+CAT_PLOT_ORDER = ["Perceptual", "Acoustic + integration", "Acoustic-only"]
 
 
 # %%
@@ -264,6 +279,7 @@ print(f"epochs loaded: {sorted(epochs_dict)}")
 # %%
 epoch_tmin = next(iter(epochs_dict.values())).tmin
 epoch_sfreq = next(iter(epochs_dict.values())).info["sfreq"]
+window_size = 0.05
 
 # %%
 # prepare to extract contrast time series per electrode×phoneme_pair×word_end, for plotting
@@ -324,18 +340,29 @@ for (subject, electrode_idx, phoneme_pair, word_end), row in behavior_plot_guide
     behavior_contrasts[conjunction_category].append(b_diff_mean)
 
 # %%
-plt.axvline(0, color="k", linestyle="--", alpha=0.5)
-plt.axhline(0, color="k", linestyle="--", alpha=0.5)
+f, ax = plt.subplots(figsize=(3, 2))
 
-for cat, contrasts in behavior_contrasts.items():
+ax.axvline(0, color="k", linestyle="--", alpha=0.5)
+ax.axhline(0, color="k", linestyle="--", alpha=0.5)
+
+for cat in CAT_PLOT_ORDER:
+    contrasts = behavior_contrasts[cat]
     ys = np.stack(contrasts).mean(0)
-    xs = b4_by_behavior_diffs.columns.get_level_values("smin").values / epoch_sfreq + epoch_tmin
-    plt.plot(xs, ys, label=cat)
+    xs = b4_by_behavior_diffs.columns.get_level_values("smin").values / epoch_sfreq + epoch_tmin + window_size / 2
+    ax.plot(xs, ys, lw=1.5, label=cat.replace(" + ", "\n+ "))
 
     yerr = np.stack(contrasts).std(0) / np.sqrt(len(contrasts))
-    plt.fill_between(xs, ys - yerr, ys + yerr, alpha=0.2)
+    ax.fill_between(xs, ys - yerr, ys + yerr, alpha=0.2)
 
-plt.legend()
+ax.legend(loc="lower left", bbox_to_anchor=(-0.8, -0.2))
+ax.set_xlim(-0.05, 0.8)
+ax.set_xlabel("Time from word onset (s)")
+ax.set_ylabel("HGA contrast by\nperceptual state\n($z$)", rotation=0, labelpad=10, ha="right")
+ax.set_yticks([-0.4, -0.2, 0.0, 0.2, 0.4, 0.6])
+
+sns.despine(ax=ax)
+
+f.savefig(OUT_DIR / "hga_contrast_perceptual.pdf", **PDF_SAVEFIG_KWARGS)
 
 
 # %% [markdown]
@@ -402,6 +429,20 @@ for (subject, electrode_idx, phoneme_pair, word_end) in acoustic_cells:
         n_no_category += 1
         continue
 
+    # which word end should we attend to? if we're looking at a one-sided site, we should only look at the word end that has a behavioral window. if we're looking at a two-sided site, we should look at both word ends and average them together. if we're looking at an acoustic-only site, we should look at both word ends and average them together.
+    if row.late_category == "one-sided":
+        target_word_ends = manifest.loc[
+            (
+                (manifest.subject == subject)
+                & (manifest.electrode_idx == electrode_idx)
+                & (manifest.phoneme_pair == phoneme_pair)
+                & (manifest["behav @late"].notna())
+            ),
+            "word_end"
+        ].unique()
+        if word_end not in target_word_ends:
+            continue
+
     b_diffs = b4_by_acoustic_diffs.loc[(subject, electrode_idx, phoneme_pair, word_end)].values
     b_diff_mean = (row.acoustic_sign_endpoint * b_diffs).mean(0)
     acoustic_contrasts[row.conjunction_category].append(b_diff_mean)
@@ -412,15 +453,56 @@ for cat, contrasts in acoustic_contrasts.items():
     print(f"  {cat}: {len(contrasts)} cells")
 
 # %%
-plt.axvline(0, color="k", linestyle="--", alpha=0.5)
-plt.axhline(0, color="k", linestyle="--", alpha=0.5)
+f, ax = plt.subplots(figsize=(3, 2))
 
-for cat, contrasts in acoustic_contrasts.items():
+ax.axvline(0, color="k", linestyle="--", alpha=0.5)
+ax.axhline(0, color="k", linestyle="--", alpha=0.5)
+
+for cat in CAT_PLOT_ORDER:
+    contrasts = acoustic_contrasts[cat]
     ys = np.stack(contrasts).mean(0)
-    xs = b4_by_acoustic_diffs.columns.get_level_values("smin").values / epoch_sfreq + epoch_tmin
-    plt.plot(xs, ys, label=cat)
+    xs = b4_by_acoustic_diffs.columns.get_level_values("smin").values / epoch_sfreq + epoch_tmin + window_size / 2
+    ax.plot(xs, ys, lw=1.5, label=cat.replace(" + ", "\n+ "))
 
     yerr = np.stack(contrasts).std(0) / np.sqrt(len(contrasts))
-    plt.fill_between(xs, ys - yerr, ys + yerr, alpha=0.2)
+    ax.fill_between(xs, ys - yerr, ys + yerr, alpha=0.2)
 
-plt.legend()
+ax.legend(loc="lower left", bbox_to_anchor=(-0.8, -0.2))
+ax.set_xlim(-0.05, 0.8)
+ax.set_xlabel("Time from word onset (s)")
+ax.set_ylabel("HGA contrast by\nacoustic input\n($z$)", rotation=0, labelpad=10, ha="right")
+ax.set_yticks([-0.4, -0.2, 0.0, 0.2, 0.4, 0.6])
+
+sns.despine(ax=ax)
+
+f.savefig(OUT_DIR / "hga_contrast_acoustic.pdf", **PDF_SAVEFIG_KWARGS)
+
+# %% [markdown]
+# ## Plot individual site, acoustics vs behavior
+
+# %%
+plot_subject = "EC287"
+plot_electrode_idx = 199
+plot_phoneme_pair = "pb"
+plot_word_end = "beneficial"
+
+# %%
+plot_acoustic_diffs = b4_by_acoustic_diffs.loc[(plot_subject, plot_electrode_idx, plot_phoneme_pair, plot_word_end)].values
+plot_behavior_diffs = b4_by_behavior_diffs.loc[(plot_subject, plot_electrode_idx, plot_phoneme_pair, plot_word_end)].values
+
+# %%
+# b4_by_acoustic.loc[(plot_subject, plot_electrode_idx, plot_phoneme_pair, plot_word_end)]
+# b4_by_behavior.loc[(plot_subject, plot_electrode_idx, plot_phoneme_pair, plot_word_end)]
+
+# %%
+f, ax = plt.subplots(figsize=(6, 4))
+
+ax.axvline(0, color="k", linestyle="--", alpha=0.5)
+ax.axhline(0, color="k", linestyle="--", alpha=0.5)
+
+xs = b4_by_behavior_diffs.columns.get_level_values("smin").values / epoch_sfreq + epoch_tmin + window_size / 2
+
+ax.plot(xs, plot_behavior_diffs.mean(0), label="behavioral contrast")
+ax.plot(xs, plot_acoustic_diffs.mean(0), label="acoustic contrast")
+
+ax.legend()
