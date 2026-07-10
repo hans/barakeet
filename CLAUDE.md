@@ -204,9 +204,11 @@ Loaded via MNE; metadata enriched with `add_metadata_features()`.
 Phoneme pairs: `bm` (/b/-/m/), `dn` (/d/-/n/), `pb` (/p/-/b/).
 
 ### Environment
-Conda environment: `/scratch/jgauthier/transformers3`
-Activate before running any notebooks or scripts: `conda activate /scratch/jgauthier/transformers3`
-Or run directly: `conda run -p /scratch/jgauthier/transformers3 <command>` (use `-p`, not `-n`)
+Uses `uv`. Run any Python script, notebook, or Snakemake invocation with `uv run <command>` from the repo root — no activation step needed.
+
+**Configs:**
+- `config.smoke.yaml` — local development; use with `CONFIG_FILE=config.smoke.yaml uv run snakemake --configfile config.smoke.yaml -j1`
+- `config.yaml` — production (separate machine); same Snakefile, full dataset
 
 ---
 
