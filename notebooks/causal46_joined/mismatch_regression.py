@@ -16,7 +16,7 @@
 # %% [markdown]
 # # Single-trial acoustic×percept mismatch regression
 #
-# For each qualifying cell `(subject, electrode_idx, phoneme_pair, word_end)`,
+# For each qualifying `(subject, electrode_idx, phoneme_pair, word_end, window_id)`,
 # fits the single-trial OLS models:
 #
 #     additive:  HGA ~ step_c + percept_c
@@ -28,11 +28,15 @@
 # **β_interaction is the diagnostic**: significant negative interaction → nonlinear
 # conflict/surprisal signal beyond additive opponent coding.
 #
-# **Window selection**: first significant behavioral discriminative window (b_windows,
-# window_id=0, ci_excludes_zero=True). Acoustic bootstrap (b4_acoustic_per_window) is
-# then looked up at the same time range as a diagnostic — any 5-sample acoustic window
-# fully within the behavioral window that has ci_aligned_excludes_zero is flagged.
-# Robustness variant uses a fixed a priori window [POD, word_offset].
+# **Qualifying set**: all significant, non-fallback behavioral discriminative windows
+# from b_windows (ci_excludes_zero=True, is_fallback=False, any window_id). Each
+# (cell, window_id) pair is a separate regression evaluation.
+# Acoustic significance (b4_acoustic_per_cell best_ci_aligned_excludes_zero) is
+# annotated as a column but is NOT a gate — cells are included regardless.
+# Per-window: b4_acoustic_per_window is queried for any 5-sample window fully
+# contained in the behavioral window that has ci_aligned_excludes_zero (flagged as
+# ac_sig_in_beh_window). Robustness variant uses a fixed [POD, word_offset] window,
+# run once per cell.
 #
 # See: docs/superpowers/plans/2026-07-08-causal46-mismatch-regression.md
 
@@ -218,36 +222,31 @@ print(f"trial_balance: {trial_balance.height} rows")
 # ## §3: Cell & window selection
 
 # %%
-# Behavioral discriminative windows: first significant window (window_id=0,
-# ci_excludes_zero=True, not a fallback) from b_windows. These supply smin/smax
-# for the regression window and define which cells are behaviorally responsive.
+# Behavioral discriminative windows: all significant, non-fallback rows (any window_id).
+# Each (cell, window_id) pair becomes a separate regression evaluation.
 if b_windows.height > 0 and "window_id" in b_windows.columns and "ci_excludes_zero" in b_windows.columns:
     beh_windows = (
         b_windows
         .filter(
-            (pl.col("window_id") == 0)
-            & pl.col("ci_excludes_zero")
+            pl.col("ci_excludes_zero")
             & ~pl.col("is_fallback")
         )
-        .select(CELL_KEYS + ["smin", "smax"])
+        .select(CELL_KEYS + ["window_id", "smin", "smax"])
     )
 else:
-    beh_windows = pl.DataFrame(schema={k: pl.Utf8 for k in CELL_KEYS} | {"smin": pl.Int64, "smax": pl.Int64})
+    beh_windows = pl.DataFrame(schema={k: pl.Utf8 for k in CELL_KEYS} | {"window_id": pl.Int64, "smin": pl.Int64, "smax": pl.Int64})
 
-print(f"Behavioral discriminative windows (first, significant): {beh_windows.height}")
+n_beh_cells = beh_windows.select(CELL_KEYS).unique().height
+print(f"Behavioral discriminative windows (all sig, non-fallback): {beh_windows.height} across {n_beh_cells} cells")
 
-# Acoustic-significant cells: still required for qualifying cells so that
-# we only analyse cells where BOTH a behavioral and acoustic effect exist.
+# Acoustic annotation: joined onto results after regression, not used as an inclusion gate.
+# best_ci_aligned_excludes_zero marks cells with significant acoustic step-tracking on ambiguous trials.
 if b4_acoustic_per_cell.height > 0 and "best_ci_aligned_excludes_zero" in b4_acoustic_per_cell.columns:
-    ac_sig_cells = (
-        b4_acoustic_per_cell
-        .filter(pl.col("best_ci_aligned_excludes_zero"))
-        .select(CELL_KEYS)
-    )
+    ac_annotation = b4_acoustic_per_cell.select(CELL_KEYS + ["best_ci_aligned_excludes_zero"])
 else:
-    ac_sig_cells = pl.DataFrame(schema={k: pl.Utf8 for k in CELL_KEYS})
+    ac_annotation = pl.DataFrame(schema={k: pl.Utf8 for k in CELL_KEYS} | {"best_ci_aligned_excludes_zero": pl.Boolean})
 
-print(f"Acoustic-significant cells: {ac_sig_cells.height}")
+print(f"Acoustic annotation available: {ac_annotation.height} cells ({ac_annotation.filter(pl.col('best_ci_aligned_excludes_zero')).height} sig)")
 
 # Qualifying steps from trial_balance_index (is_ambiguous_step, per-step K threshold)
 if trial_balance.height > 0:
@@ -266,18 +265,15 @@ else:
 
 print(f"Cells with ≥{min_steps} qualifying steps (K≥{K_min_per_step}): {qualifying_steps_df.height}")
 
-# Intersection: behavioral-window ∩ acoustic-sig ∩ trial-structure.
-# qualifying_cells carries smin/smax from beh_windows as the regression window.
+# Qualifying (cell, window) pairs: behavioral-windows ∩ trial-structure.
+# Acoustic significance is NOT a gate here — it is annotated post-hoc.
 if beh_windows.height > 0 and qualifying_steps_df.height > 0:
-    qualifying_cells = beh_windows.join(qualifying_steps_df, on=CELL_KEYS, how="inner")
-    if ac_sig_cells.height > 0:
-        qualifying_cells = qualifying_cells.join(ac_sig_cells, on=CELL_KEYS, how="inner")
-    else:
-        print("WARNING: no acoustic significance data; using behavioral ∩ trial-structure only")
+    qualifying_windows = beh_windows.join(qualifying_steps_df, on=CELL_KEYS, how="inner")
 else:
-    qualifying_cells = pl.DataFrame()
+    qualifying_windows = pl.DataFrame()
 
-print(f"Qualifying cells for regression: {qualifying_cells.height}")
+n_qual_cells = qualifying_windows.select(CELL_KEYS).unique().height if qualifying_windows.height > 0 else 0
+print(f"Qualifying (cell, window) pairs for regression: {qualifying_windows.height} across {n_qual_cells} cells")
 
 # Pre-build acoustic per-window lookup as pandas for fast per-cell queries in the loop.
 # b4_acoustic_per_window has 5-sample windows; we look up any that fall within the
@@ -299,7 +295,7 @@ else:
 results_rows = []
 cell_table_rows = []
 
-subjects = sorted(qualifying_cells["subject"].unique().to_list()) if qualifying_cells.height > 0 else []
+subjects = sorted(qualifying_windows["subject"].unique().to_list()) if qualifying_windows.height > 0 else []
 
 for subject in subjects:
     ep_path = EPOCH_DIR / f"{subject}_epo.fif"
@@ -323,15 +319,13 @@ for subject in subjects:
             print(f"  ⚠ {subject} {pp}: modal class at step 6 = {modal_class} (expected 1) — skipping pair")
             continue
 
-    subj_cells = qualifying_cells.filter(pl.col("subject") == subject)
+    subj_windows = qualifying_windows.filter(pl.col("subject") == subject)
 
-    for row in subj_cells.iter_rows(named=True):
-        elec_idx = int(row["electrode_idx"])
-        pp = row["phoneme_pair"]
-        we = row["word_end"]
-        steps = [int(s) for s in row["qualifying_steps"]]
-        smin_beh = int(row["smin"])
-        smax_beh = int(row["smax"])
+    # Group by cell; HGA and trial_df are computed once per cell, windows iterated within.
+    for (elec_idx_v, pp_v, we_v), cell_wins in subj_windows.group_by(["electrode_idx", "phoneme_pair", "word_end"]):
+        elec_idx = int(elec_idx_v)
+        pp = str(pp_v)
+        we = str(we_v)
 
         # Validate class 1 = step-6 percept for this pair
         md_full_pp = ep_full.metadata[ep_full.metadata["phoneme_pair"] == pp]
@@ -339,51 +333,102 @@ for subject in subjects:
         if len(md_step6) == 0 or int(md_step6[behav_col].mode()[0]) != 1:
             continue
 
-        hga, md_cell = extract_hga_trials(ep_full, elec_idx, pp, we)
+        # qualifying_steps is cell-level — same across all windows for this cell
+        steps = [int(s) for s in cell_wins["qualifying_steps"][0]]
 
+        hga, md_cell = extract_hga_trials(ep_full, elec_idx, pp, we)
         if len(md_cell) == 0:
             continue
 
-        # Build design matrix for behavioral window
-        trial_df_beh = _build_trial_df(md_cell, steps, behav_col)
-        if trial_df_beh.empty:
+        # Design matrix is cell-level (same steps regardless of window)
+        trial_df = _build_trial_df(md_cell, steps, behav_col)
+        if trial_df.empty:
             continue
 
-        # Regression on behavioral window
-        res_beh = _fit_mismatch_regression(trial_df_beh, smin_beh, smax_beh, hga)
-        if res_beh is None:
-            continue
+        # Regression for each behavioral window
+        for win_row in cell_wins.sort("window_id").iter_rows(named=True):
+            window_id = int(win_row["window_id"])
+            smin_beh = int(win_row["smin"])
+            smax_beh = int(win_row["smax"])
 
-        tmin_beh = _s_to_t(smin_beh)
-        tmax_beh = _s_to_t(smax_beh)
-        mirrored = (
-            np.sign(res_beh["beta_step"]) != np.sign(res_beh["beta_percept"])
-            if res_beh["beta_step"] != 0 and res_beh["beta_percept"] != 0
-            else False
-        )
-        both_main_sig = res_beh["p_step"] < 0.05 and res_beh["p_percept"] < 0.05
+            res_beh = _fit_mismatch_regression(trial_df, smin_beh, smax_beh, hga)
+            if res_beh is None:
+                continue
 
-        # Acoustic lookup: find 5-sample acoustic bootstrap windows fully within
-        # [smin_beh, smax_beh) and report whether any is ci_aligned_excludes_zero.
-        ac_sig_in_beh = False
-        n_ac_sig_windows = 0
-        if _baw_pd is not None:
-            try:
-                _cell_ac = _baw_pd.loc[(subject, elec_idx, pp, we)]
-                if hasattr(_cell_ac, "iterrows"):  # multiple rows
-                    _contained = _cell_ac[
-                        (_cell_ac["smin"] >= smin_beh) & (_cell_ac["smax"] <= smax_beh)
-                    ]
-                else:  # single row became a Series
-                    _contained = _cell_ac.to_frame().T[
-                        (_cell_ac["smin"] >= smin_beh) & (_cell_ac["smax"] <= smax_beh)
-                    ]
-                n_ac_sig_windows = int(_contained["ci_aligned_excludes_zero"].sum())
-                ac_sig_in_beh = n_ac_sig_windows > 0
-            except KeyError:
-                pass
+            tmin_beh = _s_to_t(smin_beh)
+            tmax_beh = _s_to_t(smax_beh)
+            mirrored = (
+                np.sign(res_beh["beta_step"]) != np.sign(res_beh["beta_percept"])
+                if res_beh["beta_step"] != 0 and res_beh["beta_percept"] != 0
+                else False
+            )
+            both_main_sig = res_beh["p_step"] < 0.05 and res_beh["p_percept"] < 0.05
 
-        # Robustness: fixed a priori window [POD, word_offset]
+            # Acoustic lookup: 5-sample bootstrap windows fully within [smin_beh, smax_beh)
+            ac_sig_in_beh = False
+            n_ac_sig_windows = 0
+            if _baw_pd is not None:
+                try:
+                    _cell_ac = _baw_pd.loc[(subject, elec_idx, pp, we)]
+                    if hasattr(_cell_ac, "iterrows"):
+                        _contained = _cell_ac[
+                            (_cell_ac["smin"] >= smin_beh) & (_cell_ac["smax"] <= smax_beh)
+                        ]
+                    else:
+                        _contained = _cell_ac.to_frame().T[
+                            (_cell_ac["smin"] >= smin_beh) & (_cell_ac["smax"] <= smax_beh)
+                        ]
+                    n_ac_sig_windows = int(_contained["ci_aligned_excludes_zero"].sum())
+                    ac_sig_in_beh = n_ac_sig_windows > 0
+                except KeyError:
+                    pass
+
+            results_rows.append(dict(
+                subject=subject,
+                electrode_idx=elec_idx,
+                phoneme_pair=pp,
+                word_end=we,
+                window_id=window_id,
+                n_steps=int(trial_df["resampled"].nunique()),
+                min_per_step_per_class=K_min_per_step,
+                smin=smin_beh,
+                smax=smax_beh,
+                tmin=round(tmin_beh, 4),
+                tmax=round(tmax_beh, 4),
+                mirrored_signs=bool(mirrored),
+                both_main_sig=bool(both_main_sig),
+                ac_sig_in_beh_window=bool(ac_sig_in_beh),
+                n_ac_sig_windows=n_ac_sig_windows,
+                window_source="behavioral",
+                **{k: v for k, v in res_beh.items()},
+            ))
+
+            # Cell table: only for window_id=0 (primary window for plotting)
+            if window_id == 0:
+                _qualifying_steps_set = set(int(s) for s in trial_df["resampled"].unique())
+                y_all = hga[:, smin_beh:smax_beh].mean(axis=1)
+                for s in steps:
+                    if s not in _qualifying_steps_set:
+                        continue
+                    step_mask = md_cell["resampled"] == s
+                    for cls in [0, 1]:
+                        cls_mask = step_mask & (md_cell[behav_col] == cls)
+                        n_cls = int(cls_mask.sum())
+                        mean_hga = float(y_all[cls_mask.values].mean()) if n_cls > 0 else float("nan")
+                        cell_table_rows.append(dict(
+                            subject=subject,
+                            electrode_idx=elec_idx,
+                            phoneme_pair=pp,
+                            word_end=we,
+                            resampled=s,
+                            percept_class=cls,
+                            n=n_cls,
+                            mean_hga=mean_hga,
+                            smin=smin_beh,
+                            smax=smax_beh,
+                        ))
+
+        # Robustness: fixed a priori window [POD, word_offset], once per cell
         pod_t = POD_dict.get(pp, 0.295)
         offset_t = OFFSET_DICT.get(we, 1.0)
         smin_fixed = int(round((pod_t - epoch_tmin) * epoch_sfreq))
@@ -391,86 +436,36 @@ for subject in subjects:
         smax_fixed = min(smax_fixed, hga.shape[1])
         smin_fixed = max(smin_fixed, 0)
 
-        res_fixed = None
         if smax_fixed > smin_fixed:
-            trial_df_fixed = _build_trial_df(md_cell, steps, behav_col)
-            if not trial_df_fixed.empty:
-                res_fixed = _fit_mismatch_regression(trial_df_fixed, smin_fixed, smax_fixed, hga)
-
-        row_base = dict(
-            subject=subject,
-            electrode_idx=elec_idx,
-            phoneme_pair=pp,
-            word_end=we,
-            n_steps=int(trial_df_beh["resampled"].nunique()),
-            min_per_step_per_class=K_min_per_step,
-            smin=smin_beh,
-            smax=smax_beh,
-            tmin=round(tmin_beh, 4),
-            tmax=round(tmax_beh, 4),
-            mirrored_signs=bool(mirrored),
-            both_main_sig=bool(both_main_sig),
-            ac_sig_in_beh_window=bool(ac_sig_in_beh),
-            n_ac_sig_windows=n_ac_sig_windows,
-            window_source="behavioral",
-            **{k: v for k, v in res_beh.items()},
-        )
-        results_rows.append(row_base)
-
-        # Robustness variant row
-        if res_fixed is not None:
-            row_fixed = dict(
-                subject=subject,
-                electrode_idx=elec_idx,
-                phoneme_pair=pp,
-                word_end=we,
-                n_steps=int(trial_df_fixed["resampled"].nunique()),
-                min_per_step_per_class=K_min_per_step,
-                smin=smin_fixed,
-                smax=smax_fixed,
-                tmin=round(_s_to_t(smin_fixed), 4),
-                tmax=round(_s_to_t(smax_fixed), 4),
-                mirrored_signs=bool(
-                    np.sign(res_fixed["beta_step"]) != np.sign(res_fixed["beta_percept"])
-                    if res_fixed["beta_step"] != 0 and res_fixed["beta_percept"] != 0
-                    else False
-                ),
-                both_main_sig=res_fixed["p_step"] < 0.05 and res_fixed["p_percept"] < 0.05,
-                ac_sig_in_beh_window=False,
-                n_ac_sig_windows=0,
-                window_source="fixed",
-                **{k: v for k, v in res_fixed.items()},
-            )
-            results_rows.append(row_fixed)
-
-        # Per-(step × percept) cell table for plotting
-        # Use all trials in the cell (not just qualifying steps) for the table,
-        # but only report qualifying steps so counts are consistent with regression.
-        _qualifying_steps_set = set(int(s) for s in trial_df_beh["resampled"].unique())
-        y_all = hga[:, smin_beh:smax_beh].mean(axis=1)
-        for s in steps:
-            if s not in _qualifying_steps_set:
-                continue
-            step_mask = md_cell["resampled"] == s
-            for cls in [0, 1]:
-                cls_mask = step_mask & (md_cell[behav_col] == cls)
-                n_cls = int(cls_mask.sum())
-                mean_hga = float(y_all[cls_mask.values].mean()) if n_cls > 0 else float("nan")
-                cell_table_rows.append(dict(
+            res_fixed = _fit_mismatch_regression(trial_df, smin_fixed, smax_fixed, hga)
+            if res_fixed is not None:
+                results_rows.append(dict(
                     subject=subject,
                     electrode_idx=elec_idx,
                     phoneme_pair=pp,
                     word_end=we,
-                    resampled=s,
-                    percept_class=cls,
-                    n=n_cls,
-                    mean_hga=mean_hga,
-                    smin=smin_beh,
-                    smax=smax_beh,
+                    window_id=None,
+                    n_steps=int(trial_df["resampled"].nunique()),
+                    min_per_step_per_class=K_min_per_step,
+                    smin=smin_fixed,
+                    smax=smax_fixed,
+                    tmin=round(_s_to_t(smin_fixed), 4),
+                    tmax=round(_s_to_t(smax_fixed), 4),
+                    mirrored_signs=bool(
+                        np.sign(res_fixed["beta_step"]) != np.sign(res_fixed["beta_percept"])
+                        if res_fixed["beta_step"] != 0 and res_fixed["beta_percept"] != 0
+                        else False
+                    ),
+                    both_main_sig=res_fixed["p_step"] < 0.05 and res_fixed["p_percept"] < 0.05,
+                    ac_sig_in_beh_window=False,
+                    n_ac_sig_windows=0,
+                    window_source="fixed",
+                    **{k: v for k, v in res_fixed.items()},
                 ))
 
-print(f"\nRegression complete: {len([r for r in results_rows if r['window_source']=='behavioral'])} behavioral-window cells")
-print(f"  + {len([r for r in results_rows if r['window_source']=='fixed'])} fixed-window robustness rows")
+n_beh_rows = len([r for r in results_rows if r["window_source"] == "behavioral"])
+n_fixed_rows = len([r for r in results_rows if r["window_source"] == "fixed"])
+print(f"\nRegression complete: {n_beh_rows} behavioral-window evaluations, {n_fixed_rows} fixed-window robustness rows")
 
 # %% [markdown]
 # ## §9: Validation — check behavioral windows for EC243 example cells
@@ -545,12 +540,12 @@ else:
 
 # %%
 if results_rows:
-    # Separate acoustic-window results from robustness variant
-    _results_ac = [r for r in results_rows if r["window_source"] == "behavioral"]
+    # Separate behavioral-window results from robustness variant
+    _results_beh = [r for r in results_rows if r["window_source"] == "behavioral"]
     _results_fixed = [r for r in results_rows if r["window_source"] == "fixed"]
 
-    res_df = pd.DataFrame(_results_ac)
-    print(f"Cells in population: {len(res_df)}")
+    res_df = pd.DataFrame(_results_beh)
+    print(f"(Cell, window) evaluations in population: {len(res_df)} across {res_df[CELL_KEYS].drop_duplicates().shape[0]} cells")
 
     # BH-FDR on interaction p-values
     if len(res_df) > 0:
@@ -597,18 +592,18 @@ if results_rows:
             _ns = int((_grp["p_int"] < 0.05).sum())
             print(f"  {_pp}: n={len(_grp)}, mirror={_mr:.1%}, median_β_int={_bi.median():.3f}, n_sig={_ns}")
 
-        # Robustness: compare acoustic-window vs fixed-window interaction
+        # Robustness: compare first behavioral window (window_id=0) vs fixed-window interaction
         if _results_fixed:
             res_fixed_df = pd.DataFrame(_results_fixed)
-            _merge = res_df[["subject", "electrode_idx", "phoneme_pair", "word_end", "beta_int"]].merge(
-                res_fixed_df[["subject", "electrode_idx", "phoneme_pair", "word_end", "beta_int"]].rename(
-                    columns={"beta_int": "beta_int_fixed"}),
-                on=["subject", "electrode_idx", "phoneme_pair", "word_end"],
+            _beh0 = res_df[res_df["window_id"] == 0]
+            _merge = _beh0[CELL_KEYS + ["beta_int"]].merge(
+                res_fixed_df[CELL_KEYS + ["beta_int"]].rename(columns={"beta_int": "beta_int_fixed"}),
+                on=CELL_KEYS,
                 how="inner",
             )
             if len(_merge) > 2:
                 _corr = _merge["beta_int"].corr(_merge["beta_int_fixed"])
-                print(f"\nRobustness: corr(β_int acoustic vs fixed window) = {_corr:.3f} (n={len(_merge)})")
+                print(f"\nRobustness: corr(β_int window_id=0 vs fixed) = {_corr:.3f} (n={len(_merge)})")
 else:
     print("No qualifying cells — population stats skipped")
     res_df = pd.DataFrame()
@@ -623,6 +618,7 @@ _SCHEMA = {
     "electrode_idx": pd.Series(dtype="int64"),
     "phoneme_pair": pd.Series(dtype="object"),
     "word_end": pd.Series(dtype="object"),
+    "window_id": pd.Series(dtype="Int64"),
     "smin": pd.Series(dtype="int64"),
     "smax": pd.Series(dtype="int64"),
     "tmin": pd.Series(dtype="float64"),
@@ -651,14 +647,17 @@ _SCHEMA = {
     "window_source": pd.Series(dtype="object"),
 }
 
-# mismatch_per_cell.parquet — includes both acoustic and fixed-window rows
+# mismatch_per_cell.parquet — includes behavioral and fixed-window rows
 if results_rows:
     mismatch_per_cell = pd.DataFrame(results_rows)
+    # Cast window_id to nullable int so fixed-window rows store NaN cleanly
+    if "window_id" in mismatch_per_cell.columns:
+        mismatch_per_cell["window_id"] = mismatch_per_cell["window_id"].astype("Int64")
     if "q_int_fdr" not in mismatch_per_cell.columns:
-        # Compute FDR across all acoustic-window rows
-        _ac_rows = mismatch_per_cell[mismatch_per_cell["window_source"] == "behavioral"]
-        if len(_ac_rows) > 0:
-            _reject_all, _q_all, _, _ = multipletests(_ac_rows["p_int"].fillna(1.0), method="fdr_bh")
+        # FDR across all behavioral-window evaluations
+        _beh_rows = mismatch_per_cell[mismatch_per_cell["window_source"] == "behavioral"]
+        if len(_beh_rows) > 0:
+            _reject_all, _q_all, _, _ = multipletests(_beh_rows["p_int"].fillna(1.0), method="fdr_bh")
             mismatch_per_cell.loc[mismatch_per_cell["window_source"] == "behavioral", "q_int_fdr"] = _q_all
             mismatch_per_cell.loc[mismatch_per_cell["window_source"] == "behavioral", "int_sig_fdr"] = _reject_all
 else:
@@ -689,17 +688,18 @@ print(f"Written: {OUT_DIR / 'mismatch_cell_table.parquet'} ({len(mismatch_cell_t
 
 # mismatch_summary.csv
 if len(results_rows) > 0:
-    _ac_df = mismatch_per_cell[mismatch_per_cell["window_source"] == "behavioral"]
+    _beh_df = mismatch_per_cell[mismatch_per_cell["window_source"] == "behavioral"]
     summary_dict = dict(
-        n_qualifying_cells=len(_ac_df),
-        mirroring_rate=float(_ac_df["mirrored_signs"].mean()),
-        n_mirrored=int(_ac_df["mirrored_signs"].sum()),
-        both_main_sig_rate=float(_ac_df["both_main_sig"].mean()),
-        median_beta_int=float(_ac_df["beta_int"].median()),
-        mean_beta_int=float(_ac_df["beta_int"].mean()),
-        frac_beta_int_negative=float((_ac_df["beta_int"] < 0).mean()),
-        n_int_sig_nominal=int((_ac_df["p_int"] < 0.05).sum()),
-        n_int_sig_fdr=int(_ac_df.get("int_sig_fdr", pd.Series([False] * len(_ac_df))).sum()),
+        n_qualifying_evaluations=len(_beh_df),
+        n_qualifying_cells=_beh_df[CELL_KEYS].drop_duplicates().shape[0],
+        mirroring_rate=float(_beh_df["mirrored_signs"].mean()),
+        n_mirrored=int(_beh_df["mirrored_signs"].sum()),
+        both_main_sig_rate=float(_beh_df["both_main_sig"].mean()),
+        median_beta_int=float(_beh_df["beta_int"].median()),
+        mean_beta_int=float(_beh_df["beta_int"].mean()),
+        frac_beta_int_negative=float((_beh_df["beta_int"] < 0).mean()),
+        n_int_sig_nominal=int((_beh_df["p_int"] < 0.05).sum()),
+        n_int_sig_fdr=int(_beh_df.get("int_sig_fdr", pd.Series([False] * len(_beh_df))).sum()),
     )
     pd.DataFrame([summary_dict]).to_csv(OUT_DIR / "mismatch_summary.csv", index=False)
     print(f"Written: {OUT_DIR / 'mismatch_summary.csv'}")
@@ -712,12 +712,12 @@ else:
 
 # %%
 if len(results_rows) > 0:
-    _ac_df = mismatch_per_cell[mismatch_per_cell["window_source"] == "behavioral"]
+    _beh_df = mismatch_per_cell[mismatch_per_cell["window_source"] == "behavioral"]
     fig, axes = plt.subplots(1, 2, figsize=(10, 4))
 
     # β_interaction histogram
     ax = axes[0]
-    _bi = _ac_df["beta_int"].dropna()
+    _bi = _beh_df["beta_int"].dropna()
     ax.axvline(0, color="k", lw=0.8, ls="--")
     ax.hist(_bi, bins=20, color="steelblue", edgecolor="white", linewidth=0.5)
     ax.axvline(float(_bi.median()), color="firebrick", lw=1.5, ls="-", label=f"median={float(_bi.median()):.3f}")
@@ -728,10 +728,10 @@ if len(results_rows) > 0:
 
     # β_step vs β_percept scatter (mirroring check)
     ax = axes[1]
-    _mirror = _ac_df["mirrored_signs"]
-    ax.scatter(_ac_df.loc[_mirror, "beta_step"], _ac_df.loc[_mirror, "beta_percept"],
+    _mirror = _beh_df["mirrored_signs"]
+    ax.scatter(_beh_df.loc[_mirror, "beta_step"], _beh_df.loc[_mirror, "beta_percept"],
                color="steelblue", s=20, alpha=0.7, label=f"mirrored (n={_mirror.sum()})")
-    ax.scatter(_ac_df.loc[~_mirror, "beta_step"], _ac_df.loc[~_mirror, "beta_percept"],
+    ax.scatter(_beh_df.loc[~_mirror, "beta_step"], _beh_df.loc[~_mirror, "beta_percept"],
                color="tomato", s=20, alpha=0.7, label=f"matched (n={(~_mirror).sum()})")
     ax.axhline(0, color="k", lw=0.5)
     ax.axvline(0, color="k", lw=0.5)
@@ -745,8 +745,9 @@ if len(results_rows) > 0:
     plt.close(fig)
     print(f"Written: {OUT_DIR / 'mismatch_summary.pdf'}")
 
-    # Example cells: step × percept heatmap for top-2 cells by |β_int|
-    _example_cells = _ac_df.nlargest(2, "beta_int" if len(_ac_df) < 4 else "delta_r2")
+    # Example cells: step × percept heatmap for top-2 cells by |β_int| (window_id=0 only)
+    _beh0_df = _beh_df[_beh_df["window_id"] == 0]
+    _example_cells = _beh0_df.nlargest(2, "beta_int" if len(_beh0_df) < 4 else "delta_r2")
     if len(_example_cells) > 0 and cell_table_rows:
         fig2, axes2 = plt.subplots(1, max(1, len(_example_cells)), figsize=(5 * max(1, len(_example_cells)), 4))
         if len(_example_cells) == 1:
@@ -818,13 +819,10 @@ print(f"acoustic_cell_manifest: {_ac_manifest.height} rows")
 print(f"t_tests b4_per_window:  {_t_tests_bpw.height} rows")
 
 # %%
-# Determine the primary window_source label (notebook may write "behavioral" or "acoustic")
-_primary_source = (
-    "behavioral"
-    if "behavioral" in mismatch_per_cell["window_source"].unique().tolist()
-    else "acoustic"
-)
-_eg_pool = mismatch_per_cell[mismatch_per_cell["window_source"] == _primary_source].copy()
+# Example pool: window_id=0 behavioral rows (primary window per cell)
+_eg_pool = mismatch_per_cell[
+    (mismatch_per_cell["window_source"] == "behavioral") & (mismatch_per_cell["window_id"] == 0)
+].copy()
 
 _example_rows: list[dict] = []
 
@@ -999,7 +997,7 @@ else:
             continue
 
         _fig.suptitle(
-            f"[{_er['_label']}]  "
+            f"[{_er['_label']}]  win={_er['window_id']}  "
             f"β_step={_er['beta_step']:+.3f}  "
             f"β_percept={_er['beta_percept']:+.3f}  "
             f"β_int={_er['beta_int']:+.3f}  "
