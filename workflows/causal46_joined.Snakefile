@@ -1649,7 +1649,7 @@ rule contrast_plot:
             a_per_window_all_path=str(input.a_per_window_all),
             output_dir=str(outdir),
             phoneme_pair=None,
-            bootstrap_r=1000,
+            bootstrap_r=config["causal46_joined"]["n_bootstrap"],
             bootstrap_seed=42,
             min_class_k=config["causal46_joined"]["min_class_k"],
             ttest_window_size=config["causal46_joined"]["window_size"],
@@ -1657,6 +1657,8 @@ rule contrast_plot:
             pval_thresholds=(0.00001, 0.0001, 0.001),
             epochs_dir="outputs/epochs_preprocessed",
             behav_polarity_mode="annotated",
+            n_perm=config["causal46_joined"]["n_perm"],
+            null_seed=0,
         ))
 
 
@@ -1678,7 +1680,7 @@ rule contrast_plot_per_pair:
             a_per_window_all_path=str(input.a_per_window_all),
             output_dir=str(outdir),
             phoneme_pair=wildcards.pair,
-            bootstrap_r=1000,
+            bootstrap_r=config["causal46_joined"]["n_bootstrap"],
             bootstrap_seed=42,
             min_class_k=4,
             ttest_window_size=15,
@@ -1686,6 +1688,8 @@ rule contrast_plot_per_pair:
             pval_thresholds=(0.00001, 0.0001, 0.001),
             epochs_dir="outputs/epochs_preprocessed",
             behav_polarity_mode="annotated",
+            n_perm=config["causal46_joined"]["n_perm"],
+            null_seed=0,
         ))
 
 

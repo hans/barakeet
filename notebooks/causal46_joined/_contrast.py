@@ -17,7 +17,7 @@ forms its own oriented contrast explicitly, so there is no hidden polarity.
 """
 from __future__ import annotations
 
-from typing import Sequence
+from typing import Optional, Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -100,6 +100,31 @@ def acoustic_endpoint_means(ep_pp, electrode_idx, *, endpoints=(1, 6)):
     return hga[lo_mask].mean(0), hga[hi_mask].mean(0)
 
 
+def _permute_per_step(
+    per_step_q: dict,
+    rng: np.random.Generator,
+) -> dict:
+    """Shuffle class labels within each step, preserving per-step class sizes.
+
+    Canonical within-step permutation (matches t_tests.bootstrap_cell's null
+    path): for each step, pool all class trial indices, shuffle, re-split with
+    the same class sizes. Per-step class counts are invariant — only the
+    percept↔HGA link is destroyed.
+    """
+    perm: dict = {}
+    for s, by_class in per_step_q.items():
+        class_keys = sorted(by_class.keys())
+        sizes = [len(by_class[k]) for k in class_keys]
+        pool = np.concatenate([np.asarray(by_class[k]) for k in class_keys])
+        rng.shuffle(pool)
+        start = 0
+        perm[s] = {}
+        for k, sz in zip(class_keys, sizes):
+            perm[s][k] = pool[start : start + sz]
+            start += sz
+    return perm
+
+
 def behavioral_bootstrap_meandiff(
     ep_pp,
     electrode_idx,
@@ -109,6 +134,7 @@ def behavioral_bootstrap_meandiff(
     bootstrap_r: int = 1000,
     bootstrap_seed: int = 42,
     candidate_steps: Sequence[int] = (2, 3, 4, 5),
+    perm_rng: Optional[np.random.Generator] = None,
 ):
     """Within-completion behavioral contrast for one (site × word_end) cell.
 
@@ -120,6 +146,11 @@ def behavioral_bootstrap_meandiff(
 
     No sign is applied: the caller orients via its own tuning convention, e.g.
     ``behav_sign * mean_diff`` or ``-acoustic_sign * mean_diff``.
+
+    ``perm_rng``: when provided, class labels are permuted within each step
+    before bootstrapping (within-step shuffle preserves per-step class counts).
+    This is the null path for ``oriented_group_band``; the observed path leaves
+    ``perm_rng`` as None.
     """
     md_pp = ep_pp.metadata.reset_index(drop=True)
     hga = extract_hga(ep_pp, electrode_idx)
@@ -141,6 +172,9 @@ def behavioral_bootstrap_meandiff(
         return None, "no_qualifying"
 
     per_step_q = {s: per_step[s] for s in qualifying}
+    if perm_rng is not None:
+        per_step_q = _permute_per_step(per_step_q, perm_rng)
+
     running_sum = np.zeros(hga.shape[1])
     valid_reps = 0
     for r in range(bootstrap_r):
@@ -157,6 +191,120 @@ def behavioral_bootstrap_meandiff(
     if valid_reps == 0:
         return None, "skipped"
     return running_sum / valid_reps, "ok"
+
+
+def oriented_group_band(
+    cells: Sequence[dict],
+    epochs_dict: dict,
+    *,
+    n_perm: int = 1000,
+    seed: int = 0,
+    min_class_k: int = 4,
+    bootstrap_r: int = 1000,
+    bootstrap_seed: int = 42,
+    candidate_steps: Sequence[int] = (2, 3, 4, 5),
+):
+    """Observed oriented grand-mean trajectory and matched-permutation null band.
+
+    For each cell in ``cells`` (a dict with keys subject, electrode_idx,
+    phoneme_pair, word_end, smin, smax):
+
+    1. Run ``behavioral_bootstrap_meandiff`` (observed path) → ``mean_diff``.
+    2. In-window sign = ``sign(mean_diff[smin:smax].mean())``.
+    3. Oriented trajectory = sign × mean_diff.
+
+    The null repeats this ``n_perm`` times with within-step label permutation:
+    class labels are shuffled within each step (preserving per-step trial
+    counts) before the bootstrap, destroying the percept↔HGA link while
+    keeping the trial-count structure identical to the observed path. The sign
+    is recomputed from each permuted replicate — this is the critical step that
+    captures the rectification floor (orientation bias from selecting a
+    sign from the same data being averaged). Reusing the observed sign would
+    collapse the null to zero mean, hiding the floor.
+
+    Cells failing the observed path (no qualifying steps) are excluded from
+    both observed and null. No-window cells (``smin`` or ``smax`` undefined)
+    must be excluded by the caller.
+
+    Runtime: O(n_perm × bootstrap_r × n_cells) bootstrap iterations. With
+    production defaults (n_perm=1000, bootstrap_r=1000, n_cells~30 per group)
+    expect several minutes per figure.
+
+    Parameters
+    ----------
+    cells : list of dicts
+        Each dict: {subject, electrode_idx, phoneme_pair, word_end, smin, smax}.
+    epochs_dict : dict
+        {subject: mne.Epochs} mapping (as returned by load_epochs_dict).
+    n_perm : int
+        Number of permutation replicates for the null band.
+    seed : int
+        Master seed for permutation RNGs. Each (cell_idx, perm_idx) pair gets
+        an independent RNG seeded with ``[seed, cell_idx, perm_idx]``.
+
+    Returns
+    -------
+    observed_mean : (n_times,) array or None
+        Grand mean of sign-oriented cell trajectories.
+    null_matrix : (n_perm, n_times) array or None
+        Null-distribution trajectories; row p is the grand mean under
+        permutation replicate p.
+    n_valid : int
+        Number of cells that contributed (skipped cells excluded).
+    """
+    kw = dict(
+        min_class_k=min_class_k,
+        bootstrap_r=bootstrap_r,
+        bootstrap_seed=bootstrap_seed,
+        candidate_steps=candidate_steps,
+    )
+    n_times: Optional[int] = None
+    obs_sum: Optional[np.ndarray] = None
+    null_matrix: Optional[np.ndarray] = None
+    n_valid = 0
+
+    for cell_idx, cell in enumerate(cells):
+        subject = cell["subject"]
+        electrode_idx = int(cell["electrode_idx"])
+        phoneme_pair = cell["phoneme_pair"]
+        word_end = cell["word_end"]
+        smin = int(cell["smin"])
+        smax = int(cell["smax"])
+
+        ep = epochs_dict[subject]
+        ep_pp = ep[ep.metadata["phoneme_pair"].values == phoneme_pair]
+
+        obs_diff, status = behavioral_bootstrap_meandiff(
+            ep_pp, electrode_idx, word_end, **kw
+        )
+        if status != "ok":
+            continue
+
+        if n_times is None:
+            n_times = len(obs_diff)
+            obs_sum = np.zeros(n_times)
+            null_matrix = np.zeros((n_perm, n_times))
+
+        obs_sign = float(np.sign(obs_diff[smin:smax].mean()) or 1.0)
+        obs_sum += obs_sign * obs_diff
+        n_valid += 1
+
+        for p in range(n_perm):
+            prng = np.random.default_rng([seed, cell_idx, p])
+            perm_diff, perm_status = behavioral_bootstrap_meandiff(
+                ep_pp, electrode_idx, word_end, perm_rng=prng, **kw
+            )
+            if perm_status != "ok":
+                continue
+            perm_sign = float(np.sign(perm_diff[smin:smax].mean()) or 1.0)
+            null_matrix[p] += perm_sign * perm_diff
+
+    if n_valid == 0:
+        return None, None, 0
+
+    observed_mean = obs_sum / n_valid
+    null_matrix = null_matrix / n_valid
+    return observed_mean, null_matrix, n_valid
 
 
 # --------------------------------------------------------------------------- #
