@@ -1382,6 +1382,9 @@ rule joined_mismatch_regression:
                 min_steps=2,
                 ci_low=2.5,
                 ci_high=97.5,
+                n_example_plots=4,
+                star_plot_R=100,
+                textgrid_dir="textgrids",
             ),
         )
 
