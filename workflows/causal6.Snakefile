@@ -139,7 +139,16 @@ def _provision_node():
             cwd=workflow.basedir, text=True,
         ).strip()
 
-    project_root = Path(workflow.basedir).parent
+    # Walk upward from basedir to find the project root (where pyproject.toml lives).
+    # Using .parent would break when the main Snakefile is at the project root itself.
+    _search = Path(workflow.basedir)
+    while _search != _search.parent:
+        if (_search / "pyproject.toml").exists():
+            break
+        _search = _search.parent
+    else:
+        raise RuntimeError(f"No pyproject.toml found above {workflow.basedir}")
+    project_root = _search
     cache_dir = Path("/tmp/jgauthier-cache-uv")
     env_dir = Path(f"/tmp/venv-barakeet")
     venv = project_root / ".venv"
