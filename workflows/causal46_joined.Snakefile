@@ -1173,9 +1173,8 @@ rule joined_acoustic_bootstrap:
     [t=0, phon_smax] for every site in the early_acoustic_window manifest,
     using the same window_size / stride as b4_bootstrap (causal46_joined config).
     Emits two tiers: `a_*_all.parquet` (all sites; feeds contrast_plot's
-    endpoint-orientation of the acoustic panel) and `a_*.parquet` (the type1
-    subset, byte-content-identical to a type1-only run; feeds
-    joined_early_perceptual_windows for apples-to-apples timing comparison).
+    endpoint-orientation of the acoustic panel and joined_acoustic_endpoint_windows)
+    and `a_*.parquet` (the type1 subset, byte-content-identical to a type1-only run).
     """
     input:
         epoch_fifs        = expand(
@@ -1214,6 +1213,43 @@ rule joined_acoustic_bootstrap:
                 min_n=4,
                 ci_low=2.5,
                 ci_high=97.5,
+            ),
+        )
+
+
+rule joined_acoustic_endpoint_windows:
+    """Unified endpoint acoustic windows (pure post-processing over a_bootstrap_all).
+
+    Applies _find_maximal_runs to a_bootstrap_all.parquet (step6 − step1,
+    unambiguous trials) so that acoustic endpoint timing is expressed on the
+    same basis as b_windows (perceptual) and ad_windows (acoustic-on-ambiguous).
+    Output a_windows.parquet feeds joined_early_perceptual_windows for
+    apples-to-apples timing comparison.
+    """
+    input:
+        ac_bootstrap  = "outputs/causal46_joined/acoustic_bootstrap/a_bootstrap_all.parquet",
+        ac_per_site   = "outputs/causal46_joined/acoustic_bootstrap/a_per_site_all.parquet",
+        helper        = "notebooks/causal46_joined/_windows.py",
+        helper_wc     = "notebooks/causal46_joined/_within_completion.py",
+        notebook      = "notebooks/causal46_joined/acoustic_endpoint_windows.py",
+
+    output:
+        notebook        = "outputs/causal46_joined/acoustic_endpoint_windows/notebook.ipynb",
+        a_windows       = "outputs/causal46_joined/acoustic_endpoint_windows/a_windows.parquet",
+        a_windows_boot  = "outputs/causal46_joined/acoustic_endpoint_windows/a_windows_bootstrap.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                ac_bootstrap_path=str(input.ac_bootstrap),
+                ac_per_site_path=str(input.ac_per_site),
+                outdir=str(outdir),
+                ci_low=2.5,
+                ci_high=97.5,
+                use_fallback=False,
             ),
         )
 
@@ -1361,8 +1397,7 @@ rule joined_early_perceptual_windows:
         notebook           = "notebooks/causal46_joined/early_perceptual_windows.py",
         manual_annotations = "outputs/causal46_joined/manual_annotations/filtered_manifest.csv",
         early_annotations  = "outputs/causal46_joined/manual_annotations/early_acoustic_window.csv",
-        a_bootstrap        = "outputs/causal46_joined/acoustic_bootstrap/a_bootstrap.parquet",
-        a_per_site         = "outputs/causal46_joined/acoustic_bootstrap/a_per_site.parquet",
+        a_windows          = "outputs/causal46_joined/acoustic_endpoint_windows/a_windows.parquet",
 
     output:
         notebook   = "outputs/causal46_joined/early_perceptual_windows/notebook.ipynb",
@@ -1381,8 +1416,7 @@ rule joined_early_perceptual_windows:
                 ci_high=97.5,
                 filtered_manifest_path=str(input.manual_annotations),
                 early_annotations_path=str(input.early_annotations),
-                a_bootstrap_path=str(input.a_bootstrap),
-                a_per_site_path=str(input.a_per_site),
+                a_windows_path=str(input.a_windows),
             ),
         )
 
@@ -1559,8 +1593,10 @@ rule causal46_joined_all:
         # bootstrapped t-tests and star plots
         "outputs/causal46_joined/t_tests/star_plots_filtered/b4_powered.pdf",
         "outputs/causal46_joined/t_tests/star_plots_filtered/b4_powered_by_type.pdf",
-        # Acoustic bootstrap: endpoint contrast for type1 sites (feeds early_perceptual_windows)
+        # Acoustic bootstrap: endpoint contrast (all sites + type1 subset)
         "outputs/causal46_joined/acoustic_bootstrap/a_bootstrap.parquet",
+        # Unified endpoint acoustic windows (feeds early_perceptual_windows)
+        "outputs/causal46_joined/acoustic_endpoint_windows/a_windows.parquet",
         # Discover discriminative windows from bootstrap outputs (pure post-processing over b4_bootstrap)
         "outputs/causal46_joined/acoustic_discriminative_windows/ad_windows.parquet",
         "outputs/causal46_joined/behavioral_discriminative_windows/b_windows.parquet",
