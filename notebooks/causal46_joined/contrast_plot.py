@@ -37,6 +37,7 @@ from _contrast import (  # noqa: E402
     acoustic_endpoint_means,
     aggregate_trajectories,
     behavioral_bootstrap_meandiff,
+    oriented_group_band,
     plot_contrast_axis,
     sliding_ttest,
 )
@@ -77,6 +78,8 @@ epochs_dir = "outputs/epochs_preprocessed"
 # "annotated": sign-correct using consensus tuning letter from manifest
 # "abs":       take absolute value of mean diff (no manifest label needed)
 behav_polarity_mode = "annotated"
+n_perm = 1000
+null_seed = 0
 
 # %% [markdown]
 # ### Prepare bootstrap results
@@ -299,70 +302,80 @@ behavior_plot_guide_df = pd.merge(
     how="outer", left_index=True, right_index=True, indicator=True
 )
 
-behavior_contrasts = defaultdict(list)
+# Build per-category cell lists for oriented_group_band.
+# Cells lacking a behavioral window (word_end is NaN / not in b_windows) are
+# excluded: without a discriminative window we cannot define the orientation
+# sign, so including them in both observed and null is not possible.
+cells_per_category = defaultdict(list)
 for (subject, electrode_idx, phoneme_pair, word_end), row in behavior_plot_guide_df.iterrows():
-    # # DEV
-    # keep = [
-    #     ("EC250", 191, "dn")
-    # ]
-    # if (subject, electrode_idx, phoneme_pair) not in keep:
-    #     continue
-
-    ep = epochs_dict[subject]
-    md = ep.metadata
-    assert md is not None
-
-    conjunction_category = row.conjunction_category
-    sign = row.sign
     if pd.isna(word_end):
-        # this row was present in `merged` but not in `b4_by_behavior_windows`, because
-        # it doesn't have a behavioral window!
-        assert row._merge == "right_only", "assumption violated"
-
-        # .. but we need to draw differences from somewhere. SO we'll pool across the word ends
-        # which are available
-        # (a word end may not be available if there was no sufficiently powered balanced ambiguous cell)
-        b_diffs = b4_by_behavior_diffs.loc[(subject, electrode_idx, phoneme_pair, slice(None))].values
-        conjunction_category = "Acoustic-only"
-
-        b_diff_mean = b_diffs.mean(0)
-
-        print(f"Warning: site×pair {subject}×{electrode_idx}×{phoneme_pair} has no behavioral window; pooling across word ends")
-    else:
-        if pd.isna(row.conjunction_category):
-            # print(f"Warning: site×pair×word_end {subject}×{electrode_idx}×{phoneme_pair}×{word_end} has no conjunction category; skipping")
-            continue
-
-        b_diffs = b4_by_behavior_diffs.loc[(subject, electrode_idx, phoneme_pair, word_end)].values
-        b_diffs = row.sign * b_diffs
-        b_diff_mean = b_diffs.mean(0)
-
-    behavior_contrasts[conjunction_category].append(b_diff_mean)
+        continue
+    if pd.isna(row.conjunction_category):
+        continue
+    cells_per_category[row.conjunction_category].append({
+        "subject": subject,
+        "electrode_idx": int(electrode_idx),
+        "phoneme_pair": phoneme_pair,
+        "word_end": word_end,
+        "smin": int(row.smin),
+        "smax": int(row.smax),
+    })
 
 # %%
-f, ax = plt.subplots(figsize=(3, 2))
+# Compute per-category oriented grand means + matched-permutation null bands.
+# Each null replicate uses within-step label permutation so per-step trial
+# counts are preserved; the sign is recomputed from the permuted trajectory to
+# capture the rectification floor.
+# NOTE on interpretation: the null calibrates the orientation (rectification)
+# bias, not selection bias. Groups selected on "behav @late" will still show
+# late-window observed > null by construction because that is the selection
+# criterion; the null band is informative primarily outside the selection window
+# and for groups (Acoustic-only) that were NOT selected on behavioral criteria.
+ep_times = next(iter(epochs_dict.values())).times
+behav_band_results = {}
+for cat, cells in cells_per_category.items():
+    obs_mean, null_mat, n_valid = oriented_group_band(
+        cells, epochs_dict,
+        n_perm=n_perm, seed=null_seed,
+        min_class_k=min_class_k,
+        bootstrap_r=bootstrap_r,
+        bootstrap_seed=bootstrap_seed,
+    )
+    behav_band_results[cat] = (obs_mean, null_mat, n_valid)
+    print(f"{cat}: {n_valid} valid cells")
 
-ax.axvline(0, color="k", linestyle="--", alpha=0.5)
-ax.axhline(0, color="k", linestyle="--", alpha=0.5)
+# %%
+fig_bh, ax_bh = plt.subplots(figsize=(10, 4))
+ax_bh.axvline(0, color="k", linestyle="--", alpha=0.5)
+ax_bh.axhline(0, color="k", linestyle="--", alpha=0.5)
 
-for cat in CAT_PLOT_ORDER:
-    contrasts = behavior_contrasts[cat]
-    ys = np.stack(contrasts).mean(0)
-    xs = b4_by_behavior_diffs.columns.get_level_values("smin").values / epoch_sfreq + epoch_tmin + window_size / 2
-    ax.plot(xs, ys, lw=1.5, label=cat.replace(" + ", "\n+ "))
+_COLOR_CYCLE = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+for i, (cat, (obs_mean, null_mat, n_valid)) in enumerate(behav_band_results.items()):
+    if obs_mean is None:
+        continue
+    color = _COLOR_CYCLE[i % len(_COLOR_CYCLE)]
+    ax_bh.plot(ep_times, obs_mean, color=color, lw=2, label=f"{cat} (n={n_valid})")
 
-    yerr = np.stack(contrasts).std(0) / np.sqrt(len(contrasts))
-    ax.fill_between(xs, ys - yerr, ys + yerr, alpha=0.2)
+    null_lo = np.percentile(null_mat, 2.5, axis=0)
+    null_hi = np.percentile(null_mat, 97.5, axis=0)
+    ax_bh.fill_between(ep_times, null_lo, null_hi, color=color, alpha=0.18,
+                       label=f"{cat} null band")
 
-ax.legend(loc="lower left", bbox_to_anchor=(-0.8, -0.2))
-ax.set_xlim(-0.05, 0.8)
-ax.set_xlabel("Time from word onset (s)")
-ax.set_ylabel("HGA contrast by\nperceptual state\n($z$)", rotation=0, labelpad=10, ha="right")
-ax.set_yticks([-0.4, -0.2, 0.0, 0.2, 0.4, 0.6])
+    # Mark timepoints where observed exits the null band
+    sig_mask = (obs_mean > null_hi) | (obs_mean < null_lo)
+    if sig_mask.any():
+        sig_y = np.where(sig_mask, obs_mean, np.nan)
+        ax_bh.scatter(ep_times[sig_mask], sig_y[sig_mask], color=color,
+                      s=6, zorder=5, linewidths=0)
 
-sns.despine(ax=ax)
-
-f.savefig(OUT_DIR / "hga_contrast_perceptual.pdf", **PDF_SAVEFIG_KWARGS)
+ax_bh.set_xlabel("Time (s)")
+ax_bh.set_ylabel("Oriented HGA contrast (a.u.)")
+ax_bh.set_title("Behavioral contrast with matched-permutation null band\n"
+                "(null: within-step label permutation; sign recomputed per replicate)")
+ax_bh.legend(fontsize=8)
+fig_bh.tight_layout()
+fig_bh.savefig(OUT_DIR / "behavioral_null_band.pdf", bbox_inches="tight")
+plt.show()
 
 
 # %% [markdown]
