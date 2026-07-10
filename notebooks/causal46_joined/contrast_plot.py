@@ -81,6 +81,10 @@ behav_polarity_mode = "annotated"
 n_perm = 1000
 null_seed = 0
 
+min_class_k = 3
+bootstrap_r = 1000
+bootstrap_seed = null_seed
+
 # %% [markdown]
 # ### Prepare bootstrap results
 
