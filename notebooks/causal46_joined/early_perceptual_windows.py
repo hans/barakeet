@@ -41,8 +41,7 @@ b4_bootstrap_path = "outputs/causal46_joined/t_tests/b4_bootstrap.parquet"
 b4_per_cell_path = "outputs/causal46_joined/t_tests/b4_per_cell.parquet"
 filtered_manifest_path = "outputs/causal46_joined/manual_annotations/filtered_manifest.csv"
 early_annotations_path = "outputs/causal46_joined/manual_annotations/early_acoustic_window.csv"
-a_bootstrap_path = "outputs/causal46_joined/acoustic_bootstrap/a_bootstrap.parquet"
-a_per_site_path = "outputs/causal46_joined/acoustic_bootstrap/a_per_site.parquet"
+a_windows_path = "outputs/causal46_joined/acoustic_endpoint_windows/a_windows.parquet"
 outdir = "outputs/causal46_joined/early_perceptual_windows"
 
 ci_low = 2.5
@@ -353,122 +352,24 @@ if ep_windows.height > 0:
     print(ep_windows.select(CELL_KEYS + ["window_id", "smin", "smax", "ci_excludes_zero", "behav_ac_tuning"]))
 
 # %% [markdown]
-# ## Type1 (acoustic-only) processing — acoustic bootstrap
+# ## Type1 (acoustic-only) windows — from acoustic_endpoint_windows
 #
-# `a_bootstrap.parquet` was computed by `acoustic_bootstrap.py` using
-# `bootstrap_A_site` (step6 − step1, endpoint trials only — no ambiguous trials).
-# We apply the same window-significance algorithm here so the acoustic-onset
-# timing is measured with the same method as the perceptual onset above.
-
-# %%
-a_bootstrap = pl.read_parquet(a_bootstrap_path)
-a_per_site  = pl.read_parquet(a_per_site_path)
-print(f"a_bootstrap: {a_bootstrap.height:,} rows")
-print(f"a_per_site:  {a_per_site.height} rows")
-
-# %%
-_a_boot_partitioned: dict[tuple, pl.DataFrame] = {
-    (r["subject"], int(r["electrode_idx"]), r["phoneme_pair"]): a_bootstrap.filter(
-        (pl.col("subject") == r["subject"]) &
-        (pl.col("electrode_idx") == r["electrode_idx"]) &
-        (pl.col("phoneme_pair") == r["phoneme_pair"])
-    )
-    for r in a_per_site.iter_rows(named=True)
-}
+# Load pre-computed unified endpoint windows (step6 − step1, unambiguous trials)
+# produced by `acoustic_endpoint_windows.py` and filter to the type1 subset.
 
 # %%
 SITE_KEYS = ["subject", "electrode_idx", "phoneme_pair"]
 
-type1_rows: list[dict] = []
-n_type1_no_candidates = 0
-n_type1_no_sig = 0
-
-for site_row in a_per_site.iter_rows(named=True):
-    subj      = site_row["subject"]
-    eidx      = int(site_row["electrode_idx"])
-    pp        = site_row["phoneme_pair"]
-    phon_smin = int(site_row["phon_smin"])
-    phon_smax = int(site_row["phon_smax"])
-
-    site_boot = _a_boot_partitioned.get((subj, eidx, pp))
-    if site_boot is None or site_boot.height == 0:
-        continue
-
-    R = int(site_boot["replicate"].max()) + 1
-
-    # Candidate windows: all windows in a_bootstrap for this site.
-    # acoustic_bootstrap.py already constrained to [SAMPLE_T0, phon_smax].
-    site_windows = sorted(
-        {(int(r[0]), int(r[1])) for r in site_boot.select(["smin", "smax"]).iter_rows()},
-        key=lambda t: t[0],
-    )
-    if not site_windows:
-        n_type1_no_candidates += 1
-        continue
-
-    w_medians: dict[int, float] = {}
-    w_ci_excl_zero: dict[int, bool] = {}
-    for smin, smax in site_windows:
-        arr = site_boot.filter(pl.col("smin") == smin)["mean_diff_raw"].to_numpy()
-        if arr.size == 0:
-            continue
-        stats = summarize_replicate_array(arr, ci_low=ci_low, ci_high=ci_high)
-        w_medians[smin] = stats["median"]
-        w_ci_excl_zero[smin] = stats["ci_excludes_zero"]
-
-    site_windows = [(smin, smax) for smin, smax in site_windows if smin in w_medians]
-    if not site_windows:
-        n_type1_no_candidates += 1
-        continue
-
-    sig_windows = [(smin, smax) for smin, smax in site_windows if w_ci_excl_zero[smin]]
-    if not sig_windows:
-        n_type1_no_sig += 1
-        continue
-
-    for window_id, comp_windows in enumerate(_find_maximal_runs(sig_windows, w_medians)):
-        component_smins = [smin for smin, _ in comp_windows]
-        union_smin = comp_windows[0][0]
-        union_smax = comp_windows[-1][1]
-        n_comp = len(comp_windows)
-
-        union_boot = site_boot.filter(pl.col("smin").is_in(component_smins))
-        union_beta_df = (
-            union_boot
-            .group_by("replicate")
-            .agg(pl.col("mean_diff_raw").mean().alias("beta"))
-            .sort("replicate")
-        )
-        beta_arr = union_beta_df["beta"].to_numpy()
-        stats = summarize_replicate_array(beta_arr, ci_low=ci_low, ci_high=ci_high)
-
-        type1_rows.append({
-            "subject": subj,
-            "electrode_idx": eidx,
-            "phoneme_pair": pp,
-            "window_id": window_id,
-            "smin": union_smin,
-            "smax": union_smax,
-            "phon_smin": phon_smin,
-            "phon_smax": phon_smax,
-            "ci_excludes_zero": stats["ci_excludes_zero"],
-        })
-
-type1_windows = pl.DataFrame(type1_rows) if type1_rows else pl.DataFrame(
-    {c: pl.Series([], dtype=pl.Utf8)
-     for c in ["subject", "electrode_idx", "phoneme_pair",
-               "window_id", "smin", "smax", "phon_smin", "phon_smax", "ci_excludes_zero"]}
-).cast({"electrode_idx": pl.Int64, "window_id": pl.Int64,
-        "smin": pl.Int64, "smax": pl.Int64,
-        "phon_smin": pl.Int64, "phon_smax": pl.Int64,
-        "ci_excludes_zero": pl.Boolean})
-
-print(
-    f"Type1 sites: {a_per_site.height} total, "
-    f"{n_type1_no_candidates} no candidate windows, "
-    f"{n_type1_no_sig} no significant window"
+a_windows = pl.read_parquet(a_windows_path)
+type1_sites = (
+    early_annotation_df
+    .filter(pl.col("site_type_relabel") == "type1_acoustic_only")
+    .select(SITE_KEYS)
+    .with_columns(pl.col("electrode_idx").cast(pl.Int64))
+    .unique()
 )
-print(f"type1_windows: {type1_windows.height} rows")
+type1_windows = a_windows.join(type1_sites, on=SITE_KEYS, how="semi")
+print(f"a_windows: {a_windows.height} rows; type1 subset: {type1_windows.height} rows")
 
 # %%
 ep_windows_perceptual = (
@@ -480,7 +381,7 @@ ep_windows_perceptual = (
 )
 
 # %%
-ep_windows_acoustic = type1_windows.group_by(SITE_KEYS).first()
+ep_windows_acoustic = type1_windows
 
 # %%
 window_size = GRID_WINDOW_SIZE
