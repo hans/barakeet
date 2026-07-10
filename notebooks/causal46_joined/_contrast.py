@@ -178,25 +178,72 @@ def _run_bootstrap_meandiff(
     If ``perm_rng`` is not None, class labels are permuted within each step
     before bootstrapping (null path). Returns ``(mean_diff, status)`` where
     status ∈ {"ok", "skipped"}.
+
+    All ``bootstrap_r`` draws are generated in one vectorized call per
+    (step, class) rather than a Python loop, so runtime is dominated by
+    numpy array operations rather than interpreter overhead.
     """
     if perm_rng is not None:
         per_step_q = _permute_per_step(per_step_q, perm_rng)
 
-    running_sum = np.zeros(hga.shape[1])
-    valid_reps = 0
-    for r in range(bootstrap_r):
-        draws = select_cell_trials_bootstrap(
-            per_step_q, rng=np.random.default_rng(bootstrap_seed + r)
-        )
-        if 0 not in draws or 1 not in draws:
+    rng = np.random.default_rng(bootstrap_seed)
+    drawn: dict = {}
+    for step, by_class in per_step_q.items():
+        n_s = min(len(v) for v in by_class.values())
+        if n_s == 0:
+            continue
+        for cls, idxs in by_class.items():
+            # (bootstrap_r, n_s) — all replicates in one call
+            drawn.setdefault(cls, []).append(
+                rng.choice(idxs, size=(bootstrap_r, n_s), replace=True)
+            )
+
+    if 0 not in drawn or 1 not in drawn:
+        return None, "skipped"
+
+    # Concatenate steps → (bootstrap_r, K) per class; index hga → (bootstrap_r, K, n_times)
+    idx0 = np.concatenate(drawn[0], axis=1)  # (bootstrap_r, K0)
+    idx1 = np.concatenate(drawn[1], axis=1)  # (bootstrap_r, K1)
+    # class 0 = first phoneme, class 1 = second phoneme (documented order)
+    diff = hga[idx0].mean(axis=1) - hga[idx1].mean(axis=1)  # (bootstrap_r, n_times)
+    return diff.mean(axis=0), "ok"
+
+
+def _analytic_meandiff(
+    hga: np.ndarray,
+    per_step_q: dict,
+    *,
+    perm_rng: Optional[np.random.Generator] = None,
+):
+    """Per-step-balanced class mean difference — analytic (no bootstrap).
+
+    Equivalent to the bootstrap_r → ∞ limit of ``_run_bootstrap_meandiff``:
+    the bootstrap mean converges to ``(1/N) Σ_s n_s (μ_0s - μ_1s)`` where
+    n_s = min class size at step s, μ_cs = empirical mean of hga for class c
+    at step s, and N = Σ_s n_s.  Computing this directly eliminates the
+    bootstrap loop and all associated random-number overhead.
+
+    If ``perm_rng`` is not None, class labels are permuted within each step
+    first (null path). The permutation is the sole source of randomness.
+
+    Returns ``(mean_diff, status)`` where status ∈ {"ok", "skipped"}.
+    """
+    if perm_rng is not None:
+        per_step_q = _permute_per_step(per_step_q, perm_rng)
+
+    weighted_sum = np.zeros(hga.shape[1])
+    total_n = 0
+    for step, by_class in per_step_q.items():
+        n_s = min(len(v) for v in by_class.values())
+        if n_s == 0 or 0 not in by_class or 1 not in by_class:
             continue
         # class 0 = first phoneme, class 1 = second phoneme (documented order)
-        running_sum += hga[draws[0]].mean(0) - hga[draws[1]].mean(0)
-        valid_reps += 1
+        weighted_sum += n_s * (hga[by_class[0]].mean(0) - hga[by_class[1]].mean(0))
+        total_n += n_s
 
-    if valid_reps == 0:
+    if total_n == 0:
         return None, "skipped"
-    return running_sum / valid_reps, "ok"
+    return weighted_sum / total_n, "ok"
 
 
 def behavioral_bootstrap_meandiff(
@@ -303,7 +350,6 @@ def oriented_group_band(
         Number of cells that contributed (skipped cells excluded).
     """
     kw_prep = dict(min_class_k=min_class_k, candidate_steps=candidate_steps)
-    kw_boot = dict(bootstrap_r=bootstrap_r, bootstrap_seed=bootstrap_seed)
     n_times: Optional[int] = None
     obs_sum: Optional[np.ndarray] = None
     null_matrix: Optional[np.ndarray] = None
@@ -328,7 +374,8 @@ def oriented_group_band(
         if hga is None:
             continue
 
-        obs_diff, status = _run_bootstrap_meandiff(hga, per_step_q, **kw_boot)
+        # Observed: analytic per-step-balanced class mean (= bootstrap_r→∞ limit).
+        obs_diff, status = _analytic_meandiff(hga, per_step_q)
         if status != "ok":
             continue
 
@@ -341,10 +388,13 @@ def oriented_group_band(
         obs_sum += obs_sign * obs_diff
         n_valid += 1
 
+        # Null: one RNG per cell drives all n_perm label permutations.
+        # Analytic mean replaces the bootstrap loop — permutation is the
+        # sole source of randomness, so bootstrap_r is not needed here.
+        cell_perm_rng = np.random.default_rng([seed, cell_idx])
         for p in range(n_perm):
-            prng = np.random.default_rng([seed, cell_idx, p])
-            perm_diff, perm_status = _run_bootstrap_meandiff(
-                hga, per_step_q, perm_rng=prng, **kw_boot
+            perm_diff, perm_status = _analytic_meandiff(
+                hga, per_step_q, perm_rng=cell_perm_rng
             )
             if perm_status != "ok":
                 continue
