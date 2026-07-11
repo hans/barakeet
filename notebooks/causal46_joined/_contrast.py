@@ -343,6 +343,8 @@ def oriented_group_band(
     -------
     observed_mean : (n_times,) array or None
         Grand mean of sign-oriented cell trajectories.
+    observed_sem : (n_times,) array or None
+        SEM of sign-oriented cell trajectories (ddof=1; NaN if n_valid < 2).
     null_matrix : (n_perm, n_times) array or None
         Null-distribution trajectories; row p is the grand mean under
         permutation replicate p.
@@ -402,11 +404,12 @@ def oriented_group_band(
             null_matrix[p] += perm_sign * perm_diff
 
     if n_valid == 0:
-        return None, None, 0
+        return None, None, None, 0
 
     observed_mean = obs_sum / n_valid
+    observed_sem = np.sqrt(obs_sum / n_valid) if n_valid > 1 else None
     null_matrix = null_matrix / n_valid
-    return observed_mean, null_matrix, n_valid
+    return observed_mean, observed_sem, null_matrix, n_valid
 
 
 # --------------------------------------------------------------------------- #
