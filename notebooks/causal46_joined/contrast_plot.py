@@ -315,10 +315,9 @@ behavior_plot_guide_df = pd.merge(
 # Cells lacking a behavioral window (word_end is NaN / not in b_windows) are
 # excluded: without a discriminative window we cannot define the orientation
 # sign, so including them in both observed and null is not possible.
+# TODO update above comment about cells lacking behavioral window
 cells_per_category = defaultdict(list)
 for (subject, electrode_idx, phoneme_pair, word_end), row in behavior_plot_guide_df.iterrows():
-    if pd.isna(word_end):
-        continue
     if pd.isna(row.conjunction_category):
         continue
     cells_per_category[row.conjunction_category].append({
@@ -326,8 +325,8 @@ for (subject, electrode_idx, phoneme_pair, word_end), row in behavior_plot_guide
         "electrode_idx": int(electrode_idx),
         "phoneme_pair": phoneme_pair,
         "word_end": word_end,
-        "smin": int(row.smin),
-        "smax": int(row.smax),
+        "smin": int(row.smin) if not pd.isna(row.smin) else None,
+        "smax": int(row.smax) if not pd.isna(row.smax) else None,
     })
 
 # %%
@@ -343,13 +342,20 @@ for (subject, electrode_idx, phoneme_pair, word_end), row in behavior_plot_guide
 ep_times = next(iter(epochs_dict.values())).times
 behav_band_results = {}
 for cat, cells in tqdm(cells_per_category.items()):
-    obs_mean, obs_sem, null_mat, n_valid = oriented_group_band(
-        cells, epochs_dict,
-        n_perm=n_perm, seed=null_seed,
-        min_class_k=min_class_k,
-        bootstrap_r=bootstrap_r,
-        bootstrap_seed=bootstrap_seed,
-    )
+    if any(cell["smin"] is None for cell in cells):
+        # We are missing sample bounds here -- this means we don't
+        # have a valid behavioral window. So we can't re-orient based on
+        # behavioral window; instead we will just take absolute value of
+        # the mean difference.
+        # TODO implement
+    else:
+        obs_mean, obs_sem, null_mat, n_valid = oriented_group_band(
+            cells, epochs_dict,
+            n_perm=n_perm, seed=null_seed,
+            min_class_k=min_class_k,
+            bootstrap_r=bootstrap_r,
+            bootstrap_seed=bootstrap_seed,
+        )
     behav_band_results[cat] = (obs_mean, obs_sem, null_mat, n_valid)
     print(f"{cat}: {n_valid} valid cells")
 
@@ -392,14 +398,16 @@ for i, cat in enumerate(CAT_PLOT_ORDER):
             run_ends = np.append(run_ends, len(sig_y))
         
         ymin, ymax = ax_bh.get_ylim()
-        bar_h = (ymax - ymin) * 0.02
-        bar_y = (ymin) + (ymax - ymin) * 0.95
+        bar_h = 0.02
+        bar_y = 0.98 - i * bar_h * 1.5
+        from matplotlib.transforms import blended_transform_factory
         for start, end in zip(run_starts, run_ends):
             start_time, end_time = ep_times[[start, end - 1]]
             ax_bh.barh(y=bar_y, width=end_time - start_time,
                        left=start_time, height=bar_h,
                        color=color, alpha=0.6,
-                       edgecolor="none", zorder=5)
+                       edgecolor="none", zorder=5,
+                       transform=blended_transform_factory(ax_bh.transData, ax_bh.transAxes))
 
         # ax_bh.scatter(ep_times[sig_mask], sig_y[sig_mask], color=color,
         #               s=6, zorder=5, linewidths=0)
@@ -525,7 +533,7 @@ for cat, contrasts in acoustic_contrasts.items():
 xs = b4_by_acoustic_diffs.columns.get_level_values("smin").values / epoch_sfreq + epoch_tmin + window_size / 2
 acoustic_band_results = {}
 for cat, contrasts in acoustic_contrasts.items():
-    obs_mean, _, null_mat, n_valid = oriented_group_band(
+    obs_mean, obs_sem, null_mat, n_valid = oriented_group_band(
         null_mode="sign_flip",
         cell_trajectories=contrasts,
         n_perm=n_perm,
