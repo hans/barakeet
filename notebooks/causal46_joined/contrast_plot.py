@@ -114,6 +114,26 @@ b4_by_acoustic = pd.read_parquet("outputs/causal46_joined/acoustic_on_ambiguous/
 # independent of the ambiguous data plotted (see "Plot contrast by acoustics").
 a_per_window_all = pl.read_parquet(a_per_window_all_path)
 
+# %%
+# Endpoint-derived acoustic tuning sign + reliability gate, per site (pooled over
+# word ends). Computed once here because BOTH panels orient by it: the acoustic
+# panel (below) and the behavioral panel's acoustic-only category (which has no
+# behavioral discriminative window, so it borrows this endpoint sign to orient —
+# non-circular, since endpoints are disjoint from the ambiguous trials plotted).
+# `per_cell_best` picks the largest-|median| endpoint window per site;
+# `best_ci_aligned_excludes_zero` is the reliability gate; the sign of
+# `best_mean_diff_aligned_med` (= median(step6 − step1)) is the acoustic tuning.
+a_best = per_cell_best(
+    a_per_window_all, ["subject", "electrode_idx", "phoneme_pair"]
+).to_pandas()
+a_best["acoustic_sign_endpoint"] = np.sign(a_best["best_mean_diff_aligned_med"])
+
+endpoint_sign = (
+    a_best[a_best["best_ci_aligned_excludes_zero"]]
+    .set_index(["subject", "electrode_idx", "phoneme_pair"])["acoustic_sign_endpoint"]
+)
+print(f"acoustic sites with a reliable endpoint window: {len(endpoint_sign)}")
+
 # %% [markdown]
 # There is an important mismatch between the two bootstrapping pipelines we need to rectify.
 #
@@ -315,10 +335,10 @@ behavior_plot_guide_df = pd.merge(
 # Cells WITH a behavioral discriminative window (smin/smax present) are oriented
 # by their window sign (behavior_permute). Cells WITHOUT one — acoustic-only
 # sites, which the outer merge leaves with word_end=NaN because they are absent
-# from b_windows — have no per-cell sign to orient by, so we recover their real
+# from b_windows — have no behavioral sign to orient by, so we recover their real
 # word-ends here (from b4_by_behavior, which covers every behavior site) and
-# mark them window-less (smin/smax None); their category is averaged with the
-# sign-agnostic absolute-value null below.
+# mark them window-less (smin/smax None); their category is instead oriented by
+# endpoint acoustic tuning with a zero-centered sign-flip null below.
 site_word_ends = (
     b4_by_behavior.index.to_frame(index=False)
     .groupby(["subject", "electrode_idx", "phoneme_pair"])["word_end"]
@@ -346,33 +366,58 @@ for (subject, electrode_idx, phoneme_pair, word_end), row in behavior_plot_guide
 
 # %%
 # Compute per-category oriented grand means + matched-permutation null bands.
-# Each null replicate uses within-step label permutation so per-step trial
-# counts are preserved; the sign is recomputed from the permuted trajectory to
-# capture the rectification floor.
-# NOTE on interpretation: the null calibrates the orientation (rectification)
-# bias, not selection bias. Groups selected on "behav @late" will still show
-# late-window observed > null by construction because that is the selection
-# criterion; the null band is informative primarily outside the selection window
-# and for groups (Acoustic-only) that were NOT selected on behavioral criteria.
+# Two orientation regimes, by whether the cells have a behavioral window:
+#
+# - Windowed categories (Perceptual, Acoustic+integration) → `behavior_permute`:
+#   each cell is oriented by its own behavioral-window sign and each null
+#   replicate permutes within-step behavior labels, recomputing the sign — so the
+#   null captures the rectification floor (band sits above zero in-window).
+#
+# - Acoustic-only (no behavioral window) → acoustic-aligned `sign_flip`: there is
+#   no behavioral sign to orient by, so each cell is oriented by its ENDPOINT
+#   acoustic tuning (`endpoint_sign`, from unambiguous trials disjoint from the
+#   ambiguous data plotted). The null flips each cell's sign independently, so it
+#   is centered at zero — no rectification floor. This is the same construction
+#   as the acoustic panel, and reads at y≈0 under the null. Aligned convention:
+#   `-endpoint_sign × (first−second)`, positive when the percept contrast runs
+#   with the site's acoustic tuning (the reactivation direction).
+#
+# NOTE on interpretation: for the windowed categories the null calibrates the
+# orientation (rectification) bias, not selection bias — groups selected on
+# "behav @late" show in-window observed > null by construction; the null there is
+# informative primarily outside the selection window. Acoustic-only was NOT
+# selected on behavioral criteria and uses an independent (endpoint) orientation,
+# so its zero-centered band is a clean test of whether ANY acoustic-aligned
+# perceptual effect is present.
 ep_times = next(iter(epochs_dict.values())).times
 behav_band_results = {}
-abs_categories = set()   # categories averaged with the sign-agnostic abs null
+signflip_categories = set()   # acoustic-aligned sign-flip null (zero-centered band)
 for cat, cells in tqdm(cells_per_category.items()):
     if any(cell["smin"] is None for cell in cells):
-        # No behavioral discriminative window for these cells (acoustic-only),
-        # so there is no per-cell sign to orient by. Take the per-timepoint
-        # absolute value of each cell's mean difference; the matched within-step
-        # permutation null gives the positive rectification floor. Observed
-        # sitting inside that band ⇒ no perceptual effect of any sign.
+        # Acoustic-only: orient each cell's behavioral mean-diff by its endpoint
+        # acoustic sign, then use a zero-centered sign-flip null. Cells whose
+        # site has no reliable endpoint window (not in `endpoint_sign`) or too
+        # few qualifying trials are dropped.
+        oriented = []
+        for cell in cells:
+            key = (cell["subject"], cell["electrode_idx"], cell["phoneme_pair"])
+            if key not in endpoint_sign.index:
+                continue
+            ep = epochs_dict[cell["subject"]]
+            ep_pp = ep[ep.metadata["phoneme_pair"].values == cell["phoneme_pair"]]
+            mean_diff, status = behavioral_bootstrap_meandiff(
+                ep_pp, cell["electrode_idx"], cell["word_end"],
+                min_class_k=min_class_k, bootstrap_r=bootstrap_r,
+                bootstrap_seed=bootstrap_seed,
+            )
+            if mean_diff is None:
+                continue
+            oriented.append(-float(endpoint_sign.loc[key]) * mean_diff)
         obs_mean, obs_sem, null_mat, n_valid = oriented_group_band(
-            cells, epochs_dict,
-            null_mode="behavior_abs",
+            null_mode="sign_flip", cell_trajectories=oriented,
             n_perm=n_perm, seed=null_seed,
-            min_class_k=min_class_k,
-            bootstrap_r=bootstrap_r,
-            bootstrap_seed=bootstrap_seed,
         )
-        abs_categories.add(cat)
+        signflip_categories.add(cat)
     else:
         obs_mean, obs_sem, null_mat, n_valid = oriented_group_band(
             cells, epochs_dict,
@@ -382,7 +427,8 @@ for cat, cells in tqdm(cells_per_category.items()):
             bootstrap_seed=bootstrap_seed,
         )
     behav_band_results[cat] = (obs_mean, obs_sem, null_mat, n_valid)
-    print(f"{cat}: {n_valid} valid cells" + ("  [abs null]" if cat in abs_categories else ""))
+    print(f"{cat}: {n_valid} valid cells"
+          + ("  [acoustic-aligned]" if cat in signflip_categories else ""))
 
 # %%
 fig_bh, ax_bh = plt.subplots(figsize=(3, 2))
@@ -399,8 +445,8 @@ for i, cat in enumerate(CAT_PLOT_ORDER):
     if obs_mean is None:
         continue
     color = _COLOR_CYCLE[i % len(_COLOR_CYCLE)]
-    is_abs = cat in abs_categories
-    label = cat.replace(" + ", "\n+ ") + (" (|·|)" if is_abs else "")
+    is_signflip = cat in signflip_categories
+    label = cat.replace(" + ", "\n+ ") + (" (acoustic-aligned)" if is_signflip else "")
     ax_bh.plot(ep_times, obs_mean, color=color, lw=2, label=label)
 
     if obs_sem is not None:
@@ -410,16 +456,16 @@ for i, cat in enumerate(CAT_PLOT_ORDER):
     null_lo = np.percentile(null_mat, 2.5, axis=0)
     null_hi = np.percentile(null_mat, 97.5, axis=0)
 
-    # Abs categories sit on a positive rectification floor, not near zero: draw
-    # the null band explicitly so "observed inside band = no effect" is visible
-    # (and does not read as the largest signal on the shared axis).
-    if is_abs:
+    # The acoustic-only category is oriented by an independent (endpoint) axis, so
+    # its sign-flip null is centered at zero: draw the band explicitly so
+    # "observed inside band = no effect" is visible. (The windowed categories'
+    # nulls sit on a rectification floor and are summarised by the sig-bars.)
+    if is_signflip:
         ax_bh.fill_between(ep_times, null_lo, null_hi, color=color,
                            alpha=0.15, lw=0, zorder=1)
 
-    # Mark timepoints where observed exits the null band. For abs categories a
-    # below-floor dip is not a perceptual effect, so only flag above-band exits.
-    sig_mask = (obs_mean > null_hi) if is_abs else ((obs_mean > null_hi) | (obs_mean < null_lo))
+    # Mark timepoints where observed exits the null band (two-sided).
+    sig_mask = (obs_mean > null_hi) | (obs_mean < null_lo)
     if sig_mask.any():
         sig_y = np.where(sig_mask, obs_mean, np.nan)
         sig_y_change = np.diff((~np.isnan(sig_y)).astype(int))
@@ -480,25 +526,9 @@ b4_by_acoustic_diffs = b4_by_acoustic.pivot_table(
 )
 
 # %%
-# Endpoint-derived sign + selection gate, per site (pooled over word ends).
-# `a_per_window_all` is loaded up in "Prepare bootstrap results".
-# `per_cell_best` picks the largest-|median| endpoint window per site;
-# `best_ci_aligned_excludes_zero` is the reliability gate; the sign of
-# `best_mean_diff_aligned_med` (= median(step6 − step1)) is the acoustic tuning.
-a_best = per_cell_best(
-    a_per_window_all, ["subject", "electrode_idx", "phoneme_pair"]
-).to_pandas()
-a_best["acoustic_sign_endpoint"] = np.sign(a_best["best_mean_diff_aligned_med"])
-
-endpoint_sign = (
-    a_best[a_best["best_ci_aligned_excludes_zero"]]
-    .set_index(["subject", "electrode_idx", "phoneme_pair"])["acoustic_sign_endpoint"]
-)
-print(f"acoustic sites with a reliable endpoint window: {len(endpoint_sign)}")
-
-# %%
 # Guide: sites with (i) a conjunction category from the manifest and (ii) a
-# reliable endpoint sign. Sign/window come from endpoints; category from manifest.
+# reliable endpoint sign (`endpoint_sign`, computed once in "Prepare bootstrap
+# results"). Sign/window come from endpoints; category from manifest.
 acoustic_plot_guide_df = (
     merged
     .set_index(["subject", "electrode_idx", "phoneme_pair"])
