@@ -313,20 +313,22 @@ def _sign_flip_null(
     Returns
     -------
     observed_mean : (n_times,) array or None
+    observed_sem : (n_times,) array or None
     null_matrix : (n_perm, n_times) array or None
     n_cells : int
     """
     if not cell_trajectories:
-        return None, None, 0
+        return None, None, None, 0
     matrix = np.stack(cell_trajectories)  # (n_cells, n_times)
     n_cells, n_times = matrix.shape
     observed_mean = matrix.mean(0)
+    observed_sem = matrix.std(0, ddof=1) / np.sqrt(n_cells) if n_cells > 1 else None
     rng = np.random.default_rng(seed)
     null_matrix = np.zeros((n_perm, n_times))
     for p in range(n_perm):
         signs = rng.choice(np.array([-1.0, 1.0]), size=n_cells)
         null_matrix[p] = (signs[:, None] * matrix).mean(0)
-    return observed_mean, null_matrix, n_cells
+    return observed_mean, observed_sem, null_matrix, n_cells
 
 
 def oriented_group_band(
@@ -382,6 +384,9 @@ def oriented_group_band(
     Returns
     -------
     observed_mean : (n_times,) array or None
+        Grand mean of sign-oriented cell trajectories.
+    observed_sem : (n_times,) array or None
+        SEM of sign-oriented cell trajectories (ddof=1; NaN if n_valid < 2).
     null_matrix : (n_perm, n_times) array or None
     n_valid : int
         Number of cells that contributed.
@@ -443,11 +448,12 @@ def oriented_group_band(
             null_matrix[p] += perm_sign * perm_diff
 
     if n_valid == 0:
-        return None, None, 0
+        return None, None, None, 0
 
     observed_mean = obs_sum / n_valid
+    observed_sem = np.sqrt(obs_sum / n_valid) if n_valid > 1 else None
     null_matrix = null_matrix / n_valid
-    return observed_mean, null_matrix, n_valid
+    return observed_mean, observed_sem, null_matrix, n_valid
 
 
 # --------------------------------------------------------------------------- #

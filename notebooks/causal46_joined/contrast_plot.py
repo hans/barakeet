@@ -31,6 +31,7 @@ import numpy as np
 import pandas as pd
 import polars as pl
 import seaborn as sns
+from tqdm.auto import tqdm
 
 sys.path.insert(0, str(Path(".").resolve() / "notebooks" / "causal46_joined"))
 from _contrast import (  # noqa: E402
@@ -337,8 +338,8 @@ for (subject, electrode_idx, phoneme_pair, word_end), row in behavior_plot_guide
 # and for groups (Acoustic-only) that were NOT selected on behavioral criteria.
 ep_times = next(iter(epochs_dict.values())).times
 behav_band_results = {}
-for cat, cells in cells_per_category.items():
-    obs_mean, null_mat, n_valid = oriented_group_band(
+for cat, cells in tqdm(cells_per_category.items()):
+    obs_mean, _, null_mat, n_valid = oriented_group_band(
         cells, epochs_dict,
         n_perm=n_perm, seed=null_seed,
         min_class_k=min_class_k,
@@ -349,7 +350,7 @@ for cat, cells in cells_per_category.items():
     print(f"{cat}: {n_valid} valid cells")
 
 # %%
-fig_bh, ax_bh = plt.subplots(figsize=(10, 4))
+fig_bh, ax_bh = plt.subplots(figsize=(3, 2))
 ax_bh.axvline(0, color="k", linestyle="--", alpha=0.5)
 ax_bh.axhline(0, color="k", linestyle="--", alpha=0.5)
 
@@ -358,26 +359,46 @@ for i, (cat, (obs_mean, null_mat, n_valid)) in enumerate(behav_band_results.item
     if obs_mean is None:
         continue
     color = _COLOR_CYCLE[i % len(_COLOR_CYCLE)]
-    ax_bh.plot(ep_times, obs_mean, color=color, lw=2, label=f"{cat} (n={n_valid})")
+    label = cat.replace(" + ", "\n+ ")
+    ax_bh.plot(ep_times, obs_mean, color=color, lw=2, label=label)
 
     null_lo = np.percentile(null_mat, 2.5, axis=0)
     null_hi = np.percentile(null_mat, 97.5, axis=0)
-    ax_bh.fill_between(ep_times, null_lo, null_hi, color=color, alpha=0.18,
-                       label=f"{cat} null band")
+    ax_bh.fill_between(ep_times, null_lo, null_hi, color=color, alpha=0.18,)
 
     # Mark timepoints where observed exits the null band
     sig_mask = (obs_mean > null_hi) | (obs_mean < null_lo)
     if sig_mask.any():
         sig_y = np.where(sig_mask, obs_mean, np.nan)
-        ax_bh.scatter(ep_times[sig_mask], sig_y[sig_mask], color=color,
-                      s=6, zorder=5, linewidths=0)
+        sig_y_change = np.diff((~np.isnan(sig_y)).astype(int))
 
+        # Find continuous runs of significant points
+        run_starts = np.where(sig_y_change == 1)[0] + 1
+        run_ends = np.where(sig_y_change == -1)[0] + 1
+
+        if len(run_starts) > len(run_ends):
+            run_ends = np.append(run_ends, len(sig_y))
+        
+        ymin, ymax = ax_bh.get_ylim()
+        bar_h = (ymax - ymin) * 0.02
+        bar_y = (ymin) + (ymax - ymin) * 0.95
+        for start, end in zip(run_starts, run_ends):
+            start_time, end_time = ep_times[[start, end - 1]]
+            ax_bh.barh(y=bar_y, width=end_time - start_time,
+                       left=start_time, height=bar_h,
+                       color=color, alpha=0.6,
+                       edgecolor="none", zorder=5)
+
+        # ax_bh.scatter(ep_times[sig_mask], sig_y[sig_mask], color=color,
+        #               s=6, zorder=5, linewidths=0)
+
+ax_bh.legend(loc="lower left", bbox_to_anchor=(-0.8, -0.2))
+ax_bh.set_xlim(-0.05, 0.8)
+ax_bh.set_yticks([-0.2, 0.0, 0.2, 0.4, 0.6])
 ax_bh.set_xlabel("Time (s)")
-ax_bh.set_ylabel("Oriented HGA contrast (a.u.)")
-ax_bh.set_title("Behavioral contrast with matched-permutation null band\n"
-                "(null: within-step label permutation; sign recomputed per replicate)")
-ax_bh.legend(fontsize=8)
-fig_bh.tight_layout()
+ax_bh.set_ylabel("HGA contrast by\nperceptual state\n($z$)", rotation=0, labelpad=10, ha="right")
+sns.despine(ax=ax_bh)
+
 fig_bh.savefig(OUT_DIR / "behavioral_null_band.pdf", bbox_inches="tight")
 plt.show()
 
@@ -492,7 +513,7 @@ for cat, contrasts in acoustic_contrasts.items():
 xs = b4_by_acoustic_diffs.columns.get_level_values("smin").values / epoch_sfreq + epoch_tmin + window_size / 2
 acoustic_band_results = {}
 for cat, contrasts in acoustic_contrasts.items():
-    obs_mean, null_mat, n_valid = oriented_group_band(
+    obs_mean, _, null_mat, n_valid = oriented_group_band(
         null_mode="sign_flip",
         cell_trajectories=contrasts,
         n_perm=n_perm,

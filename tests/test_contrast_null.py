@@ -191,7 +191,7 @@ class TestNullBandNoise:
     def band_result(self):
         cells, epochs_dict = _make_multi(n_cells=N_CELLS_MULTI,
                                          n_per_class_per_step=8)
-        obs, null_mat, n_valid = oriented_group_band(
+        obs, _, null_mat, n_valid = oriented_group_band(
             cells, epochs_dict,
             n_perm=80, seed=0,
             min_class_k=3, bootstrap_r=30, bootstrap_seed=42,
@@ -247,7 +247,7 @@ class TestNullBandSignal:
             n_per_class_per_step=8,
             signal_smin=30, signal_smax=45, signal_amp=30.0,
         )
-        obs, null_mat, n_valid = oriented_group_band(
+        obs, _, null_mat, n_valid = oriented_group_band(
             cells, epochs_dict,
             n_perm=60, seed=0,
             min_class_k=3, bootstrap_r=30, bootstrap_seed=42,
@@ -273,15 +273,15 @@ class TestDeterminism:
     def test_same_seed_same_null(self):
         cells, epochs_dict = _make_multi(n_cells=3, n_per_class_per_step=6)
         kw = dict(n_perm=20, seed=7, min_class_k=3, bootstrap_r=15, bootstrap_seed=42)
-        _, null1, _ = oriented_group_band(cells, epochs_dict, **kw)
-        _, null2, _ = oriented_group_band(cells, epochs_dict, **kw)
+        _, _, null1, _ = oriented_group_band(cells, epochs_dict, **kw)
+        _, _, null2, _ = oriented_group_band(cells, epochs_dict, **kw)
         np.testing.assert_array_equal(null1, null2)
 
     def test_different_seed_different_null(self):
         cells, epochs_dict = _make_multi(n_cells=3, n_per_class_per_step=6)
         kw = dict(n_perm=20, min_class_k=3, bootstrap_r=15, bootstrap_seed=42)
-        _, null_a, _ = oriented_group_band(cells, epochs_dict, seed=7, **kw)
-        _, null_b, _ = oriented_group_band(cells, epochs_dict, seed=99, **kw)
+        _, _, null_a, _ = oriented_group_band(cells, epochs_dict, seed=7, **kw)
+        _, _, null_b, _ = oriented_group_band(cells, epochs_dict, seed=99, **kw)
         assert not np.allclose(null_a, null_b), (
             "null matrices from different seeds should differ"
         )
@@ -359,7 +359,7 @@ class TestSignReuseGuard:
         cells, epochs_dict = _make_multi(n_cells=N_CELLS_MULTI,
                                          n_per_class_per_step=8)
         kw = dict(n_perm=60, seed=0, min_class_k=3, bootstrap_r=30, bootstrap_seed=42)
-        _, null_correct, _ = oriented_group_band(cells, epochs_dict, **kw)
+        _, _, null_correct, _ = oriented_group_band(cells, epochs_dict, **kw)
         _, null_wrong, _ = _oriented_group_band_fixed_sign(cells, epochs_dict, **kw)
         return null_correct, null_wrong
 
@@ -432,17 +432,17 @@ class TestSignFlipRandomOrientation:
         )
 
     def test_returns_correct_n_valid(self, band_result):
-        _, _, n_valid = band_result
+        _, _, _, n_valid = band_result
         assert n_valid == N_TRAJ
 
     def test_null_matrix_shape(self, band_result):
-        _, null_mat, _ = band_result
+        _, _, null_mat, _ = band_result
         assert null_mat.shape == (400, N_WIN)
 
     def test_null_centered_near_zero(self, band_result):
         # With n_perm=400 and n_cells=20 the null mean should be close to zero
         # (tolerance: 3 * 1/sqrt(400 * 20) ≈ 0.034 std units of noise ≈ 0.1)
-        _, null_mat, _ = band_result
+        _, _, null_mat, _ = band_result
         null_global_mean = null_mat.mean()
         assert abs(null_global_mean) < 0.15, (
             f"null global mean {null_global_mean:.4f} too far from zero "
@@ -450,7 +450,7 @@ class TestSignFlipRandomOrientation:
         )
 
     def test_observed_inside_null_band(self, band_result):
-        obs, null_mat, _ = band_result
+        obs, _, null_mat, _ = band_result
         null_lo = np.percentile(null_mat, 2.5, axis=0)
         null_hi = np.percentile(null_mat, 97.5, axis=0)
         frac_outside = float(((obs > null_hi) | (obs < null_lo)).mean())
@@ -473,7 +473,7 @@ class TestSignFlipAligned:
         )
 
     def test_observed_exceeds_null_hi_in_signal_window(self, band_result):
-        obs, null_mat, _ = band_result
+        obs, _, null_mat, _ = band_result
         null_hi = np.percentile(null_mat, 97.5, axis=0)
         frac_above = float((obs[SIGNAL_WIN] > null_hi[SIGNAL_WIN]).mean())
         assert frac_above >= 0.5, (
@@ -495,7 +495,7 @@ class TestSignFlipAntiAligned:
         )
 
     def test_observed_below_null_lo_in_signal_window(self, band_result):
-        obs, null_mat, _ = band_result
+        obs, _, null_mat, _ = band_result
         null_lo = np.percentile(null_mat, 2.5, axis=0)
         frac_below = float((obs[SIGNAL_WIN] < null_lo[SIGNAL_WIN]).mean())
         assert frac_below >= 0.5, (
@@ -509,23 +509,24 @@ class TestSignFlipDeterminism:
     def test_same_seed_same_null(self):
         trajs = _random_trajectories()
         kw = dict(null_mode="sign_flip", cell_trajectories=trajs, n_perm=50, seed=7)
-        _, null1, _ = oriented_group_band(**kw)
-        _, null2, _ = oriented_group_band(**kw)
+        _, _, null1, _ = oriented_group_band(**kw)
+        _, _, null2, _ = oriented_group_band(**kw)
         np.testing.assert_array_equal(null1, null2)
 
     def test_different_seed_different_null(self):
         trajs = _random_trajectories()
         kw = dict(null_mode="sign_flip", cell_trajectories=trajs, n_perm=50)
-        _, null_a, _ = oriented_group_band(seed=7, **kw)
-        _, null_b, _ = oriented_group_band(seed=99, **kw)
+        _, _, null_a, _ = oriented_group_band(seed=7, **kw)
+        _, _, null_b, _ = oriented_group_band(seed=99, **kw)
         assert not np.allclose(null_a, null_b), (
             "null matrices from different seeds should differ"
         )
 
     def test_empty_trajectories_returns_none(self):
-        obs, null_mat, n_valid = oriented_group_band(
+        obs, obs_sem, null_mat, n_valid = oriented_group_band(
             null_mode="sign_flip", cell_trajectories=[], n_perm=10, seed=0
         )
         assert obs is None
+        assert obs_sem is None
         assert null_mat is None
         assert n_valid == 0
