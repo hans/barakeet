@@ -353,7 +353,20 @@ def oriented_group_band(
         and reused across ``n_perm`` null replicates that permute within-step
         behavior labels.  The sign is recomputed per replicate, capturing the
         rectification floor (null band sits above zero in the orientation
-        window).  Requires ``cells`` and ``epochs_dict``.
+        window).  Requires ``cells`` and ``epochs_dict``; each cell needs
+        ``smin``/``smax`` (the orientation window).
+
+    ``"behavior_abs"`` (behavioral panel, sites with no discriminative window)
+        Sign-agnostic variant of ``behavior_permute`` for cells that lack a
+        behavioral window (e.g. acoustic-only sites): there is no per-cell sign
+        to orient by, so each cell's mean-diff trajectory is rectified per
+        timepoint (``|mean_diff(t)|``) instead of oriented by a window sign.
+        Observed = ``mean_c |mean_diff_c(t)|``; every null replicate applies the
+        identical per-timepoint ``|·|`` to the within-step-permuted trajectory,
+        so the null band is a matched positive rectification floor.  Observed
+        sitting inside the band ⇒ no perceptual effect of *any* sign.  Requires
+        ``cells`` and ``epochs_dict``; ``smin``/``smax`` are ignored (may be
+        ``None``).
 
     ``"sign_flip"`` (acoustic panel)
         Operates on pre-computed, pre-oriented per-cell trajectories passed as
@@ -373,7 +386,7 @@ def oriented_group_band(
     epochs_dict : dict, optional
         Required for ``behavior_permute``.  {subject: mne.Epochs}.
     null_mode : str
-        ``"behavior_permute"`` or ``"sign_flip"``.
+        ``"behavior_permute"``, ``"behavior_abs"``, or ``"sign_flip"``.
     cell_trajectories : list of (n_times,) arrays, optional
         Required for ``sign_flip``.  Pre-oriented per-cell trajectories.
     n_perm : int
@@ -393,8 +406,14 @@ def oriented_group_band(
     """
     if null_mode == "sign_flip":
         return _sign_flip_null(cell_trajectories or [], n_perm=n_perm, seed=seed)
+    if null_mode not in ("behavior_permute", "behavior_abs"):
+        raise ValueError(f"unknown null_mode {null_mode!r}")
 
-    # --- behavior_permute path (original implementation) ---
+    # --- behavior_permute / behavior_abs path ---
+    # abs_mode: rectify each trajectory per timepoint (|mean_diff|) instead of
+    # orienting by a per-cell window sign — for cells without a discriminative
+    # window (smin/smax may be None).
+    abs_mode = null_mode == "behavior_abs"
     kw_prep = dict(min_class_k=min_class_k, candidate_steps=candidate_steps)
     n_times: Optional[int] = None
     obs_traces = []
@@ -406,8 +425,9 @@ def oriented_group_band(
         electrode_idx = int(cell["electrode_idx"])
         phoneme_pair = cell["phoneme_pair"]
         word_end = cell["word_end"]
-        smin = int(cell["smin"])
-        smax = int(cell["smax"])
+        # smin/smax only orient the window-sign path; abs_mode ignores them.
+        smin = None if abs_mode else int(cell["smin"])
+        smax = None if abs_mode else int(cell["smax"])
 
         ep = epochs_dict[subject]
         ep_pp = ep[ep.metadata["phoneme_pair"].values == phoneme_pair]
@@ -430,8 +450,11 @@ def oriented_group_band(
             obs_traces = []
             null_matrix = np.zeros((n_perm, n_times))
 
-        obs_sign = float(np.sign(obs_diff[smin:smax].mean()) or 1.0)
-        obs_traces.append(obs_sign * obs_diff)
+        if abs_mode:
+            obs_traces.append(np.abs(obs_diff))
+        else:
+            obs_sign = float(np.sign(obs_diff[smin:smax].mean()) or 1.0)
+            obs_traces.append(obs_sign * obs_diff)
         n_valid += 1
 
         # Null: one RNG per cell drives all n_perm label permutations.
@@ -444,8 +467,11 @@ def oriented_group_band(
             )
             if perm_status != "ok":
                 continue
-            perm_sign = float(np.sign(perm_diff[smin:smax].mean()) or 1.0)
-            null_matrix[p] += perm_sign * perm_diff
+            if abs_mode:
+                null_matrix[p] += np.abs(perm_diff)
+            else:
+                perm_sign = float(np.sign(perm_diff[smin:smax].mean()) or 1.0)
+                null_matrix[p] += perm_sign * perm_diff
 
     if n_valid == 0:
         return None, None, None, 0

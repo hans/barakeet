@@ -312,22 +312,37 @@ behavior_plot_guide_df = pd.merge(
 )
 
 # Build per-category cell lists for oriented_group_band.
-# Cells lacking a behavioral window (word_end is NaN / not in b_windows) are
-# excluded: without a discriminative window we cannot define the orientation
-# sign, so including them in both observed and null is not possible.
-# TODO update above comment about cells lacking behavioral window
+# Cells WITH a behavioral discriminative window (smin/smax present) are oriented
+# by their window sign (behavior_permute). Cells WITHOUT one — acoustic-only
+# sites, which the outer merge leaves with word_end=NaN because they are absent
+# from b_windows — have no per-cell sign to orient by, so we recover their real
+# word-ends here (from b4_by_behavior, which covers every behavior site) and
+# mark them window-less (smin/smax None); their category is averaged with the
+# sign-agnostic absolute-value null below.
+site_word_ends = (
+    b4_by_behavior.index.to_frame(index=False)
+    .groupby(["subject", "electrode_idx", "phoneme_pair"])["word_end"]
+    .apply(lambda s: sorted(s.unique()))
+)
+
 cells_per_category = defaultdict(list)
 for (subject, electrode_idx, phoneme_pair, word_end), row in behavior_plot_guide_df.iterrows():
     if pd.isna(row.conjunction_category):
         continue
-    cells_per_category[row.conjunction_category].append({
-        "subject": subject,
-        "electrode_idx": int(electrode_idx),
-        "phoneme_pair": phoneme_pair,
-        "word_end": word_end,
-        "smin": int(row.smin) if not pd.isna(row.smin) else None,
-        "smax": int(row.smax) if not pd.isna(row.smax) else None,
-    })
+    has_window = not pd.isna(row.smin)
+    if has_window:
+        word_ends = [word_end]
+    else:
+        word_ends = site_word_ends.get((subject, electrode_idx, phoneme_pair), [])
+    for we in word_ends:
+        cells_per_category[row.conjunction_category].append({
+            "subject": subject,
+            "electrode_idx": int(electrode_idx),
+            "phoneme_pair": phoneme_pair,
+            "word_end": we,
+            "smin": int(row.smin) if has_window else None,
+            "smax": int(row.smax) if has_window else None,
+        })
 
 # %%
 # Compute per-category oriented grand means + matched-permutation null bands.
@@ -341,13 +356,23 @@ for (subject, electrode_idx, phoneme_pair, word_end), row in behavior_plot_guide
 # and for groups (Acoustic-only) that were NOT selected on behavioral criteria.
 ep_times = next(iter(epochs_dict.values())).times
 behav_band_results = {}
+abs_categories = set()   # categories averaged with the sign-agnostic abs null
 for cat, cells in tqdm(cells_per_category.items()):
     if any(cell["smin"] is None for cell in cells):
-        # We are missing sample bounds here -- this means we don't
-        # have a valid behavioral window. So we can't re-orient based on
-        # behavioral window; instead we will just take absolute value of
-        # the mean difference.
-        # TODO implement
+        # No behavioral discriminative window for these cells (acoustic-only),
+        # so there is no per-cell sign to orient by. Take the per-timepoint
+        # absolute value of each cell's mean difference; the matched within-step
+        # permutation null gives the positive rectification floor. Observed
+        # sitting inside that band ⇒ no perceptual effect of any sign.
+        obs_mean, obs_sem, null_mat, n_valid = oriented_group_band(
+            cells, epochs_dict,
+            null_mode="behavior_abs",
+            n_perm=n_perm, seed=null_seed,
+            min_class_k=min_class_k,
+            bootstrap_r=bootstrap_r,
+            bootstrap_seed=bootstrap_seed,
+        )
+        abs_categories.add(cat)
     else:
         obs_mean, obs_sem, null_mat, n_valid = oriented_group_band(
             cells, epochs_dict,
@@ -357,7 +382,7 @@ for cat, cells in tqdm(cells_per_category.items()):
             bootstrap_seed=bootstrap_seed,
         )
     behav_band_results[cat] = (obs_mean, obs_sem, null_mat, n_valid)
-    print(f"{cat}: {n_valid} valid cells")
+    print(f"{cat}: {n_valid} valid cells" + ("  [abs null]" if cat in abs_categories else ""))
 
 # %%
 fig_bh, ax_bh = plt.subplots(figsize=(3, 2))
@@ -374,7 +399,8 @@ for i, cat in enumerate(CAT_PLOT_ORDER):
     if obs_mean is None:
         continue
     color = _COLOR_CYCLE[i % len(_COLOR_CYCLE)]
-    label = cat.replace(" + ", "\n+ ")
+    is_abs = cat in abs_categories
+    label = cat.replace(" + ", "\n+ ") + (" (|·|)" if is_abs else "")
     ax_bh.plot(ep_times, obs_mean, color=color, lw=2, label=label)
 
     if obs_sem is not None:
@@ -384,8 +410,16 @@ for i, cat in enumerate(CAT_PLOT_ORDER):
     null_lo = np.percentile(null_mat, 2.5, axis=0)
     null_hi = np.percentile(null_mat, 97.5, axis=0)
 
-    # Mark timepoints where observed exits the null band
-    sig_mask = (obs_mean > null_hi) | (obs_mean < null_lo)
+    # Abs categories sit on a positive rectification floor, not near zero: draw
+    # the null band explicitly so "observed inside band = no effect" is visible
+    # (and does not read as the largest signal on the shared axis).
+    if is_abs:
+        ax_bh.fill_between(ep_times, null_lo, null_hi, color=color,
+                           alpha=0.15, lw=0, zorder=1)
+
+    # Mark timepoints where observed exits the null band. For abs categories a
+    # below-floor dip is not a perceptual effect, so only flag above-band exits.
+    sig_mask = (obs_mean > null_hi) if is_abs else ((obs_mean > null_hi) | (obs_mean < null_lo))
     if sig_mask.any():
         sig_y = np.where(sig_mask, obs_mean, np.nan)
         sig_y_change = np.diff((~np.isnan(sig_y)).astype(int))
