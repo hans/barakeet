@@ -353,7 +353,7 @@ def oriented_group_band(
     """
     kw_prep = dict(min_class_k=min_class_k, candidate_steps=candidate_steps)
     n_times: Optional[int] = None
-    obs_sum: Optional[np.ndarray] = None
+    obs_traces = []
     null_matrix: Optional[np.ndarray] = None
     n_valid = 0
 
@@ -383,11 +383,11 @@ def oriented_group_band(
 
         if n_times is None:
             n_times = len(obs_diff)
-            obs_sum = np.zeros(n_times)
+            obs_traces = []
             null_matrix = np.zeros((n_perm, n_times))
 
         obs_sign = float(np.sign(obs_diff[smin:smax].mean()) or 1.0)
-        obs_sum += obs_sign * obs_diff
+        obs_traces.append(obs_sign * obs_diff)
         n_valid += 1
 
         # Null: one RNG per cell drives all n_perm label permutations.
@@ -406,8 +406,8 @@ def oriented_group_band(
     if n_valid == 0:
         return None, None, None, 0
 
-    observed_mean = obs_sum / n_valid
-    observed_sem = np.sqrt(obs_sum / n_valid) if n_valid > 1 else None
+    observed_mean = np.mean(obs_traces, axis=0)
+    observed_sem = np.std(obs_traces, axis=0, ddof=1) / np.sqrt(n_valid) if n_valid > 1 else None
     null_matrix = null_matrix / n_valid
     return observed_mean, observed_sem, null_matrix, n_valid
 

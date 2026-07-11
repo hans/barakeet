@@ -17,6 +17,10 @@
 # # Continuous-time HGA contrast plot (causal46_joined)
 
 # %%
+# %load_ext autoreload
+# %autoreload 2
+
+# %%
 from __future__ import annotations
 
 import ast
@@ -339,14 +343,14 @@ for (subject, electrode_idx, phoneme_pair, word_end), row in behavior_plot_guide
 ep_times = next(iter(epochs_dict.values())).times
 behav_band_results = {}
 for cat, cells in tqdm(cells_per_category.items()):
-    obs_mean, null_mat, n_valid = oriented_group_band(
+    obs_mean, obs_sem, null_mat, n_valid = oriented_group_band(
         cells, epochs_dict,
         n_perm=n_perm, seed=null_seed,
         min_class_k=min_class_k,
         bootstrap_r=bootstrap_r,
         bootstrap_seed=bootstrap_seed,
     )
-    behav_band_results[cat] = (obs_mean, null_mat, n_valid)
+    behav_band_results[cat] = (obs_mean, obs_sem, null_mat, n_valid)
     print(f"{cat}: {n_valid} valid cells")
 
 # %%
@@ -355,16 +359,24 @@ ax_bh.axvline(0, color="k", linestyle="--", alpha=0.5)
 ax_bh.axhline(0, color="k", linestyle="--", alpha=0.5)
 
 _COLOR_CYCLE = plt.rcParams["axes.prop_cycle"].by_key()["color"]
-for i, (cat, (obs_mean, null_mat, n_valid)) in enumerate(behav_band_results.items()):
+for i, cat in enumerate(CAT_PLOT_ORDER):
+    if cat not in behav_band_results:
+        print(f"Warning: {cat} not found in behav_band_results")
+        continue
+    obs_mean, obs_sem, null_mat, n_valid = behav_band_results[cat]
+
     if obs_mean is None:
         continue
     color = _COLOR_CYCLE[i % len(_COLOR_CYCLE)]
     label = cat.replace(" + ", "\n+ ")
     ax_bh.plot(ep_times, obs_mean, color=color, lw=2, label=label)
 
+    if obs_sem is not None:
+        ax_bh.fill_between(ep_times, obs_mean - obs_sem, obs_mean + obs_sem,
+                           color=color, alpha=0.3, lw=0)
+
     null_lo = np.percentile(null_mat, 2.5, axis=0)
     null_hi = np.percentile(null_mat, 97.5, axis=0)
-    ax_bh.fill_between(ep_times, null_lo, null_hi, color=color, alpha=0.18,)
 
     # Mark timepoints where observed exits the null band
     sig_mask = (obs_mean > null_hi) | (obs_mean < null_lo)
