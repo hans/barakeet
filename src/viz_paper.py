@@ -2430,9 +2430,14 @@ def plot_behav_barplot(
     figsize=(2.3, 2.3),
     resampled_palette=resampled_palette,
     legend=True,
+    legend_bbox_to_anchor=(1.75, 0.45),
     plot_values: Literal["count", "proportion"] = "proportion",
     ax=None,
 ):
+    if isinstance(resampled_palette, dict):
+        assert set(resampled_palette.keys()) == set(range(1, 7))
+        resampled_palette = [resampled_palette[i] for i in range(1, 7)]
+
     fb = None
     if ax is None:
         fb = FigureBuilder(figsize=figsize)
@@ -2496,18 +2501,18 @@ def plot_behav_barplot(
     ax.tick_params(axis="both", labelsize=12)
 
     legend_handles = [
-        Patch(
-            facecolor="white",
-            edgecolor="black",
+        Line2D(
+            [0], [0],
+            color="k",
             linewidth=1.5,
-            hatch="//",
+            linestyle="--",
             label=f"Chose\n$\\it{{{plot_phoneme_pair[1]}{plot_word_end[1:]}}}$",
         ),
-        Patch(
-            facecolor="white",
-            edgecolor="black",
+        Line2D(
+            [0], [0],
+            color="k",
             linewidth=1.5,
-            hatch="",
+            linestyle="-",
             label=f"Chose\n$\\it{{{plot_phoneme_pair[0]}{plot_word_end[1:]}}}$",
         ),
     ]
@@ -2518,9 +2523,9 @@ def plot_behav_barplot(
             frameon=False,
             fontsize=10,
             handlelength=3,
-            handleheight=2,
+            handleheight=3,
             loc="center right",
-            bbox_to_anchor=(1.75, 0.5),
+            bbox_to_anchor=legend_bbox_to_anchor,
         )
     else:
         ax.get_legend().remove()
