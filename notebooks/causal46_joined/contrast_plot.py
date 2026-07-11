@@ -469,20 +469,63 @@ print(f"acoustic cells dropped (no conjunction category):   {n_no_category}")
 for cat, contrasts in acoustic_contrasts.items():
     print(f"  {cat}: {len(contrasts)} cells")
 
+# %% [markdown]
+# ### Acoustic null band (sign-flip permutation)
+#
+# For each category, the observed grand mean is `mean_c[endpoint_sign_c ×
+# contrast_c(t)]`; the null flips each cell's `endpoint_sign` independently
+# per replicate.  The null is centered at zero — **no rectification floor** —
+# because the orientation source (endpoint unambiguous data) is disjoint from
+# the tested quantity (ambiguous-trial acoustic contrast).  Stars mark where
+# the observed curve exits the 2.5–97.5 th percentile band.
+#
+# Non-circularity: selection (endpoint reliability gate + morphology type) is
+# on unambiguous endpoint data; the tested quantity is the behavior-balanced
+# acoustic contrast on ambiguous trials.  The sign-flip significance is
+# therefore non-circular, unlike the behavioral panel where selection and
+# tested quantity share data.
+
+# %%
+# Compute sign-flip null bands for each category.
+# cell_trajectories are the already-oriented per-cell contrasts (endpoint_sign
+# baked in); no epoch reload needed.
+xs = b4_by_acoustic_diffs.columns.get_level_values("smin").values / epoch_sfreq + epoch_tmin + window_size / 2
+acoustic_band_results = {}
+for cat, contrasts in acoustic_contrasts.items():
+    obs_mean, null_mat, n_valid = oriented_group_band(
+        null_mode="sign_flip",
+        cell_trajectories=contrasts,
+        n_perm=n_perm,
+        seed=null_seed,
+    )
+    acoustic_band_results[cat] = (obs_mean, null_mat, n_valid)
+    print(f"{cat}: {n_valid} valid cells")
+
 # %%
 f, ax = plt.subplots(figsize=(3, 2))
 
 ax.axvline(0, color="k", linestyle="--", alpha=0.5)
 ax.axhline(0, color="k", linestyle="--", alpha=0.5)
 
-for cat in CAT_PLOT_ORDER:
-    contrasts = acoustic_contrasts[cat]
-    ys = np.stack(contrasts).mean(0)
-    xs = b4_by_acoustic_diffs.columns.get_level_values("smin").values / epoch_sfreq + epoch_tmin + window_size / 2
-    ax.plot(xs, ys, lw=1.5, label=cat.replace(" + ", "\n+ "))
+for i, cat in enumerate(CAT_PLOT_ORDER):
+    if cat not in acoustic_band_results:
+        continue
+    obs_mean, null_mat, n_valid = acoustic_band_results[cat]
+    if obs_mean is None:
+        continue
+    color = _COLOR_CYCLE[i % len(_COLOR_CYCLE)]
 
-    yerr = np.stack(contrasts).std(0) / np.sqrt(len(contrasts))
-    ax.fill_between(xs, ys - yerr, ys + yerr, alpha=0.2)
+    ax.plot(xs, obs_mean, color=color, lw=1.5,
+            label=f"{cat.replace(' + ', chr(10) + '+ ')} (n={n_valid})")
+
+    null_lo = np.percentile(null_mat, 2.5, axis=0)
+    null_hi = np.percentile(null_mat, 97.5, axis=0)
+    ax.fill_between(xs, null_lo, null_hi, color=color, alpha=0.18)
+
+    sig_mask = (obs_mean > null_hi) | (obs_mean < null_lo)
+    if sig_mask.any():
+        ax.scatter(xs[sig_mask], obs_mean[sig_mask],
+                   color=color, s=6, zorder=5, linewidths=0)
 
 ax.legend(loc="lower left", bbox_to_anchor=(-0.8, -0.2))
 ax.set_xlim(-0.05, 0.8)

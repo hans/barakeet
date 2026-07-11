@@ -288,10 +288,53 @@ def behavioral_bootstrap_meandiff(
     )
 
 
-def oriented_group_band(
-    cells: Sequence[dict],
-    epochs_dict: dict,
+def _sign_flip_null(
+    cell_trajectories: Sequence[np.ndarray],
     *,
+    n_perm: int,
+    seed: int,
+) -> tuple:
+    """Sign-flip permutation null for pre-oriented per-cell trajectories.
+
+    Each null replicate independently draws a ±1 sign per cell and averages
+    ``sign_c × traj_c``.  Because each draw is equiprobable the null is
+    centered at zero — there is no rectification floor, in contrast to the
+    ``behavior_permute`` mode.
+
+    Parameters
+    ----------
+    cell_trajectories : list of (n_times,) arrays
+        Pre-oriented per-cell trajectories (endpoint_sign already applied).
+    n_perm : int
+        Number of sign-flip replicates.
+    seed : int
+        RNG seed for reproducibility.
+
+    Returns
+    -------
+    observed_mean : (n_times,) array or None
+    null_matrix : (n_perm, n_times) array or None
+    n_cells : int
+    """
+    if not cell_trajectories:
+        return None, None, 0
+    matrix = np.stack(cell_trajectories)  # (n_cells, n_times)
+    n_cells, n_times = matrix.shape
+    observed_mean = matrix.mean(0)
+    rng = np.random.default_rng(seed)
+    null_matrix = np.zeros((n_perm, n_times))
+    for p in range(n_perm):
+        signs = rng.choice(np.array([-1.0, 1.0]), size=n_cells)
+        null_matrix[p] = (signs[:, None] * matrix).mean(0)
+    return observed_mean, null_matrix, n_cells
+
+
+def oriented_group_band(
+    cells: Optional[Sequence[dict]] = None,
+    epochs_dict: Optional[dict] = None,
+    *,
+    null_mode: str = "behavior_permute",
+    cell_trajectories: Optional[Sequence[np.ndarray]] = None,
     n_perm: int = 1000,
     seed: int = 0,
     min_class_k: int = 4,
@@ -301,54 +344,52 @@ def oriented_group_band(
 ):
     """Observed oriented grand-mean trajectory and matched-permutation null band.
 
-    For each cell in ``cells`` (a dict with keys subject, electrode_idx,
-    phoneme_pair, word_end, smin, smax):
+    Two modes, selected by ``null_mode``:
 
-    Per cell, HGA is extracted once via ``_prepare_cell_data`` and reused
-    across the observed path and all ``n_perm`` null replicates — avoiding
-    the ``n_perm`` redundant ``ep.copy().get_data()`` calls that made the
-    previous implementation slow.
+    ``"behavior_permute"`` (default, behavioral panel)
+        For each cell in ``cells``, HGA is extracted once from ``epochs_dict``
+        and reused across ``n_perm`` null replicates that permute within-step
+        behavior labels.  The sign is recomputed per replicate, capturing the
+        rectification floor (null band sits above zero in the orientation
+        window).  Requires ``cells`` and ``epochs_dict``.
 
-    1. Extract HGA + qualifying per-step trial indices (once per cell).
-    2. Bootstrap observed mean diff; in-window sign = ``sign(diff[smin:smax])``.
-    3. Oriented observed trajectory = sign × mean_diff.
-
-    The null repeats the bootstrap ``n_perm`` times with within-step label
-    permutation, destroying the percept↔HGA link while preserving per-step
-    trial counts. The sign is recomputed from each permuted replicate — this
-    captures the rectification floor (orientation bias from selecting a sign
-    from the same data being averaged). Reusing the observed sign would
-    collapse the null to zero mean, hiding the floor.
-
-    Cells failing the observed path (no qualifying steps) are excluded from
-    both observed and null. No-window cells (``smin`` or ``smax`` undefined)
-    must be excluded by the caller.
-
-    Runtime: O(n_perm × bootstrap_r × n_cells) bootstrap iterations — but
-    ``get_data()`` is called once per cell, not once per replicate.
+    ``"sign_flip"`` (acoustic panel)
+        Operates on pre-computed, pre-oriented per-cell trajectories passed as
+        ``cell_trajectories`` (endpoint_sign already applied; no epoch reload).
+        Each null replicate independently flips each cell's orientation sign.
+        The null is centered at zero — no rectification floor — because
+        endpoint tuning (the orientation source) is derived from unambiguous
+        endpoint data disjoint from the ambiguous data being averaged.
+        Requires ``cell_trajectories``; ``cells`` and ``epochs_dict`` are
+        ignored.
 
     Parameters
     ----------
-    cells : list of dicts
-        Each dict: {subject, electrode_idx, phoneme_pair, word_end, smin, smax}.
-    epochs_dict : dict
-        {subject: mne.Epochs} mapping (as returned by load_epochs_dict).
+    cells : list of dicts, optional
+        Required for ``behavior_permute``.  Each dict:
+        {subject, electrode_idx, phoneme_pair, word_end, smin, smax}.
+    epochs_dict : dict, optional
+        Required for ``behavior_permute``.  {subject: mne.Epochs}.
+    null_mode : str
+        ``"behavior_permute"`` or ``"sign_flip"``.
+    cell_trajectories : list of (n_times,) arrays, optional
+        Required for ``sign_flip``.  Pre-oriented per-cell trajectories.
     n_perm : int
         Number of permutation replicates for the null band.
     seed : int
-        Master seed for permutation RNGs. Each (cell_idx, perm_idx) pair gets
-        an independent RNG seeded with ``[seed, cell_idx, perm_idx]``.
+        Master RNG seed.
 
     Returns
     -------
     observed_mean : (n_times,) array or None
-        Grand mean of sign-oriented cell trajectories.
     null_matrix : (n_perm, n_times) array or None
-        Null-distribution trajectories; row p is the grand mean under
-        permutation replicate p.
     n_valid : int
-        Number of cells that contributed (skipped cells excluded).
+        Number of cells that contributed.
     """
+    if null_mode == "sign_flip":
+        return _sign_flip_null(cell_trajectories or [], n_perm=n_perm, seed=seed)
+
+    # --- behavior_permute path (original implementation) ---
     kw_prep = dict(min_class_k=min_class_k, candidate_steps=candidate_steps)
     n_times: Optional[int] = None
     obs_sum: Optional[np.ndarray] = None
