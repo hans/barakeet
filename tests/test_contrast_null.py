@@ -1,6 +1,6 @@
 """Tests for oriented_group_band and the _permute_per_step null machinery.
 
-Four cases from issue #5:
+Four cases from issue #5 (behavior_permute mode):
 1. Pure-noise cells → observed grand mean inside the null band; null band
    has positive mean inside the orientation window (rectification floor).
 2. Signal-injected cells → observed exits the null band in the signal window.
@@ -10,6 +10,13 @@ Four cases from issue #5:
    (the wrong approach) collapses the null band to near-zero mean, hiding the
    rectification floor; recomputing the sign (the correct approach) gives a
    wider, positive band.
+
+Four cases from issue #6 (sign_flip mode):
+5. Random-orientation trajectories → null centered ≈0 (no rectification floor)
+   and observed inside the band.
+6. Consistently-aligned trajectories → observed exits the band (positive side).
+7. Anti-aligned trajectories → observed exits the band (negative side).
+8. Determinism: same seed → identical null; different seed → different null.
 """
 from __future__ import annotations
 
@@ -22,7 +29,7 @@ import pandas as pd
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "notebooks" / "causal46_joined"))
-from _contrast import _permute_per_step, behavioral_bootstrap_meandiff, oriented_group_band
+from _contrast import _permute_per_step, behavioral_bootstrap_meandiff, oriented_group_band, _sign_flip_null
 
 # --------------------------------------------------------------------------- #
 # Synthetic-epoch helpers
@@ -184,7 +191,7 @@ class TestNullBandNoise:
     def band_result(self):
         cells, epochs_dict = _make_multi(n_cells=N_CELLS_MULTI,
                                          n_per_class_per_step=8)
-        obs, null_mat, n_valid = oriented_group_band(
+        obs, _, null_mat, n_valid = oriented_group_band(
             cells, epochs_dict,
             n_perm=80, seed=0,
             min_class_k=3, bootstrap_r=30, bootstrap_seed=42,
@@ -240,7 +247,7 @@ class TestNullBandSignal:
             n_per_class_per_step=8,
             signal_smin=30, signal_smax=45, signal_amp=30.0,
         )
-        obs, null_mat, n_valid = oriented_group_band(
+        obs, _, null_mat, n_valid = oriented_group_band(
             cells, epochs_dict,
             n_perm=60, seed=0,
             min_class_k=3, bootstrap_r=30, bootstrap_seed=42,
@@ -266,15 +273,15 @@ class TestDeterminism:
     def test_same_seed_same_null(self):
         cells, epochs_dict = _make_multi(n_cells=3, n_per_class_per_step=6)
         kw = dict(n_perm=20, seed=7, min_class_k=3, bootstrap_r=15, bootstrap_seed=42)
-        _, null1, _ = oriented_group_band(cells, epochs_dict, **kw)
-        _, null2, _ = oriented_group_band(cells, epochs_dict, **kw)
+        _, _, null1, _ = oriented_group_band(cells, epochs_dict, **kw)
+        _, _, null2, _ = oriented_group_band(cells, epochs_dict, **kw)
         np.testing.assert_array_equal(null1, null2)
 
     def test_different_seed_different_null(self):
         cells, epochs_dict = _make_multi(n_cells=3, n_per_class_per_step=6)
         kw = dict(n_perm=20, min_class_k=3, bootstrap_r=15, bootstrap_seed=42)
-        _, null_a, _ = oriented_group_band(cells, epochs_dict, seed=7, **kw)
-        _, null_b, _ = oriented_group_band(cells, epochs_dict, seed=99, **kw)
+        _, _, null_a, _ = oriented_group_band(cells, epochs_dict, seed=7, **kw)
+        _, _, null_b, _ = oriented_group_band(cells, epochs_dict, seed=99, **kw)
         assert not np.allclose(null_a, null_b), (
             "null matrices from different seeds should differ"
         )
@@ -352,7 +359,7 @@ class TestSignReuseGuard:
         cells, epochs_dict = _make_multi(n_cells=N_CELLS_MULTI,
                                          n_per_class_per_step=8)
         kw = dict(n_perm=60, seed=0, min_class_k=3, bootstrap_r=30, bootstrap_seed=42)
-        _, null_correct, _ = oriented_group_band(cells, epochs_dict, **kw)
+        _, _, null_correct, _ = oriented_group_band(cells, epochs_dict, **kw)
         _, null_wrong, _ = _oriented_group_band_fixed_sign(cells, epochs_dict, **kw)
         return null_correct, null_wrong
 
@@ -374,3 +381,152 @@ class TestSignReuseGuard:
             f"wrong null (fixed sign) window mean {window_mean:.4f} should be "
             f"substantially below correct null window mean {correct_mean:.4f}"
         )
+
+
+# --------------------------------------------------------------------------- #
+# Issue #6: sign_flip mode of oriented_group_band
+# --------------------------------------------------------------------------- #
+N_TRAJ = 20   # number of cells per synthetic fixture
+N_WIN = 40    # number of "windows" (n_times in the acoustic panel)
+SIGNAL_WIN = slice(15, 30)
+
+
+def _random_trajectories(n_cells=N_TRAJ, n_times=N_WIN, seed=0):
+    """Noise trajectories with no consistent signal."""
+    rng = np.random.default_rng(seed)
+    return [rng.standard_normal(n_times) for _ in range(n_cells)]
+
+
+def _aligned_trajectories(n_cells=N_TRAJ, n_times=N_WIN, amp=5.0, seed=0):
+    """Each trajectory has a positive bump in SIGNAL_WIN (all concordant with sign=+1)."""
+    rng = np.random.default_rng(seed)
+    trajs = []
+    for _ in range(n_cells):
+        t = rng.standard_normal(n_times) * 0.1
+        t[SIGNAL_WIN] += amp
+        trajs.append(t)
+    return trajs
+
+
+def _antialigned_trajectories(n_cells=N_TRAJ, n_times=N_WIN, amp=5.0, seed=0):
+    """Each trajectory has a *negative* bump in SIGNAL_WIN."""
+    rng = np.random.default_rng(seed)
+    trajs = []
+    for _ in range(n_cells):
+        t = rng.standard_normal(n_times) * 0.1
+        t[SIGNAL_WIN] -= amp
+        trajs.append(t)
+    return trajs
+
+
+# Case 5: random-orientation → null ≈ centered at zero, observed inside band
+class TestSignFlipRandomOrientation:
+    @pytest.fixture(scope="class")
+    def band_result(self):
+        trajs = _random_trajectories()
+        return oriented_group_band(
+            null_mode="sign_flip",
+            cell_trajectories=trajs,
+            n_perm=400,
+            seed=0,
+        )
+
+    def test_returns_correct_n_valid(self, band_result):
+        _, _, _, n_valid = band_result
+        assert n_valid == N_TRAJ
+
+    def test_null_matrix_shape(self, band_result):
+        _, _, null_mat, _ = band_result
+        assert null_mat.shape == (400, N_WIN)
+
+    def test_null_centered_near_zero(self, band_result):
+        # With n_perm=400 and n_cells=20 the null mean should be close to zero
+        # (tolerance: 3 * 1/sqrt(400 * 20) ≈ 0.034 std units of noise ≈ 0.1)
+        _, _, null_mat, _ = band_result
+        null_global_mean = null_mat.mean()
+        assert abs(null_global_mean) < 0.15, (
+            f"null global mean {null_global_mean:.4f} too far from zero "
+            "(expected ≈0 for sign_flip null on random trajectories)"
+        )
+
+    def test_observed_inside_null_band(self, band_result):
+        obs, _, null_mat, _ = band_result
+        null_lo = np.percentile(null_mat, 2.5, axis=0)
+        null_hi = np.percentile(null_mat, 97.5, axis=0)
+        frac_outside = float(((obs > null_hi) | (obs < null_lo)).mean())
+        assert frac_outside < 0.20, (
+            f"{frac_outside:.1%} of timepoints outside 95% band — "
+            "expected < 20% for random-orientation trajectories"
+        )
+
+
+# Case 6: consistently-aligned → observed exits band on positive side
+class TestSignFlipAligned:
+    @pytest.fixture(scope="class")
+    def band_result(self):
+        trajs = _aligned_trajectories()
+        return oriented_group_band(
+            null_mode="sign_flip",
+            cell_trajectories=trajs,
+            n_perm=400,
+            seed=0,
+        )
+
+    def test_observed_exceeds_null_hi_in_signal_window(self, band_result):
+        obs, _, null_mat, _ = band_result
+        null_hi = np.percentile(null_mat, 97.5, axis=0)
+        frac_above = float((obs[SIGNAL_WIN] > null_hi[SIGNAL_WIN]).mean())
+        assert frac_above >= 0.5, (
+            f"only {frac_above:.1%} of signal-window timepoints exceed "
+            "null 97.5th percentile — expected ≥50% for aligned trajectories"
+        )
+
+
+# Case 7: anti-aligned → observed exits band on negative side
+class TestSignFlipAntiAligned:
+    @pytest.fixture(scope="class")
+    def band_result(self):
+        trajs = _antialigned_trajectories()
+        return oriented_group_band(
+            null_mode="sign_flip",
+            cell_trajectories=trajs,
+            n_perm=400,
+            seed=0,
+        )
+
+    def test_observed_below_null_lo_in_signal_window(self, band_result):
+        obs, _, null_mat, _ = band_result
+        null_lo = np.percentile(null_mat, 2.5, axis=0)
+        frac_below = float((obs[SIGNAL_WIN] < null_lo[SIGNAL_WIN]).mean())
+        assert frac_below >= 0.5, (
+            f"only {frac_below:.1%} of signal-window timepoints below "
+            "null 2.5th percentile — expected ≥50% for anti-aligned trajectories"
+        )
+
+
+# Case 8: determinism
+class TestSignFlipDeterminism:
+    def test_same_seed_same_null(self):
+        trajs = _random_trajectories()
+        kw = dict(null_mode="sign_flip", cell_trajectories=trajs, n_perm=50, seed=7)
+        _, _, null1, _ = oriented_group_band(**kw)
+        _, _, null2, _ = oriented_group_band(**kw)
+        np.testing.assert_array_equal(null1, null2)
+
+    def test_different_seed_different_null(self):
+        trajs = _random_trajectories()
+        kw = dict(null_mode="sign_flip", cell_trajectories=trajs, n_perm=50)
+        _, _, null_a, _ = oriented_group_band(seed=7, **kw)
+        _, _, null_b, _ = oriented_group_band(seed=99, **kw)
+        assert not np.allclose(null_a, null_b), (
+            "null matrices from different seeds should differ"
+        )
+
+    def test_empty_trajectories_returns_none(self):
+        obs, obs_sem, null_mat, n_valid = oriented_group_band(
+            null_mode="sign_flip", cell_trajectories=[], n_perm=10, seed=0
+        )
+        assert obs is None
+        assert obs_sem is None
+        assert null_mat is None
+        assert n_valid == 0
