@@ -290,12 +290,6 @@ ax.spines["top"].set_visible(False)
 ax.spines["right"].set_visible(False)
 
 # %%
-scores_all
-
-# %%
-phon_n
-
-# %%
 plot_subject = "EC253"
 plot_electrode_idx = 21
 plot_phoneme_pair = "pb"
