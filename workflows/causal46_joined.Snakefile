@@ -1079,6 +1079,7 @@ rule joined_t_tests:
             subject=config["data"]["subjects"],
         ),
         a_per_window        = "outputs/causal46_joined/acoustic_bootstrap/a_per_window.parquet",
+        a_per_window_full   = "outputs/causal46_joined/acoustic_bootstrap/a_per_window_full.parquet",
         notebook            = "notebooks/causal46_joined/t_tests.py",
 
     output:
@@ -1110,6 +1111,7 @@ rule joined_t_tests:
                 stride=C46["stride"],
                 ac_p_value_threshold=C46["ac_p_value_threshold"],
                 a_per_window_path=str(input.a_per_window),
+                a_per_window_full_path=str(input.a_per_window_full),
             ),
         )
 
@@ -1189,12 +1191,14 @@ rule joined_acoustic_bootstrap:
 
     output:
         notebook         = "outputs/causal46_joined/acoustic_bootstrap/notebook.ipynb",
-        a_bootstrap      = "outputs/causal46_joined/acoustic_bootstrap/a_bootstrap.parquet",
-        a_per_site       = "outputs/causal46_joined/acoustic_bootstrap/a_per_site.parquet",
-        a_per_window     = "outputs/causal46_joined/acoustic_bootstrap/a_per_window.parquet",
-        a_bootstrap_all  = "outputs/causal46_joined/acoustic_bootstrap/a_bootstrap_all.parquet",
-        a_per_site_all   = "outputs/causal46_joined/acoustic_bootstrap/a_per_site_all.parquet",
-        a_per_window_all = "outputs/causal46_joined/acoustic_bootstrap/a_per_window_all.parquet",
+        a_bootstrap          = "outputs/causal46_joined/acoustic_bootstrap/a_bootstrap.parquet",
+        a_per_site           = "outputs/causal46_joined/acoustic_bootstrap/a_per_site.parquet",
+        a_per_window         = "outputs/causal46_joined/acoustic_bootstrap/a_per_window.parquet",
+        a_bootstrap_all      = "outputs/causal46_joined/acoustic_bootstrap/a_bootstrap_all.parquet",
+        a_per_site_all       = "outputs/causal46_joined/acoustic_bootstrap/a_per_site_all.parquet",
+        a_per_window_all     = "outputs/causal46_joined/acoustic_bootstrap/a_per_window_all.parquet",
+        a_per_window_full    = "outputs/causal46_joined/acoustic_bootstrap/a_per_window_full.parquet",
+        a_per_window_full_all= "outputs/causal46_joined/acoustic_bootstrap/a_per_window_full_all.parquet",
 
     run:
         outdir = Path(output.notebook).parent

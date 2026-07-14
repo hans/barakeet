@@ -99,6 +99,7 @@ window_size = 10
 stride = 10
 ac_p_value_threshold = 0.001
 a_per_window_path = "outputs_prod/causal46_joined/acoustic_bootstrap/a_per_window.parquet"
+a_per_window_full_path = "outputs_prod/causal46_joined/acoustic_bootstrap/a_per_window_full.parquet"
 
 # %%
 REPO = Path(".").resolve()
@@ -1217,7 +1218,7 @@ if b4_per_cell.height:
         (r["subject"], int(r["electrode_idx"]), r["phoneme_pair"]): r
         for r in b4_per_pair.iter_rows(named=True)
     } if b4_per_pair.height else None
-    _apw_path = Path(a_per_window_path)
+    _apw_path = Path(a_per_window_full_path) if a_per_window_full_path else Path(a_per_window_path)
     _a_per_window = pl.read_parquet(_apw_path) if _apw_path.exists() else pl.DataFrame()
     acoustic_site_sig_windows = {}
     if _a_per_window.height:
