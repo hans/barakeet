@@ -55,6 +55,7 @@ import pandas as pd
 import polars as pl
 
 from src.data import add_metadata_features
+from src.stimuli import OFFSET_DICT, PHONEME_PAIR_TO_WORD_ENDS
 from src.viz_paper import epoch_sfreq, epoch_tmin
 
 sys.path.insert(0, str(Path(".").resolve() / "notebooks" / "causal46_joined"))
@@ -71,6 +72,19 @@ SITE_KEYS = ["subject", "electrode_idx", "phoneme_pair"]
 # t=0 in sample space
 SAMPLE_T0 = int(round((0.0 - epoch_tmin) * epoch_sfreq))
 print(f"SAMPLE_T0={SAMPLE_T0}  window_size={window_size}  stride={stride}  R={R}")
+
+# Full-timecourse upper bound per phoneme pair (mirrors t_tests.py PAIR_SMAX).
+# Used for the second bootstrap that backs full-trial significance bars on ax_top.
+WORD_END_TAIL_SAMPLES = 20  # +200 ms tail past word offset (sfreq=100 Hz)
+_WE_SMAX = {
+    we: int(round((OFFSET_DICT[we] - epoch_tmin) * epoch_sfreq)) + WORD_END_TAIL_SAMPLES
+    for we in OFFSET_DICT
+}
+PAIR_SMAX = {
+    pp: max(_WE_SMAX[we] for we in wes)
+    for pp, wes in PHONEME_PAIR_TO_WORD_ENDS.items()
+}
+print(f"PAIR_SMAX (samples): {PAIR_SMAX}")
 
 # %% [markdown]
 # ## Load inputs
@@ -114,6 +128,7 @@ print(f"all annotated sites: {all_sites.height}; type1 sites: {type1_sites.heigh
 
 # %%
 boot_rows: list[dict] = []
+boot_rows_full: list[dict] = []
 per_site_rows: list[dict] = []
 n_skipped_no_peaks = 0
 n_skipped_underpowered = 0
@@ -181,7 +196,34 @@ for subject, subj_sites in all_sites.to_pandas().groupby("subject"):
             "n_hi": n_hi,
             "n_per_class": min(n_lo, n_hi),
         })
-        print(f"  e{eidx} {pp}: n_lo={n_lo} n_hi={n_hi}  {len(rows)} rows")
+
+        # Second pass: full-timecourse bootstrap for star-plot ax_top bars.
+        # Same seed, same trial draws — windows within [SAMPLE_T0, phon_smax]
+        # are identical; additional windows cover [phon_smax, PAIR_SMAX[pp]].
+        result_full = bootstrap_A_site(
+            hga, md_pp,
+            search_smin=SAMPLE_T0,
+            search_smax=PAIR_SMAX[pp],
+            window_size=window_size,
+            stride=stride,
+            R=R,
+            min_n=min_n,
+        )
+        if result_full is not None:
+            rows_full, _, _ = result_full
+            for r in rows_full:
+                boot_rows_full.append({
+                    "subject": subject,
+                    "electrode_idx": eidx,
+                    "phoneme_pair": pp,
+                    "replicate": r["replicate"],
+                    "smin": r["smin"],
+                    "smax": r["smax"],
+                    "mean_diff_raw": r["mean_diff_raw"],
+                    "n_per_class": r["n_per_class"],
+                })
+
+        print(f"  e{eidx} {pp}: n_lo={n_lo} n_hi={n_hi}  {len(rows)} rows (early)  {len(rows_full) if result_full else 0} rows (full)")
 
 print(
     f"\nDone: {len(per_site_rows)} sites processed, "
@@ -199,7 +241,12 @@ A_SITE_COLS = ["subject", "electrode_idx", "phoneme_pair",
                "phon_smin", "phon_smax", "n_lo", "n_hi", "n_per_class"]
 
 if boot_rows:
-    a_bootstrap = pl.DataFrame(boot_rows)
+    a_bootstrap      = pl.DataFrame(boot_rows)
+    a_bootstrap_full = pl.DataFrame(boot_rows_full) if boot_rows_full else pl.DataFrame(
+        {c: pl.Series([], dtype=pl.Utf8) for c in A_BOOT_COLS}
+    ).cast({"electrode_idx": pl.Int64, "replicate": pl.Int64,
+            "smin": pl.Int64, "smax": pl.Int64,
+            "mean_diff_raw": pl.Float64, "n_per_class": pl.Int64})
     a_per_site  = pl.DataFrame(per_site_rows)
 else:
     a_bootstrap = pl.DataFrame(
@@ -207,6 +254,7 @@ else:
     ).cast({"electrode_idx": pl.Int64, "replicate": pl.Int64,
             "smin": pl.Int64, "smax": pl.Int64,
             "mean_diff_raw": pl.Float64, "n_per_class": pl.Int64})
+    a_bootstrap_full = a_bootstrap.clone()
     a_per_site = pl.DataFrame(
         {c: pl.Series([], dtype=pl.Utf8) for c in A_SITE_COLS}
     ).cast({"electrode_idx": pl.Int64,
@@ -215,19 +263,28 @@ else:
 
 # Per-window CI summary for star-plot significance bars on ax_top.
 # mean_diff_aligned = mean_diff_raw (step6 > step1 polarity is fixed).
-a_boot_aligned = a_bootstrap.with_columns(
-    pl.col("mean_diff_raw").alias("mean_diff_aligned"),
-    (pl.col("smin") / epoch_sfreq + epoch_tmin).alias("tmin"),
-    (pl.col("smax") / epoch_sfreq + epoch_tmin).alias("tmax"),
-    pl.lit(None).cast(pl.Float64).alias("acoustic_peak_auc"),
-)
-a_per_window = per_window_summary(a_boot_aligned, SITE_KEYS)
+def _boot_to_per_window(df: pl.DataFrame) -> pl.DataFrame:
+    aligned = df.with_columns(
+        pl.col("mean_diff_raw").alias("mean_diff_aligned"),
+        (pl.col("smin") / epoch_sfreq + epoch_tmin).alias("tmin"),
+        (pl.col("smax") / epoch_sfreq + epoch_tmin).alias("tmax"),
+        pl.lit(None).cast(pl.Float64).alias("acoustic_peak_auc"),
+    )
+    return per_window_summary(aligned, SITE_KEYS)
 
-# Full (all-site) outputs — consumed by contrast_plot.py to orient every
-# acoustic site by its endpoint sign.
+
+a_per_window      = _boot_to_per_window(a_bootstrap)
+a_per_window_full_df = _boot_to_per_window(a_bootstrap_full)
+
+# Full (all-site) early-window outputs — consumed by contrast_plot.py to orient
+# every acoustic site by its endpoint sign (must not include late windows).
 a_bootstrap.write_parquet(OUT_DIR / "a_bootstrap_all.parquet")
 a_per_site.write_parquet(OUT_DIR / "a_per_site_all.parquet")
 a_per_window.write_parquet(OUT_DIR / "a_per_window_all.parquet")
+
+# Full-timecourse outputs — star-plot ax_top significance bars across full trial.
+a_per_window_full_df.write_parquet(OUT_DIR / "a_per_window_full_all.parquet")
+_type1_subset(a_per_window_full_df).write_parquet(OUT_DIR / "a_per_window_full.parquet")
 
 
 # Type1 subset under the original names, preserving existing type1-only
@@ -244,8 +301,9 @@ a_bootstrap_t1.write_parquet(OUT_DIR / "a_bootstrap.parquet")
 a_per_site_t1.write_parquet(OUT_DIR / "a_per_site.parquet")
 a_per_window_t1.write_parquet(OUT_DIR / "a_per_window.parquet")
 
-print(f"a_bootstrap:  {a_bootstrap.height:,} rows (all)  {a_bootstrap_t1.height:,} rows (type1)")
-print(f"a_per_site:   {a_per_site.height} rows (all)  {a_per_site_t1.height} rows (type1)")
-print(f"a_per_window: {a_per_window.height} rows (all)  {a_per_window_t1.height} rows (type1)")
+print(f"a_bootstrap:       {a_bootstrap.height:,} rows (all)  {a_bootstrap_t1.height:,} rows (type1)")
+print(f"a_per_site:        {a_per_site.height} rows (all)  {a_per_site_t1.height} rows (type1)")
+print(f"a_per_window:      {a_per_window.height} rows (all)  {a_per_window_t1.height} rows (type1)")
+print(f"a_per_window_full: {a_per_window_full_df.height} rows (all)  {_type1_subset(a_per_window_full_df).height} rows (type1)")
 if a_per_site.height > 0:
     print(a_per_site)
