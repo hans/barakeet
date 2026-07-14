@@ -1106,6 +1106,7 @@ def matched_n_star_plot_paper(
     acoustic_peak_auc=None,
     R_plot=200,
     sig_windows=None,
+    top_sig_windows=None,
     mean_diff_arrays=None,
     xlim=None,
     resampled_cmap: Optional[dict[int, str]] = None,
@@ -1130,8 +1131,11 @@ def matched_n_star_plot_paper(
     ci_low, ci_high : float
         Percentile bounds for the CI bands (default 2.5 / 97.5).
     sig_windows : list of (tmin, tmax) float tuples, optional
-        Windows where the bootstrap CI excludes zero. Drawn as gray bars at
-        the top of ax_bot.
+        Windows where the behavioral bootstrap CI excludes zero. Drawn as
+        gray bars at the top of ax_bot.
+    top_sig_windows : list of (tmin, tmax) float tuples, optional
+        Windows where the full-timecourse acoustic bootstrap CI excludes zero.
+        Drawn as gray bars at the top of ax_top.
     mean_diff_arrays : dict, optional
         Pre-computed bootstrap mean-diff overlay for ax_bot. Expected keys:
         ``tcenter``, ``mean``, ``ci_lo``, ``ci_hi`` (all float arrays).
@@ -1298,6 +1302,16 @@ def matched_n_star_plot_paper(
         bar_y = ymin + (ymax - ymin) * 0.95
         for tmin_s, tmax_s in sig_windows:
             ax_bot.barh(y=bar_y, width=tmax_s - tmin_s, left=tmin_s,
+                        height=bar_h, color="gray", alpha=0.6,
+                        edgecolor="none", zorder=5)
+
+    # Significance bars on ax_top: full-timecourse acoustic bootstrap.
+    if top_sig_windows:
+        ymin, ymax = ax_top.get_ylim()
+        bar_h = (ymax - ymin) * 0.04
+        bar_y = ymin + (ymax - ymin) * 0.95
+        for tmin_s, tmax_s in top_sig_windows:
+            ax_top.barh(y=bar_y, width=tmax_s - tmin_s, left=tmin_s,
                         height=bar_h, color="gray", alpha=0.6,
                         edgecolor="none", zorder=5)
 

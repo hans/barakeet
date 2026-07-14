@@ -240,6 +240,11 @@ A_BOOT_COLS = ["subject", "electrode_idx", "phoneme_pair",
 A_SITE_COLS = ["subject", "electrode_idx", "phoneme_pair",
                "phon_smin", "phon_smax", "n_lo", "n_hi", "n_per_class"]
 
+
+def _type1_subset(df: pl.DataFrame) -> pl.DataFrame:
+    return df.join(type1_sites, on=SITE_KEYS, how="semi") if df.height else df
+
+
 if boot_rows:
     a_bootstrap      = pl.DataFrame(boot_rows)
     a_bootstrap_full = pl.DataFrame(boot_rows_full) if boot_rows_full else pl.DataFrame(
@@ -290,10 +295,6 @@ _type1_subset(a_per_window_full_df).write_parquet(OUT_DIR / "a_per_window_full.p
 # Type1 subset under the original names, preserving existing type1-only
 # consumers. Per-site RNG is independent of the site loop, so these rows are
 # content-identical to a type1-only run.
-def _type1_subset(df: pl.DataFrame) -> pl.DataFrame:
-    return df.join(type1_sites, on=SITE_KEYS, how="semi") if df.height else df
-
-
 a_bootstrap_t1 = _type1_subset(a_bootstrap)
 a_per_site_t1 = _type1_subset(a_per_site)
 a_per_window_t1 = _type1_subset(a_per_window)
