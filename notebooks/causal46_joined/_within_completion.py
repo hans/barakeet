@@ -69,6 +69,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
+from textgrid import textgrid
 
 from src.stimuli import OFFSET_DICT
 from src.viz_paper import add_textgrid, epoch_sfreq, epoch_tmin
@@ -1100,7 +1101,7 @@ def matched_n_star_plot_paper(
     phon_smax=None,
     phon_search_smin=None,
     phon_search_smax=None,
-    textgrid_dir="textgrids",
+    textgrid_dir=None,
     figsize=(4.5, 4.5),
     acoustic_peak_auc=None,
     R_plot=200,
@@ -1273,17 +1274,19 @@ def matched_n_star_plot_paper(
 
     # ax_bot.legend(fontsize=7, loc=bottom_legend_loc, framealpha=0.7)
 
-    # textgrid_file = next(iter(
-    #     Path(textgrid_dir).glob(f"*_{word_end}_{phoneme_pair}_*.TextGrid")
-    # ))
-    # for ax in (ax_top, ax_bot):
-    #     add_textgrid(
-    #         ax,
-    #         textgrid_dir=textgrid_dir,
-    #         textgrid_file=textgrid_file.name,
-    #         vline_extent=1.0,
-    #         tmax=xlim,
-    #     )
+    if textgrid_dir is not None:
+        textgrid_file = next(iter(
+            Path(textgrid_dir).glob(f"*_{word_end}_{phoneme_pair}_*.TextGrid")
+        ))
+        # Plot extent of first sound on unambiguous panel
+        tg = textgrid.TextGrid.fromFile(textgrid_file)
+        assert tg.getNames() == ["phonemes"]
+        first_sound = next((interval for interval in tg.tiers[0].intervals
+                            if interval.mark is not None
+                            and interval.mark.strip()), None)
+        if first_sound is not None:
+            ax_top.axvspan(0, first_sound.maxTime,
+                        color="k", alpha=0.1)
 
     ax_top.set_xlim(-0.05, xlim)
     ax_bot.set_xlim(-0.05, xlim)

@@ -431,7 +431,7 @@ for cat, cells in tqdm(cells_per_category.items()):
           + ("  [acoustic-aligned]" if cat in signflip_categories else ""))
 
 # %%
-fig_bh, ax_bh = plt.subplots(figsize=(3, 2))
+fig_bh, ax_bh = plt.subplots(figsize=(3.5, 2))
 ax_bh.axvline(0, color="k", linestyle="--", alpha=0.5)
 ax_bh.axhline(0, color="k", linestyle="--", alpha=0.5)
 
@@ -446,7 +446,11 @@ for i, cat in enumerate(CAT_PLOT_ORDER):
         continue
     color = _COLOR_CYCLE[i % len(_COLOR_CYCLE)]
     is_signflip = cat in signflip_categories
-    label = cat.replace(" + ", "\n+ ") + (" (acoustic-aligned)" if is_signflip else "")
+    label = cat.replace(" + ", "\n+ ")
+
+    # obs_mean to rolling mean
+    obs_mean = pd.Series(obs_mean).rolling(window=10, center=True, min_periods=1).mean().to_numpy()
+
     ax_bh.plot(ep_times, obs_mean, color=color, lw=2, label=label)
 
     if obs_sem is not None:
@@ -455,14 +459,6 @@ for i, cat in enumerate(CAT_PLOT_ORDER):
 
     null_lo = np.percentile(null_mat, 2.5, axis=0)
     null_hi = np.percentile(null_mat, 97.5, axis=0)
-
-    # The acoustic-only category is oriented by an independent (endpoint) axis, so
-    # its sign-flip null is centered at zero: draw the band explicitly so
-    # "observed inside band = no effect" is visible. (The windowed categories'
-    # nulls sit on a rectification floor and are summarised by the sig-bars.)
-    if is_signflip:
-        ax_bh.fill_between(ep_times, null_lo, null_hi, color=color,
-                           alpha=0.15, lw=0, zorder=1)
 
     # Mark timepoints where observed exits the null band (two-sided).
     sig_mask = (obs_mean > null_hi) | (obs_mean < null_lo)
@@ -492,14 +488,14 @@ for i, cat in enumerate(CAT_PLOT_ORDER):
         # ax_bh.scatter(ep_times[sig_mask], sig_y[sig_mask], color=color,
         #               s=6, zorder=5, linewidths=0)
 
-ax_bh.legend(loc="lower left", bbox_to_anchor=(-0.8, -0.2))
+# ax_bh.legend(loc="lower left", bbox_to_anchor=(-0.8, -0.2))
 ax_bh.set_xlim(-0.05, 0.8)
 ax_bh.set_yticks([-0.2, 0.0, 0.2, 0.4, 0.6])
-ax_bh.set_xlabel("Time (s)")
-ax_bh.set_ylabel("HGA contrast by\nperceptual state\n($z$)", rotation=0, labelpad=10, ha="right")
+ax_bh.set_xlabel("Time from word onset (s)")
+ax_bh.set_ylabel("HGA contrast\nby perceptual\nstate ($z$)", rotation=0, labelpad=0, ha="right")
 sns.despine(ax=ax_bh)
 
-fig_bh.savefig(OUT_DIR / "behavioral_null_band.pdf", bbox_inches="tight")
+fig_bh.savefig(OUT_DIR / "behavioral_null_band.pdf", bbox_inches="tight", transparent=True)
 plt.show()
 
 
