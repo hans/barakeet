@@ -433,6 +433,128 @@ with PdfPages(str(OUT_DIR / "diagnostics.pdf")) as pdf:
             pdf.savefig(fig)
             plt.close(fig)
 
+    # ── Plot 7: per-FDR-sig site null overlay ─────────────────────────────
+    # For each one-tailed FDR-significant site: observed π vs its own null.
+    if len(valid_df) > 0 and null_arrays:
+        sig_sites = valid_df[valid_df.get("fdr_sig_one_tailed", pd.Series(False, index=valid_df.index)).astype(bool)]
+        if len(sig_sites) > 0:
+            ncols = min(3, len(sig_sites))
+            nrows = int(np.ceil(len(sig_sites) / ncols))
+            fig, axes_grid = plt.subplots(nrows, ncols,
+                                          figsize=(5 * ncols, 3.5 * nrows),
+                                          squeeze=False)
+            fig.suptitle("FDR-significant sites: observed π vs per-site null", fontsize=11)
+            for idx, (_, row) in enumerate(sig_sites.iterrows()):
+                ax = axes_grid[idx // ncols][idx % ncols]
+                site_key = f"{row.subject}_{row.electrode_idx}_{row.phoneme_pair}"
+                null = null_arrays.get(site_key)
+                if null is not None:
+                    ax.hist(null, bins=60, density=True, color="gray", alpha=0.6,
+                            label="permutation null")
+                obs = row["pi_pooled"]
+                ax.axvline(obs, color="firebrick", lw=2, label=f"π={obs:.3f}")
+                ax.axvline(0, color="k", lw=0.7, ls="--")
+                p_label = f"p={row['p_one_tailed']:.4f}, q={row['q_one_tailed']:.3f}"
+                ax.set_title(f"{row.subject} e{int(row.electrode_idx)} {row.phoneme_pair}\n{p_label}",
+                             fontsize=9)
+                ax.set_xlabel("π")
+                ax.legend(fontsize=7)
+            # blank unused axes
+            for idx in range(len(sig_sites), nrows * ncols):
+                axes_grid[idx // ncols][idx % ncols].set_visible(False)
+            plt.tight_layout()
+            pdf.savefig(fig)
+            plt.close(fig)
+
+    # ── Plot 8: π by phoneme_pair ─────────────────────────────────────────
+    if len(valid_df) > 0:
+        pairs = sorted(valid_df["phoneme_pair"].dropna().unique())
+        fig, ax = plt.subplots(figsize=(max(5, len(pairs) * 2), 4))
+        pair_order = sorted(pairs)
+        jitter = 0.15
+        for i, pp in enumerate(pair_order):
+            sub = valid_df[valid_df["phoneme_pair"] == pp]["pi_pooled"].dropna()
+            x = np.full(len(sub), i) + np.random.default_rng(7).uniform(-jitter, jitter, len(sub))
+            sig_mask = valid_df.loc[valid_df["phoneme_pair"] == pp, "fdr_sig_one_tailed"].fillna(False)
+            colors_pp = ["firebrick" if s else "steelblue"
+                         for s in sig_mask.values]
+            ax.scatter(x, sub.values, s=40, alpha=0.7, c=colors_pp, zorder=3)
+            ax.plot([i - 0.3, i + 0.3], [sub.median(), sub.median()],
+                    color="k", lw=1.5, zorder=4)
+            n_sig = int(valid_df.loc[valid_df["phoneme_pair"] == pp, "fdr_sig_one_tailed"].fillna(False).sum())
+            ax.annotate(f"n={len(sub)}, sig={n_sig}", xy=(i, sub.max() if len(sub) else 0),
+                        xytext=(0, 6), textcoords="offset points",
+                        ha="center", fontsize=8)
+        ax.set_xticks(range(len(pair_order)))
+        ax.set_xticklabels(pair_order)
+        ax.axhline(0, color="k", lw=0.8, ls="--")
+        ax.set_xlabel("phoneme pair")
+        ax.set_ylabel("π (pooled)")
+        ax.set_title("π by phoneme pair  (red = one-tailed FDR sig,  bar = median)")
+        plt.tight_layout()
+        pdf.savefig(fig)
+        plt.close(fig)
+
+    # ── Plot 9: π by site_type ────────────────────────────────────────────
+    if test3_df is not None and len(test3_df) > 0:
+        type_order = [t for t in [
+            "type1_acoustic_only", "type2_early_perceptual",
+            "type3_asymmetric", "type4_early_perceptual_mirrored",
+            "type5_behav_only", "complex", "grab_bag", "unknown",
+        ] if t in test3_df["site_type"].values]
+        fig, ax = plt.subplots(figsize=(max(6, len(type_order) * 1.5), 4))
+        rng_jit = np.random.default_rng(13)
+        for i, st in enumerate(type_order):
+            sub = test3_df[test3_df["site_type"] == st]
+            pi_v = sub["pi_pooled"].dropna().values
+            x = np.full(len(pi_v), i) + rng_jit.uniform(-0.2, 0.2, len(pi_v))
+            fdr_col = "fdr_sig_one_tailed"
+            sig_col = [
+                "firebrick" if (fdr_col in sub.columns and bool(row[fdr_col]))
+                else "steelblue"
+                for _, row in sub.iterrows()
+            ]
+            ax.scatter(x, pi_v, s=35, alpha=0.75, c=sig_col, zorder=3)
+            if len(pi_v):
+                ax.plot([i - 0.3, i + 0.3], [np.median(pi_v), np.median(pi_v)],
+                        color="k", lw=1.5, zorder=4)
+        ax.set_xticks(range(len(type_order)))
+        ax.set_xticklabels(type_order, rotation=30, ha="right", fontsize=8)
+        ax.axhline(0, color="k", lw=0.8, ls="--")
+        ax.set_ylabel("π (pooled)")
+        ax.set_title("π by site type  (red = one-tailed FDR sig,  bar = median)")
+        plt.tight_layout()
+        pdf.savefig(fig)
+        plt.close(fig)
+
+    # ── Plot 10: qualifying trial count histogram ─────────────────────────
+    if len(valid_df) > 0:
+        n_trials_col = (valid_df["n_we0_total"].fillna(0) + valid_df["n_we1_total"].fillna(0))
+        sig_mask_trials = valid_df.get("fdr_sig_one_tailed", pd.Series(False, index=valid_df.index)).fillna(False)
+        fig, axes_tc = plt.subplots(1, 2, figsize=(10, 4))
+        fig.suptitle("Qualifying perceptual trial count per site")
+
+        ax = axes_tc[0]
+        ax.hist(n_trials_col.values, bins=20, color="steelblue", alpha=0.7, edgecolor="white")
+        for v in n_trials_col[sig_mask_trials].values:
+            ax.axvline(v, color="firebrick", lw=1.2, alpha=0.8)
+        ax.set_xlabel("n_we0_total + n_we1_total")
+        ax.set_ylabel("count")
+        ax.set_title("histogram (red lines = FDR-sig sites)")
+
+        ax = axes_tc[1]
+        ax.scatter(n_trials_col.values,
+                   valid_df["pi_pooled"].values,
+                   c=["firebrick" if s else "steelblue" for s in sig_mask_trials],
+                   s=35, alpha=0.7)
+        ax.axhline(0, color="k", lw=0.8, ls="--")
+        ax.set_xlabel("qualifying trial count")
+        ax.set_ylabel("π (pooled)")
+        ax.set_title("π vs trial count  (red = FDR-sig)")
+        plt.tight_layout()
+        pdf.savefig(fig)
+        plt.close(fig)
+
 print("Saved diagnostics.pdf")
 
 # %% [markdown]
