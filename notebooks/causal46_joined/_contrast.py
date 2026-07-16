@@ -293,6 +293,7 @@ def _sign_flip_null(
     *,
     n_perm: int,
     seed: int,
+    return_all=False
 ) -> tuple:
     """Sign-flip permutation null for pre-oriented per-cell trajectories.
 
@@ -318,6 +319,8 @@ def _sign_flip_null(
     n_cells : int
     """
     if not cell_trajectories:
+        if return_all:
+            return None, None, None, 0, [], []
         return None, None, None, 0
     matrix = np.stack(cell_trajectories)  # (n_cells, n_times)
     n_cells, n_times = matrix.shape
@@ -328,6 +331,8 @@ def _sign_flip_null(
     for p in range(n_perm):
         signs = rng.choice(np.array([-1.0, 1.0]), size=n_cells)
         null_matrix[p] = (signs[:, None] * matrix).mean(0)
+    if return_all:
+        return observed_mean, observed_sem, null_matrix, n_cells, matrix, np.ones(n_cells)
     return observed_mean, observed_sem, null_matrix, n_cells
 
 
@@ -343,6 +348,7 @@ def oriented_group_band(
     bootstrap_r: int = 1000,
     bootstrap_seed: int = 42,
     candidate_steps: Sequence[int] = (2, 3, 4, 5),
+    return_all=False,
 ):
     """Observed oriented grand-mean trajectory and matched-permutation null band.
 
@@ -393,13 +399,14 @@ def oriented_group_band(
         Number of cells that contributed.
     """
     if null_mode == "sign_flip":
-        return _sign_flip_null(cell_trajectories or [], n_perm=n_perm, seed=seed)
+        return _sign_flip_null(cell_trajectories or [], n_perm=n_perm, seed=seed, return_all=return_all)
     if null_mode != "behavior_permute":
         raise ValueError(f"unknown null_mode {null_mode!r}")
 
     # --- behavior_permute path ---
     kw_prep = dict(min_class_k=min_class_k, candidate_steps=candidate_steps)
     n_times: Optional[int] = None
+    obs_signs = []
     obs_traces = []
     null_matrix: Optional[np.ndarray] = None
     n_valid = 0
@@ -434,6 +441,8 @@ def oriented_group_band(
             null_matrix = np.zeros((n_perm, n_times))
 
         obs_sign = float(np.sign(obs_diff[smin:smax].mean()) or 1.0)
+
+        obs_signs.append(obs_sign)
         obs_traces.append(obs_sign * obs_diff)
         n_valid += 1
 
@@ -451,11 +460,16 @@ def oriented_group_band(
             null_matrix[p] += perm_sign * perm_diff
 
     if n_valid == 0:
+        if return_all:
+            return None, None, None, 0, [], []
         return None, None, None, 0
 
     observed_mean = np.mean(obs_traces, axis=0)
     observed_sem = np.std(obs_traces, axis=0, ddof=1) / np.sqrt(n_valid) if n_valid > 1 else None
     null_matrix = null_matrix / n_valid
+
+    if return_all:
+        return observed_mean, observed_sem, null_matrix, n_valid, obs_traces, obs_signs
     return observed_mean, observed_sem, null_matrix, n_valid
 
 

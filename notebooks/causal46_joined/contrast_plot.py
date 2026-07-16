@@ -391,6 +391,7 @@ for (subject, electrode_idx, phoneme_pair, word_end), row in behavior_plot_guide
 # perceptual effect is present.
 ep_times = next(iter(epochs_dict.values())).times
 behav_band_results = {}
+behav_band_results_orient_by_endpoint = {}
 signflip_categories = set()   # acoustic-aligned sign-flip null (zero-centered band)
 for cat, cells in tqdm(cells_per_category.items()):
     if any(cell["smin"] is None for cell in cells):
@@ -413,20 +414,48 @@ for cat, cells in tqdm(cells_per_category.items()):
             if mean_diff is None:
                 continue
             oriented.append(-float(endpoint_sign.loc[key]) * mean_diff)
-        obs_mean, obs_sem, null_mat, n_valid = oriented_group_band(
+        obs_mean, obs_sem, null_mat, n_valid, obs_traces, obs_signs = oriented_group_band(
             null_mode="sign_flip", cell_trajectories=oriented,
             n_perm=n_perm, seed=null_seed,
+            return_all=True,
         )
+
+        endpoint_obs_mean, endpoint_obs_sem, endpoint_null_mat, endpoint_n_valid, endpoint_obs_traces, endpoint_obs_signs = \
+            obs_mean, obs_sem, null_mat, n_valid, obs_traces, obs_signs
+
         signflip_categories.add(cat)
     else:
-        obs_mean, obs_sem, null_mat, n_valid = oriented_group_band(
+        obs_mean, obs_sem, null_mat, n_valid, obs_traces, obs_signs = oriented_group_band(
             cells, epochs_dict,
             n_perm=n_perm, seed=null_seed,
             min_class_k=min_class_k,
             bootstrap_r=bootstrap_r,
             bootstrap_seed=bootstrap_seed,
+            return_all=True,
         )
-    behav_band_results[cat] = (obs_mean, obs_sem, null_mat, n_valid)
+
+        for cell in cells:
+            key = (cell["subject"], cell["electrode_idx"], cell["phoneme_pair"])
+            if key not in endpoint_sign.index:
+                continue
+            ep = epochs_dict[cell["subject"]]
+            ep_pp = ep[ep.metadata["phoneme_pair"].values == cell["phoneme_pair"]]
+            mean_diff, status = behavioral_bootstrap_meandiff(
+                ep_pp, cell["electrode_idx"], cell["word_end"],
+                min_class_k=min_class_k, bootstrap_r=bootstrap_r,
+                bootstrap_seed=bootstrap_seed,
+            )
+            if mean_diff is None:
+                continue
+            oriented.append(-float(endpoint_sign.loc[key]) * mean_diff)
+        endpoint_obs_mean, endpoint_obs_sem, endpoint_null_mat, endpoint_n_valid, endpoint_obs_traces, endpoint_obs_signs = oriented_group_band(
+            null_mode="sign_flip", cell_trajectories=oriented,
+            n_perm=n_perm, seed=null_seed,
+            return_all=True,
+        )
+
+    behav_band_results[cat] = (obs_mean, obs_sem, null_mat, n_valid, obs_traces, obs_signs)
+    behav_band_results_orient_by_endpoint[cat] = (endpoint_obs_mean, endpoint_obs_sem, endpoint_null_mat, endpoint_n_valid, endpoint_obs_traces, endpoint_obs_signs)
     print(f"{cat}: {n_valid} valid cells"
           + ("  [acoustic-aligned]" if cat in signflip_categories else ""))
 
@@ -440,7 +469,7 @@ for i, cat in enumerate(CAT_PLOT_ORDER):
     if cat not in behav_band_results:
         print(f"Warning: {cat} not found in behav_band_results")
         continue
-    obs_mean, obs_sem, null_mat, n_valid = behav_band_results[cat]
+    obs_mean, obs_sem, null_mat, n_valid, obs_traces, obs_signs = behav_band_results[cat]
 
     if obs_mean is None:
         continue
@@ -498,6 +527,77 @@ sns.despine(ax=ax_bh)
 fig_bh.savefig(OUT_DIR / "behavioral_null_band.pdf", bbox_inches="tight", transparent=True)
 plt.show()
 
+
+# %%
+# Try plotting aligned by acoustic endpoint
+# TODO need to debug
+
+fig_bh, ax_bh = plt.subplots(figsize=(3.5, 2))
+ax_bh.axvline(0, color="k", linestyle="--", alpha=0.5)
+ax_bh.axhline(0, color="k", linestyle="--", alpha=0.5)
+
+_COLOR_CYCLE = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+for i, cat in enumerate(CAT_PLOT_ORDER):
+    if cat not in behav_band_results:
+        print(f"Warning: {cat} not found in behav_band_results")
+        continue
+    obs_mean, obs_sem, null_mat, n_valid, obs_traces, obs_signs = behav_band_results_orient_by_endpoint[cat]
+
+    if obs_mean is None:
+        continue
+    color = _COLOR_CYCLE[i % len(_COLOR_CYCLE)]
+    is_signflip = cat in signflip_categories
+    label = cat.replace(" + ", "\n+ ")
+
+    # obs_mean to rolling mean
+    obs_mean = pd.Series(obs_mean).rolling(window=10, center=True, min_periods=1).mean().to_numpy()
+
+    ax_bh.plot(ep_times, obs_mean, color=color, lw=2, label=label)
+
+    if obs_sem is not None:
+        ax_bh.fill_between(ep_times, obs_mean - obs_sem, obs_mean + obs_sem,
+                           color=color, alpha=0.3, lw=0)
+
+    null_lo = np.percentile(null_mat, 2.5, axis=0)
+    null_hi = np.percentile(null_mat, 97.5, axis=0)
+
+    # Mark timepoints where observed exits the null band (two-sided).
+    sig_mask = (obs_mean > null_hi) | (obs_mean < null_lo)
+    if sig_mask.any():
+        sig_y = np.where(sig_mask, obs_mean, np.nan)
+        sig_y_change = np.diff((~np.isnan(sig_y)).astype(int))
+
+        # Find continuous runs of significant points
+        run_starts = np.where(sig_y_change == 1)[0] + 1
+        run_ends = np.where(sig_y_change == -1)[0] + 1
+
+        if len(run_starts) > len(run_ends):
+            run_ends = np.append(run_ends, len(sig_y))
+        
+        ymin, ymax = ax_bh.get_ylim()
+        bar_h = 0.02
+        bar_y = 0.98 - i * bar_h * 1.5
+        from matplotlib.transforms import blended_transform_factory
+        for start, end in zip(run_starts, run_ends):
+            start_time, end_time = ep_times[[start, end - 1]]
+            ax_bh.barh(y=bar_y, width=end_time - start_time,
+                       left=start_time, height=bar_h,
+                       color=color, alpha=0.6,
+                       edgecolor="none", zorder=5,
+                       transform=blended_transform_factory(ax_bh.transData, ax_bh.transAxes))
+
+        # ax_bh.scatter(ep_times[sig_mask], sig_y[sig_mask], color=color,
+        #               s=6, zorder=5, linewidths=0)
+
+# ax_bh.legend(loc="lower left", bbox_to_anchor=(-0.8, -0.2))
+ax_bh.set_xlim(-0.05, 0.8)
+ax_bh.set_yticks([-0.2, 0.0, 0.2, 0.4, 0.6])
+ax_bh.set_xlabel("Time from word onset (s)")
+ax_bh.set_ylabel("HGA contrast\nby perceptual\nstate ($z$)", rotation=0, labelpad=0, ha="right")
+sns.despine(ax=ax_bh)
+
+# fig_bh.savefig(OUT_DIR / "behavioral_null_band.pdf", bbox_inches="tight", transparent=True)
+plt.show()
 
 # %% [markdown]
 # ## Plot contrast by acoustics
@@ -593,13 +693,14 @@ for cat, contrasts in acoustic_contrasts.items():
 xs = b4_by_acoustic_diffs.columns.get_level_values("smin").values / epoch_sfreq + epoch_tmin + window_size / 2
 acoustic_band_results = {}
 for cat, contrasts in acoustic_contrasts.items():
-    obs_mean, obs_sem, null_mat, n_valid = oriented_group_band(
+    obs_mean, obs_sem, null_mat, n_valid, all_traces, all_signs = oriented_group_band(
         null_mode="sign_flip",
         cell_trajectories=contrasts,
         n_perm=n_perm,
         seed=null_seed,
+        return_all=True,
     )
-    acoustic_band_results[cat] = (obs_mean, null_mat, n_valid)
+    acoustic_band_results[cat] = (obs_mean, obs_sem, null_mat, n_valid, all_traces, all_signs)
     print(f"{cat}: {n_valid} valid cells")
 
 # %%
@@ -611,7 +712,7 @@ ax.axhline(0, color="k", linestyle="--", alpha=0.5)
 for i, cat in enumerate(CAT_PLOT_ORDER):
     if cat not in acoustic_band_results:
         continue
-    obs_mean, null_mat, n_valid = acoustic_band_results[cat]
+    obs_mean, obs_sem, null_mat, n_valid, _, _ = acoustic_band_results[cat]
     if obs_mean is None:
         continue
     color = _COLOR_CYCLE[i % len(_COLOR_CYCLE)]
@@ -619,14 +720,39 @@ for i, cat in enumerate(CAT_PLOT_ORDER):
     ax.plot(xs, obs_mean, color=color, lw=1.5,
             label=f"{cat.replace(' + ', chr(10) + '+ ')} (n={n_valid})")
 
+    ax.fill_between(xs, obs_mean - obs_sem, obs_mean + obs_sem,
+                    color=color, alpha=0.3, lw=0)
+
     null_lo = np.percentile(null_mat, 2.5, axis=0)
     null_hi = np.percentile(null_mat, 97.5, axis=0)
-    ax.fill_between(xs, null_lo, null_hi, color=color, alpha=0.18)
+    # ax.fill_between(xs, null_lo, null_hi, color=color, alpha=0.18)
 
     sig_mask = (obs_mean > null_hi) | (obs_mean < null_lo)
     if sig_mask.any():
+        sig_y = np.where(sig_mask, obs_mean, np.nan)
+        sig_y_change = np.diff((~np.isnan(sig_y)).astype(int))
+
+        # Find continuous runs of significant points
+        run_starts = np.where(sig_y_change == 1)[0] + 1
+        run_ends = np.where(sig_y_change == -1)[0] + 1
+
+        if len(run_starts) > len(run_ends):
+            run_ends = np.append(run_ends, len(sig_y))
+        
+        ymin, ymax = ax.get_ylim()
+        bar_h = 0.02
+        bar_y = 0.98 - i * bar_h * 1.5
+        from matplotlib.transforms import blended_transform_factory
+        for start, end in zip(run_starts, run_ends):
+            start_time, end_time = xs[[start, max(end - 1, start + 1)]]
+            ax.barh(y=bar_y, width=end_time - start_time,
+                       left=start_time, height=bar_h,
+                       color=color, alpha=0.6,
+                       edgecolor="none", zorder=5,
+                       transform=blended_transform_factory(ax.transData, ax.transAxes))
         ax.scatter(xs[sig_mask], obs_mean[sig_mask],
                    color=color, s=6, zorder=5, linewidths=0)
+
 
 ax.legend(loc="lower left", bbox_to_anchor=(-0.8, -0.2))
 ax.set_xlim(-0.05, 0.8)
@@ -637,6 +763,38 @@ ax.set_yticks([-0.4, -0.2, 0.0, 0.2, 0.4, 0.6])
 sns.despine(ax=ax)
 
 f.savefig(OUT_DIR / "hga_contrast_acoustic.pdf", **PDF_SAVEFIG_KWARGS)
+
+# %%
+f, ax = plt.subplots(figsize=(4, 3))
+
+plot_group = "Acoustic + integration"
+
+xs = b4_by_acoustic_diffs.columns.get_level_values("smin").values / epoch_sfreq + epoch_tmin + window_size / 2
+for ys in acoustic_contrasts[plot_group]:
+    plt.plot(xs, ys)
+
+plt.plot(xs, np.mean(acoustic_contrasts[plot_group], axis=0), color="black", lw=3)
+
+plt.axhline(0, color="k", linestyle="--", alpha=0.5)
+plt.axvline(0, color="k", linestyle="--", alpha=0.5)
+plt.xlim(-0.05, 0.8)
+plt.title(plot_group)
+
+# %%
+f, ax = plt.subplots(figsize=(4, 3))
+
+plot_group = "Perceptual"
+
+xs = b4_by_acoustic_diffs.columns.get_level_values("smin").values / epoch_sfreq + epoch_tmin + window_size / 2
+for ys in acoustic_contrasts[plot_group]:
+    plt.plot(xs, ys)
+
+plt.plot(xs, np.mean(acoustic_contrasts[plot_group], axis=0), color="black", lw=3)
+
+plt.axhline(0, color="k", linestyle="--", alpha=0.5)
+plt.axvline(0, color="k", linestyle="--", alpha=0.5)
+plt.xlim(-0.05, 0.8)
+plt.title(plot_group)
 
 # %% [markdown]
 # ## Plot individual site, acoustics vs behavior
@@ -667,3 +825,42 @@ ax.plot(xs, plot_behavior_diffs.mean(0), label="behavioral contrast")
 ax.plot(xs, plot_acoustic_diffs.mean(0), label="acoustic contrast")
 
 ax.legend()
+
+# %% [markdown]
+# ## Compare behavior sign and endpoint acoustic sign
+
+# %%
+behav_sign_df = []
+for cat in ["Acoustic + integration", "Perceptual"]:
+    obs_mean, obs_sem, null_mat, n_valid, obs_traces, obs_signs = behav_band_results[cat]
+    for i, cell_data in enumerate(cells_per_category[cat]):
+        behav_sign_df.append({
+            **cell_data,
+            "cat": cat,
+            "behav_sign": obs_signs[i],
+        })
+behav_sign_df = pd.DataFrame(behav_sign_df)
+behav_sign_df
+
+# %%
+comp_df = pd.merge(
+    behav_sign_df, endpoint_sign.rename("acoustic_sign_endpoint"),
+    left_on=["subject", "electrode_idx", "phoneme_pair"],
+    right_index=True,
+    how="left"
+)
+
+# %%
+f, ax = plt.subplots(figsize=(3, 2))
+sns.heatmap(pd.crosstab(comp_df["behav_sign"], comp_df["acoustic_sign_endpoint"]),
+            annot=True)
+
+# %%
+f, axs = plt.subplots(1, 2, figsize=(6, 2.5))
+for ax, cat in zip(axs, ["Acoustic + integration", "Perceptual"]):
+    sns.heatmap(
+        pd.crosstab(comp_df.loc[comp_df["cat"] == cat, "behav_sign"],
+                    comp_df.loc[comp_df["cat"] == cat, "acoustic_sign_endpoint"]),
+        annot=True, ax=ax
+    )
+    ax.set_title(cat)
