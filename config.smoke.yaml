@@ -98,3 +98,4 @@ causal46_joined:
   ac_p_value_threshold: 0.001
   n_bootstrap: 10           # smoke-test: was 1000
   n_perm: 10               # smoke-test: was 1000
+  n_perms_projection: 100  # smoke-test: was 10000

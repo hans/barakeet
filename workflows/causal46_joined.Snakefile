@@ -2217,3 +2217,79 @@ rule reorder_star_plots_by_annotation:
             --star-dir  outputs/causal46_joined/early_window_site_types \
             --out       {output.pdf}
         """
+
+
+# =============================================================================
+# Early perceptual projection (projection-based detection of early perceptual
+# responses; candidate replacement for window-based bootstrap test)
+# =============================================================================
+
+
+rule early_perceptual_projection:
+    """Per-subject: compute projection statistic π and permutation null."""
+    input:
+        epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
+        phon_peaks = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet",
+        helper     = "notebooks/causal46_joined/_within_completion.py",
+        notebook   = "notebooks/causal46_joined/early_perceptual_projection.py",
+    output:
+        notebook     = "outputs/causal46_joined/early_perceptual_projection/{subject}/notebook.ipynb",
+        site_results = "outputs/causal46_joined/early_perceptual_projection/{subject}/site_results.csv",
+        null_pi      = "outputs/causal46_joined/early_perceptual_projection/{subject}/null_pi.npz",
+        pi_dist      = "outputs/causal46_joined/early_perceptual_projection/{subject}/pi_dist.png",
+    run:
+        outdir = Path(output.notebook).parent
+        C46 = config["causal46_joined"]
+        run_notebook(
+            str(input.notebook), str(output.notebook),
+            parameters=dict(
+                subject=wildcards.subject,
+                phon_peaks_path=str(input.phon_peaks),
+                epoch_dir=str(Path(input.epochs).parent),
+                outdir=str(outdir),
+                min_class_k=C46["min_class_k"],
+                window_size=C46["window_size"],
+                stride=C46["stride"],
+                ac_search_smin=config["analysis"]["decoding"]["acoustic_peak_search_smin"],
+                ac_search_smax=config["analysis"]["decoding"]["acoustic_peak_search_smax"],
+                n_perms=C46["n_perms_projection"],
+                master_seed=42,
+                fdr_alpha=config["analysis"]["fdr_alpha"],
+            ),
+        )
+
+
+rule early_perceptual_projection_aggregate:
+    """Aggregate: FDR (Test 1), CPO (Test 2), site-type cross-tab (Test 3), plots."""
+    input:
+        site_results = expand(
+            "outputs/causal46_joined/early_perceptual_projection/{subject}/site_results.csv",
+            subject=config["data"]["subjects"],
+        ),
+        null_pi = expand(
+            "outputs/causal46_joined/early_perceptual_projection/{subject}/null_pi.npz",
+            subject=config["data"]["subjects"],
+        ),
+        site_type_relabel = "outputs/causal46_joined/early_window_site_types/site_type_relabel.csv",
+        notebook = "notebooks/causal46_joined/early_perceptual_projection_aggregate.py",
+    output:
+        notebook      = "outputs/causal46_joined/early_perceptual_projection/aggregate_notebook.ipynb",
+        all_sites     = "outputs/causal46_joined/early_perceptual_projection/all_sites.csv",
+        diagnostics   = "outputs/causal46_joined/early_perceptual_projection/diagnostics.pdf",
+        test1_list    = "outputs/causal46_joined/early_perceptual_projection/test1_one_tailed.csv",
+        test2_cpo     = "outputs/causal46_joined/early_perceptual_projection/test2_cpo.csv",
+        test3_crosstab= "outputs/causal46_joined/early_perceptual_projection/test3_crosstab.csv",
+        test3_detail  = "outputs/causal46_joined/early_perceptual_projection/test3_detail.csv",
+    run:
+        outdir = str(Path(output.notebook).parent)
+        C46 = config["causal46_joined"]
+        run_notebook(
+            str(input.notebook), str(output.notebook),
+            parameters=dict(
+                results_dir=outdir,
+                site_type_relabel_path=str(input.site_type_relabel),
+                outdir=outdir,
+                fdr_alpha=config["analysis"]["fdr_alpha"],
+                cpo_p_threshold=0.05,
+            ),
+        )
