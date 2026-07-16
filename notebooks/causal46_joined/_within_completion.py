@@ -1102,6 +1102,7 @@ def matched_n_star_plot_paper(
     phon_search_smin=None,
     phon_search_smax=None,
     textgrid_dir=None,
+    plot_phonemes=False,
     figsize=(4.5, 4.5),
     acoustic_peak_auc=None,
     R_plot=200,
@@ -1143,6 +1144,9 @@ def matched_n_star_plot_paper(
 
     if xlim is None:
         xlim = OFFSET_DICT.get(word_end, 1.0) + 0.1
+
+    if plot_phonemes and textgrid_dir is None:
+        raise ValueError("`textgrid_dir` must be provided if `plot_phonemes=True`")
 
     ep = epochs_dict[subject]
     md = ep.metadata
@@ -1291,6 +1295,18 @@ def matched_n_star_plot_paper(
         if first_sound is not None:
             ax_top.axvspan(0, first_sound.maxTime,
                         color="k", alpha=0.1)
+
+        if plot_phonemes:
+            for ax in (ax_top, ax_bot):
+                add_textgrid(
+                    ax,
+                    textgrid_dir=textgrid_dir,
+                    textgrid_file=textgrid_file.name,
+                    vline_extent=1.0,
+                    tmax=xlim,
+                    include_phonemes=ax == ax_top,
+                    include_first_phoneme_offset=False,
+                )
 
     ax_top.set_xlim(-0.05, xlim)
     ax_bot.set_xlim(-0.05, xlim)
