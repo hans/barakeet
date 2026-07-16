@@ -2228,10 +2228,10 @@ rule reorder_star_plots_by_annotation:
 rule early_perceptual_projection:
     """Per-subject: compute projection statistic π and permutation null."""
     input:
-        epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
-        phon_peaks = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet",
-        helper     = "notebooks/causal46_joined/_within_completion.py",
-        notebook   = "notebooks/causal46_joined/early_perceptual_projection.py",
+        epochs           = "outputs/epochs_preprocessed/{subject}_epo.fif",
+        site_type_relabel= "outputs/causal46_joined/early_window_site_types/site_type_relabel.csv",
+        helper           = "notebooks/causal46_joined/_within_completion.py",
+        notebook         = "notebooks/causal46_joined/early_perceptual_projection.py",
     output:
         notebook     = "outputs/causal46_joined/early_perceptual_projection/{subject}/notebook.ipynb",
         site_results = "outputs/causal46_joined/early_perceptual_projection/{subject}/site_results.csv",
@@ -2244,7 +2244,7 @@ rule early_perceptual_projection:
             str(input.notebook), str(output.notebook),
             parameters=dict(
                 subject=wildcards.subject,
-                phon_peaks_path=str(input.phon_peaks),
+                site_type_relabel_path=str(input.site_type_relabel),
                 epoch_dir=str(Path(input.epochs).parent),
                 outdir=str(outdir),
                 min_class_k=C46["min_class_k"],

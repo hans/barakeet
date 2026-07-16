@@ -44,7 +44,6 @@ import matplotlib.pyplot as plt
 import mne
 import numpy as np
 import pandas as pd
-import polars as pl
 from tqdm.auto import tqdm
 
 os.environ.setdefault("OMP_NUM_THREADS", "1")
@@ -65,7 +64,7 @@ from _within_completion import (  # noqa: E402
 
 # %% tags=["parameters"]
 subject = "EC250"
-phon_peaks_path = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet"
+site_type_relabel_path = "outputs/causal46_joined/early_window_site_types/site_type_relabel.csv"
 epoch_dir = "outputs/epochs_preprocessed"
 outdir = "outputs/causal46_joined/early_perceptual_projection/EC250"
 min_class_k = 3
@@ -103,17 +102,20 @@ print(f"Window grid smin values: {WINDOW_STARTS}  (N_WINDOWS={N_WINDOWS})")
 # ## Load inputs
 
 # %%
-phon_peaks_all = pl.read_parquet(phon_peaks_path)
+# Site pool: A_significant sites from site_type_relabel (same universe as other causal46_joined analyses).
+# A_significant = True means the acoustic searchlight test was significant in early_window_site_types.
+# This is broader than phon_peaks_all 'significant' (global FDR across all subjects/sites/times),
+# which would exclude many subjects entirely.
+relabel_all = pd.read_csv(site_type_relabel_path)
+relabel_subj = relabel_all[relabel_all["subject"] == subject]
 included_sites = (
-    phon_peaks_all
-    .filter((pl.col("subject") == subject) & pl.col("significant"))
-    .select(["subject", "electrode_idx", "phoneme_pair", "smin", "smax"])
-    .to_pandas()
+    relabel_subj[relabel_subj["A_significant"]]
+    [["subject", "electrode_idx", "phoneme_pair"]]
     .reset_index(drop=True)
 )
-n_total_acoustic = int(phon_peaks_all.filter(pl.col("subject") == subject).height)
-print(f"Acoustic sites (total): {n_total_acoustic}")
-print(f"FDR-significant acoustic sites (included): {len(included_sites)}")
+n_total_in_relabel = len(relabel_subj)
+print(f"Sites in relabel for {subject}: {n_total_in_relabel}")
+print(f"A_significant sites (included): {len(included_sites)}")
 if len(included_sites) > 0:
     print(included_sites[["electrode_idx", "phoneme_pair"]].to_string(index=False))
 
