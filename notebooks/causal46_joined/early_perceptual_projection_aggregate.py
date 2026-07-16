@@ -38,8 +38,6 @@ import numpy as np
 import pandas as pd
 import scipy.stats
 from statsmodels.stats.multitest import multipletests
-from tqdm.auto import tqdm
-
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
@@ -71,9 +69,17 @@ if not csv_paths:
     print("No results found — writing empty outputs.")
     all_sites = pd.DataFrame()
 else:
-    all_sites = pd.concat(
-        [pd.read_csv(p) for p in csv_paths], ignore_index=True
-    )
+    dfs = []
+    for p in csv_paths:
+        try:
+            df = pd.read_csv(p)
+            if len(df.columns) > 0:
+                dfs.append(df)
+            else:
+                print(f"  Skipping empty (0-site subject): {p.parent.name}")
+        except pd.errors.EmptyDataError:
+            print(f"  Skipping empty (0-site subject): {p.parent.name}")
+    all_sites = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
     print(f"Total sites: {len(all_sites)}")
 
 # Load null distributions (needed for Test 2 CPO)
@@ -198,7 +204,7 @@ if len(valid_df) > 0 and null_arrays:
             "binom_sd": binom_sd,
         }
         pd.DataFrame([cpo_summary]).to_csv(OUT_DIR / "test2_cpo.csv", index=False)
-        print(f"  Saved test2_cpo.csv")
+        print("  Saved test2_cpo.csv")
     else:
         print("  No null arrays available — CPO skipped.")
         cpo_null_counts = None
@@ -222,7 +228,7 @@ elif len(valid_df) == 0:
     test3_df = None
 else:
     relabel = pd.read_csv(relabel_path)
-    print(f"\nTest 3 — cross-tab vs site_type_relabel")
+    print("\nTest 3 — cross-tab vs site_type_relabel")
     print(f"  Relabel rows: {len(relabel)}")
 
     # Merge on site keys
@@ -278,7 +284,7 @@ else:
 
     crosstab.to_csv(OUT_DIR / "test3_crosstab.csv")
     test3_df.to_csv(OUT_DIR / "test3_detail.csv", index=False)
-    print(f"  Saved test3_crosstab.csv + test3_detail.csv")
+    print("  Saved test3_crosstab.csv + test3_detail.csv")
 
 # %% [markdown]
 # ## Diagnostic plots
@@ -427,7 +433,7 @@ with PdfPages(str(OUT_DIR / "diagnostics.pdf")) as pdf:
             pdf.savefig(fig)
             plt.close(fig)
 
-print(f"Saved diagnostics.pdf")
+print("Saved diagnostics.pdf")
 
 # %% [markdown]
 # ## Save all-sites CSV
