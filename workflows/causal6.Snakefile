@@ -17,7 +17,7 @@
 #
 # Pipeline overview:
 #
-#   find_speech_responsive (from causal5)
+#   find_speech_responsive (refined screen — see notebooks/causal6/find_speech_responsive.py)
 #       │
 #       ├─► select_tuning_subject
 #       │       Ranks subjects by ambiguous (phoneme_pair, word_end) tuple count;
@@ -56,6 +56,8 @@ def run_notebook(input_path: str, output_path: str, parameters, **kwargs):
 
     Mirrors the helper in causal5.Snakefile.
     """
+    _provision_node()
+
     import tempfile
 
     import jupytext
@@ -101,16 +103,79 @@ def run_notebook(input_path: str, output_path: str, parameters, **kwargs):
 
 
 import os
+import subprocess
 import sys
 import random
 import pynvml
 import time
 import fcntl
 
+# Set BARAKEET_GPU_LOCK=0 when something else is already pinning GPUs for us
+# (e.g. SGE's `-l gpu=N` populating CUDA_VISIBLE_DEVICES). In that case
+# select_gpu_device is a no-op and the child process inherits whatever
+# CUDA_VISIBLE_DEVICES the parent had.
+USE_GPU_LOCK = os.environ.get("BARAKEET_GPU_LOCK", "1") not in ("0", "false", "False")
+
+
+_node_provisioned = False
+
+
+def _provision_node():
+    """Ensure .venv → /tmp/uv-{branch} is set up on this node (idempotent).
+
+    Creates the branch-scoped env dir in /tmp, symlinks .venv to it if needed,
+    then runs `uv sync` once per node per process (guarded by a sentinel file
+    so subsequent rules on the same node are free). The /tmp cache dir avoids
+    hitting network/NFS for uv's package cache.
+    """
+    global _node_provisioned
+    if _node_provisioned:
+        return
+
+    branch = os.environ.get("barakeet_branch_name")
+    if not branch:
+        branch = subprocess.check_output(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=workflow.basedir, text=True,
+        ).strip()
+
+    # Walk upward from basedir to find the project root (where pyproject.toml lives).
+    # Using .parent would break when the main Snakefile is at the project root itself.
+    _search = Path(workflow.basedir)
+    while _search != _search.parent:
+        if (_search / "pyproject.toml").exists():
+            break
+        _search = _search.parent
+    else:
+        raise RuntimeError(f"No pyproject.toml found above {workflow.basedir}")
+    project_root = _search
+    cache_dir = Path("/tmp/jgauthier-cache-uv")
+    env_dir = Path(f"/tmp/venv-barakeet")
+    venv = project_root / ".venv"
+    sentinel = env_dir / ".provisioned"
+
+    cache_dir.mkdir(exist_ok=True)
+    env_dir.mkdir(exist_ok=True)
+
+    if not venv.exists() and not venv.is_symlink():
+        venv.symlink_to(env_dir)
+
+    if not sentinel.exists():
+        subprocess.run(
+            ["uv", "sync"],
+            cwd=project_root,
+            check=True,
+            env={**os.environ, "UV_CACHE_DIR": str(cache_dir)},
+        )
+        sentinel.touch()
+
+    _node_provisioned = True
+
+
 def select_gpu_device(wildcards, resources):
     """Pick a free GPU and create a claim file. Returns (gpu_id_str, claim_file_path)
-    or (None, None) when the rule does not request a GPU."""
-    if resources.gpu == 0:
+    or (None, None) when the rule does not request a GPU or the lock is disabled."""
+    if resources.gpu == 0 or not USE_GPU_LOCK:
         return None, None
 
     lock_dir = "/tmp/snakemake_gpu_locks"
@@ -180,9 +245,6 @@ def run_notebook_gpu(input_path, output_path, parameters, gpu_device):
     the Snakemake process, so subprocess isolation is mandatory.
     """
     import json
-    import os
-    import subprocess
-    import sys
     import tempfile
 
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
@@ -191,10 +253,12 @@ def run_notebook_gpu(input_path, output_path, parameters, gpu_device):
 
     try:
         env = os.environ.copy()
-        env["CUDA_VISIBLE_DEVICES"] = str(gpu_device)
+        if gpu_device is not None:
+            env["CUDA_VISIBLE_DEVICES"] = str(gpu_device)
         helper = Path(workflow.basedir) / "_gpu_notebook_runner.py"
+        venv_python = Path(workflow.basedir).parent / ".venv" / "bin" / "python"
         subprocess.run(
-            [sys.executable, str(helper), str(input_path), str(output_path), params_path],
+            [str(venv_python), str(helper), str(input_path), str(output_path), params_path],
             env=env, check=True,
         )
     finally:
@@ -203,6 +267,7 @@ def run_notebook_gpu(input_path, output_path, parameters, gpu_device):
 
 def run_notebook_with_gpu(input_path, output_path, parameters, wildcards, resources):
     """Acquire a GPU claim, run the notebook, and release the claim — even on failure."""
+    _provision_node()
     gpu_device, claim_file = select_gpu_device(wildcards, resources)
     try:
         run_notebook_gpu(input_path, output_path, parameters, gpu_device=gpu_device)
@@ -224,13 +289,14 @@ rule causal6_all:
 
     For the three behavior/acoustic decoders, four peak-finding flavors are
     emitted (foldmean_maxstat, tstat_maxstat, foldmean_tfce, tstat_tfce —
-    acoustic skips TFCE since its peak-search window is already narrow).
+    acoustic ships three flavors: foldmean_maxstat, tstat_maxstat, foldmean_tfce).
     Each has its own aggregate+FDR output so downstream consumers can choose.
     """
     input:
-        # Acoustic — foldmean_maxstat (v1) + tstat_maxstat
+        # Acoustic — three flavors
         "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet",
         "outputs/causal6/acoustic_decoding_peaks/phon_peaks_tstat_maxstat_all.parquet",
+        "outputs/causal6/acoustic_decoding_peaks/phon_peaks_foldmean_tfce_all.parquet",
         # Behavior with control — four flavors
         "outputs/causal6/behavior_decoding_single_electrode_summarize/peak_summary_all.parquet",
         "outputs/causal6/behavior_decoding_single_electrode_summarize/peak_summary_tstat_maxstat_all.parquet",
@@ -244,6 +310,41 @@ rule causal6_all:
         # Ganong (single v1 flavor; t-stat/TFCE extensions left as follow-up)
         "outputs/causal6/ganong_decoding_summarize/peak_summary_all.parquet",
         "outputs/causal6/ganong_decoding_hga_only_summarize/peak_summary_all.parquet",
+
+
+rule find_speech_responsive:
+    """Causal6 speech-responsive screen.
+
+    Replaces causal5's screen (paired t-test on the full [0, tmax] post-window,
+    one-sided t > 7) with a refined criterion: paired t-test on a short
+    [0, post_tmax_s] post-window, two-sided |t| > t_threshold. Motivation +
+    diagnostics: notebooks/causal6/find_speech_responsive.py header and
+    scripts/refined_speech_responsive.py.
+
+    Output schema matches causal5/find_speech_responsive so downstream readers
+    keep working unchanged; the `speech_responsive` boolean now reflects the
+    refined criterion.
+    """
+    input:
+        epochs   = "outputs/epochs_preprocessed/{subject}_epo.fif",
+        notebook = "notebooks/causal6/find_speech_responsive.py",
+
+    output:
+        notebook = "outputs/causal6/find_speech_responsive/{subject}.ipynb",
+        results  = "outputs/causal6/find_speech_responsive/{subject}_results.csv",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                epochs_path=input.epochs,
+                outdir=str(outdir),
+                post_tmax_s=config["analysis"]["speech_responsive"]["post_tmax_s"],
+                t_threshold=config["analysis"]["speech_responsive"]["t_threshold"],
+            ),
+        )
 
 
 rule select_tuning_subject:
@@ -294,7 +395,7 @@ rule reg_lambda_sweep:
             subject=config["data"]["subjects"],
         ),
         electrodes_glob = expand(
-            "outputs/causal5/find_speech_responsive/{subject}_results.csv",
+            "outputs/causal6/find_speech_responsive/{subject}_results.csv",
             subject=config["data"]["subjects"],
         ),
         winner   = "outputs/causal6/select_tuning_subject/tuning_subject.txt",
@@ -309,16 +410,19 @@ rule reg_lambda_sweep:
         fold_variance   = "outputs/causal6/reg_lambda_sweep/sweep_fold_variance.parquet",
         seed_comparison = "outputs/causal6/reg_lambda_sweep/sweep_seed_comparison.parquet"
 
+    resources:
+        gpu = 1
+
     run:
         outdir = Path(output.notebook).parent
         tuning_subject = Path(input.winner).read_text().strip()
 
-        run_notebook(
+        run_notebook_with_gpu(
             str(input.notebook),
             str(output.notebook),
             parameters=dict(
                 epochs_path=f"outputs/epochs_preprocessed/{tuning_subject}_epo.fif",
-                electrodes_path=f"outputs/causal5/find_speech_responsive/{tuning_subject}_results.csv",
+                electrodes_path=f"outputs/causal6/find_speech_responsive/{tuning_subject}_results.csv",
                 outdir=str(outdir),
 
                 min_sample=config["analysis"]["decoding"]["min_sample"],
@@ -333,6 +437,8 @@ rule reg_lambda_sweep:
                 tol=C6["tol"],
                 max_iter=C6["max_iter"],
             ),
+            wildcards=wildcards,
+            resources=resources,
         )
 
 
@@ -355,7 +461,7 @@ rule acoustic_decoding_single_electrode:
     """Acoustic searchlight — GPU-batched replacement for causal5's rule."""
     input:
         epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
-        electrodes = "outputs/causal5/find_speech_responsive/{subject}_results.csv",
+        electrodes = "outputs/causal6/find_speech_responsive/{subject}_results.csv",
         winners    = REG_LAMBDA_WINNERS,
         notebook   = "notebooks/causal6/acoustic_decoding_single_electrode.py",
 
@@ -365,9 +471,12 @@ rule acoustic_decoding_single_electrode:
         predictions  = "outputs/causal6/acoustic_decoding_single_electrode/{subject}/predictions.parquet",
         coefficients = "outputs/causal6/acoustic_decoding_single_electrode/{subject}/coefficients.parquet",
 
+    resources:
+        gpu = 1
+
     run:
         outdir = Path(output.notebook).parent
-        run_notebook(
+        run_notebook_with_gpu(
             str(input.notebook),
             str(output.notebook),
             parameters=dict(
@@ -386,6 +495,8 @@ rule acoustic_decoding_single_electrode:
                 tol=C6["tol"],
                 max_iter=C6["max_iter"],
             ),
+            wildcards=wildcards,
+            resources=resources,
         )
 
 
@@ -393,7 +504,7 @@ rule behavior_decoding_single_electrode:
     """Behavior decoding with resampled control — GPU-batched replacement."""
     input:
         epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
-        electrodes = "outputs/causal5/find_speech_responsive/{subject}_results.csv",
+        electrodes = "outputs/causal6/find_speech_responsive/{subject}_results.csv",
         winners    = REG_LAMBDA_WINNERS,
         notebook   = "notebooks/causal6/behavior_decoding_single_electrode.py",
 
@@ -403,9 +514,12 @@ rule behavior_decoding_single_electrode:
         predictions  = "outputs/causal6/behavior_decoding_single_electrode/{subject}/predictions.parquet",
         coefficients = "outputs/causal6/behavior_decoding_single_electrode/{subject}/coefficients.parquet",
 
+    resources:
+        gpu = 1
+
     run:
         outdir = Path(output.notebook).parent
-        run_notebook(
+        run_notebook_with_gpu(
             str(input.notebook),
             str(output.notebook),
             parameters=dict(
@@ -425,6 +539,8 @@ rule behavior_decoding_single_electrode:
                 tol=C6["tol"],
                 max_iter=C6["max_iter"],
             ),
+            wildcards=wildcards,
+            resources=resources,
         )
 
 
@@ -432,7 +548,7 @@ rule behavior_decoding_single_electrode_hga_only:
     """Behavior decoding, HGA only — GPU-batched replacement."""
     input:
         epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
-        electrodes = "outputs/causal5/find_speech_responsive/{subject}_results.csv",
+        electrodes = "outputs/causal6/find_speech_responsive/{subject}_results.csv",
         winners    = REG_LAMBDA_WINNERS,
         notebook   = "notebooks/causal6/behavior_decoding_single_electrode_hga_only.py",
 
@@ -442,9 +558,12 @@ rule behavior_decoding_single_electrode_hga_only:
         predictions  = "outputs/causal6/behavior_decoding_single_electrode_hga_only/{subject}/predictions.parquet",
         coefficients = "outputs/causal6/behavior_decoding_single_electrode_hga_only/{subject}/coefficients.parquet",
 
+    resources:
+        gpu = 1
+
     run:
         outdir = Path(output.notebook).parent
-        run_notebook(
+        run_notebook_with_gpu(
             str(input.notebook),
             str(output.notebook),
             parameters=dict(
@@ -463,6 +582,8 @@ rule behavior_decoding_single_electrode_hga_only:
                 tol=C6["tol"],
                 max_iter=C6["max_iter"],
             ),
+            wildcards=wildcards,
+            resources=resources,
         )
 
 
@@ -480,10 +601,14 @@ rule acoustic_decoding_null:
     """Per-subject acoustic permutation-null refits with two-stage adaptive K."""
     input:
         epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
-        electrodes = "outputs/causal5/find_speech_responsive/{subject}_results.csv",
+        electrodes = "outputs/causal6/find_speech_responsive/{subject}_results.csv",
         winners    = REG_LAMBDA_WINNERS,
         scores     = "outputs/causal6/acoustic_decoding_single_electrode/{subject}/scores.parquet",
         notebook   = "notebooks/causal6/acoustic_decoding_null.py",
+        all_electrode_dfs = expand(
+            "outputs/causal6/find_speech_responsive/{subject}_results.csv",
+            subject=config["data"]["subjects"],
+        ),
 
     output:
         notebook        = "outputs/causal6/acoustic_decoding_null/{subject}/notebook.ipynb",
@@ -491,7 +616,9 @@ rule acoustic_decoding_null:
         escalation_log  = "outputs/causal6/acoustic_decoding_null/{subject}/escalation_log.parquet",
 
     resources:
-        gpu = 1
+        gpu = 1,
+        mem_gb = 200,
+        queue = "mind-gpu"
 
     run:
         outdir = Path(output.notebook).parent
@@ -524,6 +651,12 @@ rule acoustic_decoding_null:
                 escalate_corrected_p_max=C6["escalate_corrected_p_max"],
                 permutation_seed=C6["permutation_seed"],
                 permutation_chunk_size=C6["permutation_chunk_size"],
+
+                n_permutations_stage3=C6["n_permutations_stage3"],
+                stage3_k_gate=C6["stage3_k_gate"],
+                fdr_alpha=config["analysis"]["fdr_alpha"],
+                fdr_rois=config["analysis"]["fdr_rois"],
+                electrode_dfs_paths=list(input.all_electrode_dfs),
             ),
             wildcards=wildcards,
             resources=resources,
@@ -534,10 +667,14 @@ rule behavior_decoding_single_electrode_null:
     """Per-subject behavior-with-control permutation-null refits with two-stage adaptive K."""
     input:
         epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
-        electrodes = "outputs/causal5/find_speech_responsive/{subject}_results.csv",
+        electrodes = "outputs/causal6/find_speech_responsive/{subject}_results.csv",
         winners    = REG_LAMBDA_WINNERS,
         scores     = "outputs/causal6/behavior_decoding_single_electrode/{subject}/scores.parquet",
         notebook   = "notebooks/causal6/behavior_decoding_single_electrode_null.py",
+        all_electrode_dfs = expand(
+            "outputs/causal6/find_speech_responsive/{subject}_results.csv",
+            subject=config["data"]["subjects"],
+        ),
 
     output:
         notebook        = "outputs/causal6/behavior_decoding_single_electrode_null/{subject}/notebook.ipynb",
@@ -545,7 +682,8 @@ rule behavior_decoding_single_electrode_null:
         escalation_log  = "outputs/causal6/behavior_decoding_single_electrode_null/{subject}/escalation_log.parquet",
 
     resources:
-        gpu = 1
+        gpu = 1,
+        mem_gb = 500
 
     run:
         outdir = Path(output.notebook).parent
@@ -581,6 +719,12 @@ rule behavior_decoding_single_electrode_null:
                 escalate_corrected_p_max=C6["escalate_corrected_p_max"],
                 permutation_seed=C6["permutation_seed"],
                 permutation_chunk_size=C6["permutation_chunk_size"],
+
+                n_permutations_stage3=C6["n_permutations_stage3"],
+                stage3_k_gate=C6["stage3_k_gate"],
+                fdr_alpha=config["analysis"]["fdr_alpha"],
+                fdr_rois=config["analysis"]["fdr_rois"],
+                electrode_dfs_paths=list(input.all_electrode_dfs),
             ),
             wildcards=wildcards,
             resources=resources,
@@ -591,10 +735,14 @@ rule behavior_decoding_single_electrode_hga_only_null:
     """Per-subject behavior-HGA-only permutation-null refits with two-stage adaptive K."""
     input:
         epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
-        electrodes = "outputs/causal5/find_speech_responsive/{subject}_results.csv",
+        electrodes = "outputs/causal6/find_speech_responsive/{subject}_results.csv",
         winners    = REG_LAMBDA_WINNERS,
         scores     = "outputs/causal6/behavior_decoding_single_electrode_hga_only/{subject}/scores.parquet",
         notebook   = "notebooks/causal6/behavior_decoding_single_electrode_hga_only_null.py",
+        all_electrode_dfs = expand(
+            "outputs/causal6/find_speech_responsive/{subject}_results.csv",
+            subject=config["data"]["subjects"],
+        ),
 
     output:
         notebook        = "outputs/causal6/behavior_decoding_single_electrode_hga_only_null/{subject}/notebook.ipynb",
@@ -602,7 +750,8 @@ rule behavior_decoding_single_electrode_hga_only_null:
         escalation_log  = "outputs/causal6/behavior_decoding_single_electrode_hga_only_null/{subject}/escalation_log.parquet",
 
     resources:
-        gpu = 1
+        gpu = 1,
+        mem_gb = 200
 
     run:
         outdir = Path(output.notebook).parent
@@ -637,6 +786,12 @@ rule behavior_decoding_single_electrode_hga_only_null:
                 escalate_corrected_p_max=C6["escalate_corrected_p_max"],
                 permutation_seed=C6["permutation_seed"],
                 permutation_chunk_size=C6["permutation_chunk_size"],
+
+                n_permutations_stage3=C6["n_permutations_stage3"],
+                stage3_k_gate=C6["stage3_k_gate"],
+                fdr_alpha=config["analysis"]["fdr_alpha"],
+                fdr_rois=config["analysis"]["fdr_rois"],
+                electrode_dfs_paths=list(input.all_electrode_dfs),
             ),
             wildcards=wildcards,
             resources=resources,
@@ -667,6 +822,9 @@ rule behavior_decoding_single_electrode_summarize:
         peak_summary_foldmean_tfce    = "outputs/causal6/behavior_decoding_single_electrode_summarize/{subject}/peak_summary_foldmean_tfce.parquet",
         peak_summary_tstat_tfce       = "outputs/causal6/behavior_decoding_single_electrode_summarize/{subject}/peak_summary_tstat_tfce.parquet",
         peak_predictions              = "outputs/causal6/behavior_decoding_single_electrode_summarize/{subject}/peak_predictions.parquet",
+
+    resources:
+        mem_gb = 300
 
     run:
         outdir = Path(output.notebook).parent
@@ -708,6 +866,9 @@ rule behavior_decoding_single_electrode_hga_only_summarize:
         peak_summary_tstat_tfce       = "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/{subject}/peak_summary_tstat_tfce.parquet",
         peak_predictions              = "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/{subject}/peak_predictions.parquet",
 
+    resources:
+        mem_gb = 300
+
     run:
         outdir = Path(output.notebook).parent
         run_notebook(
@@ -743,10 +904,11 @@ rule acoustic_decoding_peaks:
         notebook     = "notebooks/causal6/acoustic_decoding_peaks.py",
 
     output:
-        notebook        = "outputs/causal6/acoustic_decoding_peaks/{subject}/notebook.ipynb",
-        peaks           = "outputs/causal6/acoustic_decoding_peaks/{subject}/phon_peaks.parquet",
-        peaks_tstat     = "outputs/causal6/acoustic_decoding_peaks/{subject}/phon_peaks_tstat_maxstat.parquet",
-        roc_auc         = "outputs/causal6/acoustic_decoding_peaks/{subject}/phon_roc_auc_searchlight.parquet",
+        notebook            = "outputs/causal6/acoustic_decoding_peaks/{subject}/notebook.ipynb",
+        peaks               = "outputs/causal6/acoustic_decoding_peaks/{subject}/phon_peaks.parquet",
+        peaks_tstat         = "outputs/causal6/acoustic_decoding_peaks/{subject}/phon_peaks_tstat_maxstat.parquet",
+        peaks_foldmean_tfce = "outputs/causal6/acoustic_decoding_peaks/{subject}/phon_peaks_foldmean_tfce.parquet",
+        roc_auc             = "outputs/causal6/acoustic_decoding_peaks/{subject}/phon_roc_auc_searchlight.parquet",
 
     run:
         outdir = Path(output.notebook).parent
@@ -777,6 +939,10 @@ rule acoustic_decoding_peaks_aggregate:
             "outputs/causal6/acoustic_decoding_peaks/{subject}/phon_peaks.parquet",
             subject=config["data"]["subjects"],
         ),
+        all_electrode_dfs = expand(
+            "outputs/causal6/find_speech_responsive/{subject}_results.csv",
+            subject=config["data"]["subjects"],
+        ),
 
     output:
         notebook = "outputs/causal6/acoustic_decoding_peaks/aggregate_notebook.ipynb",
@@ -792,6 +958,8 @@ rule acoustic_decoding_peaks_aggregate:
                 outdir=str(outdir),
                 output_name="phon_peaks_all.parquet",
                 fdr_alpha=config["analysis"]["fdr_alpha"],
+                fdr_rois=config["analysis"]["fdr_rois"],
+                electrode_dfs_paths=list(input.all_electrode_dfs),
             ),
         )
 
@@ -802,6 +970,10 @@ rule behavior_decoding_single_electrode_summarize_aggregate:
         notebook     = "notebooks/causal6/significance_aggregate.py",
         result_paths = expand(
             "outputs/causal6/behavior_decoding_single_electrode_summarize/{subject}/peak_summary.parquet",
+            subject=config["data"]["subjects"],
+        ),
+        all_electrode_dfs = expand(
+            "outputs/causal6/find_speech_responsive/{subject}_results.csv",
             subject=config["data"]["subjects"],
         ),
 
@@ -819,6 +991,8 @@ rule behavior_decoding_single_electrode_summarize_aggregate:
                 outdir=str(outdir),
                 output_name="peak_summary_all.parquet",
                 fdr_alpha=config["analysis"]["fdr_alpha"],
+                fdr_rois=config["analysis"]["fdr_rois"],
+                electrode_dfs_paths=list(input.all_electrode_dfs),
             ),
         )
 
@@ -829,6 +1003,10 @@ rule behavior_decoding_single_electrode_hga_only_summarize_aggregate:
         notebook     = "notebooks/causal6/significance_aggregate.py",
         result_paths = expand(
             "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/{subject}/peak_summary.parquet",
+            subject=config["data"]["subjects"],
+        ),
+        all_electrode_dfs = expand(
+            "outputs/causal6/find_speech_responsive/{subject}_results.csv",
             subject=config["data"]["subjects"],
         ),
 
@@ -846,6 +1024,8 @@ rule behavior_decoding_single_electrode_hga_only_summarize_aggregate:
                 outdir=str(outdir),
                 output_name="peak_summary_all.parquet",
                 fdr_alpha=config["analysis"]["fdr_alpha"],
+                fdr_rois=config["analysis"]["fdr_rois"],
+                electrode_dfs_paths=list(input.all_electrode_dfs),
             ),
         )
 
@@ -884,12 +1064,43 @@ rule acoustic_decoding_peaks_aggregate_tstat_maxstat:
         )
 
 
+rule acoustic_decoding_peaks_aggregate_foldmean_tfce:
+    """Acoustic fold-mean TFCE peaks: concatenate + BH-FDR."""
+    input:
+        notebook     = "notebooks/causal6/significance_aggregate.py",
+        result_paths = expand(
+            "outputs/causal6/acoustic_decoding_peaks/{subject}/phon_peaks_foldmean_tfce.parquet",
+            subject=config["data"]["subjects"],
+        ),
+
+    output:
+        notebook = "outputs/causal6/acoustic_decoding_peaks/aggregate_notebook_foldmean_tfce.ipynb",
+        all      = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_foldmean_tfce_all.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                result_paths=list(input.result_paths),
+                outdir=str(outdir),
+                output_name="phon_peaks_foldmean_tfce_all.parquet",
+                fdr_alpha=config["analysis"]["fdr_alpha"],
+            ),
+        )
+
+
 rule behavior_decoding_single_electrode_summarize_aggregate_tstat_maxstat:
     """Behavior-with-control, t-stat max-stat peaks: concatenate + BH-FDR."""
     input:
         notebook     = "notebooks/causal6/significance_aggregate.py",
         result_paths = expand(
             "outputs/causal6/behavior_decoding_single_electrode_summarize/{subject}/peak_summary_tstat_maxstat.parquet",
+            subject=config["data"]["subjects"],
+        ),
+        all_electrode_dfs = expand(
+            "outputs/causal6/find_speech_responsive/{subject}_results.csv",
             subject=config["data"]["subjects"],
         ),
 
@@ -907,6 +1118,8 @@ rule behavior_decoding_single_electrode_summarize_aggregate_tstat_maxstat:
                 outdir=str(outdir),
                 output_name="peak_summary_tstat_maxstat_all.parquet",
                 fdr_alpha=config["analysis"]["fdr_alpha"],
+                fdr_rois=config["analysis"]["fdr_rois"],
+                electrode_dfs_paths=list(input.all_electrode_dfs),
             ),
         )
 
@@ -917,6 +1130,10 @@ rule behavior_decoding_single_electrode_summarize_aggregate_foldmean_tfce:
         notebook     = "notebooks/causal6/significance_aggregate.py",
         result_paths = expand(
             "outputs/causal6/behavior_decoding_single_electrode_summarize/{subject}/peak_summary_foldmean_tfce.parquet",
+            subject=config["data"]["subjects"],
+        ),
+        all_electrode_dfs = expand(
+            "outputs/causal6/find_speech_responsive/{subject}_results.csv",
             subject=config["data"]["subjects"],
         ),
 
@@ -934,6 +1151,8 @@ rule behavior_decoding_single_electrode_summarize_aggregate_foldmean_tfce:
                 outdir=str(outdir),
                 output_name="peak_summary_foldmean_tfce_all.parquet",
                 fdr_alpha=config["analysis"]["fdr_alpha"],
+                fdr_rois=config["analysis"]["fdr_rois"],
+                electrode_dfs_paths=list(input.all_electrode_dfs),
             ),
         )
 
@@ -944,6 +1163,10 @@ rule behavior_decoding_single_electrode_summarize_aggregate_tstat_tfce:
         notebook     = "notebooks/causal6/significance_aggregate.py",
         result_paths = expand(
             "outputs/causal6/behavior_decoding_single_electrode_summarize/{subject}/peak_summary_tstat_tfce.parquet",
+            subject=config["data"]["subjects"],
+        ),
+        all_electrode_dfs = expand(
+            "outputs/causal6/find_speech_responsive/{subject}_results.csv",
             subject=config["data"]["subjects"],
         ),
 
@@ -961,6 +1184,8 @@ rule behavior_decoding_single_electrode_summarize_aggregate_tstat_tfce:
                 outdir=str(outdir),
                 output_name="peak_summary_tstat_tfce_all.parquet",
                 fdr_alpha=config["analysis"]["fdr_alpha"],
+                fdr_rois=config["analysis"]["fdr_rois"],
+                electrode_dfs_paths=list(input.all_electrode_dfs),
             ),
         )
 
@@ -971,6 +1196,10 @@ rule behavior_decoding_single_electrode_hga_only_summarize_aggregate_tstat_maxst
         notebook     = "notebooks/causal6/significance_aggregate.py",
         result_paths = expand(
             "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/{subject}/peak_summary_tstat_maxstat.parquet",
+            subject=config["data"]["subjects"],
+        ),
+        all_electrode_dfs = expand(
+            "outputs/causal6/find_speech_responsive/{subject}_results.csv",
             subject=config["data"]["subjects"],
         ),
 
@@ -988,6 +1217,8 @@ rule behavior_decoding_single_electrode_hga_only_summarize_aggregate_tstat_maxst
                 outdir=str(outdir),
                 output_name="peak_summary_tstat_maxstat_all.parquet",
                 fdr_alpha=config["analysis"]["fdr_alpha"],
+                fdr_rois=config["analysis"]["fdr_rois"],
+                electrode_dfs_paths=list(input.all_electrode_dfs),
             ),
         )
 
@@ -998,6 +1229,10 @@ rule behavior_decoding_single_electrode_hga_only_summarize_aggregate_foldmean_tf
         notebook     = "notebooks/causal6/significance_aggregate.py",
         result_paths = expand(
             "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/{subject}/peak_summary_foldmean_tfce.parquet",
+            subject=config["data"]["subjects"],
+        ),
+        all_electrode_dfs = expand(
+            "outputs/causal6/find_speech_responsive/{subject}_results.csv",
             subject=config["data"]["subjects"],
         ),
 
@@ -1015,6 +1250,8 @@ rule behavior_decoding_single_electrode_hga_only_summarize_aggregate_foldmean_tf
                 outdir=str(outdir),
                 output_name="peak_summary_foldmean_tfce_all.parquet",
                 fdr_alpha=config["analysis"]["fdr_alpha"],
+                fdr_rois=config["analysis"]["fdr_rois"],
+                electrode_dfs_paths=list(input.all_electrode_dfs),
             ),
         )
 
@@ -1025,6 +1262,10 @@ rule behavior_decoding_single_electrode_hga_only_summarize_aggregate_tstat_tfce:
         notebook     = "notebooks/causal6/significance_aggregate.py",
         result_paths = expand(
             "outputs/causal6/behavior_decoding_single_electrode_hga_only_summarize/{subject}/peak_summary_tstat_tfce.parquet",
+            subject=config["data"]["subjects"],
+        ),
+        all_electrode_dfs = expand(
+            "outputs/causal6/find_speech_responsive/{subject}_results.csv",
             subject=config["data"]["subjects"],
         ),
 
@@ -1042,6 +1283,8 @@ rule behavior_decoding_single_electrode_hga_only_summarize_aggregate_tstat_tfce:
                 outdir=str(outdir),
                 output_name="peak_summary_tstat_tfce_all.parquet",
                 fdr_alpha=config["analysis"]["fdr_alpha"],
+                fdr_rois=config["analysis"]["fdr_rois"],
+                electrode_dfs_paths=list(input.all_electrode_dfs),
             ),
         )
 
@@ -1057,7 +1300,7 @@ rule ganong_decoding_single_electrode:
     """Ganong decoding with resampled control — GPU-batched, pooled across completions."""
     input:
         epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
-        electrodes = "outputs/causal5/find_speech_responsive/{subject}_results.csv",
+        electrodes = "outputs/causal6/find_speech_responsive/{subject}_results.csv",
         winners    = REG_LAMBDA_WINNERS,
         notebook   = "notebooks/causal6/ganong_decoding_single_electrode.py",
 
@@ -1067,9 +1310,12 @@ rule ganong_decoding_single_electrode:
         predictions  = "outputs/causal6/ganong_decoding_single_electrode/{subject}/predictions.parquet",
         coefficients = "outputs/causal6/ganong_decoding_single_electrode/{subject}/coefficients.parquet",
 
+    resources:
+        gpu = 1
+
     run:
         outdir = Path(output.notebook).parent
-        run_notebook(
+        run_notebook_with_gpu(
             str(input.notebook),
             str(output.notebook),
             parameters=dict(
@@ -1089,6 +1335,8 @@ rule ganong_decoding_single_electrode:
                 tol=C6["tol"],
                 max_iter=C6["max_iter"],
             ),
+            wildcards=wildcards,
+            resources=resources,
         )
 
 
@@ -1096,7 +1344,7 @@ rule ganong_decoding_single_electrode_hga_only:
     """Ganong decoding, HGA only — GPU-batched, pooled across completions."""
     input:
         epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
-        electrodes = "outputs/causal5/find_speech_responsive/{subject}_results.csv",
+        electrodes = "outputs/causal6/find_speech_responsive/{subject}_results.csv",
         winners    = REG_LAMBDA_WINNERS,
         notebook   = "notebooks/causal6/ganong_decoding_single_electrode_hga_only.py",
 
@@ -1106,9 +1354,12 @@ rule ganong_decoding_single_electrode_hga_only:
         predictions  = "outputs/causal6/ganong_decoding_single_electrode_hga_only/{subject}/predictions.parquet",
         coefficients = "outputs/causal6/ganong_decoding_single_electrode_hga_only/{subject}/coefficients.parquet",
 
+    resources:
+        gpu = 1
+
     run:
         outdir = Path(output.notebook).parent
-        run_notebook(
+        run_notebook_with_gpu(
             str(input.notebook),
             str(output.notebook),
             parameters=dict(
@@ -1127,6 +1378,8 @@ rule ganong_decoding_single_electrode_hga_only:
                 tol=C6["tol"],
                 max_iter=C6["max_iter"],
             ),
+            wildcards=wildcards,
+            resources=resources,
         )
 
 
@@ -1134,10 +1387,14 @@ rule ganong_decoding_null:
     """Per-subject ganong-with-control permutation-null refits with two-stage adaptive K."""
     input:
         epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
-        electrodes = "outputs/causal5/find_speech_responsive/{subject}_results.csv",
+        electrodes = "outputs/causal6/find_speech_responsive/{subject}_results.csv",
         winners    = REG_LAMBDA_WINNERS,
         scores     = "outputs/causal6/ganong_decoding_single_electrode/{subject}/scores.parquet",
         notebook   = "notebooks/causal6/ganong_decoding_null.py",
+        all_electrode_dfs = expand(
+            "outputs/causal6/find_speech_responsive/{subject}_results.csv",
+            subject=config["data"]["subjects"],
+        ),
 
     output:
         notebook        = "outputs/causal6/ganong_decoding_null/{subject}/notebook.ipynb",
@@ -1145,7 +1402,8 @@ rule ganong_decoding_null:
         escalation_log  = "outputs/causal6/ganong_decoding_null/{subject}/escalation_log.parquet",
 
     resources:
-        gpu = 1
+        gpu = 1,
+        mem_gb = 200
 
     run:
         outdir = Path(output.notebook).parent
@@ -1180,6 +1438,12 @@ rule ganong_decoding_null:
                 escalate_corrected_p_max=C6["escalate_corrected_p_max"],
                 permutation_seed=C6["permutation_seed"],
                 permutation_chunk_size=C6["permutation_chunk_size"],
+
+                n_permutations_stage3=C6["n_permutations_stage3"],
+                stage3_k_gate=C6["stage3_k_gate"],
+                fdr_alpha=config["analysis"]["fdr_alpha"],
+                fdr_rois=config["analysis"]["fdr_rois"],
+                electrode_dfs_paths=list(input.all_electrode_dfs),
             ),
             wildcards=wildcards,
             resources=resources,
@@ -1190,10 +1454,14 @@ rule ganong_decoding_hga_only_null:
     """Per-subject ganong-HGA-only permutation-null refits with two-stage adaptive K."""
     input:
         epochs     = "outputs/epochs_preprocessed/{subject}_epo.fif",
-        electrodes = "outputs/causal5/find_speech_responsive/{subject}_results.csv",
+        electrodes = "outputs/causal6/find_speech_responsive/{subject}_results.csv",
         winners    = REG_LAMBDA_WINNERS,
         scores     = "outputs/causal6/ganong_decoding_single_electrode_hga_only/{subject}/scores.parquet",
         notebook   = "notebooks/causal6/ganong_decoding_hga_only_null.py",
+        all_electrode_dfs = expand(
+            "outputs/causal6/find_speech_responsive/{subject}_results.csv",
+            subject=config["data"]["subjects"],
+        ),
 
     output:
         notebook        = "outputs/causal6/ganong_decoding_hga_only_null/{subject}/notebook.ipynb",
@@ -1201,7 +1469,8 @@ rule ganong_decoding_hga_only_null:
         escalation_log  = "outputs/causal6/ganong_decoding_hga_only_null/{subject}/escalation_log.parquet",
 
     resources:
-        gpu = 1
+        gpu = 1,
+        mem_gb = 200
 
     run:
         outdir = Path(output.notebook).parent
@@ -1235,6 +1504,12 @@ rule ganong_decoding_hga_only_null:
                 escalate_corrected_p_max=C6["escalate_corrected_p_max"],
                 permutation_seed=C6["permutation_seed"],
                 permutation_chunk_size=C6["permutation_chunk_size"],
+
+                n_permutations_stage3=C6["n_permutations_stage3"],
+                stage3_k_gate=C6["stage3_k_gate"],
+                fdr_alpha=config["analysis"]["fdr_alpha"],
+                fdr_rois=config["analysis"]["fdr_rois"],
+                electrode_dfs_paths=list(input.all_electrode_dfs),
             ),
             wildcards=wildcards,
             resources=resources,
@@ -1253,6 +1528,9 @@ rule ganong_decoding_summarize:
         notebook         = "outputs/causal6/ganong_decoding_summarize/{subject}/notebook.ipynb",
         peak_summary     = "outputs/causal6/ganong_decoding_summarize/{subject}/peak_summary.parquet",
         peak_predictions = "outputs/causal6/ganong_decoding_summarize/{subject}/peak_predictions.parquet",
+
+    resources:
+        mem_gb = 300
 
     run:
         outdir = Path(output.notebook).parent
@@ -1285,6 +1563,9 @@ rule ganong_decoding_hga_only_summarize:
         peak_summary     = "outputs/causal6/ganong_decoding_hga_only_summarize/{subject}/peak_summary.parquet",
         peak_predictions = "outputs/causal6/ganong_decoding_hga_only_summarize/{subject}/peak_predictions.parquet",
 
+    resources:
+        mem_gb = 300
+
     run:
         outdir = Path(output.notebook).parent
         run_notebook(
@@ -1311,6 +1592,10 @@ rule ganong_decoding_summarize_aggregate:
             "outputs/causal6/ganong_decoding_summarize/{subject}/peak_summary.parquet",
             subject=config["data"]["subjects"],
         ),
+        all_electrode_dfs = expand(
+            "outputs/causal6/find_speech_responsive/{subject}_results.csv",
+            subject=config["data"]["subjects"],
+        ),
 
     output:
         notebook = "outputs/causal6/ganong_decoding_summarize/aggregate_notebook.ipynb",
@@ -1326,6 +1611,8 @@ rule ganong_decoding_summarize_aggregate:
                 outdir=str(outdir),
                 output_name="peak_summary_all.parquet",
                 fdr_alpha=config["analysis"]["fdr_alpha"],
+                fdr_rois=config["analysis"]["fdr_rois"],
+                electrode_dfs_paths=list(input.all_electrode_dfs),
             ),
         )
 
@@ -1336,6 +1623,10 @@ rule ganong_decoding_hga_only_summarize_aggregate:
         notebook     = "notebooks/causal6/significance_aggregate.py",
         result_paths = expand(
             "outputs/causal6/ganong_decoding_hga_only_summarize/{subject}/peak_summary.parquet",
+            subject=config["data"]["subjects"],
+        ),
+        all_electrode_dfs = expand(
+            "outputs/causal6/find_speech_responsive/{subject}_results.csv",
             subject=config["data"]["subjects"],
         ),
 
@@ -1353,6 +1644,8 @@ rule ganong_decoding_hga_only_summarize_aggregate:
                 outdir=str(outdir),
                 output_name="peak_summary_all.parquet",
                 fdr_alpha=config["analysis"]["fdr_alpha"],
+                fdr_rois=config["analysis"]["fdr_rois"],
+                electrode_dfs_paths=list(input.all_electrode_dfs),
             ),
         )
 
@@ -1392,7 +1685,7 @@ rule prepare_neurometrics:
             subject=config["data"]["subjects"],
         ),
         electrode_paths = expand(
-            "outputs/causal5/find_speech_responsive/{subject}_results.csv",
+            "outputs/causal6/find_speech_responsive/{subject}_results.csv",
             subject=config["data"]["subjects"],
         ),
 
@@ -1411,6 +1704,7 @@ rule prepare_neurometrics:
         ),
         phon_peaks_foldmean_maxstat   = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet",
         phon_peaks_tstat_maxstat      = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_tstat_maxstat_all.parquet",
+        phon_peaks_foldmean_tfce      = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_foldmean_tfce_all.parquet",
         phon_roc_auc_searchlight = expand(
             "outputs/causal6/acoustic_decoding_peaks/{subject}/phon_roc_auc_searchlight.parquet",
             subject=config["data"]["subjects"],
@@ -1460,6 +1754,7 @@ rule prepare_neurometrics:
         # Peak parquets keyed by flavor
         phon_peaks_foldmean_maxstat           = "outputs/causal6/prepare_neurometrics/phon_peaks_foldmean_maxstat.parquet",
         phon_peaks_tstat_maxstat              = "outputs/causal6/prepare_neurometrics/phon_peaks_tstat_maxstat.parquet",
+        phon_peaks_foldmean_tfce              = "outputs/causal6/prepare_neurometrics/phon_peaks_foldmean_tfce.parquet",
         behav_hga_only_peaks_foldmean_maxstat = "outputs/causal6/prepare_neurometrics/behav_hga_only_peaks_foldmean_maxstat.parquet",
         behav_hga_only_peaks_tstat_maxstat    = "outputs/causal6/prepare_neurometrics/behav_hga_only_peaks_tstat_maxstat.parquet",
         behav_hga_only_peaks_tstat_tfce       = "outputs/causal6/prepare_neurometrics/behav_hga_only_peaks_tstat_tfce.parquet",
@@ -1499,6 +1794,7 @@ rule prepare_neurometrics:
                 acoustic_coefficients=list(input.acoustic_coefficients),
                 phon_peaks_foldmean_maxstat=str(input.phon_peaks_foldmean_maxstat),
                 phon_peaks_tstat_maxstat=str(input.phon_peaks_tstat_maxstat),
+                phon_peaks_foldmean_tfce=str(input.phon_peaks_foldmean_tfce),
                 phon_roc_auc_searchlight_paths=list(input.phon_roc_auc_searchlight),
 
                 behav_full_scores=list(input.behav_full_scores),

@@ -1,0 +1,42 @@
+# Snakemake profile for SGE submission via submit_job.
+#
+# Usage (from the project root, on a host with `submit_job` / `qsub` available
+# and the shared filesystem mounted at the same paths the compute nodes see):
+#
+#   conda activate /scratch/jgauthier/transformers3
+#   pip install snakemake-executor-plugin-cluster-generic   # one-time
+#   BARAKEET_GPU_LOCK=0 snakemake --profile profiles/sge -s workflows/causal6.Snakefile <target>
+#
+# BARAKEET_GPU_LOCK=0 disables the in-Snakefile /tmp/snakemake_gpu_locks
+# machinery — SGE handles GPU allocation and pinning instead (assuming the
+# cluster's prolog populates CUDA_VISIBLE_DEVICES from `-l gpu=N`). If your
+# cluster does NOT do that, leave the lock on and accept that snakemake-side
+# GPU selection runs inside each SGE job.
+
+executor: cluster-generic
+cluster-generic-submit-cmd: >-
+  profiles/sge/submit.sh
+  -n {rule}.{jobid}
+  -c {threads}
+  -m {resources.mem_gb}
+  -g {resources.gpu}
+  -q {resources.queue}
+  -o logs/sge/{rule}.{jobid}.out
+  -x /bin/sh
+cluster-generic-status-cmd: profiles/sge/status.sh
+cluster-generic-cancel-cmd: qdel
+
+# Defaults applied to every rule. Override per-rule via `resources:` blocks.
+# GPU jobs (gpu > 0) carrying the default skull-batch.q are auto-upgraded to
+# skull-gpu in submit.sh. Set queue=<other> explicitly to override for any rule.
+default-resources:
+  - mem_gb=32
+  - gpu=0
+  - queue=skull-batch.q
+
+jobs: 20
+latency-wait: 60
+restart-times: 0
+keep-going: True
+rerun-incomplete: True
+printshellcmds: True

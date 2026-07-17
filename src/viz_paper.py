@@ -2,6 +2,7 @@
 Final visualization functions for paper figures.
 """
 
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, TypeAlias
@@ -210,8 +211,10 @@ def add_textgrid(
     rotation=0,
     include_phonemes=True,
     fontsize=10,
+    include_first_phoneme_offset=True,
     include_offset=True,
     vline_extent=1.25,
+    tmax=None,
 ):
     if ep_df is None and textgrid_file is None:
         raise ValueError("Either ep_df or textgrid_file must be provided")
@@ -230,8 +233,11 @@ def add_textgrid(
     ]
     for i, interval in enumerate(plot_intervals):
         if include_phonemes:
+            plotx = interval.minTime + 0.035
+            if tmax is not None and plotx > tmax:
+                continue
             ax.text(
-                interval.minTime + 0.035,
+                plotx,
                 1.025,
                 interval.mark.strip(),
                 rotation=rotation,
@@ -244,7 +250,7 @@ def add_textgrid(
             )
 
         # add offset of first phoneme as vertical line
-        if i == 0:
+        if include_first_phoneme_offset and i == 0:
             ax.axvline(
                 interval.maxTime,
                 ymax=vline_extent,
@@ -256,14 +262,15 @@ def add_textgrid(
 
         # word offset line
         if include_offset and i == len(plot_intervals) - 1:
-            ax.axvline(
-                interval.maxTime,
-                ymax=vline_extent,
-                linestyle="--",
-                alpha=0.5,
-                color="blue",
-                clip_on=False,
-            )
+            if tmax is None or interval.maxTime <= tmax:
+                ax.axvline(
+                    interval.maxTime,
+                    ymax=vline_extent,
+                    linestyle="--",
+                    alpha=0.5,
+                    color="blue",
+                    clip_on=False,
+                )
 
 
 def _plot_phon_controlled(
@@ -2306,7 +2313,7 @@ def show_behav_stackplot2(
     if filter_word_end is not None:
         md_i = md_i.query("word_end == @filter_word_end")
 
-    all_behaviors = ["d", "n"]
+    all_behaviors = list(phoneme_pair)
     colors = plt.cm.Set3(range(len(all_behaviors)))
     color_map = {behavior: colors[i] for i, behavior in enumerate(all_behaviors)}
 
@@ -2425,9 +2432,15 @@ def plot_behav_barplot(
     figsize=(2.3, 2.3),
     resampled_palette=resampled_palette,
     legend=True,
+    legend_bbox_to_anchor=(1.75, 0.45),
     plot_values: Literal["count", "proportion"] = "proportion",
+    collapse_zero_bars: bool = False,
     ax=None,
 ):
+    if isinstance(resampled_palette, dict):
+        assert set(resampled_palette.keys()) == set(range(1, 7))
+        resampled_palette = [resampled_palette[i] for i in range(1, 7)]
+
     fb = None
     if ax is None:
         fb = FigureBuilder(figsize=figsize)
@@ -2463,7 +2476,7 @@ def plot_behav_barplot(
     sns.barplot(
         data=behav_barplot_data,
         y="resampled",
-        x="prop",
+        x="prop" if plot_values == "proportion" else "count",
         order=plot_resampled_steps[::-1],
         hue="label_behavior",
         hue_order=list(plot_phoneme_pair)[::-1],
@@ -2473,8 +2486,8 @@ def plot_behav_barplot(
         ax=ax,
     )
 
-    behavior_styles = {"d": "", "n": "//"}
-    linestyles = {"d": "solid", "n": "dashed"}
+    behavior_styles = dict(zip(list(plot_phoneme_pair), ["", "//"]))
+    linestyles = dict(zip(list(plot_phoneme_pair), ["solid", "dashed"]))
 
     max_width = behav_barplot_data["count"].max()
 
@@ -2488,21 +2501,20 @@ def plot_behav_barplot(
         ax.xaxis.set_major_formatter(mtick.PercentFormatter(1.0))
         ax.set_xlabel("% trials")
     ax.set_ylabel("step")
-    ax.tick_params(axis="both", labelsize=12)
 
     legend_handles = [
-        Patch(
-            facecolor="white",
-            edgecolor="black",
+        Line2D(
+            [0], [0],
+            color="k",
             linewidth=1.5,
-            hatch="//",
+            linestyle="--",
             label=f"Chose\n$\\it{{{plot_phoneme_pair[1]}{plot_word_end[1:]}}}$",
         ),
-        Patch(
-            facecolor="white",
-            edgecolor="black",
+        Line2D(
+            [0], [0],
+            color="k",
             linewidth=1.5,
-            hatch="",
+            linestyle="-",
             label=f"Chose\n$\\it{{{plot_phoneme_pair[0]}{plot_word_end[1:]}}}$",
         ),
     ]
@@ -2513,9 +2525,9 @@ def plot_behav_barplot(
             frameon=False,
             fontsize=10,
             handlelength=3,
-            handleheight=2,
+            handleheight=3,
             loc="center right",
-            bbox_to_anchor=(1.25, 0.5),
+            bbox_to_anchor=legend_bbox_to_anchor,
         )
     else:
         ax.get_legend().remove()
@@ -2530,20 +2542,41 @@ def plot_behav_barplot(
         fb.stage("skeleton")
 
     # Data: color and style bars, add line overlays
-    for patch, (_, row) in zip(ax.patches, behav_barplot_data.iterrows()):
-        patch_color = resampled_palette[row["resampled"] - 1]
+    patch_rows = list(zip(ax.patches, behav_barplot_data.itertuples(index=False)))
+
+    if collapse_zero_bars:
+        groups = defaultdict(list)
+        for patch, row in patch_rows:
+            groups[row.resampled].append((patch, row))
+
+        for resampled_step, group in groups.items():
+            nonzero = [pr for pr in group if pr[1].count > 0]
+            zero = [pr for pr in group if pr[1].count == 0]
+            if zero and len(nonzero) == 1:
+                surviving_patch, _ = nonzero[0]
+                empty_patch, _ = zero[0]
+                # merge the two dodge slots into one full-height bar
+                full_y0 = min(surviving_patch.get_y(), empty_patch.get_y())
+                full_height = surviving_patch.get_height() + empty_patch.get_height()
+                surviving_patch.set_y(full_y0)
+                surviving_patch.set_height(full_height)
+                empty_patch.set_visible(False)
+
+    for patch, row in patch_rows:
+        if collapse_zero_bars and row.count == 0:
+            continue  # already hidden above, and no line overlay needed
+
+        patch_color = resampled_palette[row.resampled - 1]
         patch.set_facecolor(patch_color)
         patch.set_alpha(0.3)
         patch.set_edgecolor("black")
         patch.set_linewidth(0.5)
-        # avoid PDF export oddities
         patch.set_rasterized(True)
 
-        # draw line overlay for bars
         x = patch.get_x()
         width = patch.get_width()
         y_center = patch.get_y() + patch.get_height() / 2
-        linestyle = linestyles[row["label_behavior"]]
+        linestyle = linestyles[row.label_behavior]
         ax.plot(
             [x, x + width],
             [y_center, y_center],

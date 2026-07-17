@@ -6,9 +6,9 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.19.1
 #   kernelspec:
-#     display_name: Python 3
+#     display_name: barakeet
 #     language: python
 #     name: python3
 # ---
@@ -19,8 +19,10 @@
 # Reads whatever outputs exist in `outputs/causal6/` and shows:
 # 1. **Acoustic** — significance from `acoustic_decoding_peaks/*/phon_peaks.parquet`
 # 2. **Behavior HGA-only (raw)** — peak fold-mean AUC across all subjects with scores
-# 3. **Behavior HGA-only (significance)** — on-the-fly significance for subjects
-#    that have both real scores and null permutations
+# 3. **Acoustic + behavior-with-control (on-the-fly significance)** — for
+#    subjects that have both real scores and null permutations.  Section 8
+#    star plots threshold on acoustic AUC + behav-with-control diff (the
+#    HGA-only metric is shown only as a third annotation).
 #
 # No files are written. Re-run the cell block you care about at any time.
 
@@ -33,8 +35,10 @@ os.environ.setdefault("POLARS_MAX_THREADS", "8")
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
+import seaborn as sns
 
 from pathlib import Path
+from tqdm.auto import tqdm
 
 from src.data import get_electrode_df
 from src.models.causal6_aggregates import SITE_KEYS_BEHAVIOR_HGA_ONLY, _behavior_offset_samples
@@ -239,8 +243,9 @@ if ac_brain_frames:
 # `diff = full_roc_auc − baseline_roc_auc`.  Peak window per site = argmax of
 # fold-mean diff.
 #
-# **Window decision:** smin ∈ [0, 290] with per-`word_end` offset cap — identical to
-# the HGA-only search (`_filter_window_expr()`).  Chance = 0.0 for diff (not 0.5).
+# **Window decision:** smin ≥ `acoustic_peak_search_smin` (=50, ≥100ms post onset),
+# smax ≤ min(per-`word_end` offset cap, 290) — identical to the HGA-only search
+# (`_filter_window_expr()`). Chance = 0.0 for diff (not 0.5).
 
 # %%
 _beh_full_score_paths = sorted(
@@ -758,6 +763,28 @@ if brain_frames:
 
 # %% [markdown]
 # ----
+# ## 5.5 Compare controlled behavior vs. HGA-only behavior
+#
+# Do the top sites under the controlled behavior decoding measure also get selected under the HGA-only behavior measure?
+# This is important to us in the interim because the nulls from the controlled behavior decoding have a bug in them.
+# So for interim results we need to go with HGA-only.
+
+# %%
+beh_comp = (
+    pl.concat(beh_peak_frames.values())
+    .join(pl.concat(beh_full_peak_frames.values()),
+          on=SITE_KEYS_BEHAV, how="inner", suffix="_full")
+)
+
+# %%
+beh_comp.to_pandas()[["peak_auc", "peak_diff"]].query("peak_diff > 0 and peak_auc > 0.5").corr()
+
+# %%
+sns.lmplot(data=beh_comp.to_pandas().query("peak_diff > 0 and peak_auc > 0.5"),
+           x="peak_auc", y="peak_diff", hue="phoneme_pair", scatter_kws=dict(alpha=0.3))
+
+# %% [markdown]
+# ----
 # ## 6  Ganong (full / with-control) — raw peak diff AUC
 #
 # Reads `ganong_decoding_single_electrode/*/scores.parquet`, pairs full vs baseline
@@ -1113,16 +1140,26 @@ plt.show()
 # ## 8  Contingency + provisional star plots — sites passing both thresholds
 #
 # Cross-filter `brain_plot_acoustic_tstats.parquet` (section 2) and
-# `brain_plot_behav_tstats.parquet` (section 5) by AUC thresholds, identify
-# electrodes that pass **both** filters, and render two-panel HGA traces.
+# `brain_plot_behav_full_tstats.parquet` (section 3) by their respective
+# thresholds (acoustic peak AUC ≥ `acoustic_auc_threshold`; behav-with-control
+# peak diff ≥ `behav_diff_threshold`), identify electrodes that pass **both**
+# filters, and render three-panel HGA traces.
 #
-# **Requires sections 2 and 5 to have been run** (parquets must exist on disk).
+# **Requires sections 2 and 3 to have been run** (parquets must exist on disk).
+# Section 5 (behav HGA-only) is consulted only for the HGA-only metric shown
+# in the star plot title, not for thresholding.
+#
+# Each star plot displays three metrics in its title (with population
+# percentile rank across all sites in that modality):
+#   - acoustic AUC
+#   - behav-with-control diff AUC (full − baseline)
+#   - behav HGA-only AUC
 #
 # Star plot panels:
 #   - Top: unambiguous trials (resampled 1 & 6), acoustic peak window shaded.
 #   - Bottom: within-completion controlled ambiguous trials (behaviorally-defined
-#     ambiguous steps via `get_ambiguous_resampled_steps`), behavioral peak
-#     window shaded, split by button-press response.
+#     ambiguous steps via `get_ambiguous_resampled_steps`), behav-with-control
+#     peak window shaded, split by button-press response.
 #
 # No polarity correction is applied (requires `prepare_neurometrics`).
 #
@@ -1134,7 +1171,9 @@ import pandas as pd
 import re as _re_s7
 from matplotlib.backends.backend_pdf import PdfPages
 from src.data import add_metadata_features, get_ambiguous_resampled_steps as _get_ambig_steps
+from src.stimuli import OFFSET_DICT as _OFFSET_DICT
 from src.viz_paper import add_textgrid
+from src.viz_provisional import provisional_star_plot as _provisional_star_plot
 
 _TEXTGRID_DIR = "data/stimuli/textgrid"
 
@@ -1155,24 +1194,74 @@ if "epochs_dict" not in dir():
 
 # %%
 acoustic_auc_threshold = 0.75
-behav_auc_threshold = 0.8
+behav_diff_threshold = 0.1  # full − baseline AUC diff on behav-with-control
 
 _ac_path = ROOT / "brain_plot_acoustic_tstats.parquet"
-_beh_path = ROOT / "brain_plot_behav_tstats.parquet"
-if not (_ac_path.exists() and _beh_path.exists()):
+_beh_full_path = ROOT / "brain_plot_behav_full_tstats.parquet"
+_beh_hga_path = ROOT / "brain_plot_behav_tstats.parquet"
+if not (_ac_path.exists() and _beh_full_path.exists()):
     raise RuntimeError(
-        "brain_plot parquets not found — run sections 2 and 5 first."
+        "brain_plot parquets not found — run sections 2 and 3 first "
+        "(acoustic + behav-with-control)."
     )
 
 _ac_pd = pl.read_parquet(_ac_path).to_pandas()
-_beh_pd = pl.read_parquet(_beh_path).to_pandas()
+_beh_full_pd = pl.read_parquet(_beh_full_path).to_pandas()
+# Behav HGA-only is *only* used to annotate the third metric in star plot titles;
+# absence is non-fatal.
+_beh_pd = pl.read_parquet(_beh_hga_path).to_pandas() if _beh_hga_path.exists() else None
 
-acoustic_passes = _ac_pd[_ac_pd.peak_auc >= acoustic_auc_threshold].copy()
-behav_passes    = _beh_pd[_beh_pd.peak_auc >= behav_auc_threshold].copy()
 
+# Population percentile ranks per modality (rank across every row in each table —
+# one rank per (subject, electrode, phoneme_pair[, word_end])).
+def _series_pct_rank(series: pd.Series) -> pd.Series:
+    # 0–100, average tie-handling. Includes the value itself.
+    return series.rank(method="average", pct=True) * 100.0
+
+
+_ac_pd["peak_auc_pct"] = _series_pct_rank(_ac_pd["peak_auc"])
+_beh_full_pd["peak_diff_pct"] = _series_pct_rank(_beh_full_pd["peak_diff"])
+if _beh_pd is not None:
+    _beh_pd["peak_auc_pct"] = _series_pct_rank(_beh_pd["peak_auc"])
+
+
+def _sp_behav_hga_auc(subject, electrode_idx, phoneme_pair, word_end):
+    """Return (peak_auc, percentile_rank) or (None, None)."""
+    if _beh_pd is None:
+        return None, None
+    mask = (
+        (_beh_pd["subject"] == subject)
+        & (_beh_pd["electrode_idx"] == electrode_idx)
+        & (_beh_pd["phoneme_pair"] == phoneme_pair)
+        & (_beh_pd["word_end"] == word_end)
+    )
+    rows = _beh_pd[mask]
+    if len(rows) == 0:
+        return None, None
+    return float(rows["peak_auc"].iloc[0]), float(rows["peak_auc_pct"].iloc[0])
+
+
+def _sp_behav_full_diff(subject, electrode_idx, phoneme_pair, word_end):
+    """Return (peak_diff, percentile_rank) or (None, None)."""
+    mask = (
+        (_beh_full_pd["subject"] == subject)
+        & (_beh_full_pd["electrode_idx"] == electrode_idx)
+        & (_beh_full_pd["phoneme_pair"] == phoneme_pair)
+        & (_beh_full_pd["word_end"] == word_end)
+    )
+    rows = _beh_full_pd[mask]
+    if len(rows) == 0:
+        return None, None
+    return float(rows["peak_diff"].iloc[0]), float(rows["peak_diff_pct"].iloc[0])
+
+
+acoustic_passes  = _ac_pd[_ac_pd.peak_auc >= acoustic_auc_threshold].copy()
+behav_passes     = _beh_full_pd[_beh_full_pd.peak_diff >= behav_diff_threshold].copy()
+
+# Best behav window per electrode = argmax peak_diff over phoneme_pair × word_end.
 behav_plot = (
     behav_passes
-    .sort_values("peak_auc", ascending=False)
+    .sort_values("peak_diff", ascending=False)
     .groupby(["subject", "electrode_idx"], observed=True, as_index=False)
     .first()
 )
@@ -1183,16 +1272,47 @@ A_phonetic_plot = (
     .first()
 )
 
+# Explicit per-side renames so the merge gives stable _phon/_behav column names
+# regardless of which columns happen to overlap.
+_phon_cols_keep = [
+    "subject", "electrode_idx", "phoneme_pair", "peak_auc", "peak_auc_pct",
+    "peak_smin", "peak_smax",
+]
+_behav_cols_keep = [
+    "subject", "electrode_idx", "phoneme_pair", "word_end",
+    "peak_diff", "peak_diff_pct", "peak_smin", "peak_smax",
+]
+_phon_renamed = (
+    A_phonetic_plot[_phon_cols_keep]
+    .drop_duplicates(["subject", "electrode_idx"])
+    .rename(columns={
+        "phoneme_pair": "phoneme_pair_phon",
+        "peak_auc":     "peak_auc_phon",
+        "peak_auc_pct": "peak_auc_pct_phon",
+        "peak_smin":    "peak_smin_phon",
+        "peak_smax":    "peak_smax_phon",
+    })
+)
+_behav_renamed = (
+    behav_plot[_behav_cols_keep]
+    .drop_duplicates(["subject", "electrode_idx"])
+    .rename(columns={
+        "phoneme_pair":  "phoneme_pair_behav",
+        "peak_diff":     "peak_diff_behav",
+        "peak_diff_pct": "peak_diff_pct_behav",
+        "peak_smin":     "peak_smin_behav",
+        "peak_smax":     "peak_smax_behav",
+    })
+)
+
 contingency_df = pd.merge(
-    A_phonetic_plot.drop_duplicates(["subject", "electrode_idx"]),
-    behav_plot.drop_duplicates(["subject", "electrode_idx"]),
+    _phon_renamed, _behav_renamed,
     on=["subject", "electrode_idx"],
     how="outer",
-    suffixes=("_phon", "_behav"),
 )
 contingency_df["outcome"] = "all"
-contingency_df.loc[contingency_df["peak_auc_behav"].isna(), "outcome"] = "phonetic"
-contingency_df.loc[contingency_df["peak_auc_phon"].isna(),  "outcome"] = "behav"
+contingency_df.loc[contingency_df["peak_diff_behav"].isna(), "outcome"] = "phonetic"
+contingency_df.loc[contingency_df["peak_auc_phon"].isna(),   "outcome"] = "behav"
 contingency_df = (
     contingency_df
     .sort_values(["subject", "electrode_idx", "outcome"])
@@ -1211,7 +1331,7 @@ if len(_both):
           f"{_both['same_phoneme_pair'].sum()}/{len(_both)}")
     print(_both[["subject", "electrode_idx",
                  "phoneme_pair_phon", "phoneme_pair_behav", "word_end",
-                 "peak_auc_phon", "peak_auc_behav",
+                 "peak_auc_phon", "peak_diff_behav",
                  "peak_smin_phon", "peak_smin_behav"]].to_string(index=False))
 
 # %%
@@ -1239,144 +1359,6 @@ ambig_steps = _get_ambig_steps(
 print(f"ambig_steps: {len(ambig_steps)} (subject, phoneme_pair, word_end) keys")
 
 # %%
-def _provisional_star_plot(
-    subject,
-    electrode_idx,
-    phoneme_pair,
-    word_end,
-    epochs_dict,
-    ambig_steps,
-    phon_smin=None,
-    phon_smax=None,
-    behav_smin=None,
-    behav_smax=None,
-    textgrid_dir=_TEXTGRID_DIR,
-    epoch_tmin=EPOCH_TMIN,
-    epoch_sfreq=EPOCH_SFREQ,
-    figsize=(6.5, 7.5),
-):
-    """Three-panel provisional HGA star plot (no prepare_neurometrics required).
-
-    Top: unambiguous trials (resampled 1 & 6); acoustic window shaded if
-    phon_smin/phon_smax supplied.
-    Middle: within-completion controlled ambiguous trials (behaviorally-defined
-    steps from ambig_steps), split by response; behavioral window shaded if
-    behav_smin/behav_smax supplied.
-    Bottom: all trials within word_end (no step filter), split by response —
-    reflects what the decoder actually evaluates on.
-    """
-    ep = epochs_dict[subject]
-    times = ep.times
-    md = ep.metadata
-
-    pp_mask = md["phoneme_pair"] == phoneme_pair
-    ep_pp = ep[pp_mask.values]
-    md_pp = md[pp_mask].reset_index(drop=True)
-
-    hga = (
-        ep_pp.copy()
-        .apply_baseline((None, 0))
-        .get_data(picks=[electrode_idx])
-        .squeeze(1)
-    )
-
-    fig, (ax_top, ax_mid, ax_bot) = plt.subplots(3, 1, figsize=figsize, sharex=True)
-
-    _bhv_col = (
-        "behavior_dummy_forced"
-        if "behavior_dummy_forced" in md_pp.columns
-        else "behavior_categorical"
-    )
-    _bhv_colors = ["#762a83", "#1b7837"]
-
-    # ── Top: unambiguous ───────────────────────────────────────────────
-    _step_colors = {1: "#2166ac", 6: "#d73027"}
-    for step, color in _step_colors.items():
-        mask = md_pp["resampled"] == step
-        if not mask.any():
-            continue
-        tr = hga[mask.values]
-        m = tr.mean(0)
-        se = tr.std(0) / np.sqrt(mask.sum())
-        ax_top.plot(times, m, color=color, lw=1.5, label=f"step {step}  (n={mask.sum()})")
-        ax_top.fill_between(times, m - se, m + se, color=color, alpha=0.18)
-    if phon_smin is not None:
-        t_phon = np.array([phon_smin, phon_smax]) / epoch_sfreq + epoch_tmin
-        ax_top.axvspan(*t_phon, color="#4dac26", alpha=0.14, label="acoustic window")
-    ax_top.axhline(0, color="k", lw=0.5, ls=":")
-    ax_top.set_ylabel("HGA (z)")
-    ax_top.set_title(
-        f"{subject}  e{electrode_idx}  {phoneme_pair} — unambiguous", fontsize=9
-    )
-    ax_top.legend(fontsize=7, loc="upper left", framealpha=0.7)
-
-    # ── Middle: controlled ambiguous (within-completion) ──────────────
-    amb = ambig_steps.get((subject, phoneme_pair, word_end), [3, 4])
-    we_amb_mask = (md_pp["word_end"] == word_end) & md_pp["resampled"].isin(amb)
-
-    for _i, _bhv_val in enumerate(
-        sorted(md_pp.loc[we_amb_mask, _bhv_col].dropna().unique())
-    ):
-        mask = we_amb_mask & (md_pp[_bhv_col] == _bhv_val)
-        if not mask.any():
-            continue
-        tr = hga[mask.values]
-        m = tr.mean(0)
-        se = tr.std(0) / np.sqrt(mask.sum())
-        color = _bhv_colors[_i % len(_bhv_colors)]
-        ax_mid.plot(times, m, color=color, lw=1.5,
-                    label=f"resp={_bhv_val}  (n={mask.sum()})")
-        ax_mid.fill_between(times, m - se, m + se, color=color, alpha=0.18)
-    if behav_smin is not None:
-        t_behav = np.array([behav_smin, behav_smax]) / epoch_sfreq + epoch_tmin
-        ax_mid.axvspan(*t_behav, color="#f4a582", alpha=0.25, label="behavioral window")
-    ax_mid.axhline(0, color="k", lw=0.5, ls=":")
-    ax_mid.set_ylabel("HGA (z)")
-    ax_mid.set_title(
-        f"Controlled ambiguous — {word_end}  (steps {amb})", fontsize=9
-    )
-    ax_mid.legend(fontsize=7, loc="upper left", framealpha=0.7)
-
-    # ── Bottom: all trials within word_end (decoder view) ─────────────
-    we_all_mask = md_pp["word_end"] == word_end
-
-    for _i, _bhv_val in enumerate(
-        sorted(md_pp.loc[we_all_mask, _bhv_col].dropna().unique())
-    ):
-        mask = we_all_mask & (md_pp[_bhv_col] == _bhv_val)
-        if not mask.any():
-            continue
-        tr = hga[mask.values]
-        m = tr.mean(0)
-        se = tr.std(0) / np.sqrt(mask.sum())
-        color = _bhv_colors[_i % len(_bhv_colors)]
-        ax_bot.plot(times, m, color=color, lw=1.5,
-                    label=f"resp={_bhv_val}  (n={mask.sum()})")
-        ax_bot.fill_between(times, m - se, m + se, color=color, alpha=0.18)
-    if behav_smin is not None:
-        t_behav = np.array([behav_smin, behav_smax]) / epoch_sfreq + epoch_tmin
-        ax_bot.axvspan(*t_behav, color="#f4a582", alpha=0.25, label="behavioral window")
-    ax_bot.axhline(0, color="k", lw=0.5, ls=":")
-    ax_bot.set_ylabel("HGA (z)")
-    ax_bot.set_xlabel("Time (s, post word onset)")
-    ax_bot.set_title(
-        f"All trials — {word_end}  (decoder view)", fontsize=9
-    )
-    ax_bot.legend(fontsize=7, loc="upper left", framealpha=0.7)
-
-    # ── TextGrid ────────────────────────────────────────────────────────
-    for _ax in (ax_top, ax_mid, ax_bot):
-        try:
-            add_textgrid(_ax, textgrid_dir=textgrid_dir,
-                         textgrid_file=f"11_{word_end}_dn_002.TextGrid",
-                         vline_extent=1.0)
-        except Exception:
-            pass
-
-    fig.tight_layout()
-    return fig
-
-# %%
 _star_out = ROOT / "provisional_star_plots.pdf"
 if len(_both) == 0:
     print("No sites pass both thresholds — no star plots to render.")
@@ -1390,6 +1372,14 @@ else:
             if _row["subject"] not in epochs_dict:
                 continue
             try:
+                _full_diff, _full_diff_pct = _sp_behav_full_diff(
+                    _row["subject"], int(_row["electrode_idx"]),
+                    _row["phoneme_pair_behav"], _row["word_end"],
+                )
+                _hga, _hga_pct = _sp_behav_hga_auc(
+                    _row["subject"], int(_row["electrode_idx"]),
+                    _row["phoneme_pair_behav"], _row["word_end"],
+                )
                 _fig = _provisional_star_plot(
                     subject=_row["subject"],
                     electrode_idx=int(_row["electrode_idx"]),
@@ -1402,6 +1392,12 @@ else:
                     behav_smax=int(_row["peak_smax_behav"]),
                     textgrid_dir=_TEXTGRID_DIR,
                     ambig_steps=ambig_steps,
+                    acoustic_peak_auc=float(_row["peak_auc_phon"]),
+                    acoustic_peak_auc_pct=float(_row["peak_auc_pct_phon"]),
+                    behav_full_peak_diff=_full_diff,
+                    behav_full_peak_diff_pct=_full_diff_pct,
+                    behav_hga_peak_auc=_hga,
+                    behav_hga_peak_auc_pct=_hga_pct,
                 )
                 _pdf.savefig(_fig)
                 plt.close(_fig)
@@ -1417,12 +1413,12 @@ _TOP_K = 10
 
 _behav_only = (
     contingency_df[contingency_df.outcome == "behav"]
-    .sort_values("peak_auc_behav", ascending=False)
+    .sort_values("peak_diff_behav", ascending=False)
     .head(_TOP_K)
 )
-print(f"Top {_TOP_K} behavioral-only sites (AUC ≥ {behav_auc_threshold}, no acoustic pass):")
+print(f"Top {_TOP_K} behavioral-only sites (diff ≥ {behav_diff_threshold}, no acoustic pass):")
 print(_behav_only[["subject", "electrode_idx", "phoneme_pair_behav",
-                    "word_end", "peak_auc_behav"]].to_string(index=False))
+                    "word_end", "peak_diff_behav"]].to_string(index=False))
 
 _bonly_out = ROOT / "provisional_star_plots_behav_only.pdf"
 with PdfPages(_bonly_out) as _pdf:
@@ -1430,6 +1426,14 @@ with PdfPages(_bonly_out) as _pdf:
         if _row["subject"] not in epochs_dict:
             continue
         try:
+            _full_diff, _full_diff_pct = _sp_behav_full_diff(
+                _row["subject"], int(_row["electrode_idx"]),
+                _row["phoneme_pair_behav"], _row["word_end"],
+            )
+            _hga, _hga_pct = _sp_behav_hga_auc(
+                _row["subject"], int(_row["electrode_idx"]),
+                _row["phoneme_pair_behav"], _row["word_end"],
+            )
             _fig = _provisional_star_plot(
                 subject=_row["subject"],
                 electrode_idx=int(_row["electrode_idx"]),
@@ -1439,6 +1443,10 @@ with PdfPages(_bonly_out) as _pdf:
                 ambig_steps=ambig_steps,
                 behav_smin=int(_row["peak_smin_behav"]),
                 behav_smax=int(_row["peak_smax_behav"]),
+                behav_full_peak_diff=_full_diff,
+                behav_full_peak_diff_pct=_full_diff_pct,
+                behav_hga_peak_auc=_hga,
+                behav_hga_peak_auc_pct=_hga_pct,
             )
             _pdf.savefig(_fig)
             plt.close(_fig)
@@ -1482,6 +1490,12 @@ with PdfPages(_aonly_out) as _pdf:
             )
         for _we in _word_ends:
             try:
+                _full_diff, _full_diff_pct = _sp_behav_full_diff(
+                    _subj, int(_row["electrode_idx"]), _pp, _we,
+                )
+                _hga, _hga_pct = _sp_behav_hga_auc(
+                    _subj, int(_row["electrode_idx"]), _pp, _we,
+                )
                 _fig = _provisional_star_plot(
                     subject=_subj,
                     electrode_idx=int(_row["electrode_idx"]),
@@ -1491,6 +1505,12 @@ with PdfPages(_aonly_out) as _pdf:
                     ambig_steps=ambig_steps,
                     phon_smin=int(_row["peak_smin_phon"]),
                     phon_smax=int(_row["peak_smax_phon"]),
+                    acoustic_peak_auc=float(_row["peak_auc_phon"]),
+                    acoustic_peak_auc_pct=float(_row["peak_auc_pct_phon"]),
+                    behav_full_peak_diff=_full_diff,
+                    behav_full_peak_diff_pct=_full_diff_pct,
+                    behav_hga_peak_auc=_hga,
+                    behav_hga_peak_auc_pct=_hga_pct,
                 )
                 _pdf.savefig(_fig)
                 plt.close(_fig)
@@ -1499,95 +1519,149 @@ with PdfPages(_aonly_out) as _pdf:
                 print(f"  skipped {_subj} e{int(_row['electrode_idx'])} {_we}: {_e}")
 print(f"Written {_n_pages} pages → {_aonly_out}")
 
+# %%
+# Top-K behavior HGA-only sites (raw peak AUC, no baseline control, no acoustic
+# requirement).  Thresholds on HGA-only AUC only; acoustic + behav-with-control
+# metrics are shown as annotations in the title where available.
+if _beh_pd is not None:
+    _beh_hga_top = (
+        _beh_pd.sort_values("peak_auc", ascending=False)
+        .groupby(["subject", "electrode_idx"], observed=True, as_index=False)
+        .first()
+        .head(_TOP_K)
+    )
+    print(f"Top {_TOP_K} behavior HGA-only sites by peak AUC:")
+    print(_beh_hga_top[["subject", "electrode_idx", "phoneme_pair",
+                         "word_end", "peak_auc"]].to_string(index=False))
+
+    _hga_only_out = ROOT / "provisional_star_plots_hga_only.pdf"
+    with PdfPages(_hga_only_out) as _pdf:
+        for _, _row in _beh_hga_top.iterrows():
+            if _row["subject"] not in epochs_dict:
+                continue
+            try:
+                _full_diff, _full_diff_pct = _sp_behav_full_diff(
+                    _row["subject"], int(_row["electrode_idx"]),
+                    _row["phoneme_pair"], _row["word_end"],
+                )
+                _fig = _provisional_star_plot(
+                    subject=_row["subject"],
+                    electrode_idx=int(_row["electrode_idx"]),
+                    phoneme_pair=_row["phoneme_pair"],
+                    word_end=_row["word_end"],
+                    epochs_dict=epochs_dict,
+                    ambig_steps=ambig_steps,
+                    behav_smin=int(_row["peak_smin"]),
+                    behav_smax=int(_row["peak_smax"]),
+                    behav_hga_peak_auc=float(_row["peak_auc"]),
+                    behav_hga_peak_auc_pct=float(_row["peak_auc_pct"]),
+                    behav_full_peak_diff=_full_diff,
+                    behav_full_peak_diff_pct=_full_diff_pct,
+                )
+                _pdf.savefig(_fig)
+                plt.close(_fig)
+            except Exception as _e:
+                print(f"  skipped {_row['subject']} e{int(_row['electrode_idx'])}: {_e}")
+    print(f"Written {len(_beh_hga_top)} pages → {_hga_only_out}")
+else:
+    print("brain_plot_behav_tstats.parquet not found — run section 5 first.")
+
+# %% [markdown]
+# ## 8.5 add star plots for behav hga only
+
+# %%
+_TOP_K_HGA = 50
+
+# Best window per electrode from HGA-only scores, ranked by peak AUC
+_hga_ranked = (
+    _beh_pd
+    .sort_values("peak_auc", ascending=False)
+    .groupby(["subject", "electrode_idx"], observed=True, as_index=False)
+    .first()
+    .head(_TOP_K_HGA)
+)
+
+# Join best acoustic AUC per electrode (across phoneme pairs) for title annotation
+_ac_best = (
+    _ac_pd
+    .sort_values("peak_auc", ascending=False)
+    .groupby(["subject", "electrode_idx"], observed=True, as_index=False)
+    .first()[["subject", "electrode_idx", "peak_auc", "peak_auc_pct"]]
+    .rename(columns={"peak_auc": "ac_auc", "peak_auc_pct": "ac_auc_pct"})
+)
+_hga_ranked = _hga_ranked.merge(_ac_best, on=["subject", "electrode_idx"], how="left").sort_values("peak_auc", ascending=False)
+
+_hga_ranked_out = ROOT / "provisional_star_plots_hga_ranked.pdf"
+with PdfPages(_hga_ranked_out) as _pdf:
+    for _, _row in tqdm(_hga_ranked.iterrows(), total=len(_hga_ranked)):
+        if _row["subject"] not in epochs_dict:
+            continue
+        try:
+            _fig = _provisional_star_plot(
+                  subject=_row["subject"],
+                  electrode_idx=int(_row["electrode_idx"]),
+                  phoneme_pair=_row["phoneme_pair"],
+                  word_end=_row["word_end"],
+                  epochs_dict=epochs_dict,
+                  ambig_steps=ambig_steps,
+                  behav_smin=int(_row["peak_smin"]),
+                  behav_smax=int(_row["peak_smax"]),
+                  acoustic_peak_auc=float(_row["ac_auc"]) if pd.notna(_row["ac_auc"]) else None,
+                  acoustic_peak_auc_pct=float(_row["ac_auc_pct"]) if pd.notna(_row["ac_auc_pct"]) else None,
+                  behav_hga_peak_auc=float(_row["peak_auc"]),
+                  behav_hga_peak_auc_pct=float(_row["peak_auc_pct"]),
+              )
+            _pdf.savefig(_fig)
+            plt.close(_fig)
+        except Exception as _e:
+            print(f"  skipped {_row['subject']} e{int(_row['electrode_idx'])}: {_e}")
+
+print(f"Written {len(_hga_ranked)} pages → {_hga_ranked_out}")
+
 # %% [markdown]
 # ----
-# ## 9  Behavior HGA-only — on-the-fly significance  *(expensive — run last)*
+# ## 9  Acoustic + behavior-with-control — on-the-fly significance  *(expensive — run last)*
 #
-# Runs `fold_tstat_aggregate` + `null_standardized_peak_test` for every
-# subject that has both `scores.parquet` and `null_scores.parquet`.
-# Uses `scan_parquet + streaming collect` so the raw null frame
-# (potentially 100s of GB) never fully materialises in RAM.
+# Runs `aggregate_<decoder>` + `null_standardized_peak_test` for every
+# subject that has both `scores.parquet` and `null_scores.parquet`, for
+# **two decoders**:
+#
+#   * acoustic (`acoustic_decoding_single_electrode` + `acoustic_decoding_null`)
+#   * behavior-with-control (`behavior_decoding_single_electrode` +
+#     `behavior_decoding_single_electrode_null`)
+#
+# Both aggregators auto-detect pre-aggregated null files (with
+# `fold_mean_diff` column) vs raw per-fold nulls, so this works whichever
+# format `null_scores.parquet` happens to be in.
 #
 # **No BH-FDR applied** — partial data.  Once the pipeline finishes, run:
 # ```
-# uv run python scripts/aggregate_partial.py behav_hga_only
+# uv run python scripts/aggregate_partial.py <decoder_name>
 # ```
 # to get FDR-corrected aggregates.
 
 # %%
 import gc
 
-from src.models.significance import fold_tstat_aggregate
+from src.models.causal6_aggregates import (
+    SITE_KEYS_ACOUSTIC,
+    SITE_KEYS_BEHAVIOR_WITH_CONTROL,
+    aggregate_acoustic,
+    aggregate_behavior_with_control,
+)
 
 
-null_dir = ROOT / "behavior_decoding_single_electrode_hga_only_null"
-score_dir = ROOT / "behavior_decoding_single_electrode_hga_only"
-
-beh_sig_frames: dict[str, pl.DataFrame] = {}
-
-for null_path in sorted(null_dir.glob("*/null_scores.parquet")):
-    subject = null_path.parent.name
-    scores_path = score_dir / subject / "scores.parquet"
-    if not scores_path.exists():
-        print(f"{subject}: null exists but no real scores — skipping.")
-        continue
-
-    print(f"{subject}: aggregating …", end=" ", flush=True)
-
-    # Real scores: small, load eagerly
-    real_agg = fold_tstat_aggregate(
-        pl.read_parquet(scores_path)
-        .with_columns(
-            pl.col("word_end")
-            .replace_strict(_OFFSET_SAMPLES, default=None)
-            .alias("_smax_limit")
-        )
-        .filter(_filter_window_expr())
-        .drop("_smax_limit"),
-        group_keys=WINDOW_KEYS_BEHAV,
-        stat_col="test_roc_auc",
-        center=0.5,
-    )
-
-    # Null scores: scan lazily, stream the fold-collapse to avoid materialising
-    # the full file (can be 100+ GB for large subjects with many permutations).
-    null_agg = (
-        pl.scan_parquet(null_path)
-        .with_columns(
-            pl.col("word_end")
-            .replace_strict(_OFFSET_SAMPLES, default=None)
-            .alias("_smax_limit")
-        )
-        .filter(_filter_window_expr())
-        .drop("_smax_limit")
-        .group_by(WINDOW_KEYS_BEHAV + ["permutation_idx"])
-        .agg(
-            pl.col("test_roc_auc").mean().alias("fold_mean"),
-            pl.col("test_roc_auc").std().alias("fold_std"),
-            pl.col("test_roc_auc").len().alias("n_folds"),
-        )
-        .with_columns(
-            (
-                (pl.col("fold_mean") - 0.5)
-                / (
-                    pl.max_horizontal(pl.col("fold_std"), pl.lit(0.01))
-                    / pl.col("n_folds").cast(pl.Float64).sqrt()
-                )
-            ).alias("t_stat")
-        )
-        .collect(streaming=True)
-    )
-
+def _run_subject_peak_test(real_agg, null_agg, site_keys, stat_col):
     peaks, _ = null_standardized_peak_test(
         real_agg, null_agg,
-        site_keys=SITE_KEYS_BEHAV,
+        site_keys=site_keys,
         window_keys=["smin", "smax"],
-        stat_col="fold_mean",
+        stat_col=stat_col,
     )
-    del null_agg
-    gc.collect()
+    return peaks
 
-    beh_sig_frames[subject] = peaks
+
+def _report_peaks(subject, peaks, *, stat_label):
     n_total = len(peaks)
     n_sig = int((peaks["p_value"] < 0.05).sum())
     n_perm = int(peaks["n_permutations"].max())
@@ -1600,51 +1674,128 @@ for null_path in sorted(null_dir.glob("*/null_scores.parquet")):
         sub = peaks.filter(pl.col("phoneme_pair") == pp)
         print(
             f"  {pp}:  {int((sub['p_value'] < 0.05).sum())}/{len(sub)} sig  "
-            f"  peak fold-mean median={sub['real_statistic'].median():.3f}  "
+            f"  peak {stat_label} median={sub['real_statistic'].median():.3f}  "
             f"max={sub['real_statistic'].max():.3f}"
         )
 
-# %%
-if beh_sig_frames:
-    subjects = sorted(beh_sig_frames)
 
+# ---------- Acoustic ----------
+ac_null_dir = ROOT / "acoustic_decoding_null"
+ac_score_dir = ROOT / "acoustic_decoding_single_electrode"
+
+ac_sig_frames: dict[str, pl.DataFrame] = {}
+
+for null_path in sorted(ac_null_dir.glob("*/null_scores.parquet")):
+    subject = null_path.parent.name
+    scores_path = ac_score_dir / subject / "scores.parquet"
+    if not scores_path.exists():
+        print(f"[acoustic] {subject}: null exists but no real scores — skipping.")
+        continue
+
+    print(f"[acoustic] {subject}: aggregating …", end=" ", flush=True)
+
+    real_scores = pl.read_parquet(scores_path)
+    null_scores = pl.read_parquet(null_path)
+
+    real_agg, null_agg = aggregate_acoustic(
+        real_scores, null_scores,
+        target=_AC_TARGET,
+        peak_search_smin=_AC_PEAK_SEARCH_SMIN,
+        peak_search_smax=_AC_PEAK_SEARCH_SMAX,
+    )
+    del real_scores, null_scores
+    gc.collect()
+
+    peaks = _run_subject_peak_test(
+        real_agg, null_agg,
+        site_keys=SITE_KEYS_ACOUSTIC,
+        stat_col="fold_mean",
+    )
+    del null_agg
+    gc.collect()
+
+    ac_sig_frames[subject] = peaks
+    _report_peaks(subject, peaks, stat_label="fold-mean AUC")
+
+
+# ---------- Behavior with control ----------
+behav_full_null_dir = ROOT / "behavior_decoding_single_electrode_null"
+behav_full_score_dir = ROOT / "behavior_decoding_single_electrode"
+
+beh_full_sig_frames: dict[str, pl.DataFrame] = {}
+
+for null_path in sorted(behav_full_null_dir.glob("*/null_scores.parquet")):
+    subject = null_path.parent.name
+    scores_path = behav_full_score_dir / subject / "scores.parquet"
+    if not scores_path.exists():
+        print(f"[behav-with-control] {subject}: null exists but no real scores — skipping.")
+        continue
+
+    print(f"[behav-with-control] {subject}: aggregating …", end=" ", flush=True)
+
+    real_scores = pl.read_parquet(scores_path)
+    null_scores = pl.read_parquet(null_path)
+
+    real_agg, null_agg = aggregate_behavior_with_control(
+        real_scores, null_scores,
+        epoch_tmin=EPOCH_TMIN,
+        epoch_sfreq=EPOCH_SFREQ,
+        behav_peak_post_offset_s=_BEHAV_POST_OFFSET_S,
+        peak_search_smin=_PEAK_SEARCH_SMIN,
+        peak_search_smax=_PEAK_SEARCH_SMAX,
+    )
+    del real_scores, null_scores
+    gc.collect()
+
+    peaks = _run_subject_peak_test(
+        real_agg, null_agg,
+        site_keys=SITE_KEYS_BEHAVIOR_WITH_CONTROL,
+        stat_col="fold_mean",
+    )
+    del null_agg
+    gc.collect()
+
+    beh_full_sig_frames[subject] = peaks
+    _report_peaks(subject, peaks, stat_label="fold-mean diff")
+
+# %%
+def _plot_subject_grid(sig_frames, *, x_label, x_chance, title_prefix):
+    if not sig_frames:
+        return
+    subjects = sorted(sig_frames)
     fig, axes = plt.subplots(
         len(subjects), 3, figsize=(15, 4 * len(subjects)), squeeze=False
     )
-
     for row, subject in enumerate(subjects):
-        peaks = beh_sig_frames[subject]
+        peaks = sig_frames[subject]
         n_perm = int(peaks["n_permutations"].max())
         min_p = 1.0 / (n_perm + 1)
 
-        aucs = peaks["real_statistic"].to_numpy()
+        stats = peaks["real_statistic"].to_numpy()
         peak_ms = smin_to_ms(peaks["peak_smin"].to_numpy())
         pv = peaks["p_value"].to_numpy()
         sig_mask = pv < 0.05
 
-        # AUC distribution coloured by significance
         ax = axes[row, 0]
-        ax.hist(aucs[~sig_mask], bins=20, color="steelblue", alpha=0.7, label="n.s.")
-        ax.hist(aucs[sig_mask], bins=20, color="tomato", alpha=0.8, label="p<0.05")
-        ax.axvline(0.5, color="k", lw=0.8, ls="--")
-        ax.set_xlabel("peak fold-mean ROC-AUC")
+        ax.hist(stats[~sig_mask], bins=20, color="steelblue", alpha=0.7, label="n.s.")
+        ax.hist(stats[sig_mask],  bins=20, color="tomato",    alpha=0.8, label="p<0.05")
+        ax.axvline(x_chance, color="k", lw=0.8, ls="--")
+        ax.set_xlabel(x_label)
         ax.set_ylabel("sites")
         ax.set_title(
-            f"{subject} — behavior peak AUC\n({n_perm} perms, min p={min_p:.4f})"
+            f"{subject} — {title_prefix} peak\n({n_perm} perms, min p={min_p:.4f})"
         )
         ax.legend(fontsize=8)
 
-        # Peak timing coloured by significance
         ax2 = axes[row, 1]
         ax2.hist(peak_ms[~sig_mask], bins=20, color="steelblue", alpha=0.7, label="n.s.")
-        ax2.hist(peak_ms[sig_mask], bins=20, color="tomato", alpha=0.8, label="p<0.05")
+        ax2.hist(peak_ms[sig_mask],  bins=20, color="tomato",    alpha=0.8, label="p<0.05")
         ax2.axvline(0, color="k", lw=0.8, ls="--", label="word onset")
         ax2.set_xlabel("peak window onset (ms post word onset)")
         ax2.set_ylabel("sites")
-        ax2.set_title(f"{subject} — behavior peak timing")
+        ax2.set_title(f"{subject} — {title_prefix} peak timing")
         ax2.legend(fontsize=8)
 
-        # p-value histogram
         ax3 = axes[row, 2]
         ax3.hist(pv[np.isfinite(pv)], bins=20, color="slategray", alpha=0.8)
         ax3.axvline(0.05, color="tomato", lw=1.2, ls="--", label="p=0.05")
@@ -1652,8 +1803,214 @@ if beh_sig_frames:
                     label=f"min achievable ({min_p:.3f})")
         ax3.set_xlabel("p-value (maxstat-corrected, uncorrected for FDR)")
         ax3.set_ylabel("sites")
-        ax3.set_title(f"{subject} — p-value distribution")
+        ax3.set_title(f"{subject} — {title_prefix} p-values")
         ax3.legend(fontsize=8)
-
     fig.tight_layout()
     plt.show()
+
+
+_plot_subject_grid(
+    ac_sig_frames,
+    x_label="peak fold-mean ROC-AUC",
+    x_chance=0.5,
+    title_prefix="acoustic",
+)
+_plot_subject_grid(
+    beh_full_sig_frames,
+    x_label="peak fold-mean diff (full − baseline)",
+    x_chance=0.0,
+    title_prefix="behav-with-control",
+)
+
+# %% [markdown]
+# ----
+# ## 10  Acoustic + Behavior — TFCE-enhanced significance  *(expensive — run last)*
+#
+# Repeats the section 9 aggregation for all three decoders but applies
+# Threshold-Free Cluster Enhancement (TFCE) along the window axis before the
+# max-stat permutation test.  TFCE rewards statistics that span multiple adjacent
+# windows; isolated single-window spikes receive less credit.
+#
+# Acoustic TFCE is included here for validation (known true positives should
+# survive); it is omitted from the production flavor list (``FLAVORS_ACOUSTIC``)
+# because the search window is narrow enough that cluster credit rarely changes
+# the ranking.
+#
+# Flavors used:
+#  - acoustic: ``fold_mean``, TFCE threshold=0.5 (raw AUC, above-chance windows)
+#  - behavior-with-control: ``fold_mean``, TFCE threshold=0.0
+#    (diff is centered at 0; matches ``FLAVORS_BEHAVIOR_WITH_CONTROL[2]``)
+#  - behavior HGA-only: ``fold_mean``, TFCE threshold=0.5
+#    (raw AUC; windows below chance excluded; matches ``FLAVORS_BEHAVIOR_HGA_ONLY[2]``)
+#
+# **Requires null permutations** in the respective ``*_null/`` directories.
+
+# %%
+from src.models.causal6_aggregates import (
+    SITE_KEYS_BEHAVIOR_HGA_ONLY,
+    FLAVORS_BEHAVIOR_HGA_ONLY,
+    FLAVORS_BEHAVIOR_WITH_CONTROL,
+    FlavorSpec,
+    aggregate_behavior_hga_only,
+    tfce_enhanced_peak_test,
+)
+
+_TFCE_FLAVOR_BEHAV_CTRL = next(
+    f for f in FLAVORS_BEHAVIOR_WITH_CONTROL if f.apply_tfce and f.stat_col == "fold_mean"
+)
+_TFCE_FLAVOR_BEHAV_HGA = next(
+    f for f in FLAVORS_BEHAVIOR_HGA_ONLY if f.apply_tfce and f.stat_col == "fold_mean"
+)
+# Acoustic fold_mean is raw AUC (chance=0.5), same threshold as HGA-only.
+# Not in FLAVORS_ACOUSTIC because the production pipeline omits TFCE there;
+# defined here for provisional validation that TFCE recovers known true positives.
+_TFCE_FLAVOR_ACOUSTIC = FlavorSpec("fold_mean", apply_tfce=True, tfce_threshold=0.5)
+
+# %%
+# ---------- Acoustic + TFCE ----------
+ac_tfce_frames: dict[str, pl.DataFrame] = {}
+
+for null_path in sorted(ac_null_dir.glob("*/null_scores.parquet")):
+    subject = null_path.parent.name
+    scores_path = ac_score_dir / subject / "scores.parquet"
+    if not scores_path.exists():
+        print(f"[acoustic TFCE] {subject}: null exists but no real scores — skipping.")
+        continue
+
+    print(f"[acoustic TFCE] {subject}: aggregating …", end=" ", flush=True)
+
+    real_scores = pl.read_parquet(scores_path)
+    null_scores = pl.read_parquet(null_path)
+
+    real_agg, null_agg = aggregate_acoustic(
+        real_scores, null_scores,
+        target=_AC_TARGET,
+        peak_search_smin=_AC_PEAK_SEARCH_SMIN,
+        peak_search_smax=_AC_PEAK_SEARCH_SMAX,
+    )
+    del real_scores, null_scores
+    gc.collect()
+
+    peaks = tfce_enhanced_peak_test(
+        real_agg, null_agg,
+        site_keys=SITE_KEYS_ACOUSTIC,
+        flavor=_TFCE_FLAVOR_ACOUSTIC,
+    )
+    del null_agg
+    gc.collect()
+
+    ac_tfce_frames[subject] = peaks
+    _report_peaks(subject, peaks, stat_label="TFCE fold-mean AUC")
+
+_plot_subject_grid(
+    ac_tfce_frames,
+    x_label="peak TFCE(fold_mean AUC)",
+    x_chance=0.0,
+    title_prefix="acoustic TFCE",
+)
+
+# %%
+# ---------- Behavior with-control + TFCE ----------
+beh_full_tfce_frames: dict[str, pl.DataFrame] = {}
+
+for null_path in sorted(behav_full_null_dir.glob("*/null_scores.parquet")):
+    subject = null_path.parent.name
+    scores_path = behav_full_score_dir / subject / "scores.parquet"
+    if not scores_path.exists():
+        print(f"[behav-ctrl TFCE] {subject}: null exists but no real scores — skipping.")
+        continue
+
+    print(f"[behav-ctrl TFCE] {subject}: aggregating …", end=" ", flush=True)
+
+    real_scores = pl.read_parquet(scores_path)
+    null_scores = pl.read_parquet(null_path)
+
+    real_agg, null_agg = aggregate_behavior_with_control(
+        real_scores, null_scores,
+        epoch_tmin=EPOCH_TMIN,
+        epoch_sfreq=EPOCH_SFREQ,
+        behav_peak_post_offset_s=_BEHAV_POST_OFFSET_S,
+        peak_search_smin=_PEAK_SEARCH_SMIN,
+        peak_search_smax=_PEAK_SEARCH_SMAX,
+    )
+    del real_scores, null_scores
+    gc.collect()
+
+    peaks = tfce_enhanced_peak_test(
+        real_agg, null_agg,
+        site_keys=SITE_KEYS_BEHAVIOR_WITH_CONTROL,
+        flavor=_TFCE_FLAVOR_BEHAV_CTRL,
+    )
+    del null_agg
+    gc.collect()
+
+    beh_full_tfce_frames[subject] = peaks
+    _report_peaks(subject, peaks, stat_label="TFCE fold-mean diff")
+
+_plot_subject_grid(
+    beh_full_tfce_frames,
+    x_label="peak TFCE(fold_mean diff)",
+    x_chance=0.0,
+    title_prefix="behav-with-control TFCE",
+)
+
+# %%
+# ---------- Behavior HGA-only + TFCE ----------
+beh_hga_null_dir = ROOT / "behavior_decoding_single_electrode_hga_only_null"
+beh_hga_score_dir = ROOT / "behavior_decoding_single_electrode_hga_only"
+
+beh_hga_tfce_frames: dict[str, pl.DataFrame] = {}
+
+for null_path in sorted(beh_hga_null_dir.glob("*/null_scores.parquet")):
+    subject = null_path.parent.name
+    scores_path = beh_hga_score_dir / subject / "scores.parquet"
+    if not scores_path.exists():
+        print(f"[behav-hga TFCE] {subject}: null exists but no real scores — skipping.")
+        continue
+
+    print(f"[behav-hga TFCE] {subject}: aggregating …", end=" ", flush=True)
+
+    real_scores = pl.read_parquet(scores_path).filter(pl.col("model") == "full")
+    null_scores = pl.read_parquet(null_path)
+
+    real_agg, null_agg = aggregate_behavior_hga_only(
+        real_scores, null_scores,
+        epoch_tmin=EPOCH_TMIN,
+        epoch_sfreq=EPOCH_SFREQ,
+        behav_peak_post_offset_s=_BEHAV_POST_OFFSET_S,
+        peak_search_smin=_PEAK_SEARCH_SMIN,
+        peak_search_smax=_PEAK_SEARCH_SMAX,
+    )
+    del real_scores, null_scores
+    gc.collect()
+
+    peaks = tfce_enhanced_peak_test(
+        real_agg, null_agg,
+        site_keys=SITE_KEYS_BEHAVIOR_HGA_ONLY,
+        flavor=_TFCE_FLAVOR_BEHAV_HGA,
+    )
+    del null_agg
+    gc.collect()
+
+    beh_hga_tfce_frames[subject] = peaks
+    _report_peaks(subject, peaks, stat_label="TFCE fold-mean AUC")
+
+_plot_subject_grid(
+    beh_hga_tfce_frames,
+    x_label="peak TFCE(fold_mean AUC)",
+    x_chance=0.0,
+    title_prefix="behav-HGA-only TFCE",
+)
+
+# %% [markdown]
+# ## Save TFCE outputs
+
+# %%
+import pickle
+
+with open(ROOT / "tfce_acoustic_results.pkl", "wb") as f:
+    pickle.dump(ac_tfce_frames, f)
+with open(ROOT / "tfce_behav_full_results.pkl", "wb") as f:
+    pickle.dump(beh_full_tfce_frames, f)
+with open(ROOT / "tfce_behav_hga_results.pkl", "wb") as f:
+    pickle.dump(beh_hga_tfce_frames, f)

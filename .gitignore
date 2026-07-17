@@ -20,6 +20,9 @@
 .ipynb_checkpoints
 .snakemake
 outputs
+logs
+
+.venv
 
 # scratch notebooks
 2024*.ipynb

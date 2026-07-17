@@ -1,29 +1,41 @@
+# -*- coding: utf-8 -*-
 # ---
 # jupyter:
 #   jupytext:
+#     custom_cell_magics: kql
 #     formats: ipynb,py:percent
 #     text_representation:
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.18.1
+#       jupytext_version: 1.11.2
 #   kernelspec:
-#     display_name: Python 3
+#     display_name: barakeet
 #     language: python
 #     name: python3
 # ---
 
 # %% [markdown]
-# # Cross-check decoding results: causal4 vs causal6
+# # Cross-check decoding results: causal4 vs two causal6 runs
 #
-# Answers two questions, per decoder type:
-#   1. How much do the per-electrode decoding results agree across pipelines?
-#   2. For sites where they disagree, what explains the drift?
+# Three pipelines, two comparisons:
 #
-# Pipelines compared: causal4 (legacy) vs causal6 (current). Decoder types:
-# acoustic and behavior-with-control. (causal4 never ran HGA-only.) causal5
-# loaders were dropped because we never plot it; bring them back from git
-# history if you need a three-way comparison again.
+# | label             | branch / SR screen                                        | role                            |
+# |-------------------|-----------------------------------------------------------|---------------------------------|
+# | `causal4`         | legacy pipeline (paper baseline)                          | paper-reference comparison      |
+# | `causal6`         | `causal6` branch — reads **causal5's** SR screen          | trusted-reference causal6 run   |
+# | `causal6_new_sr`  | this branch — refined SR screen `[0, 0.6s], \|t\| > 7`    | adds sites; tests SR change     |
+#
+# Between the two causal6 runs the only meaningful change is the SR screen
+# (and the per-rule `electrodes=` input wiring). Decoder code, CV scheme,
+# regularization, and seeds are unchanged. So:
+#
+#   - **Shared electrodes** between the causal6 runs should have near-identical
+#     per-fold AUC. Drift on shared sites is a bug or hidden nondeterminism.
+#   - **Added electrodes** (in `causal6_new_sr` but not in `causal6`) are the
+#     headline interest: the user wants their AUC distribution characterized,
+#     and (where causal4 also tested them) their causal4 AUC shown, to check
+#     whether they're sites the legacy screen wrongly dropped.
 #
 # Comparison axes per decoder: per-site peak ROC-AUC, peak-window (smin, smax),
 # and the full searchlight AUC map. Debug section shows top-disagreement sites
@@ -44,30 +56,51 @@ import numpy as np
 import pandas as pd
 import polars as pl
 import yaml
-from scipy.stats import pearsonr
+from scipy.stats import ks_2samp, pearsonr
+from tqdm.auto import tqdm
 
 from src.stimuli import OFFSET_DICT, WORD_END_TO_PHONEME_PAIR
 from src.viz_paper import pl_roc_auc
 
 # %% tags=["parameters"]
-causal4_root = "outputs/causal4"
-causal6_root = "outputs/causal6"
+causal4_root = "~/u/projects/barakeet/outputs/causal4"
+causal6_root = "~/u/projects/barakeet/outputs/causal6"
+# `causal6_new_sr` = this branch's run with the refined SR screen. Both causal6
+# roots default to the same path so the parameters cell stays compact — point
+# them at the two relevant local dirs at run time (e.g.
+# ~/freesurfer_subjects/barakeet/causal6_pipeline and
+# ~/freesurfer_subjects/barakeet/causal6_speech_responsive_pipeline).
+causal6_new_sr_root = "~/u/projects/barakeet-speech-responsive/outputs/causal6"
 
 top_n_disagreements = 20
 behav_peak_post_offset_s = 0.2
 epoch_tmin = -0.4
 epoch_sfreq = 100
 
+# Headline-decoder reference for the speech-responsive coverage check below
+# (section 0). Points at causal4's prepare_neurometrics outputs which apply
+# the paper's phon/behav peak thresholds.
+neurometrics_ref_root = "~/u/projects/barakeet/outputs/causal4/prepare_neurometrics/p65_b5_a3"
+
 # Pipeline pairs to plot. We treat causal6 as the trusted reference (better CV
 # scheme + tuned regularization → lower-variance per-fold estimates) and use it
-# to validate causal4's small claimed effect sizes.
-PIPELINE_PAIRS = [("causal4", "causal6")]
+# to validate causal4's small claimed effect sizes. The (causal6,
+# causal6_new_sr) pair is the SR-screen reproducibility check.
+PIPELINE_PAIRS = [
+    ("causal4", "causal6"),
+    ("causal6", "causal6_new_sr"),
+]
 
 # %%
 ROOTS = {
-    "causal4": Path(causal4_root),
-    "causal6": Path(causal6_root),
+    "causal4": Path(causal4_root).expanduser(),
+    "causal6": Path(causal6_root).expanduser(),
+    "causal6_new_sr": Path(causal6_new_sr_root).expanduser(),
 }
+
+if ROOTS["causal6"] == ROOTS["causal6_new_sr"]:
+    print("⚠ causal6_root == causal6_new_sr_root — comparing a directory to itself. "
+          "Override one of the parameters to point at the other pipeline run.")
 
 for name, root in ROOTS.items():
     print(f"{name}: {root}  (exists={root.exists()})")
@@ -81,16 +114,18 @@ for name, root in ROOTS.items():
 # explicitly so we don't silently drop subjects from a comparison.
 
 # %%
+_CAUSAL6_GLOBS = [
+    "acoustic_decoding_single_electrode/*",
+    "behavior_decoding_single_electrode/*",
+    "behavior_decoding_single_electrode_hga_only/*",
+]
 GLOB_TARGETS = {
     "causal4": [
         "behavior_decoding_single_electrode_acoustic/*",
         "behavior_decoding_single_electrode_summarize/*",
     ],
-    "causal6": [
-        "acoustic_decoding_single_electrode/*",
-        "behavior_decoding_single_electrode/*",
-        "behavior_decoding_single_electrode_hga_only/*",
-    ],
+    "causal6": _CAUSAL6_GLOBS,
+    "causal6_new_sr": _CAUSAL6_GLOBS,
 }
 
 
@@ -132,19 +167,34 @@ subjects = union  # loaders skip per-subject paths that don't exist, so union is
 # %% [markdown]
 # ## 0. Speech-responsive screen comparison
 #
-# The decoding coverage asymmetry (~700 sites differ in each direction) traces
-# back here: causal4 uses an amplitude-threshold criterion (max|epoch| > 0.3
-# after baselining, averaged evoked), while causal5/causal6 uses a paired
-# t-test across all epochs (pre- vs post-onset mean, t > 7) and overrides the
-# amplitude flag with that result. Both are per-subject; causal6 imports its
-# electrode lists directly from `outputs/causal5/find_speech_responsive/`.
+# Three screens drive an actual pipeline run here:
 #
-# This section loads both screens, shows their per-subject counts, and
-# breaks down the 4-way agreement (both / only-causal4 / only-causal5 / neither).
+# | screen          | criterion                                                                | role                                |
+# |-----------------|--------------------------------------------------------------------------|-------------------------------------|
+# | causal4         | `max\|baselined evoked\|` in `[0, 0.9s]` > 0.3 (directionless)             | drives the causal4 decoders         |
+# | causal6         | paired t-test, post=`[0, tmax]`, **t > 7** (one-sided, full window)      | causal5's SR file, consumed by `causal6` |
+# | causal6_new_sr  | paired t-test, post=`[0, post_tmax_s]`, **\|t\| > t_threshold** (refined) | drives the `causal6_new_sr` decoders |
+#
+# The c5→`causal6_new_sr` change addresses two failure modes of the c5 screen
+# documented in `scripts/refined_speech_responsive.py`: long-window dilution of
+# transient responses (the population the paper is built on) and one-sidedness
+# silently dropping suppression. This section audits:
+#   1. Coverage of the headline acoustic + behavior decoder sets by each screen.
+#   2. The pairwise overlap between the SR file the `causal6` pipeline read
+#      (causal5's) and the refined SR file the `causal6_new_sr` pipeline read.
+#      This is what determines which electrodes the two runs share.
 
 # %%
-causal5_speech_resp_root = Path("outputs/causal5/find_speech_responsive")
-causal4_speech_resp_root = ROOTS["causal4"] / "find_speech_responsive"
+SR_ROOTS = {
+    "causal4": ROOTS["causal4"] / "find_speech_responsive",
+    # The `causal6` decoder run consumed causal5's SR file directly (the
+    # workflow on the `causal6` branch wired
+    # `electrodes=outputs/causal5/find_speech_responsive/...`). We use the
+    # `causal6` label so coverage rows below align with the decoder-pipeline
+    # labels and don't duplicate the same file under two keys.
+    "causal6": ROOTS["causal6"].parent / "causal5" / "find_speech_responsive",
+    "causal6_new_sr": ROOTS["causal6_new_sr"] / "find_speech_responsive",
+}
 
 
 def load_speech_responsive(root: Path, subjects: list[str]) -> pl.DataFrame:
@@ -156,7 +206,8 @@ def load_speech_responsive(root: Path, subjects: list[str]) -> pl.DataFrame:
         df = pl.read_csv(p)
         keep = ["subject", "electrode_idx", "speech_responsive"]
         optional = ["speech_responsive_test_value", "speech_responsive_tval",
-                    "speech_responsive_ttest"]
+                    "speech_responsive_ttest", "speech_responsive_t_full",
+                    "speech_responsive_post_tmax_s"]
         keep += [c for c in optional if c in df.columns]
         frames.append(df.select(keep).with_columns(
             pl.col("speech_responsive").cast(pl.Boolean)
@@ -168,73 +219,116 @@ def load_speech_responsive(root: Path, subjects: list[str]) -> pl.DataFrame:
     return pl.concat(frames, how="diagonal")
 
 
-sr_c4 = load_speech_responsive(causal4_speech_resp_root, subjects)
-sr_c5 = load_speech_responsive(causal5_speech_resp_root, subjects)
+SR = {label: load_speech_responsive(root, subjects) for label, root in SR_ROOTS.items()}
 
 # %%
 print("Speech-responsive electrode counts (all electrodes loaded):")
-for label, df in [("causal4", sr_c4), ("causal5/6", sr_c5)]:
+for label, df in SR.items():
     if df.is_empty():
-        print(f"  {label}: (no data)")
+        print(f"  {label}: (no data — re-run rule {label}/find_speech_responsive)")
         continue
     n_resp = df.filter(pl.col("speech_responsive")).height
     n_total = df.height
     print(f"  {label}: {n_resp} / {n_total} = {n_resp/n_total:.1%}")
 
+
 # %%
-if not sr_c4.is_empty() and not sr_c5.is_empty():
+def _pairwise_agreement(a: pl.DataFrame, b: pl.DataFrame, label_a: str, label_b: str):
+    """Print 4-way overall + per-subject agreement between two screens."""
+    if a.is_empty() or b.is_empty():
+        print(f"\n[skip] pairwise {label_a} vs {label_b}: one side missing")
+        return
     site_cols_sr = ["subject", "electrode_idx"]
-    joined_sr = (
-        sr_c4.select(site_cols_sr + ["speech_responsive"])
-        .rename({"speech_responsive": "sr_c4"})
+    joined = (
+        a.select(site_cols_sr + ["speech_responsive"]).rename({"speech_responsive": "sr_a"})
         .join(
-            sr_c5.select(site_cols_sr + ["speech_responsive"])
-            .rename({"speech_responsive": "sr_c5"}),
+            b.select(site_cols_sr + ["speech_responsive"]).rename({"speech_responsive": "sr_b"}),
             on=site_cols_sr, how="outer",
         )
-        .with_columns([
-            pl.col("sr_c4").fill_null(False),
-            pl.col("sr_c5").fill_null(False),
-        ])
+        .with_columns([pl.col("sr_a").fill_null(False), pl.col("sr_b").fill_null(False)])
     )
-    both    = joined_sr.filter( pl.col("sr_c4") &  pl.col("sr_c5")).height
-    only_c4 = joined_sr.filter( pl.col("sr_c4") & ~pl.col("sr_c5")).height
-    only_c5 = joined_sr.filter(~pl.col("sr_c4") &  pl.col("sr_c5")).height
-    neither = joined_sr.filter(~pl.col("sr_c4") & ~pl.col("sr_c5")).height
-    total   = joined_sr.height
-    print("\n4-way agreement (all shared electrode slots):")
-    print(f"  both responsive  : {both:5d}  ({both/total:.1%})")
-    print(f"  only causal4     : {only_c4:5d}  ({only_c4/total:.1%})")
-    print(f"  only causal5/6   : {only_c5:5d}  ({only_c5/total:.1%})")
-    print(f"  neither          : {neither:5d}  ({neither/total:.1%})")
+    both    = joined.filter( pl.col("sr_a") &  pl.col("sr_b")).height
+    only_a  = joined.filter( pl.col("sr_a") & ~pl.col("sr_b")).height
+    only_b  = joined.filter(~pl.col("sr_a") &  pl.col("sr_b")).height
+    neither = joined.filter(~pl.col("sr_a") & ~pl.col("sr_b")).height
+    total   = joined.height
+    print(f"\n4-way agreement {label_a} vs {label_b} (all shared slots):")
+    print(f"  both responsive : {both:5d}  ({both/total:.1%})")
+    print(f"  only {label_a:<10}: {only_a:5d}  ({only_a/total:.1%})")
+    print(f"  only {label_b:<10}: {only_b:5d}  ({only_b/total:.1%})")
+    print(f"  neither         : {neither:5d}  ({neither/total:.1%})")
 
-    # Per-subject breakdown
-    print("\nPer-subject breakdown (both / only-c4 / only-c5 / neither):")
-    for subj, grp in joined_sr.group_by("subject", maintain_order=True):
-        b  = grp.filter( pl.col("sr_c4") &  pl.col("sr_c5")).height
-        c4 = grp.filter( pl.col("sr_c4") & ~pl.col("sr_c5")).height
-        c5 = grp.filter(~pl.col("sr_c4") &  pl.col("sr_c5")).height
-        n  = grp.filter(~pl.col("sr_c4") & ~pl.col("sr_c5")).height
-        print(f"  {subj[0]:>6}:  both={b:3d}  only_c4={c4:3d}  only_c5={c5:3d}  neither={n:3d}")
+    print(f"\nPer-subject (both / only-{label_a} / only-{label_b} / neither):")
+    for subj, grp in joined.group_by("subject", maintain_order=True):
+        b_  = grp.filter( pl.col("sr_a") &  pl.col("sr_b")).height
+        oa  = grp.filter( pl.col("sr_a") & ~pl.col("sr_b")).height
+        ob  = grp.filter(~pl.col("sr_a") &  pl.col("sr_b")).height
+        n_  = grp.filter(~pl.col("sr_a") & ~pl.col("sr_b")).height
+        print(f"  {subj[0]:>6}:  both={b_:3d}  only_{label_a}={oa:3d}  "
+              f"only_{label_b}={ob:3d}  neither={n_:3d}")
+    return joined
 
-    # If causal5 wrote test values, show the distribution at disagreement sites
-    if "speech_responsive_test_value" in sr_c5.columns:
-        disagreement = joined_sr.filter(pl.col("sr_c4") != pl.col("sr_c5"))
-        if not disagreement.is_empty():
-            with_vals = disagreement.join(
-                sr_c5.select(["subject", "electrode_idx", "speech_responsive_test_value"]),
-                on=["subject", "electrode_idx"], how="left",
-            )
-            print("\nAmplitude test values at disagreement sites (causal5 criterion):")
-            for group_label, filt in [
-                ("only_causal4 (c4=T, c5=F)", with_vals.filter( pl.col("sr_c4") & ~pl.col("sr_c5"))),
-                ("only_causal5 (c4=F, c5=T)", with_vals.filter(~pl.col("sr_c4") &  pl.col("sr_c5"))),
-            ]:
-                vals = filt["speech_responsive_test_value"].drop_nulls().to_numpy()
-                if len(vals):
-                    print(f"  {group_label}: n={len(vals)}, "
-                          f"med={np.nanmedian(vals):.3f}, "
-                          f"min={vals.min():.3f}, max={vals.max():.3f}")
+
+# Paper-baseline reference: causal4's amplitude screen vs each causal6 SR file
+joined_46 = _pairwise_agreement(SR["causal4"], SR["causal6"], "causal4", "causal6 (c5 SR)")
+joined_4new = _pairwise_agreement(SR["causal4"], SR["causal6_new_sr"], "causal4", "causal6_new_sr")
+
+# What the legacy → refined SR change actually did. The `causal6` run consumed
+# causal5's SR file (see SR_ROOTS comment) so this comparison directly
+# characterizes the SR change that distinguishes the two decoder runs.
+joined_66 = _pairwise_agreement(SR["causal6"], SR["causal6_new_sr"],
+                                "causal6 (c5 SR)", "causal6_new_sr (refined)")
+
+# %% [markdown]
+# ### Coverage of paper headline decoder sets
+#
+# The strongest test of a screen is whether it admits the sites that actually
+# decode. This block joins each screen against causal4's `phon_peaks_df` (n=64
+# acoustic decoders @ AUC ≥ 0.65) and `behav_peaks_df` (n=58 behavior decoders
+# clearing the improvement threshold), reporting how many headline sites each
+# screen catches. A screen that drops headline sites is silently capping the
+# paper's effective n.
+
+# %%
+def _load_paper_sites(path: Path) -> pl.DataFrame:
+    if not path.exists():
+        return pl.DataFrame()
+    df = pl.read_parquet(path)
+    return df.with_columns(pl.col("subject").cast(pl.Utf8)).select(
+        ["subject", "electrode_idx"]
+    ).unique()
+
+
+phon_sites = _load_paper_sites(Path(neurometrics_ref_root).expanduser() / "phon_peaks_df.parquet")
+behav_sites = _load_paper_sites(Path(neurometrics_ref_root).expanduser() / "behav_peaks_df.parquet")
+
+
+def _coverage(headline: pl.DataFrame, screen: pl.DataFrame, label: str) -> tuple[int, int]:
+    """Return (n_headline, n_caught) for this screen."""
+    if headline.is_empty() or screen.is_empty():
+        return (headline.height, 0)
+    flagged = (
+        screen.filter(pl.col("speech_responsive"))
+        .select(["subject", "electrode_idx"]).unique()
+    )
+    caught = headline.join(flagged, on=["subject", "electrode_idx"], how="inner").height
+    return (headline.height, caught)
+
+
+for headline_label, headline in [("acoustic decoders (phon_peaks_df)", phon_sites),
+                                 ("behavior decoders (behav_peaks_df)", behav_sites)]:
+    if headline.is_empty():
+        print(f"\n{headline_label}: (no headline reference at {neurometrics_ref_root}; "
+              f"skip)")
+        continue
+    print(f"\nCoverage of {headline_label}  (n={headline.height}):")
+    for label, screen in SR.items():
+        n_total, n_caught = _coverage(headline, screen, label)
+        if n_total == 0:
+            continue
+        missed = n_total - n_caught
+        suffix = "" if screen.is_empty() else f"  ({n_caught/n_total:.1%}, missed {missed})"
+        print(f"  {label}: {n_caught}/{n_total}{suffix}")
 
 # %% [markdown]
 # ## 1. Loaders
@@ -290,6 +384,12 @@ def load_acoustic_searchlight_causal4(root: Path, subjects: list[str]) -> pl.Dat
         df = pl.read_parquet(p)
         if df.is_empty():
             continue
+        # all_outcomes.parquet contains both `categorical_acoustic_cue` and
+        # `subject_specific_acoustics` rows; canonical usage filters to the
+        # categorical measure (causal5/acoustic_decoding_peaks.py:106). Without
+        # this filter, pl_roc_auc pools classifier and regressor outputs into
+        # a single AUC per group, producing meaningless values.
+        df = df.filter(pl.col("measure") == "categorical_acoustic_cue")
         # binary target encoding (causal5 uses `== 1`); match that
         df = df.with_columns((pl.col("decoder_target") == 1).cast(pl.Int8).alias("decoder_target"))
         auc = pl_roc_auc(
@@ -491,10 +591,25 @@ PEAK_CRITERION = {
 #   `smax ≤ word_end_offset_sample + 20` (per word_end; window must END within
 #   200ms post word offset).
 #
-# **Behavior — causal6** (`notebooks/causal6/view_provisional_results.py`):
-#   `smin ≥ 50` (= `_AC_PEAK_SEARCH_SMIN`, shared with acoustic) AND
-#   `smax ≤ word_end_offset_sample + 20` (per word_end) AND
+# **Behavior — causal6** (this notebook, NOT the production pipeline):
+#   Per-site gate on the site's acoustic peak quality:
+#     - acoustic peak AUC ≥ 0.6  → smin > causal6_acoustic_peak.smax
+#     - else                     → smin ≥ 50  (the production smin floor)
+#   AND `smax ≤ word_end_offset_sample + 20` (per word_end) AND
 #   `smax ≤ 290` (`_PEAK_SEARCH_SMAX`).
+#
+#   The threshold gate matters because causal6 runs acoustic decoding on every
+#   SR electrode — non-acoustically-selective sites still get an "acoustic
+#   peak" via argmax, but it's a ~0.51 AUC pick at a random smax. Using that
+#   noise smax to filter behavior smin silently drops valid behavior windows.
+#   Causal4 doesn't have this problem because its behavior decoder was only
+#   fit on AS sites upstream — for symmetry we threshold there too, but it's
+#   near-redundant.
+#
+#   The production causal6 only enforces `smin ≥ 50`; this gated restriction
+#   is stricter for AS sites and identical to production for non-AS sites.
+#   It mirrors causal4's theoretical prior (behavior follows acoustic) only
+#   where that prior is meaningful.
 
 # %%
 EPOCH_TMIN = -0.4
@@ -523,8 +638,8 @@ _WORD_END_TO_BEHAV_SMAX: dict[str, int] = {
     for word_end, offset_s in OFFSET_DICT.items()
 }
 
-# causal6 behavior: hardcoded in view_provisional_results.py (not in config).
-_C6_BEHAV_SMIN = _C6_AC_SMIN  # `_filter_window_expr` uses _AC_PEAK_SEARCH_SMIN
+# causal6 behavior: production uses _C6_AC_SMIN; we override to a stricter
+# per-site post-acoustic prior to mirror causal4 (see markdown above).
 _C6_BEHAV_SMAX = 290           # _PEAK_SEARCH_SMAX
 
 
@@ -562,59 +677,107 @@ def _word_end_behav_caps_df() -> pl.DataFrame:
     })
 
 
-def _restrict_behavior_ctrl_causal4(searchlight: pl.DataFrame) -> pl.DataFrame:
-    """smin > causal4 acoustic peak smax (per-site) AND smax ≤ word_end + 20.
+_ACOUSTIC_PEAK_MIN_AUC = 0.6  # below this, treat the acoustic peak as noise
 
-    Looks up the causal4 acoustic peaks from the in-progress `PEAKS` dict; this
-    is safe because the build loop processes acoustic before behavior_ctrl.
-    Sites without a causal4 acoustic peak are dropped (inner join), matching
-    causal4's production behavior.
+
+def _make_post_acoustic_behavior_restrictor(
+    pipe: str,
+    extra_smax_cap: int | None = None,
+    acoustic_min_auc: float = _ACOUSTIC_PEAK_MIN_AUC,
+    fallback_smin: int | None = None,
+):
+    """Per-site behavior peak-eligibility, gated by the site's acoustic peak quality.
+
+    For each (subject, electrode, phoneme_pair):
+      - acoustic peak AUC ≥ `acoustic_min_auc`  → eligible smin > acoustic_smax
+      - else and `fallback_smin` is given       → eligible smin ≥ fallback_smin
+      - else                                    → site dropped
+
+    Smax always capped per word_end at word_end+0.2s; `extra_smax_cap` adds a
+    global ceiling on top.
+
+    The threshold gate exists because causal6 runs acoustic decoding on *every*
+    SR electrode, so the per-site acoustic argmax for non-acoustically-selective
+    sites is just a noise pick (~0.51 AUC at some random smax). Using that
+    noise smax to filter behavior smin would silently exclude valid behavior
+    windows. Causal4's behavior decoder was only fit on acoustically-selected
+    sites in production, so this issue didn't arise there — but symmetric
+    thresholding makes the per-pipeline behavior here apples-to-apples.
     """
-    if searchlight.is_empty():
-        return searchlight
-    ac_peaks = PEAKS.get("acoustic", {}).get("causal4")
-    if ac_peaks is None or ac_peaks.is_empty():
-        # Acoustic peaks not yet built — fall through (build-loop ordering bug).
-        return searchlight.head(0)
-    ac_smax = (
-        ac_peaks.select(["subject", "electrode_idx", "phoneme_pair", "smax"])
-        .rename({"smax": "_smax_phon"})
-    )
-    return (
-        searchlight
-        .join(ac_smax, on=["subject", "electrode_idx", "phoneme_pair"], how="inner")
-        .join(_word_end_behav_caps_df(), on="word_end", how="left")
-        .filter(
-            (pl.col("smin") > pl.col("_smax_phon"))
-            & (pl.col("smax") <= pl.col("_smax_cap"))
-        )
-        .drop(["_smax_phon", "_smax_cap"])
-    )
+    def _restrict(searchlight: pl.DataFrame) -> pl.DataFrame:
+        if searchlight.is_empty():
+            return searchlight
+        ac_peaks = PEAKS.get("acoustic", {}).get(pipe)
+        if ac_peaks is None or ac_peaks.is_empty():
+            # Acoustic peaks not yet built — fall through (build-loop ordering bug).
+            return searchlight.head(0)
 
-
-def _restrict_behavior_ctrl_causal6(searchlight: pl.DataFrame) -> pl.DataFrame:
-    """smin ≥ 50 AND smax ≤ word_end + 0.2s AND smax ≤ 290."""
-    if searchlight.is_empty():
-        return searchlight
-    return (
-        searchlight
-        .join(_word_end_behav_caps_df(), on="word_end", how="left")
-        .filter(
-            (pl.col("smin") >= _C6_BEHAV_SMIN)
-            & (pl.col("smax") <= pl.col("_smax_cap"))
-            & (pl.col("smax") <= _C6_BEHAV_SMAX)
+        real_ac = ac_peaks.filter(pl.col("roc_auc") >= acoustic_min_auc)
+        real_smax = (
+            real_ac.select(["subject", "electrode_idx", "phoneme_pair", "smax"])
+            .rename({"smax": "_smax_phon"})
         )
-        .drop("_smax_cap")
-    )
+        caps = _word_end_behav_caps_df()
+
+        with_real = (
+            searchlight
+            .join(real_smax, on=["subject", "electrode_idx", "phoneme_pair"], how="inner")
+            .join(caps, on="word_end", how="left")
+            .filter(
+                (pl.col("smin") > pl.col("_smax_phon"))
+                & (pl.col("smax") <= pl.col("_smax_cap"))
+            )
+            .drop(["_smax_phon", "_smax_cap"])
+        )
+
+        if fallback_smin is None:
+            out = with_real
+        else:
+            without_real = (
+                searchlight
+                .join(
+                    real_smax.select(["subject", "electrode_idx", "phoneme_pair"]),
+                    on=["subject", "electrode_idx", "phoneme_pair"],
+                    how="anti",
+                )
+                .join(caps, on="word_end", how="left")
+                .filter(
+                    (pl.col("smin") >= fallback_smin)
+                    & (pl.col("smax") <= pl.col("_smax_cap"))
+                )
+                .drop("_smax_cap")
+            )
+            out = pl.concat([with_real, without_real])
+
+        if extra_smax_cap is not None:
+            out = out.filter(pl.col("smax") <= extra_smax_cap)
+        return out
+    return _restrict
 
 
 # (kind, pipeline) → callable that filters the searchlight before argmax.
-# Missing key = no filter (use full searchlight grid).
+# Missing key = no filter (use full searchlight grid). The two causal6 runs
+# share config.yaml and the same restriction logic.
 PEAK_WINDOW_FILTERS: dict[tuple[str, str], callable] = {
     ("acoustic", "causal4"): _restrict_acoustic_causal4,
     ("acoustic", "causal6"): _restrict_acoustic_causal6,
-    ("behavior_ctrl", "causal4"): _restrict_behavior_ctrl_causal4,
-    ("behavior_ctrl", "causal6"): _restrict_behavior_ctrl_causal6,
+    ("acoustic", "causal6_new_sr"): _restrict_acoustic_causal6,
+    # causal4: no fallback — matches its production "drop sites without an AS
+    # acoustic peak" behavior. In practice the threshold is near-redundant for
+    # causal4 since behavior_decoding was already only fit on AS sites upstream.
+    ("behavior_ctrl", "causal4"):
+        _make_post_acoustic_behavior_restrictor("causal4"),
+    # causal6: fall back to production smin floor (_C6_AC_SMIN = 50) for sites
+    # whose acoustic peak is noise — so we don't silently drop their valid
+    # behavior windows just because the acoustic argmax landed at a random smax.
+    ("behavior_ctrl", "causal6"):
+        _make_post_acoustic_behavior_restrictor(
+            "causal6", extra_smax_cap=_C6_BEHAV_SMAX, fallback_smin=_C6_AC_SMIN,
+        ),
+    ("behavior_ctrl", "causal6_new_sr"):
+        _make_post_acoustic_behavior_restrictor(
+            "causal6_new_sr", extra_smax_cap=_C6_BEHAV_SMAX, fallback_smin=_C6_AC_SMIN,
+        ),
 }
 
 print("Acoustic peak-search restrictions:")
@@ -622,30 +785,41 @@ print(f"  causal4: smin ≥ {_C4_AC_SMIN_MIN}, "
       f"smax ≤ {_PP_TO_MAX_WORD_END_SAMPLE} (per phoneme_pair)")
 print(f"  causal6: smin ≥ {_C6_AC_SMIN}, smax ≤ {_C6_AC_SMAX}")
 print("Behavior peak-search restrictions:")
-print(f"  causal4: smin > causal4_acoustic_peak.smax (per-site), "
-      f"smax ≤ {_WORD_END_TO_BEHAV_SMAX} (per word_end)")
-print(f"  causal6: smin ≥ {_C6_BEHAV_SMIN}, "
-      f"smax ≤ {_WORD_END_TO_BEHAV_SMAX} (per word_end), smax ≤ {_C6_BEHAV_SMAX}")
+print(f"  acoustic_peak quality gate: AUC ≥ {_ACOUSTIC_PEAK_MIN_AUC} → per-site "
+      f"smin > acoustic_smax; below → fallback smin floor (if any) or drop")
+print(f"  causal4: real-AS → smin > acoustic_smax, sub-threshold → DROP; "
+      f"smax ≤ {_WORD_END_TO_BEHAV_SMAX}")
+print(f"  causal6: real-AS → smin > acoustic_smax, sub-threshold → smin ≥ {_C6_AC_SMIN}; "
+      f"smax ≤ {_WORD_END_TO_BEHAV_SMAX}, smax ≤ {_C6_BEHAV_SMAX}")
 
 # %% [markdown]
 # ### Build all tables
 
 # %%
-load_spec = [
-    ("acoustic", load_acoustic_searchlight_causal4, load_acoustic_searchlight_causal6),
-    ("behavior_ctrl", load_behavior_ctrl_searchlight_causal4, load_behavior_ctrl_searchlight_causal6),
-    ("behavior_hga", None, load_behavior_hga_searchlight_causal6),
+# (kind → {pipeline_label → loader_fn}). Both causal6 runs use the same loader
+# (parquet schemas are identical); only the root differs and that's passed in
+# at call time.
+load_spec: list[tuple[str, dict[str, callable]]] = [
+    ("acoustic", {
+        "causal4":        load_acoustic_searchlight_causal4,
+        "causal6":        load_acoustic_searchlight_causal6,
+        "causal6_new_sr": load_acoustic_searchlight_causal6,
+    }),
+    ("behavior_ctrl", {
+        "causal4":        load_behavior_ctrl_searchlight_causal4,
+        "causal6":        load_behavior_ctrl_searchlight_causal6,
+        "causal6_new_sr": load_behavior_ctrl_searchlight_causal6,
+    }),
+    ("behavior_hga", {
+        "causal6":        load_behavior_hga_searchlight_causal6,
+        "causal6_new_sr": load_behavior_hga_searchlight_causal6,
+    }),
 ]
 SEARCHLIGHTS = {}
-for target, loader4, loader6 in tqdm(load_spec):
-    causal4_result = _normalize_types(loader4(ROOTS["causal4"], subjects)) if loader4 else None
-    causal6_result = _normalize_types(loader6(ROOTS["causal6"], subjects)) if loader6 else None
-
+for target, loaders in tqdm(load_spec):
     SEARCHLIGHTS[target] = {}
-    if loader4 is not None:
-        SEARCHLIGHTS[target]["causal4"] = causal4_result
-    if loader6 is not None:
-        SEARCHLIGHTS[target]["causal6"] = causal6_result
+    for pipe, loader in loaders.items():
+        SEARCHLIGHTS[target][pipe] = _normalize_types(loader(ROOTS[pipe], subjects))
 
 # %%
 PEAKS = {}
@@ -664,6 +838,25 @@ for kind in SEARCHLIGHTS:
         n_total = df.height
         restr = "" if wf is None else f" (peak-eligible: {n_eligible})"
         print(f"  {p}: {n_total} searchlight rows{restr}, {PEAKS[kind][p].height} sites")
+
+# %%
+# Acoustic-peak quality buckets — gates which sites use per-site vs fallback
+# behavior smin. AUC ≥ _ACOUSTIC_PEAK_MIN_AUC = real acoustic peak; below = noise.
+print(f"\nAcoustic peak quality (gate for behavior_ctrl smin restriction, "
+      f"threshold AUC = {_ACOUSTIC_PEAK_MIN_AUC}):")
+for p, ac_peaks in PEAKS.get("acoustic", {}).items():
+    if ac_peaks.is_empty():
+        continue
+    n_total = ac_peaks.height
+    n_real = ac_peaks.filter(pl.col("roc_auc") >= _ACOUSTIC_PEAK_MIN_AUC).height
+    n_noise = n_total - n_real
+    med = float(ac_peaks.select(pl.col("roc_auc").median()).item())
+    p55 = ac_peaks.filter(pl.col("roc_auc") >= 0.55).height
+    p65 = ac_peaks.filter(pl.col("roc_auc") >= 0.65).height
+    p75 = ac_peaks.filter(pl.col("roc_auc") >= 0.75).height
+    print(f"  {p}: {n_real}/{n_total} real-AS ({n_real/n_total:.1%}), "
+          f"{n_noise} sub-threshold (use fallback or drop) | median AUC={med:.3f} | "
+          f"≥0.55={p55}, ≥0.65={p65}, ≥0.75={p75}")
 
 # %% [markdown]
 # ## 2. Coverage summary
@@ -1208,12 +1401,253 @@ run_comparison("behavior_ctrl", peak_thresholds=(0.0, 0.05, 0.1, 0.15, 0.2))
 # %% [markdown]
 # ### Behavior-HGA-only
 #
-# Skipped: causal4 never ran HGA-only behavior decoding, and we've restricted
-# `PIPELINE_PAIRS` to causal4 vs causal6. `BEHAV_HGA` is still populated for
-# causal6 if a single-pipeline view is ever useful.
+# Causal4 never ran HGA-only behavior decoding, so its pair is dropped
+# automatically. The plots below show only the (causal6, causal6_new_sr) pair.
+
+# %%
+run_comparison("behavior_hga")
 
 # %% [markdown]
-# ## 4. Highlight-electrode drill-in
+# ## 4. SR-screen reproducibility check
+#
+# **The headline check this notebook is for.** Between the two causal6 runs the
+# only meaningful pipeline change is the SR file each consumed. Decoder code,
+# CV scheme, regularization, and seeds are unchanged (`git diff causal6..HEAD`).
+# So on electrodes the two runs share, per-site peak AUC should be identical
+# up to floating-point noise (GPU dispatch can introduce sub-ε drift). Anything
+# else points at hidden nondeterminism that needs investigating.
+#
+# This block reports per-decoder: site overlap, the Δ-summary (`max|Δ|`,
+# `mean|Δ|`, counts above several drift thresholds), and a scatter of paired
+# peak AUC. The full set of agreement diagnostics for this pair are already
+# rendered by `run_comparison` above (since the pair is in `PIPELINE_PAIRS`) —
+# this section just calls out the numerical sanity check explicitly.
+
+# %%
+def reproducibility_summary(
+    peaks: dict[str, pl.DataFrame], site_cols: list[str], criterion: str,
+    drift_thresholds: tuple[float, ...] = (1e-6, 1e-4, 1e-3, 1e-2),
+    pipe_a: str = "causal6", pipe_b: str = "causal6_new_sr",
+) -> pd.DataFrame:
+    """Δpeak summary on shared sites between two pipelines."""
+    if pipe_a not in peaks or pipe_b not in peaks:
+        return pd.DataFrame()
+    if peaks[pipe_a].is_empty() or peaks[pipe_b].is_empty():
+        return pd.DataFrame()
+    joined = pair_peaks(peaks[pipe_a], peaks[pipe_b], site_cols, criterion)
+    if joined.empty:
+        return pd.DataFrame()
+    a = joined[f"{criterion}_a"].to_numpy()
+    b = joined[f"{criterion}_b"].to_numpy()
+    delta = a - b
+    abs_d = np.abs(delta)
+    sa = joined.assign(_w_eq=(joined["smin_a"] == joined["smin_b"]) & (joined["smax_a"] == joined["smax_b"]))
+    summary = {
+        "n_shared": len(joined),
+        "max|Δ|":   float(np.nanmax(abs_d)),
+        "mean|Δ|":  float(np.nanmean(abs_d)),
+        "median|Δ|": float(np.nanmedian(abs_d)),
+        "same_peak_window_pct": float(sa["_w_eq"].mean() * 100.0),
+    }
+    for thr in drift_thresholds:
+        summary[f"|Δ|>{thr:g}"] = int((abs_d > thr).sum())
+    return pd.DataFrame([summary])
+
+
+for kind in SEARCHLIGHTS:
+    site_cols = SITE_COLS[kind]
+    criterion = PEAK_CRITERION[kind]
+    print(f"\n--- {kind}: Δpeak on shared sites (causal6 vs causal6_new_sr) ---")
+    summary = reproducibility_summary(PEAKS[kind], site_cols, criterion)
+    if summary.empty:
+        print("  (one or both pipelines unavailable)")
+        continue
+    print(summary.to_string(index=False))
+
+print(
+    "\nInterpretation: shared-site Δpeak should be ≲ 1e-4 across all decoder kinds "
+    "(GPU/cuBLAS dispatch can introduce sub-ε drift even with identical seeds). "
+    "Anything above ~1e-2 indicates real divergence — investigate before trusting "
+    "either run."
+)
+
+
+# %% [markdown]
+# ## 5. Electrodes added by the refined SR
+#
+# The refined SR screen admits sites the legacy (causal5) screen dropped. The
+# user wants:
+#   1. **Are the added sites decoder-positive?** — overlay peak-AUC histograms
+#      for added vs shared sites within `causal6_new_sr`.
+#   2. **Did causal4 also see signal at these sites?** — where causal4 tested
+#      them, plot causal4's peak AUC at the added sites vs the shared baseline.
+#      If causal4 saw clear signal there, the legacy screen was leaving sites
+#      on the table.
+#
+# `behavior_hga` is included for plot 1 only (causal4 never ran HGA-only).
+
+# %%
+def _site_set(peaks_df: pl.DataFrame, site_cols: list[str]) -> set[tuple]:
+    if peaks_df.is_empty():
+        return set()
+    return set(map(tuple, peaks_df.select(site_cols).unique().rows()))
+
+
+def _sites_to_filter_df(sites: set[tuple], site_cols: list[str]) -> pl.DataFrame:
+    if not sites:
+        return pl.DataFrame(schema={c: pl.Utf8 if c != "electrode_idx" else pl.Int64
+                                    for c in site_cols})
+    cols = list(zip(*sites))
+    data = {c: list(cols[i]) for i, c in enumerate(site_cols)}
+    return pl.DataFrame(data)
+
+
+def added_sites_summary(
+    peaks: dict[str, pl.DataFrame], site_cols: list[str], criterion: str,
+    legacy: str = "causal6", new: str = "causal6_new_sr",
+    auc_thresholds: tuple[float, ...] = (0.55, 0.6, 0.65, 0.7, 0.75),
+) -> dict[str, object]:
+    out: dict[str, object] = {}
+    if legacy not in peaks or new not in peaks:
+        return out
+    legacy_sites = _site_set(peaks[legacy], site_cols)
+    new_sites = _site_set(peaks[new], site_cols)
+    added = new_sites - legacy_sites
+    dropped = legacy_sites - new_sites
+    shared = new_sites & legacy_sites
+    out["n_legacy"] = len(legacy_sites)
+    out["n_new"] = len(new_sites)
+    out["n_added"] = len(added)
+    out["n_dropped"] = len(dropped)
+    out["n_shared"] = len(shared)
+    if added:
+        added_df = (
+            peaks[new]
+            .join(_sites_to_filter_df(added, site_cols), on=site_cols, how="inner")
+            .to_pandas()
+        )
+        out["added_auc"] = added_df[criterion].to_numpy()
+        out["added_df"] = added_df
+        for thr in auc_thresholds:
+            out[f"added_above_{thr:g}"] = int((added_df[criterion] >= thr).sum())
+    if shared:
+        shared_auc = (
+            peaks[new]
+            .join(_sites_to_filter_df(shared, site_cols), on=site_cols, how="inner")
+            .select(criterion).to_numpy().flatten()
+        )
+        out["shared_auc"] = shared_auc
+    if dropped:
+        dropped_df = (
+            peaks[legacy]
+            .join(_sites_to_filter_df(dropped, site_cols), on=site_cols, how="inner")
+            .to_pandas()
+        )
+        out["dropped_auc"] = dropped_df[criterion].to_numpy()
+        out["dropped_df"] = dropped_df
+    return out
+
+
+def plot_added_vs_shared_hist(summary: dict[str, object], criterion: str, kind: str):
+    if not summary or summary.get("n_added", 0) == 0:
+        return
+    added = summary.get("added_auc")
+    shared = summary.get("shared_auc")
+    if added is None or shared is None:
+        return
+    fig, ax = plt.subplots(figsize=(7, 4))
+    # Shared on count axis (much larger n); added as scaled histogram so the
+    # comparison is by shape, not count.
+    ax.hist(shared, bins=30, alpha=0.5, color="steelblue", density=True,
+            label=f"shared n={len(shared)}  med={np.nanmedian(shared):.3f}")
+    ax.hist(added, bins=30, alpha=0.6, color="tomato", density=True,
+            label=f"added  n={len(added)}  med={np.nanmedian(added):.3f}")
+    chance = 0.5 if criterion == "roc_auc" else 0.0
+    ax.axvline(chance, color="k", lw=0.5, ls="--", label="chance")
+    if len(added) >= 5 and len(shared) >= 5:
+        ks = ks_2samp(added, shared)
+        title = f"{kind}: added (refined SR) vs shared peak {criterion}  KS p={ks.pvalue:.3g}"
+    else:
+        title = f"{kind}: added (refined SR) vs shared peak {criterion}"
+    ax.set_xlabel(f"peak {criterion} (in causal6_new_sr)")
+    ax.set_ylabel("density")
+    ax.set_title(title)
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    plt.show()
+
+
+def plot_causal4_at_added(
+    peaks: dict[str, pl.DataFrame], summary: dict[str, object],
+    site_cols: list[str], criterion: str, kind: str,
+):
+    if not summary or "added_df" not in summary:
+        return
+    if "causal4" not in peaks or peaks["causal4"].is_empty():
+        print(f"  [{kind}] causal4 peaks unavailable; skipping causal4-at-added plot")
+        return
+    added_df = summary["added_df"]
+    added_keys = _sites_to_filter_df(
+        set(map(tuple, added_df[site_cols].itertuples(index=False, name=None))),
+        site_cols,
+    )
+    causal4_at_added = (
+        peaks["causal4"]
+        .join(added_keys, on=site_cols, how="inner")
+        .select(criterion).to_numpy().flatten()
+    )
+    n_tested = len(causal4_at_added)
+    n_added = len(added_df)
+    if n_tested == 0:
+        print(f"  [{kind}] none of the {n_added} added sites were tested in causal4 — skipping plot")
+        return
+    causal4_at_shared = (
+        peaks["causal4"]
+        .join(_sites_to_filter_df(
+            set(map(tuple, peaks["causal6_new_sr"].select(site_cols).unique().rows())) &
+            set(map(tuple, peaks["causal6"].select(site_cols).unique().rows())),
+            site_cols,
+        ), on=site_cols, how="inner")
+        .select(criterion).to_numpy().flatten()
+    )
+    fig, ax = plt.subplots(figsize=(7, 4))
+    ax.hist(causal4_at_shared, bins=30, alpha=0.5, color="steelblue", density=True,
+            label=f"shared sites  n={len(causal4_at_shared)}  med={np.nanmedian(causal4_at_shared):.3f}")
+    ax.hist(causal4_at_added, bins=30, alpha=0.6, color="tomato", density=True,
+            label=f"added sites   n={n_tested} of {n_added}  med={np.nanmedian(causal4_at_added):.3f}")
+    chance = 0.5 if criterion == "roc_auc" else 0.0
+    ax.axvline(chance, color="k", lw=0.5, ls="--", label="chance")
+    ax.set_xlabel(f"causal4 peak {criterion}")
+    ax.set_ylabel("density")
+    ax.set_title(f"{kind}: causal4 AUC at added vs shared sites")
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    plt.show()
+
+
+for kind in SEARCHLIGHTS:
+    site_cols = SITE_COLS[kind]
+    criterion = PEAK_CRITERION[kind]
+    print(f"\n=== {kind}: refined-SR site delta ===")
+    summary = added_sites_summary(PEAKS[kind], site_cols, criterion)
+    if not summary:
+        print("  (one or both pipelines unavailable)")
+        continue
+    print(f"  causal6={summary['n_legacy']}   causal6_new_sr={summary['n_new']}   "
+          f"shared={summary['n_shared']}   added={summary['n_added']}   dropped={summary['n_dropped']}")
+    if "added_auc" in summary:
+        thr_keys = [k for k in summary if k.startswith("added_above_")]
+        print(f"  median added peak {criterion}: {np.nanmedian(summary['added_auc']):.3f}")
+        for k in thr_keys:
+            print(f"  added with peak ≥ {k.split('_')[-1]}: {summary[k]} / {summary['n_added']}")
+    if summary.get("n_added", 0) > 0:
+        plot_added_vs_shared_hist(summary, criterion, kind)
+        if kind != "behavior_hga":
+            plot_causal4_at_added(PEAKS[kind], summary, site_cols, criterion, kind)
+
+
+# %% [markdown]
+# ## 6. Highlight-electrode drill-in
 #
 # The most direct test of "are causal4's small effects real?" is a fold-level
 # look at the electrodes that causal4's `A_neurometrics` highlighted: if their
@@ -1315,7 +1749,7 @@ inspect_site("acoustic",      subject="EC278", electrode_idx=38,  phoneme_pair="
 inspect_site("behavior_ctrl", subject="EC278", electrode_idx=38,  phoneme_pair="dn", word_end="necessary")
 
 # %% [markdown]
-# ## 5. Notes on expected differences
+# ## 7. Notes on expected differences
 #
 # Before chasing down every disagreement, keep in mind these structural
 # differences between pipelines that will produce real, non-bug AUC drift:
@@ -1342,3 +1776,9 @@ inspect_site("behavior_ctrl", subject="EC278", electrode_idx=38,  phoneme_pair="
 # - **Significance**: only causal6 writes per-site permutation p/q-values
 #   (`significance_all.parquet`). Not used here; see
 #   `notebooks/causal6/significance_aggregate.py`.
+# - **causal6 vs causal6_new_sr**: these share decoder code, CV scheme, seeds,
+#   and regularization (`git diff causal6..HEAD` covers only the SR rule and
+#   the `electrodes=` wiring). The only legitimate diff is **set membership**:
+#   sites the new SR admits or drops. Per-site AUC on shared sites should be
+#   identical up to GPU-dispatch FP drift (~1e-5 or smaller). Section 4's
+#   summary surfaces any larger drift explicitly.

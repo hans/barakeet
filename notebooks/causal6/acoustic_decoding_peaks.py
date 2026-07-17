@@ -17,25 +17,26 @@
 # causal6: per-subject acoustic-decoding peak-finding with null-standardized
 # significance.
 #
-# Emits two flavors per subject (both fed into separate aggregate+FDR rules
+# Emits three flavors per subject (each fed into a separate aggregate+FDR rule
 # downstream):
-#   * foldmean_maxstat — statistic = fold-mean AUC; peak selected by argmin
+#   * foldmean_maxstat  — statistic = fold-mean AUC; peak selected by argmin
 #     pointwise p + max-stat correction. Existing v1 contract.
-#   * tstat_maxstat    — statistic = (fold_mean - 0.5) / (fold_std / sqrt(n_folds));
+#   * tstat_maxstat     — statistic = (fold_mean - 0.5) / (fold_std / sqrt(n_folds));
 #     variance-normalized. Same peak selection + max-stat correction.
-#
-# TFCE is omitted here because the acoustic peak-search window is already
-# narrow (W ≈ 3-4), so cluster breadth is not the bottleneck.
+#   * foldmean_tfce     — TFCE-enhanced fold-mean AUC (threshold=0.5, above-chance
+#     windows only), then max-stat correction. Included for reconciliation: tests
+#     whether cluster credit changes site counts despite the narrow window (W ≈ 3-4).
 #
 # Inputs:
 #   scores.parquet         — real fold-wise test AUC per (site, window)
 #   null_scores.parquet    — permutation-null fold-wise AUC per (site, window, perm)
 #
 # Outputs:
-#   phon_peaks.parquet                — foldmean_maxstat (unchanged schema).
-#   phon_peaks_tstat_maxstat.parquet  — tstat_maxstat, same schema.
-#   phon_roc_auc_searchlight.parquet  — fold-mean AUC per (site, window) for
-#                                        diagnostic plots (unchanged).
+#   phon_peaks.parquet                 — foldmean_maxstat (unchanged schema).
+#   phon_peaks_tstat_maxstat.parquet   — tstat_maxstat, same schema.
+#   phon_peaks_foldmean_tfce.parquet   — foldmean_tfce, same schema.
+#   phon_roc_auc_searchlight.parquet   — fold-mean AUC per (site, window) for
+#                                         diagnostic plots (unchanged).
 
 # %%
 from pathlib import Path
@@ -44,7 +45,9 @@ import polars as pl
 
 from src.models.causal6_aggregates import (
     SITE_KEYS_ACOUSTIC as site_keys,
+    FlavorSpec,
     aggregate_acoustic,
+    tfce_enhanced_peak_test,
 )
 from src.models.significance import null_standardized_peak_test
 
@@ -105,6 +108,18 @@ print(
     f"{(phon_peaks_tstat['p_value'] < 0.05).sum()} with p<0.05 (uncorrected)"
 )
 
+# foldmean_tfce — TFCE on fold-mean AUC (threshold=0.5: above-chance windows only)
+_FOLDMEAN_TFCE = FlavorSpec("fold_mean", apply_tfce=True, tfce_threshold=0.5)
+phon_peaks_foldmean_tfce = tfce_enhanced_peak_test(
+    real_agg, null_agg,
+    site_keys=site_keys,
+    flavor=_FOLDMEAN_TFCE,
+).rename({"peak_smin": "smin", "peak_smax": "smax", "real_statistic": "test_roc_auc"})
+print(
+    f"[foldmean_tfce]    {phon_peaks_foldmean_tfce.height} sites: "
+    f"{(phon_peaks_foldmean_tfce['p_value'] < 0.05).sum()} with p<0.05 (uncorrected)"
+)
+
 # Diagnostic searchlight: per-(site, window) fold-mean AUC, same as before.
 phon_roc_auc_searchlight = real_agg.select(
     window_keys + ["fold_mean"]
@@ -114,9 +129,11 @@ phon_roc_auc_searchlight = real_agg.select(
 outdir = Path(outdir)
 phon_peaks.write_parquet(outdir / "phon_peaks.parquet")
 phon_peaks_tstat.write_parquet(outdir / "phon_peaks_tstat_maxstat.parquet")
+phon_peaks_foldmean_tfce.write_parquet(outdir / "phon_peaks_foldmean_tfce.parquet")
 phon_roc_auc_searchlight.write_parquet(outdir / "phon_roc_auc_searchlight.parquet")
 print(
     f"Wrote phon_peaks.parquet ({phon_peaks.height} rows), "
     f"phon_peaks_tstat_maxstat.parquet ({phon_peaks_tstat.height} rows), "
+    f"phon_peaks_foldmean_tfce.parquet ({phon_peaks_foldmean_tfce.height} rows), "
     f"phon_roc_auc_searchlight.parquet ({phon_roc_auc_searchlight.height} rows) to {outdir}"
 )

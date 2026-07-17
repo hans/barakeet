@@ -1,0 +1,684 @@
+# ---
+# jupyter:
+#   jupytext:
+#     formats: ipynb,py:percent
+#     text_representation:
+#       extension: .py
+#       format_name: percent
+#       format_version: '1.3'
+#       jupytext_version: 1.19.1
+# ---
+
+# %% [markdown]
+# # causal4/causal6 AS-site reconciliation
+#
+# Classifies every (subject, electrode_idx, phoneme_pair) tuple evaluated by
+# either pipeline into one of five buckets, then renders summary stats and
+# four star-plot PDFs (losses, gains-eligible, gains-newly-eligible, both) for
+# visual inspection. Final canonical AS-site list is written to
+# `outputs/causal46_joined/canonical_AS_sites.csv`.
+#
+# See `docs/superpowers/plans/2026-05-14-causal46-as-reconciliation.md` and
+# Linear JON-42.
+
+# %%
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+import polars as pl
+import yaml
+from matplotlib.backends.backend_pdf import PdfPages
+
+# %%
+HOME = Path(os.path.expanduser("~"))
+# Resolve REPO from this notebook's location so it works in any worktree.
+REPO = Path(".").resolve()
+CAUSAL4_DIR = HOME / "u/projects/barakeet/outputs/causal4/prepare_neurometrics"
+CAUSAL6_DIR = HOME / "u/projects/barakeet-speech-responsive/outputs/causal6/acoustic_decoding_peaks"
+OUT_DIR = REPO / "outputs/causal46_joined"
+OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+CAUSAL4_AUC_THRESHOLD = 0.65
+CAUSAL6_P_THRESHOLD = 0.05
+
+# Set False to fall back to raw foldmean maxstat (phon_peaks.parquet) instead
+# of TFCE-enhanced foldmean peaks (phon_peaks_foldmean_tfce.parquet).
+USE_TFCE_ACOUSTIC = False
+
+# causal6's acoustic peak-search bounds (in samples post epoch_tmin). These
+# define the maxstat-correction range — the NHST p-value is corrected over
+# every window that satisfies smin >= AC_SEARCH_SMIN and smax <= AC_SEARCH_SMAX.
+_cfg = yaml.safe_load((REPO / "config.yaml").read_text())
+AC_SEARCH_SMIN = int(_cfg["analysis"]["decoding"]["acoustic_peak_search_smin"])
+AC_SEARCH_SMAX = int(_cfg["analysis"]["decoding"]["acoustic_peak_search_smax"])
+print(f"AC_SEARCH range: smin={AC_SEARCH_SMIN}, smax={AC_SEARCH_SMAX}")
+
+print(f"REPO:        {REPO}")
+print(f"CAUSAL4_DIR: {CAUSAL4_DIR}")
+print(f"CAUSAL6_DIR: {CAUSAL6_DIR}")
+print(f"OUT_DIR:     {OUT_DIR}")
+
+# %% [markdown]
+# ## Load causal4 outputs
+
+# %%
+# phon_peaks_df.parquet contains the peak window per (subject, electrode_idx,
+# phoneme_pair) over the full causal4 search range -- it is NOT pre-filtered
+# to AUC>=0.65. Apply the causal4 AS criterion explicitly here.
+c4_peaks = pl.read_parquet(CAUSAL4_DIR / "phon_peaks_df.parquet")
+c4_peaks = c4_peaks.with_columns(
+    pl.col("subject").cast(pl.Utf8),
+    pl.col("phoneme_pair").cast(pl.Utf8),
+).rename({
+    "phon_roc_auc": "causal4_peak_auc",
+    "smin": "causal4_smin",
+    "smax": "causal4_smax",
+}).drop("word_end_offset_sample")
+print(f"causal4 phon_peaks_df rows (unfiltered): {c4_peaks.shape[0]}")
+c4_AS = c4_peaks.filter(pl.col("causal4_peak_auc") >= CAUSAL4_AUC_THRESHOLD)
+
+c4_eligible = (
+    pl.read_parquet(CAUSAL4_DIR / "phon_roc_auc_searchlight_df.parquet")
+    .with_columns(
+        pl.col("subject").cast(pl.Utf8),
+        pl.col("phoneme_pair").cast(pl.Utf8),
+    )
+    .select(["subject", "electrode_idx", "phoneme_pair"])
+    .unique()
+)
+
+print(f"causal4 AS sites: {c4_AS.shape[0]}")
+print(f"causal4 evaluated tuples: {c4_eligible.shape[0]}")
+print(f"causal4 subjects (in AS): {sorted(c4_AS['subject'].unique().to_list())}")
+
+# %% [markdown]
+# ## Load causal6 outputs
+
+# %%
+_c6_peaks_file = "phon_peaks_foldmean_tfce.parquet" if USE_TFCE_ACOUSTIC else "phon_peaks.parquet"
+print(f"causal6 acoustic peaks flavor: {_c6_peaks_file}")
+c6_paths = sorted(CAUSAL6_DIR.glob(f"*/{_c6_peaks_file}"))
+c6_subjects_present = [p.parent.name for p in c6_paths]
+print(f"causal6 subjects in prod: {c6_subjects_present}")
+
+c6_all = pl.concat([pl.read_parquet(p) for p in c6_paths])
+c6_all = c6_all.rename({
+    "test_roc_auc": "causal6_test_roc_auc",
+    "p_value": "causal6_p_value",
+    "n_permutations": "causal6_n_perm",
+    "smin": "causal6_smin",
+    "smax": "causal6_smax",
+    "T_obs": "causal6_T_obs",
+    "null_q05": "causal6_null_q05",
+    "null_q50": "causal6_null_q50",
+    "null_q95": "causal6_null_q95",
+    "null_q99": "causal6_null_q99",
+}).select([
+    "subject", "electrode_idx", "phoneme_pair",
+    "causal6_test_roc_auc", "causal6_p_value", "causal6_n_perm",
+    "causal6_smin", "causal6_smax",
+    "causal6_T_obs",
+    "causal6_null_q05", "causal6_null_q50", "causal6_null_q95", "causal6_null_q99",
+])
+print(f"causal6 evaluated tuples: {c6_all.shape[0]}")
+print(f"causal6 significant (p<0.05): {int((c6_all['causal6_p_value'] < CAUSAL6_P_THRESHOLD).sum())}")
+
+# %% [markdown]
+# ## Subject coverage warning
+
+# %%
+c4_subj = set(c4_AS["subject"].unique().to_list())
+c6_subj = set(c6_subjects_present)
+missing_in_c6 = sorted(c4_subj - c6_subj)
+if missing_in_c6:
+    print(
+        f"WARNING: {len(missing_in_c6)} causal4 subjects absent from causal6 prod: "
+        f"{missing_in_c6}. Their sites are excluded from reconciliation."
+    )
+    c4_AS = c4_AS.filter(~pl.col("subject").is_in(missing_in_c6))
+    c4_eligible = c4_eligible.filter(~pl.col("subject").is_in(missing_in_c6))
+
+# %% [markdown]
+# ## Build the reconciliation table
+
+# %%
+KEYS = ["subject", "electrode_idx", "phoneme_pair"]
+
+# Universe = union of every tuple either pipeline evaluated.
+universe = pl.concat([
+    c4_eligible.select(KEYS),
+    c6_all.select(KEYS),
+]).unique()
+
+recon = (
+    universe
+    .join(
+        c4_eligible.with_columns(pl.lit(True).alias("causal4_eligible")),
+        on=KEYS, how="left",
+    )
+    .with_columns(pl.col("causal4_eligible").fill_null(False))
+    .join(
+        c4_AS.with_columns(pl.lit(True).alias("causal4_AS")),
+        on=KEYS, how="left",
+    )
+    .with_columns(pl.col("causal4_AS").fill_null(False))
+    .join(c6_all, on=KEYS, how="left")
+    .with_columns(
+        (pl.col("causal6_p_value") < CAUSAL6_P_THRESHOLD)
+            .fill_null(False)
+            .alias("causal6_AS"),
+    )
+)
+
+
+def assign_bucket(c4_elig: bool, c4_AS_: bool, c6_AS_: bool) -> str:
+    if c4_AS_ and c6_AS_:
+        return "both"
+    if c4_AS_ and not c6_AS_:
+        return "causal4_only"
+    if c6_AS_ and c4_elig:
+        return "causal6_only_eligible"
+    if c6_AS_ and not c4_elig:
+        return "causal6_only_newly_eligible"
+    return "neither_AS"
+
+
+recon = recon.with_columns(
+    pl.struct(["causal4_eligible", "causal4_AS", "causal6_AS"])
+      .map_elements(
+          lambda s: assign_bucket(s["causal4_eligible"], s["causal4_AS"], s["causal6_AS"]),
+          return_dtype=pl.Utf8,
+      )
+      .alias("bucket")
+)
+
+print("Bucket counts:")
+print(recon.group_by("bucket").len().sort("len", descending=True))
+
+recon.write_parquet(OUT_DIR / "reconciliation.parquet")
+print(f"Written: {OUT_DIR / 'reconciliation.parquet'}  ({recon.shape[0]} rows)")
+
+# %% [markdown]
+# ## Summary panels
+#
+# - Bucket counts per subject and phoneme_pair
+# - Loss audit: distribution of causal4 peak AUC for `causal4_only` sites
+# - Gain audit: distribution of causal6 corrected p-values for gain buckets
+# - Joint scatter: causal4 peak AUC × causal6 p-value, coloured by bucket
+
+# %%
+breakdown = (
+    recon
+    .group_by(["bucket", "subject", "phoneme_pair"])
+    .len()
+    .pivot(values="len", index=["subject", "phoneme_pair"], on="bucket")
+    .fill_null(0)
+    .sort(["subject", "phoneme_pair"])
+)
+print("Per-subject / phoneme_pair bucket breakdown:")
+print(breakdown)
+breakdown.write_csv(OUT_DIR / "bucket_breakdown.csv")
+
+# %%
+losses = recon.filter(pl.col("bucket") == "causal4_only")
+print(f"Losses: {losses.shape[0]} sites")
+print(f"  causal4_peak_auc:  min={losses['causal4_peak_auc'].min():.3f}  "
+      f"median={losses['causal4_peak_auc'].median():.3f}  "
+      f"max={losses['causal4_peak_auc'].max():.3f}")
+print(f"  count >= 0.70: {int((losses['causal4_peak_auc'] >= 0.70).sum())}  "
+      f">= 0.75: {int((losses['causal4_peak_auc'] >= 0.75).sum())}")
+
+fig, axes = plt.subplots(1, 2, figsize=(11, 4))
+axes[0].hist(
+    losses["causal4_peak_auc"].to_numpy(),
+    bins=20, color="tomato", alpha=0.8, edgecolor="k",
+)
+axes[0].axvline(0.65, color="k", lw=0.8, ls="--", label="causal4 threshold")
+axes[0].set_xlabel("causal4 peak AUC")
+axes[0].set_ylabel("losses (count)")
+axes[0].set_title(f"Loss audit — {losses.shape[0]} sites")
+axes[0].legend()
+
+gains = recon.filter(pl.col("bucket").is_in(
+    ["causal6_only_eligible", "causal6_only_newly_eligible"]
+))
+print(f"Gains: {gains.shape[0]} sites")
+print(f"  eligible:        {(gains['bucket'] == 'causal6_only_eligible').sum()}")
+print(f"  newly_eligible:  {(gains['bucket'] == 'causal6_only_newly_eligible').sum()}")
+
+for bucket, color in [
+    ("causal6_only_eligible", "steelblue"),
+    ("causal6_only_newly_eligible", "seagreen"),
+]:
+    vals = gains.filter(pl.col("bucket") == bucket)["causal6_p_value"].to_numpy()
+    axes[1].hist(vals, bins=np.linspace(0, 0.05, 21), alpha=0.6,
+                 color=color, edgecolor="k", label=bucket)
+axes[1].set_xlabel("causal6 corrected p-value")
+axes[1].set_ylabel("gains (count)")
+axes[1].set_title(f"Gain audit — {gains.shape[0]} sites")
+axes[1].legend(fontsize=8)
+
+fig.tight_layout()
+fig.savefig(OUT_DIR / "summary_audit.png", dpi=150)
+plt.close(fig)
+
+# %%
+plot_df = recon.filter(
+    pl.col("causal4_peak_auc").is_not_null()
+    | pl.col("causal6_p_value").is_not_null()
+)
+
+fig, ax = plt.subplots(figsize=(7, 5))
+bucket_colors = {
+    "both": "#3a823a",
+    "causal4_only": "#c44e4e",
+    "causal6_only_eligible": "#4a78b8",
+    "causal6_only_newly_eligible": "#2d8b8b",
+    "neither_AS": "#999999",
+}
+for bucket, color in bucket_colors.items():
+    sub = plot_df.filter(pl.col("bucket") == bucket)
+    if sub.shape[0] == 0:
+        continue
+    x = sub["causal4_peak_auc"].fill_null(np.nan).to_numpy()
+    y = sub["causal6_p_value"].fill_null(np.nan).to_numpy()
+    ax.scatter(x, y, c=color, s=18, alpha=0.55,
+               label=f"{bucket} (n={sub.shape[0]})", edgecolors="none")
+
+ax.axvline(0.65, color="k", lw=0.6, ls="--", label="causal4 AUC threshold")
+ax.axhline(0.05, color="k", lw=0.6, ls=":", label="causal6 p threshold")
+ax.set_xlabel("causal4 peak AUC")
+ax.set_ylabel("causal6 corrected p-value")
+ax.set_yscale("log")
+ax.set_title("causal4 vs causal6 — agreement & disagreement")
+ax.legend(fontsize=8, loc="best")
+fig.tight_layout()
+fig.savefig(OUT_DIR / "summary_scatter.png", dpi=150)
+plt.close(fig)
+print(f"Wrote: {OUT_DIR / 'summary_audit.png'}, {OUT_DIR / 'summary_scatter.png'}")
+
+# %% [markdown]
+# ## Star plot galleries — visual inspection
+#
+# Four PDFs:
+#   - losses.pdf:                bucket == "causal4_only", sort by causal4 peak AUC desc
+#   - gains_eligible.pdf:        bucket == "causal6_only_eligible", sort by causal6 AUC desc
+#   - gains_newly_eligible.pdf:  bucket == "causal6_only_newly_eligible", sort by causal6 AUC desc
+#   - both.pdf:                  random sample of 10 from "both" for sanity
+#
+# Star plot helper imported from src.viz_provisional.
+
+# %%
+import mne
+
+from src.data import add_metadata_features
+from src.viz_provisional import (
+    load_ambig_steps,
+    provisional_star_plot,
+)
+
+# Epoch files live wherever the preprocessing pipeline output them. Default is
+# <REPO>/outputs/epochs_preprocessed; override with the BARAKEET_EPOCH_DIR env
+# var if they live elsewhere on this machine.
+EPOCH_DIR = Path(os.environ.get(
+    "BARAKEET_EPOCH_DIR",
+    str(REPO / "outputs/epochs_preprocessed"),
+))
+print(f"EPOCH_DIR: {EPOCH_DIR}  (exists: {EPOCH_DIR.exists()})")
+
+needed_subjects = sorted(
+    recon.filter(pl.col("bucket").is_in([
+        "causal4_only", "causal6_only_eligible",
+        "causal6_only_newly_eligible", "both",
+    ]))["subject"].unique().to_list()
+)
+print(f"Loading epochs for {len(needed_subjects)} subjects: {needed_subjects}")
+
+epochs_dict: dict = {}
+for s in needed_subjects:
+    path = EPOCH_DIR / f"{s}_epo.fif"
+    if not path.exists():
+        print(f"  (skip {s}: {path} missing)")
+        continue
+    ep = mne.read_epochs(str(path), preload=False, verbose="WARNING")
+    ep.metadata = add_metadata_features(ep.metadata.copy())
+    epochs_dict[s] = ep
+print(f"Loaded epochs for {len(epochs_dict)} subjects: {sorted(epochs_dict)}")
+
+ambig_steps = load_ambig_steps(epochs_dict) if epochs_dict else {}
+print(f"ambig_steps: {len(ambig_steps)} (subject, phoneme_pair, word_end) keys")
+
+# %%
+def _opt_int(v):
+    return int(v) if v is not None else None
+
+
+def _opt_float(v):
+    return float(v) if v is not None else None
+
+
+def _fmt_c4_metric(row) -> str:
+    auc = _opt_float(row["causal4_peak_auc"])
+    if auc is None:
+        return "c4: N/A"
+    smin, smax = _opt_int(row["causal4_smin"]), _opt_int(row["causal4_smax"])
+    flag = " AS" if auc >= CAUSAL4_AUC_THRESHOLD else ""
+    return f"c4: AUC={auc:.3f}{flag} [{smin}-{smax}]"
+
+
+def _fmt_c6_metric(row) -> str:
+    auc = _opt_float(row["causal6_test_roc_auc"])
+    if auc is None:
+        return "c6: N/A"
+    p = _opt_float(row["causal6_p_value"])
+    T = _opt_float(row["causal6_T_obs"])
+    smin, smax = _opt_int(row["causal6_smin"]), _opt_int(row["causal6_smax"])
+    q95 = _opt_float(row["causal6_null_q95"])
+    sig = " sig" if (p is not None and p < CAUSAL6_P_THRESHOLD) else ""
+    bits = [f"c6: AUC={auc:.3f}{sig} [{smin}-{smax}]"]
+    if p is not None:
+        bits.append(f"p={p:.3f}")
+    if T is not None and q95 is not None:
+        bits.append(f"T={T:.2f} vs q95={q95:.2f}")
+    return "  ".join(bits)
+
+
+def render_gallery(rows: pl.DataFrame, out_path: Path, title_prefix: str):
+    """Render one PDF: one page per site (all word-ends combined)."""
+    if rows.shape[0] == 0:
+        print(f"  (no sites for {out_path.name})")
+        return
+    n_pages = 0
+    n_skipped = 0
+    with PdfPages(out_path) as pdf:
+        for row in rows.iter_rows(named=True):
+            if row["subject"] not in epochs_dict:
+                n_skipped += 1
+                continue
+            try:
+                fig = provisional_star_plot(
+                    subject=row["subject"],
+                    electrode_idx=int(row["electrode_idx"]),
+                    phoneme_pair=row["phoneme_pair"],
+                    epochs_dict=epochs_dict,
+                    ambig_steps=ambig_steps,
+                    phon_smin_c4=_opt_int(row["causal4_smin"]),
+                    phon_smax_c4=_opt_int(row["causal4_smax"]),
+                    phon_smin_c6=_opt_int(row["causal6_smin"]),
+                    phon_smax_c6=_opt_int(row["causal6_smax"]),
+                    phon_search_smin=AC_SEARCH_SMIN,
+                    phon_search_smax=AC_SEARCH_SMAX,
+                    acoustic_peak_auc=None,  # suppress redundant inline label
+                    word_end=None,
+                )
+                header = (
+                    f"{title_prefix}  |  {row['subject']} e{row['electrode_idx']} "
+                    f"{row['phoneme_pair']}  |  bucket={row['bucket']}\n"
+                    f"{_fmt_c4_metric(row)}    |    {_fmt_c6_metric(row)}"
+                )
+                fig.suptitle(header, y=1.02, fontsize=9)
+                pdf.savefig(fig, bbox_inches="tight")
+                plt.close(fig)
+                n_pages += 1
+            except Exception as ex:
+                print(f"  star_plot failed for {row['subject']} e{row['electrode_idx']} "
+                      f"{row['phoneme_pair']}: {ex}")
+                plt.close("all")
+    print(f"Wrote {out_path.name}: {n_pages} pages  ({n_skipped} sites skipped: no epochs)")
+
+
+# %%
+losses_sorted = (
+    recon.filter(pl.col("bucket") == "causal4_only")
+         .sort("causal4_peak_auc", descending=True)
+)
+render_gallery(losses_sorted, OUT_DIR / "losses.pdf", title_prefix="LOSS")
+
+# %%
+ge_sorted = (
+    recon.filter(pl.col("bucket") == "causal6_only_eligible")
+         .sort("causal6_test_roc_auc", descending=True)
+)
+render_gallery(ge_sorted, OUT_DIR / "gains_eligible.pdf", title_prefix="GAIN(elig)")
+
+# %%
+gne_sorted = (
+    recon.filter(pl.col("bucket") == "causal6_only_newly_eligible")
+         .sort("causal6_test_roc_auc", descending=True)
+)
+render_gallery(gne_sorted, OUT_DIR / "gains_newly_eligible.pdf", title_prefix="GAIN(new)")
+
+# %%
+_both_n = recon.filter(pl.col("bucket") == "both").shape[0]
+both_sample = (
+    recon.filter(pl.col("bucket") == "both")
+         .sample(min(10, _both_n), seed=0)
+         .sort("causal6_test_roc_auc", descending=True)
+)
+render_gallery(both_sample, OUT_DIR / "both.pdf", title_prefix="BOTH")
+
+# %% [markdown]
+# ## NHST diagnostic — T_obs vs null T-max quantiles
+#
+# One horizontal strip per site, sorted by `causal6_T_obs` descending. Each
+# strip shows the null distribution's q05-q95 band (light grey) and q95-q99
+# band (darker grey), plus the observed `T_obs` as a marker. The vertical
+# `q95` line marks the rejection threshold (p<0.05).
+#
+# Use this to answer "why was this site a loss?": a marker just to the left
+# of its own q95 line means the site was borderline; a marker well inside the
+# null band means the per-window AUC, even at its peak, isn't unusual against
+# the maxstat-corrected null.
+#
+# For gain buckets the same plot shows the opposite story (T_obs >= q95).
+
+# %%
+def render_nhst_diagnostic(rows: pl.DataFrame, out_path: Path, title_prefix: str):
+    """Per-site strip plot of causal6 T_obs vs that site's own null quantiles."""
+    rows = rows.filter(pl.col("causal6_T_obs").is_not_null())
+    if rows.shape[0] == 0:
+        print(f"  (no sites with causal6 T_obs for {out_path.name})")
+        return
+    rows = rows.sort("causal6_T_obs", descending=True)
+    n = rows.shape[0]
+    h = max(2.5, 0.25 * n + 1.5)
+    fig, ax = plt.subplots(figsize=(8, h))
+
+    y = np.arange(n)
+    q05 = rows["causal6_null_q05"].to_numpy()
+    q50 = rows["causal6_null_q50"].to_numpy()
+    q95 = rows["causal6_null_q95"].to_numpy()
+    q99 = rows["causal6_null_q99"].to_numpy()
+    T   = rows["causal6_T_obs"].to_numpy()
+    p   = rows["causal6_p_value"].to_numpy()
+
+    for i in range(n):
+        # q05 to q95: light grey band ("null bulk")
+        ax.hlines(y=y[i], xmin=q05[i], xmax=q95[i], color="#cccccc",
+                  lw=10, alpha=0.7)
+        # q95 to q99: darker grey ("tail")
+        ax.hlines(y=y[i], xmin=q95[i], xmax=q99[i], color="#888888",
+                  lw=10, alpha=0.7)
+        # q50 tick
+        ax.scatter(q50[i], y[i], marker="|", color="#444444", s=40, zorder=3)
+        # q95 vertical short tick
+        ax.scatter(q95[i], y[i], marker="|", color="k", s=80, zorder=3)
+        # T_obs marker — red if p>=0.05 (loss / rejection), green if p<0.05
+        sig = (p[i] is not None) and (p[i] < CAUSAL6_P_THRESHOLD)
+        col = "#1b7837" if sig else "#c44e4e"
+        ax.scatter(T[i], y[i], marker="o", s=42, color=col,
+                   edgecolors="k", linewidths=0.6, zorder=4)
+
+    labels = [
+        f"{r['subject']} e{r['electrode_idx']} {r['phoneme_pair']}"
+        f"  (c4={(r['causal4_peak_auc'] or 0):.2f}, p={r['causal6_p_value']:.3f})"
+        for r in rows.iter_rows(named=True)
+    ]
+    ax.set_yticks(y)
+    ax.set_yticklabels(labels, fontsize=8)
+    ax.invert_yaxis()
+    ax.set_xlabel("T statistic (causal6 maxstat)")
+    ax.set_title(
+        f"{title_prefix}  —  T_obs vs null quantiles  (n={n} sites)\n"
+        "grey bar: null q05-q95;  darker: q95-q99;  black tick: q95 (sig threshold);  "
+        "circle: T_obs (red=p>=0.05, green=p<0.05)",
+        fontsize=9,
+    )
+    ax.axvline(0, color="k", lw=0.5, ls=":")
+    fig.tight_layout()
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Wrote {out_path.name}: {n} sites")
+
+
+# %%
+render_nhst_diagnostic(
+    recon.filter(pl.col("bucket") == "causal4_only"),
+    OUT_DIR / "losses_nhst_diagnostic.pdf",
+    title_prefix="LOSSES (causal4_only)",
+)
+
+# %%
+render_nhst_diagnostic(
+    recon.filter(pl.col("bucket") == "causal6_only_eligible"),
+    OUT_DIR / "gains_eligible_nhst_diagnostic.pdf",
+    title_prefix="GAINS eligible (causal6_only_eligible)",
+)
+
+# %%
+render_nhst_diagnostic(
+    recon.filter(pl.col("bucket") == "causal6_only_newly_eligible"),
+    OUT_DIR / "gains_newly_eligible_nhst_diagnostic.pdf",
+    title_prefix="GAINS newly eligible (causal6_only_newly_eligible)",
+)
+
+# %% [markdown]
+# ## ROI breakdown per bucket
+#
+# Does the c4 → c6 swap change the anatomical composition of the AS list?
+# If `both` is STG-concentrated and the disagreement buckets are too, the
+# swap is anatomy-neutral. If gains drift to non-STG areas (or losses are
+# STG-concentrated), that's a substantive change to flag.
+
+# %%
+from src.data import get_electrode_df
+
+elec_frames = []
+for subj in sorted(recon["subject"].unique().to_list()):
+    df = get_electrode_df(subj).reset_index()[["electrode_idx", "roi"]]
+    df["roi"] = df["roi"].astype(str)
+    df["subject"] = subj
+    elec_frames.append(pl.from_pandas(df))
+electrode_df = pl.concat(elec_frames).select(["subject", "electrode_idx", "roi"])
+print(f"Loaded electrode metadata: {electrode_df.shape[0]} rows across "
+      f"{electrode_df['subject'].n_unique()} subjects")
+
+recon_roi = recon.join(electrode_df, on=["subject", "electrode_idx"], how="left")
+n_missing = recon_roi.filter(pl.col("roi").is_null()).shape[0]
+if n_missing:
+    print(f"WARNING: {n_missing} rows missing ROI lookup (electrode not in metadata).")
+
+# %%
+# Full per-bucket × ROI count (every ROI that appears in any bucket).
+roi_by_bucket = (
+    recon_roi
+    .group_by(["bucket", "roi"])
+    .len()
+    .pivot(values="len", index="roi", on="bucket")
+    .fill_null(0)
+    .with_columns(
+        (pl.col("both") + pl.col("causal4_only")).alias("_c4_AS_total"),
+        (pl.col("both") + pl.col("causal6_only_eligible")
+         + pl.col("causal6_only_newly_eligible")).alias("_c6_AS_total"),
+    )
+    .sort("_c6_AS_total", descending=True)
+)
+print("Per-bucket ROI count (sorted by causal6 AS total):")
+print(roi_by_bucket)
+roi_by_bucket.write_csv(OUT_DIR / "roi_breakdown.csv")
+print(f"Written: {OUT_DIR / 'roi_breakdown.csv'}")
+
+# %%
+# Compact STG-vs-other view (focuses on the downstream story).
+roi_stg = recon_roi.with_columns(
+    pl.col("roi").str.contains("(?i)superiortemporal").alias("_is_stg")
+)
+stg_summary = (
+    roi_stg
+    .filter(pl.col("bucket") != "neither_AS")
+    .group_by(["bucket", "_is_stg"])
+    .len()
+    .pivot(values="len", index="bucket", on="_is_stg")
+    .rename({"true": "STG", "false": "non-STG"})
+    .fill_null(0)
+    .with_columns(
+        (pl.col("STG") + pl.col("non-STG")).alias("total"),
+        (100.0 * pl.col("STG") / (pl.col("STG") + pl.col("non-STG")))
+            .round(1).alias("pct_STG"),
+    )
+    .sort("total", descending=True)
+)
+print("STG vs non-STG by bucket (excluding neither_AS):")
+print(stg_summary)
+stg_summary.write_csv(OUT_DIR / "roi_breakdown_stg_summary.csv")
+print(f"Written: {OUT_DIR / 'roi_breakdown_stg_summary.csv'}")
+
+# %% [markdown]
+# ## Canonical AS-site list
+#
+# Initial canonical list = every site with `causal6_AS == True` (union of `both`,
+# `causal6_only_eligible`, `causal6_only_newly_eligible`).
+#
+# The user may overwrite `canonical_AS_sites.csv` manually after reviewing the
+# PDFs (e.g., to add back high-AUC `causal4_only` losses, or remove borderline
+# gains). Downstream notebooks (Group B/C) MUST read from this CSV.
+
+# %%
+canonical = (
+    recon.filter(pl.col("causal6_AS"))
+         .select([
+             "subject", "electrode_idx", "phoneme_pair",
+             pl.col("causal6_smin").alias("smin"),
+             pl.col("causal6_smax").alias("smax"),
+             pl.col("causal6_test_roc_auc").alias("peak_auc"),
+             pl.col("causal6_p_value").alias("p_value"),
+             "bucket",
+         ])
+         .sort(["subject", "electrode_idx", "phoneme_pair"])
+)
+canonical.write_csv(OUT_DIR / "canonical_AS_sites.csv")
+print(f"Canonical AS sites: {canonical.shape[0]}")
+print(f"Written: {OUT_DIR / 'canonical_AS_sites.csv'}")
+print(canonical.group_by("bucket").len().sort("len", descending=True))
+
+# %% [markdown]
+# ## Review checklist for the user
+#
+# 1. Open `outputs/causal46_joined/losses.pdf` — are any of the highest-AUC
+#    losses visually compelling (clear divergence between step 1 and step 6
+#    HGA in the top panel within the shaded acoustic window)? If yes, causal6
+#    NHST may be over-conservative; consider relaxing the p threshold or
+#    keeping selected sites manually. The top panel shows: dashed lines =
+#    causal6 search bounds; blue shade = causal4 peak window; green shade =
+#    causal6 peak window.
+# 1a. `losses_nhst_diagnostic.pdf` — population-level view of each loss site's
+#     T_obs against its own null quantile band. Sites where T_obs sits just
+#     left of the q95 (sig) threshold are near-misses; sites deep inside the
+#     null bulk are clear non-effects despite a high observed AUC.
+# 2. Open `outputs/causal46_joined/gains_eligible.pdf` — do the gains look
+#    real? If most are noisy, causal6 NHST may have inflated power (e.g.,
+#    insufficient permutations).
+# 3. Open `outputs/causal46_joined/gains_newly_eligible.pdf` — these sites
+#    were rejected by causal4's speech-responsive pre-screen. Validating
+#    these supports dropping the pre-screen.
+# 4. Edit `outputs/causal46_joined/canonical_AS_sites.csv` manually if you
+#    want to override the default (causal6_AS = True) selection.
+# 5. The 3 absent subjects (EC248, EC250, EC253) are NOT in the canonical
+#    list. When causal6 prod is re-synced with them, re-run this notebook.
+# 6. The star-plot galleries skip silently if epoch files are not available
+#    under `<REPO>/outputs/epochs_preprocessed/`. Set `BARAKEET_EPOCH_DIR`
+#    to point at the actual epoch directory, then re-run.

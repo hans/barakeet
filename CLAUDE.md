@@ -38,7 +38,6 @@ The project distinguishes two responses observable at single electrodes:
    - Temporally diffuse, peaks near or after point of disambiguation (POD),
      can extend beyond word offset
    - 58 of 64 acoustic sites (91%) also show perceptual selectivity
-   - 80/110 perceptual responses emerge ONLY for ambiguous trials
 
 ## Key indices
 - **ASI (Acoustic Selectivity Index)**: HGA difference between clear /d/ and /n/
@@ -67,8 +66,12 @@ The project distinguishes two responses observable at single electrodes:
 
 ## Theoretical framing
 The project evaluates four candidate mechanisms:
-1. **Reactivation**: Same code re-expressed later. RULED OUT by code inconsistency
-   and ambiguity dependence.
+1. **Reactivation**: Same code re-expressed later. Tentatively disfavored by code
+   inconsistency (transfer bimodality). The "ambiguity dependence" argument that
+   previously also counted against it rested on a claim now retracted as unreliable
+   (perceptual responses emerging only for ambiguous trials); whether a single
+   belief-driven generator accounts for both ambiguous and unambiguous responses is
+   an OPEN question under active test, not ruled out.
 2. **Interactive processing**: Top-down feedback overwrites acoustic representation.
    RULED OUT by code inconsistency (if same population, codes should match).
 3. **Distal integration**: Perceptual resolution in a different brain region.
@@ -106,11 +109,25 @@ belief-updating (surprisal/prediction error). Not distinguishable in this design
 
 ## Code structure
 
-### Active pipeline: causal5
-`workflows/causal5.Snakefile` is the live pipeline. causal4 is legacy (kept for
-reference; adds electrode pre-selection steps A/B/C that causal5 drops).
+### Standard pipeline: causal6 + causal46_joined
+`workflows/causal6.Snakefile` (acoustic decoding + speech-responsive selection;
+produces `outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet`) and
+`workflows/causal46_joined.Snakefile` (the joined acoustic + within-completion
+perceptual analyses) are the live pipeline. Notebooks live in
+`notebooks/causal46_joined/` (Jupytext percent-format .py). **causal5 and causal4
+are defunct** — kept only for reference; the causal5 run-order table below is
+retained as a schema/protocol reference where the two pipelines still share
+`src/` code.
 
-**Run order and notebooks** (`notebooks/causal5/` — Jupytext percent-format .py files):
+**Within-completion subsampling (canonical).** The per-step class-balance rule
+(B3 single-step / B4 across-step) that underlies every within-completion
+perceptual contrast — star-plot galleries, bootstrap t-tests, early-window and
+strong-generator analyses — is defined **authoritatively in the module docstring
+of `notebooks/causal46_joined/_within_completion.py`** (imported by 14+
+notebooks). Read it before touching any B3/B4 trial-selection code. Pointer +
+consumer map: `docs/superpowers/plans/2026-07-01-causal46-within-completion-subsampling.md`.
+
+**Legacy causal5 run order** (`notebooks/causal5/` — Jupytext percent-format .py files; retained for reference):
 
 | Rule | Notebook | Key outputs |
 |------|----------|-------------|
@@ -135,6 +152,7 @@ the canonical reference for data schemas and protocols:
 - **Epoch metadata columns**: `src/data.py:add_metadata_features()` docstring — `resampled`, `behavior_categorical_forced`, `ambiguity`, `categorical_acoustic_cue`, etc.
 - **Decoder checkpoint formats**: `src/models/decoding.py` module docstring
 - **Timing constants**: `src/stimuli.py` — `POD_dict`, `OFFSET_DICT`, `WORD_PHASES`
+- **Within-completion B3/B4 subsampling**: `notebooks/causal46_joined/_within_completion.py` module docstring — canonical per-step class-balance rule (both classes bootstrapped with replacement; gallery and t-test share draws)
 - **all_outcomes.parquet schema**: columns `subject, electrode_idx, phoneme_pair, smin, smax, measure, epoch_idx, fold, decoder_target, decoder_proba, decoder_prediction`; `measure` ∈ {`categorical_acoustic_cue`, `subject_specific_acoustics`}; predictions on ALL trials including ambiguous steps
 
 ### Key source files
@@ -186,6 +204,24 @@ Loaded via MNE; metadata enriched with `add_metadata_features()`.
 Phoneme pairs: `bm` (/b/-/m/), `dn` (/d/-/n/), `pb` (/p/-/b/).
 
 ### Environment
-Conda environment: `/scratch/jgauthier/transformers3`
-Activate before running any notebooks or scripts: `conda activate /scratch/jgauthier/transformers3`
-Or run directly: `conda run -p /scratch/jgauthier/transformers3 <command>` (use `-p`, not `-n`)
+Uses `uv`. Run any Python script, notebook, or Snakemake invocation with `uv run <command>` from the repo root — no activation step needed.
+
+**Configs:**
+- `config.smoke.yaml` — local development; use with `CONFIG_FILE=config.smoke.yaml uv run snakemake --configfile config.smoke.yaml -j1`
+- `config.yaml` — production (separate machine); same Snakefile, full dataset
+
+---
+
+## Agent skills
+
+### Issue tracker
+
+Issues live in GitHub Issues at github.com/hans/barakeet (uses the `gh` CLI). See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default label vocabulary: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context layout: `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.

@@ -17,11 +17,26 @@ analysis:
   epoch_sfreq: 100
   epoch_tmin: -0.4
 
+  # Speech-responsive screen (causal6). See notebooks/causal6/find_speech_responsive.py
+  # for the full criterion and motivation. Tuning for these values is documented
+  # in scripts/refined_speech_responsive.py.
+  speech_responsive:
+    post_tmax_s: 0.6
+    t_threshold: 7.0
+
   phon_response_peak_threshold: 0.65
   behav_response_peak_threshold: 0.01
   ambiguous_response_threshold: 2
 
   fdr_alpha: 0.05
+  fdr_rois:
+    - superiortemporal
+    - middletemporal
+    - supramarginal
+    - precentral
+    - parsopercularis
+    - parstriangularis
+    - caudalmiddlefrontal
 
   behav_ttest_pvalue_threshold: 0.001
 
@@ -44,17 +59,17 @@ analysis:
     peak_search_smax: 290
     # Acoustic-specific override: the STG acoustic response is known to be
     # transient and peaks ~150-250ms post word onset (CLAUDE.md / project
-    # prior). Restricting peak-search to 100-350ms is a pre-registered
-    # range that drops W_effective from ~21 to ~3-4, which is what makes
-    # BH-FDR across all tested sites achievable at K=500 permutations.
+    # prior). Restricting peak-search so window data ends at or before 250ms
+    # drops W_effective, which is what makes BH-FDR across all tested sites
+    # achievable at K=500 permutations.
     # Claims about later re-expression of the acoustic code are tested
     # elsewhere (cross-window transfer / late-window direct tests) — NOT
     # via this peak search.
     # In samples with epoch_tmin=-0.4, sfreq=100:
-    #   smin >= 50 → window starts >= 100ms post onset
-    #   smax <= 75 → window ends <= 350ms post onset
-    acoustic_peak_search_smin: 50
-    acoustic_peak_search_smax: 75
+    #   smin >= 45 → window starts >= 50ms post onset
+    #   smax <= 68 → window ends <= 280ms post onset
+    acoustic_peak_search_smin: 45
+    acoustic_peak_search_smax: 68
 
   multivariate:
     window_sizes: [10]          # 100ms at 100Hz; robustness: [5, 10, 15]
@@ -70,6 +85,15 @@ analysis:
     phon_response_peak_thresholds: [0.55, 0.60, 0.65]
     behav_response_peak_thresholds: [0.005, 0.010, 0.020]
     ambiguous_response_thresholds: [1, 2, 3]
+
+
+causal46_joined:
+  min_class_k: 3            # minimum per-class trials to include a cell
+  window_size: 5           # searchlight window in samples (100ms at 100 Hz)
+  stride: 5
+  ac_p_value_threshold: 0.01   # uncorrected p-value cutoff for AS-site inclusion
+  n_bootstrap: 1000        # bootstrap replicates (reduce for smoke testing)
+  n_perm: 1000             # permutation null replicates for contrast_plot behavioral band
 
 
 causal6:
@@ -110,7 +134,9 @@ causal6:
   # max-stat-corrected p-values).
   n_permutations_stage1: 1000
   n_permutations_stage2: 9000
-  escalate_corrected_p_max: 0.20
+  escalate_corrected_p_max: 0.10
   permutation_seed: 0          # base RNG seed; stage 1 uses [seed, seed+K1),
                                # stage 2 uses [seed+K1, seed+K1+K2).
-  permutation_chunk_size: 10   # permutations fit per GPU call
+  permutation_chunk_size: 20   # permutations fit per GPU call
+  n_permutations_stage3: 90000     # stage-3 boost — see docs/superpowers/plans/2026-05-19-causal6-stage3-null-roi-fdr.md
+  stage3_k_gate: 200               # 2× expected discovery rate ~100

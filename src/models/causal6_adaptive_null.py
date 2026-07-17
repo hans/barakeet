@@ -42,14 +42,13 @@ polars / numpy work — no extra GPU refits.
 from __future__ import annotations
 
 import shutil
-from collections.abc import Generator
+from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Sequence
 
 import polars as pl
 
-from src.models.causal6_aggregates import FlavorSpec
+from src.models.causal6_aggregates import FlavorSpec, restrict_to_rois
 from src.models.significance import null_standardized_peak_test, tfce_1d_per_site
 
 
@@ -403,11 +402,73 @@ def stage1_gate(
     return borderline_keys, gate_log
 
 
+def stage3_gate(
+    real_agg: pl.DataFrame,
+    null_agg: pl.DataFrame,
+    *,
+    site_keys: Sequence[str],
+    flavors: Sequence[FlavorSpec],
+    k_gate: int,
+    n_roi: int,
+    alpha: float,
+    window_keys: Sequence[str] = ("smin", "smax"),
+    perm_key: str = "permutation_idx",
+) -> tuple[set[tuple], pl.DataFrame]:
+    """Gate K-floored ROI sites for a stage-3 permutation refit.
+
+    Threshold = k_gate * alpha / n_roi. With k_gate=200, alpha=0.05,
+    n_roi=2007: threshold ≈ 5e-3. Catches sites whose current p, if true,
+    could be FDR-significant at any of the top k_gate BH ranks.
+
+    Caller must pre-restrict real_agg / null_agg to ROI sites — this
+    function does not apply the ROI filter.
+
+    Returns (refit_keys, gate_log) in the same shape as stage1_gate.
+    """
+    p_max = k_gate * alpha / n_roi
+    return stage1_gate(
+        real_agg, null_agg,
+        site_keys=site_keys, flavors=flavors,
+        p_max=p_max, window_keys=window_keys, perm_key=perm_key,
+    )
+
+
+def log_stage3_gate(
+    subject: str,
+    *,
+    n_permutations_total_pre_stage3: int,
+    n_roi: int,
+    k_gate: int,
+    alpha: float,
+    gate_log: pl.DataFrame,
+    n_refit: int,
+    print_top_k: int = 50,
+) -> None:
+    """Print a stage-3 gate summary to stdout. See ``log_stage1_gate``."""
+    threshold = k_gate * alpha / n_roi
+    print(
+        f"[{_GATE_TAG}/{subject}] stage3 K_pre={n_permutations_total_pre_stage3} "
+        f"k_gate={k_gate} N_ROI={n_roi} threshold={threshold:.2e}: "
+        f"{n_refit}/{gate_log.height} sites flagged",
+        flush=True,
+    )
+    if n_refit > 0:
+        print(
+            gate_log.filter(pl.col("escalated"))
+            .sort("min_corrected_p_global")
+            .head(print_top_k)
+            .to_pandas().to_string(index=False),
+            flush=True,
+        )
+
+
 def filter_null_to_borderline(
     null_scores: pl.DataFrame | pl.LazyFrame,
     borderline_keys: set[tuple],
     *,
     site_keys: Sequence[str],
+    baseline_site_keys: Sequence[str] | None = None,
+    model_col: str = "model",
 ) -> pl.DataFrame | pl.LazyFrame:
     """Filter raw null_scores to rows whose ``site_keys`` tuple is in ``borderline_keys``.
 
@@ -422,6 +483,23 @@ def filter_null_to_borderline(
     apply this filter lazily, and only collect the (much smaller) result —
     avoiding the full-null materialization that triggers OOMs on
     high-electrode-count subjects.
+
+    For paired (``with_control``) decoders the spill contains both
+    ``model='full'`` rows (one per electrode×window×perm×fold) and
+    ``model='baseline'`` rows (one per perm×fold, with sentinel
+    ``electrode_idx=-1``, ``smin=-1``, ``smax=-1``). The site_keys
+    semi-join drops every baseline row because ``electrode_idx=-1`` is
+    never in any borderline tuple — silently NULL'ing
+    ``baseline_roc_auc`` in the downstream ``_pair_full_baseline``
+    left-join and effectively capping escalated sites at K=K1.
+
+    Pass ``baseline_site_keys`` (a strict subset of ``site_keys``, the
+    same keys ``_pair_full_baseline`` joins full↔baseline on — i.e.
+    ``[subject, phoneme_pair, word_end]`` for behavior_with_control or
+    ``[subject, phoneme_pair]`` for ganong_with_control) to opt into
+    paired-aware filtering: rows where ``model_col == 'baseline'`` go
+    through a separate semi-join on the reduced keys, and the two
+    partitions are concatenated.
     """
     site_keys = list(site_keys)
     is_lazy = isinstance(null_scores, pl.LazyFrame)
@@ -437,6 +515,203 @@ def filter_null_to_borderline(
         target_dtype = schema[sk]
         if keys_df.schema[sk] != target_dtype:
             keys_df = keys_df.with_columns(pl.col(sk).cast(target_dtype))
-    if isinstance(null_scores, pl.LazyFrame):
-        return null_scores.join(keys_df.lazy(), on=site_keys, how="semi")
-    return null_scores.join(keys_df, on=site_keys, how="semi")
+
+    if baseline_site_keys is None:
+        if is_lazy:
+            return null_scores.join(keys_df.lazy(), on=site_keys, how="semi")
+        return null_scores.join(keys_df, on=site_keys, how="semi")
+
+    baseline_site_keys = list(baseline_site_keys)
+    missing = [k for k in baseline_site_keys if k not in site_keys]
+    if missing:
+        raise ValueError(
+            f"baseline_site_keys must be a subset of site_keys; "
+            f"unknown keys: {missing}"
+        )
+    if model_col not in schema:
+        raise ValueError(
+            f"baseline_site_keys requires a {model_col!r} column on null_scores; "
+            f"got columns {list(schema.keys())}"
+        )
+    base_keys_df = keys_df.select(baseline_site_keys).unique()
+    if is_lazy:
+        full = null_scores.filter(pl.col(model_col) == "full").join(
+            keys_df.lazy(), on=site_keys, how="semi",
+        )
+        base = null_scores.filter(pl.col(model_col) == "baseline").join(
+            base_keys_df.lazy(), on=baseline_site_keys, how="semi",
+        )
+        return pl.concat([full, base])
+    full = null_scores.filter(pl.col(model_col) == "full").join(
+        keys_df, on=site_keys, how="semi",
+    )
+    base = null_scores.filter(pl.col(model_col) == "baseline").join(
+        base_keys_df, on=baseline_site_keys, how="semi",
+    )
+    return pl.concat([full, base])
+
+
+def _build_stage3_flag(
+    refit_keys: set[tuple],
+    *,
+    site_keys: list[str],
+    gate_log: pl.DataFrame,
+) -> pl.DataFrame:
+    if refit_keys:
+        return pl.DataFrame({
+            sk: [k[site_keys.index(sk)] for k in refit_keys]
+            for sk in site_keys
+        }).with_columns(pl.lit(True).alias("stage3_refit"))
+    return pl.DataFrame(
+        schema={sk: gate_log.schema[sk] for sk in site_keys}
+        | {"stage3_refit": pl.Boolean}
+    )
+
+
+def stage3_boost(
+    *,
+    subject: str,
+    outdir: Path,
+    real_scores: pl.DataFrame,
+    real_agg: pl.DataFrame,
+    null_scores: pl.DataFrame,
+    gate_log: pl.DataFrame,
+    site_keys: Sequence[str],
+    flavors: Sequence[FlavorSpec],
+    aggregate_fn: Callable[
+        [pl.DataFrame, pl.DataFrame],
+        tuple[pl.DataFrame, pl.DataFrame],
+    ],
+    preagg_fn: Callable[[pl.DataFrame, pl.DataFrame], pl.DataFrame],
+    run_permutations_fn: Callable[..., pl.DataFrame | None],
+    electrode_dfs: list[pl.DataFrame],
+    fdr_rois: Sequence[str],
+    k_gate: int,
+    fdr_alpha: float,
+    permutation_seeds: list[int],
+    n_permutations_pre: int,
+    baseline_site_keys: Sequence[str] | None = None,
+) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """Stage-3 K-boost: refit ROI sites in the BH rejection neighborhood.
+
+    Decoder-agnostic orchestrator that mirrors the original acoustic
+    stage-3 block. Steps:
+
+      1. Compute ``n_roi`` from the electrode pool (speech-responsive
+         electrodes restricted to ``fdr_rois``) — used as the BH family
+         size after Simes collapse, so the threshold is
+         ``k_gate * fdr_alpha / n_roi``.
+      2. Re-aggregate ``(real_scores, null_scores)`` via ``aggregate_fn``
+         so the gate sees the K1+K2 combined null in fold_mean / t_stat
+         schema (not the preagg fold_mean_diff schema). The returned
+         real_agg is discarded — caller supplies the pre-computed
+         ``real_agg`` from stage 1 since it's identical content.
+      3. ``restrict_to_rois`` both frames to the ROI electrode pool.
+      4. ``stage3_gate`` → ``(refit_keys, stage3_log)``; ``log_stage3_gate``.
+      5. If ``refit_keys`` is non-empty: invoke ``run_permutations_fn``
+         (bound partial; orchestrator passes only ``electrode_idxs``,
+         ``permute_seeds``, ``spill_dir``) inside a ``_stage3_spill``
+         scratch dir. Lazily filter the raw shards via
+         ``filter_null_to_borderline`` (optionally paired-aware via
+         ``baseline_site_keys``), pre-aggregate via ``preagg_fn``, and
+         concat the result onto ``null_scores``.
+      6. Add a ``stage3_refit`` boolean column to ``gate_log`` (true for
+         keys in ``refit_keys``, false otherwise).
+
+    Caller is responsible for computing the final ``n_permutations``
+    column on ``gate_log`` (three-state: K1, K1+K2, K1+K2+K3).
+
+    Args:
+        subject: subject id (passed through to log calls).
+        outdir: output directory; the spill scratch dir is placed inside.
+        real_scores: real-scores frame to pass to ``aggregate_fn`` and
+            ``preagg_fn``. Acoustic callers pass the target-pre-filtered
+            frame (idempotent through ``aggregate_acoustic``); behavior/
+            ganong callers pass the unfiltered frame.
+        real_agg: per-site real aggregate from stage 1 — reused for ROI
+            restriction without recomputation.
+        null_scores: combined K1+K2 preagg null. Stage-3 preagg is
+            appended on the way out.
+        gate_log: gate log from ``stage1_gate``.
+        site_keys: decoder site-key list (e.g. ``SITE_KEYS_ACOUSTIC``).
+            Must contain ``electrode_idx`` for the refit-electrode
+            extraction.
+        flavors: decoder flavor list (e.g. ``FLAVORS_ACOUSTIC``).
+        aggregate_fn: bound partial of the decoder's ``aggregate_*``,
+            invoked as ``aggregate_fn(real_scores, null_scores)``.
+        preagg_fn: bound partial of the decoder's ``preagg_*_null``,
+            invoked as ``preagg_fn(raw_null, real_scores)``.
+        run_permutations_fn: bound partial of the decoder's
+            ``run_*_permutations``, invoked with kw-only
+            ``electrode_idxs``, ``permute_seeds``, ``spill_dir``.
+        electrode_dfs: list of per-subject electrode DataFrames
+            (``subject, electrode_idx, roi, speech_responsive`` columns).
+        fdr_rois: ROI list (FreeSurfer aparc labels).
+        k_gate: gate multiplier; threshold = ``k_gate * fdr_alpha / n_roi``.
+        fdr_alpha: BH-FDR alpha (typically 0.05).
+        permutation_seeds: full disjoint seed range to use for stage 3.
+            Caller is responsible for offsetting past stage 1+2 seeds.
+        n_permutations_pre: K1+K2; logged but not otherwise used.
+        baseline_site_keys: forwarded to ``filter_null_to_borderline``.
+            Set for paired with-control decoders so ``model='baseline'``
+            rows survive the borderline-key semi-join.
+
+    Returns:
+        Tuple of ``(null_scores, gate_log)`` with stage-3 rows appended
+        to ``null_scores`` and a ``stage3_refit`` column added to
+        ``gate_log``.
+    """
+    site_keys = list(site_keys)
+
+    elec_pool = pl.concat([
+        e.filter(pl.col("speech_responsive"))
+         .select(["subject", "electrode_idx", "roi"])
+        for e in electrode_dfs
+    ])
+    n_roi = elec_pool.filter(pl.col("roi").is_in(list(fdr_rois))).height
+
+    _, null_agg_combined = aggregate_fn(real_scores, null_scores)
+    real_agg_roi, _ = restrict_to_rois(real_agg, electrode_dfs, fdr_rois)
+    null_agg_roi, _ = restrict_to_rois(null_agg_combined, electrode_dfs, fdr_rois)
+
+    refit_keys, stage3_log = stage3_gate(
+        real_agg_roi, null_agg_roi,
+        site_keys=site_keys, flavors=flavors,
+        k_gate=k_gate, n_roi=n_roi, alpha=fdr_alpha,
+    )
+    log_stage3_gate(
+        subject,
+        n_permutations_total_pre_stage3=n_permutations_pre,
+        n_roi=n_roi, k_gate=k_gate, alpha=fdr_alpha,
+        gate_log=stage3_log, n_refit=len(refit_keys),
+    )
+
+    if refit_keys:
+        eidx_pos = site_keys.index("electrode_idx")
+        refit_electrode_idxs = sorted({k[eidx_pos] for k in refit_keys})
+        with stage2_spill_dir(outdir, name="_stage3_spill") as spill_dir:
+            run_permutations_fn(
+                electrode_idxs=refit_electrode_idxs,
+                permute_seeds=permutation_seeds,
+                spill_dir=spill_dir,
+            )
+            null_stage3_raw = filter_null_to_borderline(
+                pl.scan_parquet(spill_dir / "*.parquet"),
+                refit_keys,
+                site_keys=site_keys,
+                baseline_site_keys=baseline_site_keys,
+            ).collect()
+
+        null_stage3 = preagg_fn(null_stage3_raw, real_scores)
+        del null_stage3_raw
+        null_scores = pl.concat([null_scores, null_stage3])
+        del null_stage3
+
+    stage3_flag = _build_stage3_flag(
+        refit_keys, site_keys=site_keys, gate_log=gate_log,
+    )
+    gate_log = gate_log.join(
+        stage3_flag, on=site_keys, how="left",
+    ).with_columns(pl.col("stage3_refit").fill_null(False))
+
+    return null_scores, gate_log
