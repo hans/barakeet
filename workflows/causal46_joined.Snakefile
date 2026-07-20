@@ -1396,18 +1396,23 @@ rule joined_mismatch_regression:
 rule joined_early_perceptual_windows:
     """Infer early perceptual windows per B4 cell (pure post-processing).
 
-    For each (subject, electrode, phoneme_pair, word_end) cell annotated with
-    `behav @ac` in the manual manifest, finds time window(s) in [t=0, phon_smax]
-    with a reliable within-completion HGA contrast. Mirror of
+    For each site (subject, electrode, phoneme_pair) that passes the perceptual-
+    projection gate (uncorrected one-tailed pooled p < gate_alpha), finds time
+    window(s) in [t=0, phon_smax] with a reliable within-completion HGA contrast,
+    for both completions of the site. Mirror of
     joined_behavioral_discriminative_windows, which searches *beyond* the acoustic
-    peak. No epoch reload — pure post-processing over b4_bootstrap.parquet.
-    No fallback: cells with no significant early window emit zero rows.
+    peak. No epoch reload — pure post-processing over b4_bootstrap.parquet and the
+    projection site_results.csv. No fallback: cells with no significant early
+    window emit zero rows. Gate rationale: docs/adr/0001-early-perceptual-window-gate.md.
     """
     input:
         b4_bootstrap       = "outputs/causal46_joined/t_tests/b4_bootstrap.parquet",
         b4_per_cell        = "outputs/causal46_joined/t_tests/b4_per_cell.parquet",
         notebook           = "notebooks/causal46_joined/early_perceptual_windows.py",
-        manual_annotations = "outputs/causal46_joined/manual_annotations/filtered_manifest.csv",
+        projection         = expand(
+            "outputs/causal46_joined/early_perceptual_projection/{subject}/site_results.csv",
+            subject=config["data"]["subjects"],
+        ),
         early_annotations  = "outputs/causal46_joined/manual_annotations/early_acoustic_window.csv",
         a_windows          = "outputs/causal46_joined/acoustic_endpoint_windows/a_windows.parquet",
 
@@ -1424,9 +1429,10 @@ rule joined_early_perceptual_windows:
                 b4_bootstrap_path=str(input.b4_bootstrap),
                 b4_per_cell_path=str(input.b4_per_cell),
                 outdir=str(outdir),
+                gate_alpha=0.05,
                 ci_low=2.5,
                 ci_high=97.5,
-                filtered_manifest_path=str(input.manual_annotations),
+                projection_results_dir="outputs/causal46_joined/early_perceptual_projection",
                 early_annotations_path=str(input.early_annotations),
                 a_windows_path=str(input.a_windows),
             ),

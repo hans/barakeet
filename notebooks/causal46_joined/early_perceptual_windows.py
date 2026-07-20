@@ -16,15 +16,24 @@
 # %% [markdown]
 # # Early perceptual windows
 #
-# For each B4 cell `(subject, electrode_idx, phoneme_pair, word_end)` that has a
-# **`behav @ac`** annotation in the filtered manifest, find time window(s) in
+# For each B4 cell `(subject, electrode_idx, phoneme_pair, word_end)` whose
+# **site** passes the **perceptual-projection gate** (uncorrected one-tailed
+# pooled `p_one_tailed < gate_alpha`), find time window(s) in
 # **`[t=0, phon_smax]`** carrying a reliable within-completion behavioral (percept)
 # contrast. This is the mirror of `behavioral_discriminative_windows.py`: that
 # notebook searches *beyond* the acoustic peak (`smin ≥ phon_smax`); this one
 # searches *up to and including* the acoustic window.
 #
+# **Gate change (2026-07-20):** the site-selection gate is the automated
+# `early_perceptual_projection` statistic (π), replacing the manual `behav @ac`
+# annotation. The gate is per *site* (subject, electrode_idx, phoneme_pair),
+# pooled across completions; both of a passing site's B4 cells enter the window
+# search. "If any site passes" is the empty-case guard — no passing site ⇒ zero
+# rows. See docs/adr/0001-early-perceptual-window-gate.md.
+#
 # **Algorithm summary** (see plan for full rationale):
-# 1. Filter to cells annotated `behav @ac` in the manual manifest.
+# 1. Gate: sites with valid π and `p_one_tailed < gate_alpha` from the per-subject
+#    projection `site_results.csv`; select both B4 cells of each passing site.
 # 2. Candidate windows: `smin >= SAMPLE_T0` (=40, corresponding to t=0) AND
 #    `smax <= phon_smax` (acoustic-peak window end from b4_per_cell).
 # 3. Significant windows: bootstrap CI of `mean_diff_raw` excludes zero.
@@ -35,15 +44,17 @@
 # Reference fixed: /n/−/d/ (`mean_diff_raw`); never `mean_diff_aligned`.
 #
 # See: docs/superpowers/plans/2026-06-20-causal46-early-perceptual-windows.md
+#      docs/superpowers/plans/2026-07-16-early-perceptual-projection-spec.md
 
 # %% tags=["parameters"]
 b4_bootstrap_path = "outputs/causal46_joined/t_tests/b4_bootstrap.parquet"
 b4_per_cell_path = "outputs/causal46_joined/t_tests/b4_per_cell.parquet"
-filtered_manifest_path = "outputs/causal46_joined/manual_annotations/filtered_manifest.csv"
+projection_results_dir = "outputs/causal46_joined/early_perceptual_projection"
 early_annotations_path = "outputs/causal46_joined/manual_annotations/early_acoustic_window.csv"
 a_windows_path = "outputs/causal46_joined/acoustic_endpoint_windows/a_windows.parquet"
 outdir = "outputs/causal46_joined/early_perceptual_windows"
 
+gate_alpha = 0.05
 ci_low = 2.5
 ci_high = 97.5
 
@@ -108,40 +119,64 @@ for col in ("phon_smin", "phon_smax"):
     )
 
 # %% [markdown]
-# ## Filter cells to those with a `behav @ac` annotation
+# ## Projection gate: select cells whose site passes the projection
 #
-# Only cells with a non-null `behav @ac` value in the filtered manifest qualify.
-# The letter encodes the behavioral category with higher HGA at the acoustic window.
+# The site-selection gate is the automated `early_perceptual_projection` statistic
+# (π), not the manual `behav @ac` annotation. A *site*
+# `(subject, electrode_idx, phoneme_pair)` passes when its pooled π is valid
+# (`pi_pooled` not null) and its uncorrected one-tailed p is below `gate_alpha`.
+# The gate is one-tailed (π > 0, report tracks the acoustic direction) and
+# **uncorrected** — no BH-FDR (Test 1 in the aggregate applies FDR separately).
+# Both B4 cells (completions) of each passing site enter the window search.
 
 # %%
+# early_annotation_df carries the manual site_type_relabel labels, still used
+# below for the type1 (acoustic-only) comparison group — not for the gate.
 early_annotation_df = pl.read_csv(early_annotations_path)
 print(f"early_annotation_df: {early_annotation_df.height} rows, cols: {early_annotation_df.columns}")
 
 # %%
-manifest = pl.read_csv(filtered_manifest_path)
-print(f"filtered_manifest: {manifest.height} rows")
-
-behav_ac = manifest.filter(pl.col("behav @ac").is_not_null())
-behav_keys: set[tuple] = {
-    (r["subject"], int(r["electrode_idx"]), r["phoneme_pair"], r["word_end"])
-    for r in behav_ac.iter_rows(named=True)
-}
-# Carry the tuning letter per cell for the output schema.
-behav_ac_tuning: dict[tuple, str] = {
-    (r["subject"], int(r["electrode_idx"]), r["phoneme_pair"], r["word_end"]): r["behav @ac"]
-    for r in behav_ac.iter_rows(named=True)
-}
-print(f"cells with behav @ac: {len(behav_keys)}")
-
-n_before = b4_per_cell.height
-b4_per_cell = b4_per_cell.filter(
-    pl.struct(["subject", "electrode_idx", "phoneme_pair", "word_end"]).map_elements(
-        lambda r: (r["subject"], int(r["electrode_idx"]), r["phoneme_pair"], r["word_end"])
-                  in behav_keys,
-        return_dtype=pl.Boolean,
-    )
+# Load per-subject projection site_results.csv and concatenate. Reading the
+# per-subject files (not the aggregate all_sites.csv) keeps the gate independent
+# of the aggregate's FDR pass. Skip empty (0-site) subject CSVs.
+proj_paths = sorted(Path(projection_results_dir).glob("*/site_results.csv"))
+assert proj_paths, (
+    f"No projection site_results.csv under {projection_results_dir}. "
+    "Run early_perceptual_projection first."
 )
-print(f"b4_per_cell after manifest filter: {b4_per_cell.height} / {n_before} cells")
+_proj_frames = []
+for p in proj_paths:
+    try:
+        df = pl.read_csv(p)
+    except pl.exceptions.NoDataError:
+        # 0-site subjects write an empty CSV (no header) — skip.
+        continue
+    if df.height > 0:
+        _proj_frames.append(df)
+projection = pl.concat(_proj_frames, how="diagonal_relaxed") if _proj_frames else pl.DataFrame()
+print(f"projection site_results: {projection.height} rows from {len(proj_paths)} subjects")
+
+# Passing sites: valid pooled π AND uncorrected one-tailed p < gate_alpha.
+passing = projection.filter(
+    pl.col("pi_pooled").is_not_null() & (pl.col("p_one_tailed") < gate_alpha)
+)
+SITE_KEYS = ["subject", "electrode_idx", "phoneme_pair"]
+passing_sites = passing.select(SITE_KEYS).with_columns(
+    pl.col("electrode_idx").cast(pl.Int64)
+).unique()
+# Carry the gate values (site-level) for the output schema.
+site_gate_stats: dict[tuple, tuple[float, float]] = {
+    (r["subject"], int(r["electrode_idx"]), r["phoneme_pair"]): (
+        float(r["pi_pooled"]), float(r["p_one_tailed"])
+    )
+    for r in passing.iter_rows(named=True)
+}
+print(f"passing sites (one-tailed p < {gate_alpha}): {passing_sites.height}")
+
+# Select both completions of each passing site: semi-join b4_per_cell on site keys.
+n_before = b4_per_cell.height
+b4_per_cell = b4_per_cell.join(passing_sites, on=SITE_KEYS, how="semi")
+print(f"b4_per_cell after projection gate: {b4_per_cell.height} / {n_before} cells")
 
 # %% [markdown]
 # ## Global grid validation
@@ -194,7 +229,8 @@ EXPECTED_SUMMARY_COLS = [
     "subject", "electrode_idx", "phoneme_pair", "word_end", "window_id",
     "smin", "smax", "n_component_windows", "component_smins", "sign",
     "beta_ambig_median", "beta_ambig_ci_low", "beta_ambig_ci_high", "ci_excludes_zero",
-    "phon_smin", "phon_smax", "n_per_class", "acoustic_peak_auc", "R", "behav_ac_tuning",
+    "phon_smin", "phon_smax", "n_per_class", "acoustic_peak_auc", "R",
+    "pi_pooled", "p_one_tailed",
 ]
 
 summary_rows: list[dict] = []
@@ -256,7 +292,7 @@ for cell_row in b4_per_cell.iter_rows(named=True):
         continue
 
     union_list = _find_maximal_runs(sig_windows, w_medians)
-    cell_tuning = behav_ac_tuning.get((subj, eidx, pp, we), "")
+    site_pi, site_p = site_gate_stats.get((subj, eidx, pp), (np.nan, np.nan))
 
     for window_id, comp_windows in enumerate(union_list):
         component_smins = [smin for smin, _ in comp_windows]
@@ -302,7 +338,8 @@ for cell_row in b4_per_cell.iter_rows(named=True):
             "n_per_class": n_per_class,
             "acoustic_peak_auc": acoustic_peak_auc,
             "R": R,
-            "behav_ac_tuning": cell_tuning,
+            "pi_pooled": site_pi,
+            "p_one_tailed": site_p,
         })
 
 print(
@@ -338,6 +375,8 @@ else:
         "n_per_class": pl.Int64,
         "acoustic_peak_auc": pl.Float64,
         "R": pl.Int64,
+        "pi_pooled": pl.Float64,
+        "p_one_tailed": pl.Float64,
     })
 
 missing_cols = set(EXPECTED_SUMMARY_COLS) - set(ep_windows.columns)
@@ -349,17 +388,16 @@ print(f"ep_windows: {ep_windows.height} rows")
 if ep_windows.height > 0:
     print(f"  ci_excludes_zero: {ep_windows['ci_excludes_zero'].sum()}")
 
-    print(ep_windows.select(CELL_KEYS + ["window_id", "smin", "smax", "ci_excludes_zero", "behav_ac_tuning"]))
+    print(ep_windows.select(CELL_KEYS + ["window_id", "smin", "smax", "ci_excludes_zero", "pi_pooled", "p_one_tailed"]))
 
 # %% [markdown]
 # ## Type1 (acoustic-only) windows — from acoustic_endpoint_windows
 #
 # Load pre-computed unified endpoint windows (step6 − step1, unambiguous trials)
 # produced by `acoustic_endpoint_windows.py` and filter to the type1 subset.
+# (SITE_KEYS defined above in the projection-gate section.)
 
 # %%
-SITE_KEYS = ["subject", "electrode_idx", "phoneme_pair"]
-
 a_windows = pl.read_parquet(a_windows_path)
 type1_sites = (
     early_annotation_df
@@ -371,14 +409,10 @@ type1_sites = (
 type1_windows = a_windows.join(type1_sites, on=SITE_KEYS, how="semi")
 print(f"a_windows: {a_windows.height} rows; type1 subset: {type1_windows.height} rows")
 
+# The projection gate now *defines* the Perceptual set: every ep_windows row is a
+# projection-passing cell, so no site_type_relabel re-filter. One row per cell.
 # %%
-ep_windows_perceptual = (
-    ep_windows
-    .join(early_annotation_df.select(["subject", "electrode_idx", "phoneme_pair", "site_type_relabel"]),
-          on=["subject", "electrode_idx", "phoneme_pair"], how="left")
-    .filter((pl.col("site_type_relabel") == "type2_early_perceptual") | (pl.col("site_type_relabel") == "type3_asymmetric"))
-    .group_by(CELL_KEYS).first()
-)
+ep_windows_perceptual = ep_windows.group_by(CELL_KEYS).first()
 
 # %%
 ep_windows_acoustic = type1_windows
