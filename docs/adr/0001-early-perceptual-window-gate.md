@@ -10,6 +10,11 @@ projection statistic π is valid and its uncorrected one-tailed permutation
 p-value is below 0.05, and both of that site's completions then enter the window
 search. The bootstrap-CI window-finding itself is unchanged — only the gate moved.
 
+This is one consumer of the method-level decision to identify early perceptual
+sites by projection rather than the early-window t-test; see
+[ADR 0002](0002-perceptual-site-identification-by-projection.md) for that
+decision and its evidence.
+
 ## Why
 
 - **Non-circularity.** The projection's sign falls out of the fixed continuum
