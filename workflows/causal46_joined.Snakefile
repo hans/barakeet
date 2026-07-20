@@ -1589,19 +1589,6 @@ rule causal46_joined_all:
     """Default target: AS-filter + all joined aggregates."""
     input:
         "outputs/causal46_joined/electrodes_as_filtered/subjects_with_as.txt",
-        # Behavior with control — 4 flavors
-        # "outputs/causal46_joined/behavior_decoding_single_electrode_summarize/peak_summary_all.parquet",
-        # "outputs/causal46_joined/behavior_decoding_single_electrode_summarize/peak_summary_tstat_maxstat_all.parquet",
-        # "outputs/causal46_joined/behavior_decoding_single_electrode_summarize/peak_summary_foldmean_tfce_all.parquet",
-        # "outputs/causal46_joined/behavior_decoding_single_electrode_summarize/peak_summary_tstat_tfce_all.parquet",
-        # # Behavior HGA-only — 4 flavors
-        # "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only_summarize/peak_summary_all.parquet",
-        # "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only_summarize/peak_summary_tstat_maxstat_all.parquet",
-        # "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only_summarize/peak_summary_foldmean_tfce_all.parquet",
-        # "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only_summarize/peak_summary_tstat_tfce_all.parquet",
-        # # Ganong (single v1 flavor each)
-        # "outputs/causal46_joined/ganong_decoding_summarize/peak_summary_all.parquet",
-        # "outputs/causal46_joined/ganong_decoding_hga_only_summarize/peak_summary_all.parquet",
         # Trial balance index + B4 bootstrap t-tests
         "outputs/causal46_joined/trial_balance_index.csv",
         "outputs/causal46_joined/t_tests/population_summary.csv",
@@ -1625,15 +1612,13 @@ rule causal46_joined_all:
         "outputs/causal46_joined/acoustic_transfer/scores_all.parquet",
         "outputs/causal46_joined/acoustic_transfer/transfer_summary.pdf",
         "outputs/causal46_joined/acoustic_transfer/transfer_timing.pdf",
-        # Strong-generator test: β_ambig vs β_unamb per behavioral window
-        "outputs/causal46_joined/strong_generator/strong_generator.parquet",
         # sankey early late
         "outputs/causal46_joined/sankey_early_late/notebook.ipynb",
         # contrast plots
         "outputs/causal46_joined/contrast_plot/contrast_plot.ipynb",
-        "outputs/causal46_joined/contrast_plot/bm_contrast_plot.ipynb",
-        "outputs/causal46_joined/contrast_plot/dn_contrast_plot.ipynb",
-        "outputs/causal46_joined/contrast_plot/pb_contrast_plot.ipynb",
+        # "outputs/causal46_joined/contrast_plot/bm_contrast_plot.ipynb",
+        # "outputs/causal46_joined/contrast_plot/dn_contrast_plot.ipynb",
+        # "outputs/causal46_joined/contrast_plot/pb_contrast_plot.ipynb",
         # type1 coding on ambiguous trials
         "outputs/causal46_joined/type1_ambiguous_hga_coding/notebook.ipynb",
 
