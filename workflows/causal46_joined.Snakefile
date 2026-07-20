@@ -2270,7 +2270,7 @@ rule early_perceptual_projection_aggregate:
             "outputs/causal46_joined/early_perceptual_projection/{subject}/null_pi.npz",
             subject=config["data"]["subjects"],
         ),
-        site_type_relabel = "outputs/causal46_joined/early_window_site_types/site_type_relabel.csv",
+        site_type_relabel = "outputs/causal46_joined/manual_annotations/early_acoustic_window.csv",
         notebook = "notebooks/causal46_joined/early_perceptual_projection_aggregate.py",
     output:
         notebook      = "outputs/causal46_joined/early_perceptual_projection/aggregate_notebook.ipynb",

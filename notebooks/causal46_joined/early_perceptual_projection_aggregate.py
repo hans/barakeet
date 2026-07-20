@@ -45,7 +45,7 @@ os.environ.setdefault("NUMEXPR_MAX_THREADS", "1")
 
 # %% tags=["parameters"]
 results_dir = "outputs/causal46_joined/early_perceptual_projection"
-site_type_relabel_path = "outputs/causal46_joined/early_window_site_types/site_type_relabel.csv"
+site_type_relabel_path = "outputs/causal46_joined/manual_annotations/early_acoustic_window.csv"
 outdir = "outputs/causal46_joined/early_perceptual_projection"
 fdr_alpha = 0.05
 cpo_p_threshold = 0.05
@@ -230,6 +230,11 @@ else:
     relabel = pd.read_csv(relabel_path)
     print("\nTest 3 — cross-tab vs site_type_relabel")
     print(f"  Relabel rows: {len(relabel)}")
+
+    # Manual authority is the `site_type_relabel` column (type1–5); the computed
+    # `site_type` column carries the retired grab_bag/complex vocabulary. Rename
+    # to `site_type` so the downstream cross-tab reads the manual labels.
+    relabel = relabel.rename(columns={"site_type_relabel": "site_type"})
 
     # Merge on site keys
     merged = pd.merge(
