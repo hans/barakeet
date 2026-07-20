@@ -1112,6 +1112,7 @@ rule joined_t_tests:
                 ac_p_value_threshold=C46["ac_p_value_threshold"],
                 a_per_window_path=str(input.a_per_window),
                 a_per_window_full_path=str(input.a_per_window_full),
+                n_bootstrap=C46.get("n_bootstrap", 1000),
             ),
         )
 
