@@ -211,6 +211,7 @@ def add_textgrid(
     rotation=0,
     include_phonemes=True,
     fontsize=10,
+    include_first_phoneme_offset=True,
     include_offset=True,
     vline_extent=1.25,
     tmax=None,
@@ -249,7 +250,7 @@ def add_textgrid(
             )
 
         # add offset of first phoneme as vertical line
-        if i == 0:
+        if include_first_phoneme_offset and i == 0:
             ax.axvline(
                 interval.maxTime,
                 ymax=vline_extent,
@@ -2500,7 +2501,6 @@ def plot_behav_barplot(
         ax.xaxis.set_major_formatter(mtick.PercentFormatter(1.0))
         ax.set_xlabel("% trials")
     ax.set_ylabel("step")
-    ax.tick_params(axis="both", labelsize=12)
 
     legend_handles = [
         Line2D(
