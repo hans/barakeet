@@ -34,11 +34,16 @@
 # Reference fixed: /n/−/d/ (`mean_diff_raw`); never `mean_diff_aligned`.
 #
 # See: docs/superpowers/plans/2026-06-19-causal46-behavioral-discriminative-windows.md
+#
+# Entry gate: cells enter iff `tfce_gate_pass` in
+# `late_perceptual_significance/site_results.parquet` (#10/#11), which replaces
+# the manual `behav @late` manifest label. See
+# docs/superpowers/plans/2026-07-20-causal46-late-perceptual-significance.md.
 
 # %% tags=["parameters"]
 b4_bootstrap_path = "outputs/causal46_joined/t_tests/b4_bootstrap.parquet"
 b4_per_cell_path = "outputs/causal46_joined/t_tests/b4_per_cell.parquet"
-filtered_manifest_path = "outputs/causal46_joined/manual_annotations/filtered_manifest.csv"
+late_significance_path = "outputs/causal46_joined/late_perceptual_significance/site_results.parquet"
 outdir = "outputs/causal46_joined/behavioral_discriminative_windows"
 
 ci_low = 2.5
@@ -88,24 +93,28 @@ for col in ("phon_smin", "phon_smax"):
     )
 
 # %% [markdown]
-# ## Filter cells to those with a post-acoustic behavioral label
+# ## Filter cells to those passing the TFCE late-perceptual-significance gate
 #
-# Only cells annotated with `behav @late` in the
-# filtered_manifest are processed. `behav @ac` is excluded — that timing bin
-# overlaps the acoustic window and is not a "behavioral discriminative window."
+# Only cells with `tfce_gate_pass` in `late_perceptual_significance/site_results.parquet`
+# (uncorrected per-cell TFCE permutation p < 0.05, #10) are processed. This
+# replaces the manual `behav @late` manifest label as the entry gate — the
+# manual label is retained only as a calibration column inside
+# `site_results.parquet` (D6), not consulted here.
 
 # %%
-manifest = pl.read_csv(filtered_manifest_path)
-print(f"filtered_manifest: {manifest.height} rows")
+late_significance = pl.read_parquet(late_significance_path)
+print(f"late_significance: {late_significance.height} rows, cols: {late_significance.columns}")
 
-behav_post_ac = manifest.filter(
-    pl.col("behav @late").is_not_null()
-)
+required_ls_cols = {"subject", "electrode_idx", "phoneme_pair", "word_end", "tfce_gate_pass"}
+missing_ls_cols = required_ls_cols - set(late_significance.columns)
+assert not missing_ls_cols, f"{late_significance_path} missing columns: {missing_ls_cols}"
+
+gate_pass = late_significance.filter(pl.col("tfce_gate_pass"))
 behav_keys: set[tuple] = {
     (r["subject"], int(r["electrode_idx"]), r["phoneme_pair"], r["word_end"])
-    for r in behav_post_ac.iter_rows(named=True)
+    for r in gate_pass.iter_rows(named=True)
 }
-print(f"cells with behav @late: {len(behav_keys)}")
+print(f"cells with tfce_gate_pass: {len(behav_keys)}")
 
 n_before = b4_per_cell.height
 b4_per_cell = b4_per_cell.filter(
@@ -115,7 +124,7 @@ b4_per_cell = b4_per_cell.filter(
         return_dtype=pl.Boolean,
     )
 )
-print(f"b4_per_cell after manifest filter: {b4_per_cell.height} / {n_before} cells")
+print(f"b4_per_cell after TFCE gate filter: {b4_per_cell.height} / {n_before} cells")
 
 # %% [markdown]
 # ## Global grid validation

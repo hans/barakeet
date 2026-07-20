@@ -1270,9 +1270,7 @@ rule joined_late_perceptual_significance:
     split-half descriptive column, BH-FDR floor, manual_behav_late for
     calibration) and a population_summary.pdf count-vs-null headline.
 
-    Not yet wired as behavioral_discriminative_windows' entry gate -- that
-    swap is plan Step 4 (issue #11); this rule's output is a leaf for now,
-    listed directly in causal46_joined_all so it still runs end-to-end.
+    Wired as behavioral_discriminative_windows' entry gate (#11).
     """
     input:
         b4_bootstrap = "outputs/causal46_joined/t_tests/b4_bootstrap.parquet",
@@ -1312,12 +1310,16 @@ rule joined_behavioral_discriminative_windows:
     window(s) beyond the acoustic peak with reliable within-completion HGA
     contrast (β_ambig). No epoch reload — pure post-processing over
     b4_bootstrap.parquet.
+
+    Entry gate is the #10 TFCE late-perceptual-significance test
+    (`tfce_gate_pass` in `late_perceptual_significance/site_results.parquet`),
+    not the manual `behav @late` manifest label (#11).
     """
     input:
         b4_bootstrap = "outputs/causal46_joined/t_tests/b4_bootstrap.parquet",
         b4_per_cell  = "outputs/causal46_joined/t_tests/b4_per_cell.parquet",
         notebook     = "notebooks/causal46_joined/behavioral_discriminative_windows.py",
-        manual_annotations = "outputs/causal46_joined/manual_annotations/filtered_manifest.csv",
+        late_significance = "outputs/causal46_joined/late_perceptual_significance/site_results.parquet",
 
     output:
         notebook        = "outputs/causal46_joined/behavioral_discriminative_windows/notebook.ipynb",
@@ -1336,7 +1338,7 @@ rule joined_behavioral_discriminative_windows:
                 ci_low=2.5,
                 ci_high=97.5,
                 decoder_window_size=config["analysis"]["decoding"]["window_size"],
-                filtered_manifest_path=str(input.manual_annotations),
+                late_significance_path=str(input.late_significance),
                 manual_override_path=None,
             ),
         )
@@ -1651,10 +1653,9 @@ rule causal46_joined_all:
         "outputs/causal46_joined/acoustic_endpoint_windows/a_windows.parquet",
         # Discover discriminative windows from bootstrap outputs (pure post-processing over b4_bootstrap)
         "outputs/causal46_joined/acoustic_discriminative_windows/ad_windows.parquet",
+        # Late within-completion perceptual significance (TFCE gate, #10) is an
+        # input of behavioral_discriminative_windows (#11) and builds transitively.
         "outputs/causal46_joined/behavioral_discriminative_windows/b_windows.parquet",
-        # Late within-completion perceptual significance (TFCE gate, #10) --
-        # leaf until #11 wires it as behavioral_discriminative_windows' gate.
-        "outputs/causal46_joined/late_perceptual_significance/site_results.parquet",
 
         # Early perceptual windows: [t=0, phon_smax] behav @ac cells
         "outputs/causal46_joined/early_perceptual_windows/ep_windows.parquet",

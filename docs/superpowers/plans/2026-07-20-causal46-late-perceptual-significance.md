@@ -278,28 +278,34 @@ trial halves), reported, never gating.
       survivor count) has **not yet been produced on real data** — that happens
       the first time this rule runs on prod.
 
-### Step 4 — Swap the gate in `behavioral_discriminative_windows.py` — NOT STARTED (this is #11)
-- [ ] Replace the manifest filter (lines 91–118) with a join to
-      `site_results.parquet` filtered on `tfce_gate_pass`. Add a param
-      `late_significance_path` (must be declared in the Snakefile `run_notebook`
-      parameters — notebook params must match Snakefile).
-- [ ] Leave `_find_maximal_runs`, `_fallback_run`, decoder placement, and the
-      `b_windows` / `b_windows_bootstrap` schema untouched.
-- [ ] Keep the `manual_override_path` hook as-is.
+### Step 4 — Swap the gate in `behavioral_discriminative_windows.py` — DONE (2026-07-20, #11)
+- [x] Replace the manifest filter (lines 91–118) with a join to
+      `site_results.parquet` filtered on `tfce_gate_pass`. Added the
+      `late_significance_path` param (replaces `filtered_manifest_path`, which
+      was otherwise unused in this notebook) and declared it in the Snakefile
+      `run_notebook` parameters.
+- [x] Leave `_find_maximal_runs`, `_fallback_run`, decoder placement, and the
+      `b_windows` / `b_windows_bootstrap` schema untouched. Confirmed by diff —
+      only the entry-gate cell and the params cell changed.
+- [x] Keep the `manual_override_path` hook as-is. Untouched.
+      Not yet re-verified end-to-end on real data (same `b4_bootstrap.parquet`
+      availability gap as #10); `py_compile` clean, `snakemake --list` registers
+      the new `late_significance` input on `joined_behavioral_discriminative_windows`.
 
-### Step 5 — Snakefile wiring — PARTIALLY DONE (2026-07-20)
+### Step 5 — Snakefile wiring — DONE (2026-07-20)
 - [x] Add the `late_perceptual_significance` rule. Snakefile rule inputs reference
       `outputs/...` (not `outputs_prod/...`).
-- [ ] Make its parquet an input of `behavioral_discriminative_windows`. **Deferred
-      to Step 4 / #11 by design** — the rule currently runs as a leaf, listed
-      directly in `causal46_joined_all` so it still executes end-to-end, but
-      nothing downstream consumes `tfce_gate_pass` yet.
-- [~] `snakemake -n` / `--list` confirms the rule parses and registers cleanly
-      (`joined_late_perceptual_significance` appears in `snakemake --list`). A full
-      dry-run against `causal46_joined_all` in this container fails upstream at
-      `preprocess_epochs` (raw `epochs/{subject}_epochs.fif` not present locally)
-      — a pre-existing container limitation unrelated to this rule, not yet
-      re-verified as a full smoke run on prod.
+- [x] Make its parquet an input of `behavioral_discriminative_windows` (#11).
+      Also dropped the now-redundant explicit `site_results.parquet` leaf target
+      in `causal46_joined_all` — it builds transitively via `b_windows.parquet`.
+- [~] `snakemake -n` / `--list` confirms both rules parse, register, and chain
+      cleanly (`late_significance` appears as a declared input of
+      `joined_behavioral_discriminative_windows` in `--list`; DAG building
+      reaches past both rules before failing). A full dry-run against
+      `causal46_joined_all` in this container still fails upstream at
+      `preprocess_epochs` (raw `epochs/{subject}_epochs.fif` not present
+      locally) — a pre-existing container limitation unrelated to this change,
+      not yet re-verified as a full smoke run on prod.
 
 ### Step 6 — Report — NOT STARTED
 - [ ] Population headline (count-vs-null p, BH-FDR survivors), run-length histogram,
