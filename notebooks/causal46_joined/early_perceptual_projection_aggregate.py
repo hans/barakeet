@@ -232,8 +232,11 @@ else:
     print(f"  Relabel rows: {len(relabel)}")
 
     # Manual authority is the `site_type_relabel` column (type1–5); the computed
-    # `site_type` column carries the retired grab_bag/complex vocabulary. Rename
-    # to `site_type` so the downstream cross-tab reads the manual labels.
+    # `site_type` column carries the retired grab_bag/complex vocabulary. Drop it
+    # before renaming — otherwise the rename produces two columns both named
+    # `site_type`, and `merged["site_type"]` returns a 2-column DataFrame instead
+    # of a Series (crosstab then fails with a buffer-dimension error).
+    relabel = relabel.drop(columns=["site_type"], errors="ignore")
     relabel = relabel.rename(columns={"site_type_relabel": "site_type"})
 
     # Merge on site keys
