@@ -2182,6 +2182,12 @@ rule early_window_site_types_figures:
         population_bar   = "outputs/causal46_joined/early_window_site_types/population_site_type_counts.pdf",
         A_vs_B_scatter   = "outputs/causal46_joined/early_window_site_types/A_vs_B_scatter.pdf",
         star_plots_all   = "outputs/causal46_joined/early_window_site_types/star_plots_all.pdf",
+        # Written by the notebook (early_window_site_types_aggregate_figures.py);
+        # consumed by early_perceptual_projection as its A_significant site pool.
+        # Declared here so that dependency is an explicit DAG edge, not an
+        # undeclared side-effect. (Purely computed — the site_type_override
+        # column is emitted blank and read by nothing.)
+        site_type_relabel= "outputs/causal46_joined/early_window_site_types/site_type_relabel.csv",
 
     run:
         outdir = str(Path(output.notebook).parent)
