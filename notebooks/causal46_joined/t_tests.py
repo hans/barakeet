@@ -100,6 +100,7 @@ stride = 10
 ac_p_value_threshold = 0.001
 a_per_window_path = "outputs_prod/causal46_joined/acoustic_bootstrap/a_per_window.parquet"
 a_per_window_full_path = "outputs_prod/causal46_joined/acoustic_bootstrap/a_per_window_full.parquet"
+n_bootstrap = 1000
 
 # %%
 REPO = Path(".").resolve()
@@ -121,7 +122,7 @@ AC_SEARCH_SMIN = int(_cfg["analysis"]["decoding"].get("acoustic_peak_search_smin
 AC_SEARCH_SMAX = int(_cfg["analysis"]["decoding"].get("acoustic_peak_search_smax", 50))
 
 K = min_class_k
-R = 1000              # bootstrap replicates per cell
+R = n_bootstrap        # bootstrap replicates per cell
 CI_LOW, CI_HIGH = 2.5, 97.5
 
 print(f"REPO:      {REPO}")
