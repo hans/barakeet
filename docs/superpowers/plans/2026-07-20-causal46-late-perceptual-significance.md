@@ -257,19 +257,28 @@ trial halves), reported, never gating.
       `notebooks/causal46_joined/_windows.py`; unit tests in
       `tests/test_causal46_windows.py` (11 tests, `uv run pytest` green).
 
-### Step 3 — `late_perceptual_significance.py`
-- [ ] Load `b4_bootstrap` + `b4_per_cell`; validate the grid (contiguous,
+### Step 3 — `late_perceptual_significance.py` — DONE (2026-07-20)
+- [x] Load `b4_bootstrap` + `b4_per_cell`; validate the grid (contiguous,
       stride==window_size) reusing the existing assertions.
-- [ ] Per cell over the **full 187**: build candidate post-acoustic windows (D4);
+      `validate_contiguous_grid` / `assert_coherent_null_replicates` (from #9's
+      `_windows.py`), reused as planned.
+- [x] Per cell over the **full 187**: build candidate post-acoustic windows (D4);
       form the observed curve (median over replicates of `mean_diff_raw` per window)
       and the R null curves (recovered signed `null_raw`, or `|·|` for two-tailed);
       compute `tfce_max_abs`, `tfce_emp_p`, integral stat/p, split-half column.
-- [ ] Drop tied cells from the gate; keep them in the parquet with `is_tied=True`.
-- [ ] BH-FDR over the 187 `tfce_emp_p`; count-vs-null vs Binomial(187, 0.05).
-- [ ] Join `manual_behav_late` for the calibration table (D6) — read-only.
-- [ ] Write `site_results.parquet` + `population_summary.pdf`.
+- [x] Drop tied cells from the gate; keep them in the parquet with `is_tied=True`.
+- [x] BH-FDR over the family `tfce_emp_p`; count-vs-null vs Binomial(n_family, 0.05).
+- [x] Join `manual_behav_late` for the calibration table (D6) — read-only.
+- [x] Write `site_results.parquet` + `population_summary.pdf`.
+      Committed `493c79e`. Verified end-to-end via `ploomber_engine` against
+      synthetic fixtures (`tests/test_late_perceptual_significance.py`,
+      `tests/test_causal46_windows.py` — 24/24 pass); the real
+      `b4_bootstrap.parquet` is not synced to this container and is too large to
+      fetch here, so the numeric population headline (count-vs-null, BH-FDR
+      survivor count) has **not yet been produced on real data** — that happens
+      the first time this rule runs on prod.
 
-### Step 4 — Swap the gate in `behavioral_discriminative_windows.py`
+### Step 4 — Swap the gate in `behavioral_discriminative_windows.py` — NOT STARTED (this is #11)
 - [ ] Replace the manifest filter (lines 91–118) with a join to
       `site_results.parquet` filtered on `tfce_gate_pass`. Add a param
       `late_significance_path` (must be declared in the Snakefile `run_notebook`
@@ -278,13 +287,21 @@ trial halves), reported, never gating.
       `b_windows` / `b_windows_bootstrap` schema untouched.
 - [ ] Keep the `manual_override_path` hook as-is.
 
-### Step 5 — Snakefile wiring
-- [ ] Add the `late_perceptual_significance` rule; make its parquet an input of
-      `behavioral_discriminative_windows`. Snakefile rule inputs reference
+### Step 5 — Snakefile wiring — PARTIALLY DONE (2026-07-20)
+- [x] Add the `late_perceptual_significance` rule. Snakefile rule inputs reference
       `outputs/...` (not `outputs_prod/...`).
-- [ ] `snakemake -n` dry-run clean; smoke run passes at the expected check count.
+- [ ] Make its parquet an input of `behavioral_discriminative_windows`. **Deferred
+      to Step 4 / #11 by design** — the rule currently runs as a leaf, listed
+      directly in `causal46_joined_all` so it still executes end-to-end, but
+      nothing downstream consumes `tfce_gate_pass` yet.
+- [~] `snakemake -n` / `--list` confirms the rule parses and registers cleanly
+      (`joined_late_perceptual_significance` appears in `snakemake --list`). A full
+      dry-run against `causal46_joined_all` in this container fails upstream at
+      `preprocess_epochs` (raw `epochs/{subject}_epochs.fif` not present locally)
+      — a pre-existing container limitation unrelated to this rule, not yet
+      re-verified as a full smoke run on prod.
 
-### Step 6 — Report
+### Step 6 — Report — NOT STARTED
 - [ ] Population headline (count-vs-null p, BH-FDR survivors), run-length histogram,
       param-sensitivity panel, integral-vs-TFCE agreement, 2×2 calibration table +
       named disagreement cells.
