@@ -203,3 +203,133 @@ def assert_coherent_null_replicates(
         f"{f' for {context}' if context else ''}, got {n_rows}. "
         "Check that every candidate window has a null value for every replicate."
     )
+
+
+def validate_contiguous_grid(windows: list[tuple[int, int]]) -> int:
+    """Assert `windows` form a contiguous, uniform-width grid sorted by smin.
+
+    Shared by the window-discovery notebooks (`behavioral_discriminative_windows.py`,
+    `late_perceptual_significance.py`) so "valid grid" (stride == window_size,
+    no gaps) is defined once instead of re-derived per notebook.
+
+    Args:
+        windows: deduplicated ``(smin, smax)`` pairs, sorted by smin.
+
+    Returns:
+        The common window width (``smax - smin``).
+
+    Raises:
+        AssertionError: on an empty, non-uniform-width, or non-contiguous grid.
+    """
+    assert windows, "No windows to validate."
+    widths = {smax - smin for smin, smax in windows}
+    assert len(widths) == 1, (
+        f"Non-uniform grid window widths detected: {widths}. "
+        "Grid must have stride == window_size."
+    )
+    for i in range(len(windows) - 1):
+        assert windows[i][1] == windows[i + 1][0], (
+            f"Grid gap between {windows[i]} and {windows[i + 1]}. "
+            "Grid must be contiguous (smax_i == smin_{i+1})."
+        )
+    return next(iter(widths))
+
+
+def late_cell_significance(
+    rep_curves: np.ndarray,
+    null_curves: np.ndarray,
+    *,
+    E: float = 0.5,
+    H: float = 2.0,
+) -> dict:
+    """Per-cell late-perceptual significance bundle (plan Step 3).
+
+    Composes the TFCE gate (`tfce_enhance` + `max_tfce_null`) with the
+    knob-free integral robustness statistic (D3) and a descriptive
+    split-half reliability column (D7), sharing one adaptive ``dt`` (TFCE
+    threshold step) across the observed curve and the null so the two are
+    enhanced on the same threshold grid.
+
+    Args:
+        rep_curves: shape ``(R, n_windows)``, one row per bootstrap
+            replicate, the replicate's raw ``mean_diff_raw`` value per
+            candidate window (in window order, ordered by smin). The
+            observed curve is ``median(rep_curves, axis=0)`` (plan Step 3:
+            "median over replicates ... per window").
+        null_curves: shape ``(R, n_windows)``, row r the coherent
+            within-step label-permutation null curve for replicate r
+            (plan D2). NaN-free — tied cells (``preferred is None``) must
+            be dropped by the caller before this point.
+        E: TFCE extent exponent (pre-registered default 0.5, D3).
+        H: TFCE height exponent (pre-registered default 2.0, D3).
+
+    Returns:
+        dict with keys:
+            tfce_peak: signed TFCE-enhanced value at the observed curve's
+                peak |enhancement| (the window driving the gate).
+            tfce_max_abs: ``abs(tfce_peak)`` — the gate statistic.
+            tfce_emp_p: two-tailed max-TFCE permutation p-value.
+            integral_stat: knob-free robustness statistic — mean of the
+                observed curve over all candidate windows (D3's rejected-
+                as-gate, reported-as-robustness-check integrated-window
+                statistic).
+            integral_emp_p: two-tailed permutation p for `integral_stat`,
+                against the per-replicate null curve means.
+            splithalf_sign_agree: descriptive-only reliability column
+                (D7), not used for gating. A *replicate*-split proxy for
+                the plan's trial-split (this module only sees persisted
+                per-replicate curves, not raw trial draws — no epoch
+                reload here): replicates are split into first/second
+                halves, each half's median curve is evaluated at the
+                observed peak window, and the two signs are compared.
+                ``None`` when ``R < 2`` (no split is possible) or when
+                either half's value at the peak is exactly zero (no sign
+                to compare).
+    """
+    rep_curves = np.asarray(rep_curves, dtype=np.float64)
+    null_curves = np.asarray(null_curves, dtype=np.float64)
+    R, n_windows = rep_curves.shape
+    assert null_curves.shape == (R, n_windows), (
+        f"rep_curves and null_curves shape mismatch: {rep_curves.shape} vs "
+        f"{null_curves.shape}"
+    )
+    assert not np.isnan(null_curves).any(), (
+        "null_curves contains NaN — tied cells must be dropped by the caller "
+        "before calling late_cell_significance."
+    )
+
+    obs_curve = np.median(rep_curves, axis=0)
+
+    dt_base = max(float(np.max(np.abs(obs_curve))), float(np.max(np.abs(null_curves))))
+    dt = dt_base / 100.0 if dt_base > 0 else 1.0  # inert: both curves all-zero
+
+    enhanced = tfce_enhance(obs_curve, dt, E=E, H=H)
+    peak_idx = int(np.argmax(np.abs(enhanced)))
+    tfce_peak = float(enhanced[peak_idx])
+    tfce_max_abs = float(abs(tfce_peak))
+
+    _, tfce_emp_p = max_tfce_null(null_curves, dt, tfce_max_abs, E=E, H=H)
+
+    integral_stat = float(np.mean(obs_curve))
+    null_integral = np.mean(null_curves, axis=1)
+    integral_emp_p = float(
+        (1 + np.sum(np.abs(null_integral) >= abs(integral_stat))) / (1 + R)
+    )
+
+    splithalf_sign_agree: bool | None = None
+    if R >= 2:
+        half = R // 2
+        first_val = float(np.median(rep_curves[:half], axis=0)[peak_idx])
+        second_val = float(np.median(rep_curves[half:], axis=0)[peak_idx])
+        s1, s2 = np.sign(first_val), np.sign(second_val)
+        if s1 != 0 and s2 != 0:
+            splithalf_sign_agree = bool(s1 == s2)
+
+    return {
+        "tfce_peak": tfce_peak,
+        "tfce_max_abs": tfce_max_abs,
+        "tfce_emp_p": tfce_emp_p,
+        "integral_stat": integral_stat,
+        "integral_emp_p": integral_emp_p,
+        "splithalf_sign_agree": splithalf_sign_agree,
+    }

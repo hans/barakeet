@@ -16,8 +16,10 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "notebooks" / "causal46_joined"))
 from _windows import (  # noqa: E402
     assert_coherent_null_replicates,
+    late_cell_significance,
     max_tfce_null,
     tfce_enhance,
+    validate_contiguous_grid,
 )
 
 from src.models.significance import _tfce_1d  # noqa: E402
@@ -158,3 +160,131 @@ def test_assert_coherent_null_replicates_passes_on_expected_shape():
 def test_assert_coherent_null_replicates_raises_on_short_rows():
     with pytest.raises(AssertionError, match="Expected 6000"):
         assert_coherent_null_replicates(n_rows=5999, R=1000, n_windows=6, context="test cell")
+
+
+# ---------------------------------------------------------------------------
+# late_cell_significance
+# ---------------------------------------------------------------------------
+
+
+def test_late_cell_significance_signal_cell_gets_small_p():
+    """A cell with a consistent bump across replicates, against noise-only
+    null curves, should clear the gate with a small two-tailed p on both
+    the TFCE and integral statistics."""
+    rng = np.random.default_rng(0)
+    R, n_windows = 200, 5
+    base = np.array([0.0, 0.0, 3.0, 0.0, 0.0])
+    rep_curves = base[None, :] + rng.normal(0, 0.3, (R, n_windows))
+    null_curves = rng.normal(0, 0.3, (R, n_windows))
+
+    out = late_cell_significance(rep_curves, null_curves)
+
+    assert out["tfce_peak"] > 0
+    assert out["tfce_max_abs"] == pytest.approx(abs(out["tfce_peak"]))
+    assert out["tfce_emp_p"] < 0.05
+    assert out["integral_stat"] > 0
+    assert out["integral_emp_p"] < 0.05
+
+
+def test_late_cell_significance_noise_cell_does_not_clear_gate():
+    """A cell with no consistent signal (replicates and null drawn from the
+    same noise distribution) should not spuriously clear the gate."""
+    rng = np.random.default_rng(1)
+    R, n_windows = 200, 5
+    rep_curves = rng.normal(0, 0.3, (R, n_windows))
+    null_curves = rng.normal(0, 0.3, (R, n_windows))
+
+    out = late_cell_significance(rep_curves, null_curves)
+
+    assert out["tfce_emp_p"] > 0.05
+    assert out["integral_emp_p"] > 0.05
+
+
+def test_late_cell_significance_splithalf_agree_true_for_consistent_sign():
+    R, n_windows = 10, 3
+    rep_curves = np.tile([0.0, 5.0, 0.0], (R, 1))
+    null_curves = np.random.default_rng(2).normal(0, 0.1, (R, n_windows))
+
+    out = late_cell_significance(rep_curves, null_curves)
+
+    assert out["splithalf_sign_agree"] is True
+
+
+def test_late_cell_significance_splithalf_agree_false_for_flipped_half():
+    """First half of replicates peaks positive, second half peaks negative
+    at the same window — the two halves disagree in sign even though the
+    pooled median (and hence the observed curve/peak window) stays positive."""
+    R, n_windows = 10, 3
+    rep_curves = np.zeros((R, n_windows))
+    rep_curves[:5] = [0.0, 5.0, 0.0]
+    rep_curves[5:] = [0.0, -1.0, 0.0]
+    null_curves = np.random.default_rng(2).normal(0, 0.1, (R, n_windows))
+
+    out = late_cell_significance(rep_curves, null_curves)
+
+    assert out["splithalf_sign_agree"] is False
+
+
+def test_late_cell_significance_splithalf_none_when_single_replicate():
+    rep_curves = np.array([[0.0, 5.0, 0.0]])
+    null_curves = np.array([[0.1, -0.1, 0.05]])
+
+    out = late_cell_significance(rep_curves, null_curves)
+
+    assert out["splithalf_sign_agree"] is None
+
+
+def test_late_cell_significance_all_zero_curves_no_crash():
+    R, n_windows = 5, 4
+    rep_curves = np.zeros((R, n_windows))
+    null_curves = np.zeros((R, n_windows))
+
+    out = late_cell_significance(rep_curves, null_curves)
+
+    assert out["tfce_peak"] == 0.0
+    assert out["tfce_max_abs"] == 0.0
+    assert out["integral_stat"] == 0.0
+    assert 0.0 < out["tfce_emp_p"] <= 1.0
+
+
+def test_late_cell_significance_raises_on_nan_null():
+    rep_curves = np.zeros((3, 2))
+    null_curves = np.array([[0.0, np.nan], [0.0, 0.0], [0.0, 0.0]])
+
+    with pytest.raises(AssertionError, match="NaN"):
+        late_cell_significance(rep_curves, null_curves)
+
+
+def test_late_cell_significance_raises_on_shape_mismatch():
+    rep_curves = np.zeros((3, 2))
+    null_curves = np.zeros((3, 3))
+
+    with pytest.raises(AssertionError, match="shape mismatch"):
+        late_cell_significance(rep_curves, null_curves)
+
+
+# ---------------------------------------------------------------------------
+# validate_contiguous_grid
+# ---------------------------------------------------------------------------
+
+
+def test_validate_contiguous_grid_passes_and_returns_width():
+    windows = [(0, 10), (10, 20), (20, 30)]
+    assert validate_contiguous_grid(windows) == 10
+
+
+def test_validate_contiguous_grid_raises_on_gap():
+    windows = [(0, 10), (20, 30)]
+    with pytest.raises(AssertionError, match="Grid gap"):
+        validate_contiguous_grid(windows)
+
+
+def test_validate_contiguous_grid_raises_on_non_uniform_width():
+    windows = [(0, 10), (10, 25)]
+    with pytest.raises(AssertionError, match="Non-uniform"):
+        validate_contiguous_grid(windows)
+
+
+def test_validate_contiguous_grid_raises_on_empty():
+    with pytest.raises(AssertionError, match="No windows"):
+        validate_contiguous_grid([])
