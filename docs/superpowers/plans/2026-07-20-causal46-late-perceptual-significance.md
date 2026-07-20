@@ -242,16 +242,20 @@ trial halves), reported, never gating.
       Downstream work (#9, #10) is unblocked; no `mean_diff_raw_null` column or
       prod re-run is needed.**
 
-### Step 2 — TFCE helpers in `_windows.py`
-- [ ] `tfce_enhance(curve, dt, E=0.5, H=2)` — threshold-free enhancement over the 1D
+### Step 2 — TFCE helpers in `_windows.py` — DONE (2026-07-20)
+- [x] `tfce_enhance(curve, dt, E=0.5, H=2)` — threshold-free enhancement over the 1D
       window axis on `|curve|`, preserving sign for reporting. Unit-test against a
       hand-worked small example (monotone bump → known enhancement ordering).
-- [ ] `max_tfce_null(null_curves, ...)` — per-replicate max |TFCE| over the R coherent
+      Implemented as a thin wrapper around the MNE-validated one-tailed engine
+      `src/models/significance.py::_tfce_1d` (enhance `|curve|`, restore sign).
+- [x] `max_tfce_null(null_curves, ...)` — per-replicate max |TFCE| over the R coherent
       null curves → null vector; `emp_p = (1 + #{null ≥ obs}) / (1 + R)` (two-tailed on
       magnitude).
-- [ ] Assert each replicate contributes exactly one coherent across-window curve
+- [x] Assert each replicate contributes exactly one coherent across-window curve
       (row count == R × n_windows per cell), mirroring the union-β assertion in
       `behavioral_discriminative_windows.py:269`.
+      `notebooks/causal46_joined/_windows.py`; unit tests in
+      `tests/test_causal46_windows.py` (11 tests, `uv run pytest` green).
 
 ### Step 3 — `late_perceptual_significance.py`
 - [ ] Load `b4_bootstrap` + `b4_per_cell`; validate the grid (contiguous,
