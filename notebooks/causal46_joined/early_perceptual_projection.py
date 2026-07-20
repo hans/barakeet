@@ -64,7 +64,10 @@ from _within_completion import (  # noqa: E402
 
 # %% tags=["parameters"]
 subject = "EC250"
-site_type_relabel_path = "outputs/causal46_joined/early_window_site_types/site_type_relabel.csv"
+# Computed site-type table (early_window_site_types); consumed ONLY for its
+# A_significant column to define the projection site pool. NOT the manual
+# type1-5 authority (that is early_acoustic_window.csv, read by the aggregate).
+site_pool_path = "outputs/causal46_joined/early_window_site_types/site_type_relabel.csv"
 epoch_dir = "outputs/epochs_preprocessed"
 outdir = "outputs/causal46_joined/early_perceptual_projection/EC250"
 min_class_k = 3
@@ -102,19 +105,19 @@ print(f"Window grid smin values: {WINDOW_STARTS}  (N_WINDOWS={N_WINDOWS})")
 # ## Load inputs
 
 # %%
-# Site pool: A_significant sites from site_type_relabel (same universe as other causal46_joined analyses).
+# Site pool: A_significant sites (same universe as other causal46_joined analyses).
 # A_significant = True means the acoustic searchlight test was significant in early_window_site_types.
 # This is broader than phon_peaks_all 'significant' (global FDR across all subjects/sites/times),
 # which would exclude many subjects entirely.
-relabel_all = pd.read_csv(site_type_relabel_path)
-relabel_subj = relabel_all[relabel_all["subject"] == subject]
+site_pool_all = pd.read_csv(site_pool_path)
+site_pool_subj = site_pool_all[site_pool_all["subject"] == subject]
 included_sites = (
-    relabel_subj[relabel_subj["A_significant"]]
+    site_pool_subj[site_pool_subj["A_significant"]]
     [["subject", "electrode_idx", "phoneme_pair"]]
     .reset_index(drop=True)
 )
-n_total_in_relabel = len(relabel_subj)
-print(f"Sites in relabel for {subject}: {n_total_in_relabel}")
+n_total_in_pool = len(site_pool_subj)
+print(f"Sites in pool for {subject}: {n_total_in_pool}")
 print(f"A_significant sites (included): {len(included_sites)}")
 if len(included_sites) > 0:
     print(included_sites[["electrode_idx", "phoneme_pair"]].to_string(index=False))
