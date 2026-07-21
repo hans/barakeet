@@ -1606,7 +1606,7 @@ rule causal46_joined_all:
         # sankey early late
         "outputs/causal46_joined/sankey_early_late/notebook.ipynb",
         # contrast plots
-        "outputs/causal46_joined/contrast_plot/contrast_plot.ipynb",
+        # "outputs/causal46_joined/contrast_plot/contrast_plot.ipynb",
         # "outputs/causal46_joined/contrast_plot/bm_contrast_plot.ipynb",
         # "outputs/causal46_joined/contrast_plot/dn_contrast_plot.ipynb",
         # "outputs/causal46_joined/contrast_plot/pb_contrast_plot.ipynb",
