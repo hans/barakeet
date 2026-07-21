@@ -268,6 +268,7 @@ def compute_cell_projection(
         "p_one_tailed_peak", "p_two_tailed_peak",
         "null_mean", "null_sd",
         "n_reliable_windows", "run_smin", "run_smax", "run_len",
+        "anchor_smin", "anchor_smax",
         "peak_smin", "peak_smax", "peak_beta_unamb_median",
         "peak_beta_unamb_ci_low", "peak_beta_unamb_ci_high",
         "a_raw_norm", "N_ambiguous", "n_qualifying_steps",
@@ -348,6 +349,10 @@ def compute_cell_projection(
     lo, hi = run
     run_windows = list(windows[lo:hi])
     a_raw_run = beta_med[lo:hi]
+    # The tuning locus actually integrated (argmax|β_unamb| within the run) — used
+    # by the aggregate's anchor-time-vs-POD diagnostic to check the â-anchor is not
+    # pulled into the acoustic-decay tail (contamination check, ADR-0003 §5).
+    anchor_win = run_windows[int(np.argmax(np.abs(a_raw_run)))]
     a_raw_norm = float(np.linalg.norm(a_raw_run))
     a_unit = a_raw_run / a_raw_norm
     p_run = p_full[lo:hi]
@@ -372,6 +377,7 @@ def compute_cell_projection(
         p_one_tailed=p_one, p_two_tailed=p_two,
         null_mean=float(null_pi.mean()), null_sd=float(null_pi.std()),
         run_smin=int(run_windows[0][0]), run_smax=int(run_windows[-1][1]),
+        anchor_smin=int(anchor_win[0]), anchor_smax=int(anchor_win[1]),
         run_len=int(hi - lo), a_raw_norm=a_raw_norm,
         exhaustive=bool(perm_space <= n_perms), perm_space=perm_space,
         min_p=(1.0 / perm_space if perm_space > 0 else np.nan),

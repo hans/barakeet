@@ -48,6 +48,9 @@ import pandas as pd
 import scipy.stats
 from statsmodels.stats.multitest import multipletests
 
+from src.stimuli import POD_dict
+from src.viz_paper import epoch_sfreq, epoch_tmin
+
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
@@ -103,6 +106,20 @@ for npz_path in sorted(RESULTS_DIR.glob("*/null_pi_peak.npz")):
     data = np.load(str(npz_path))
     for k in data.files:
         null_arrays_peak[k] = data[k]
+
+
+# Run mode knobs (constant across cells) — stamped into every headline CSV so
+# multiple-mode runs are distinguishable.
+def _mode(col):
+    if len(all_cells) and col in all_cells.columns:
+        vals = all_cells[col].dropna().unique()
+        return vals[0] if len(vals) == 1 else "|".join(map(str, vals))
+    return "unknown"
+
+
+ANCHOR_MODE = _mode("anchor_mode")
+LATE_CUTOFF_MODE = _mode("late_cutoff_mode")
+print(f"run modes: anchor_mode={ANCHOR_MODE}  late_cutoff_mode={LATE_CUTOFF_MODE}")
 
 # %% [markdown]
 # ## Claim-bearing population: â-reliable cells (π_anchored non-NaN)
@@ -175,6 +192,7 @@ if len(reliable_df) > 0 and null_arrays:
             cpo_threshold=CPO_P, cpo_null_mean=float(cpo_null_counts.mean()),
             cpo_null_sd=float(cpo_null_counts.std()), p_cpo=p_cpo,
             p_binom=binom_p, binom_mean=binom_mean,
+            anchor_mode=ANCHOR_MODE, late_cutoff_mode=LATE_CUTOFF_MODE,
         )]).to_csv(OUT_DIR / "cpo.csv", index=False)
         print("  Saved cpo.csv")
 
@@ -207,7 +225,46 @@ print("=" * 62)
 
 pd.DataFrame([dict(decision=decision, p_cpo=p_cpo, n_obs=n_obs,
                    n_reliable=(len(reliable_df) if len(all_cells) else 0),
-                   cpo_threshold=CPO_P)]).to_csv(OUT_DIR / "go_no_go.csv", index=False)
+                   cpo_threshold=CPO_P,
+                   anchor_mode=ANCHOR_MODE, late_cutoff_mode=LATE_CUTOFF_MODE)]
+             ).to_csv(OUT_DIR / "go_no_go.csv", index=False)
+
+# %% [markdown]
+# ## CHECKPOINT-1 diagnostic — is the â-anchor in the acoustic-decay tail?
+#
+# `phon_smax_c6` (~0.20–0.28s) sits at/before POD (dn 0.295, bm 0.28, pb 0.21),
+# and β_unamb *is* the acoustic contrast (peaks ~0.15–0.25s). So under
+# `late_cutoff_mode="phon_smax"` the â-anchor can be pulled into the acoustic
+# **residue**, in which case a GO would mean "late percept aligns with the
+# residual acoustic response," NOT reactivation of the integration-window tuning.
+# This tabulates where each â-reliable cell's integrated anchor sits relative to
+# its pair's POD. **Decision rule for checkpoint 1:** if anchors cluster in
+# `[phon_smax, POD)`, `phon_smax` is measuring acoustic residue → prefer `pod`.
+
+# %%
+if len(reliable_df) > 0 and "anchor_smin" in reliable_df.columns:
+    def s_to_t(s):
+        return s / epoch_sfreq + epoch_tmin
+    rel = reliable_df.copy()
+    rel["anchor_center_s"] = rel[["anchor_smin", "anchor_smax"]].mean(axis=1).map(s_to_t)
+    rel["pod_s"] = rel["phoneme_pair"].map(POD_dict)
+    rel["anchor_pre_pod"] = rel["anchor_center_s"] < rel["pod_s"]
+    n_pre = int(rel["anchor_pre_pod"].sum())
+    n_post = int((~rel["anchor_pre_pod"]).sum())
+    print("\n[CHECKPOINT-1] â-anchor time vs POD, over â-reliable cells:")
+    print(f"  anchor center < POD (acoustic-tail risk): {n_pre} / {len(rel)}")
+    print(f"  anchor center ≥ POD (integration window) : {n_post} / {len(rel)}")
+    print("  per phoneme_pair (pre-POD / total):")
+    for pp, sub in rel.groupby("phoneme_pair"):
+        print(f"    {pp}: {int(sub['anchor_pre_pod'].sum())} / {len(sub)}  "
+              f"(POD={POD_dict.get(pp, float('nan'))}s, "
+              f"median anchor={sub['anchor_center_s'].median():.3f}s)")
+    if n_pre > n_post:
+        print("  ⚠ MOST anchors are pre-POD under this cutoff — phon_smax may be")
+        print("    measuring acoustic residue; consider late_cutoff_mode='pod' (checkpoint 1).")
+    rel[["subject", "electrode_idx", "phoneme_pair", "word_end",
+         "anchor_center_s", "pod_s", "anchor_pre_pod", "pi_anchored"]].to_csv(
+        OUT_DIR / "anchor_time_vs_pod.csv", index=False)
 
 # %% [markdown]
 # ## Diagnostic — reliable-vs-all (the map's spine)
