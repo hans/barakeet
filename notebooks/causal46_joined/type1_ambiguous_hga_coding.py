@@ -1030,20 +1030,20 @@ ax.plot(plot_df.groupby("resampled")["hga_dprime_corr"].mean().values,
         color="k", lw=3, ls="--", label="mean", zorder=100)
 ax.axhline(0, color="k", lw=0.6, ls=":")
 
-ax2 = ax.twinx()
-plot_steps = np.array(sorted(plot_ax_df["step_a"].unique())) - 0.5
-ax2.plot(plot_steps, plot_ax_df.groupby("step_a")["roc_auc"].mean().values,
-         color="C2", lw=1.5, ls="-", label="AX mean AUC")
-ax2.errorbar(plot_steps, plot_ax_df.groupby("step_a")["roc_auc"].mean().values,
-             yerr=plot_ax_df.groupby("step_a")["roc_auc_std"].mean() / np.sqrt(48),
-             fmt="o", color="C2", ms=5, lw=1.5, label="AX mean ± SEM")
+# ax2 = ax.twinx()
+# plot_steps = np.array(sorted(plot_ax_df["step_a"].unique())) - 0.5
+# ax2.plot(plot_steps, plot_ax_df.groupby("step_a")["roc_auc"].mean().values,
+#          color="C2", lw=1.5, ls="-", label="AX mean AUC")
+# ax2.errorbar(plot_steps, plot_ax_df.groupby("step_a")["roc_auc"].mean().values,
+#              yerr=plot_ax_df.groupby("step_a")["roc_auc_std"].mean() / np.sqrt(48),
+#              fmt="o", color="C2", ms=5, lw=1.5, label="AX mean ± SEM")
 
-ax2.spines["top"].set_visible(False)
+# ax2.spines["top"].set_visible(False)
 
 ax.set_xlabel("Acoustic step")
 ax.set_ylabel("$d'$", color="k", rotation=0, labelpad=10, ha="right")
-ax2.set_ylabel("AX discrimination\n(ROC-AUC)", color="C2", rotation=0,
-               labelpad=10, ha="left")
+# ax2.set_ylabel("AX discrimination\n(ROC-AUC)", color="C2", rotation=0,
+#                labelpad=10, ha="left")
 
 
 # Sigmoid on the d' axis. Mean d' per step, normalized to [0,1] endpoints to match fit_sigmoid's precondition.
