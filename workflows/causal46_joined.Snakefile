@@ -2324,8 +2324,6 @@ rule late_perceptual_projection:
                 ci_low=2.5,
                 ci_high=97.5,
                 min_endpoint_n=3,
-                late_cutoff_mode="phon_smax",
-                pod_min_s=0.30,
                 word_end_tail_samples=20,
                 anchor_mode="reliable_max",
                 n_perms=C46["n_perms_projection"],

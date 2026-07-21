@@ -118,8 +118,8 @@ def _mode(col):
 
 
 ANCHOR_MODE = _mode("anchor_mode")
-LATE_CUTOFF_MODE = _mode("late_cutoff_mode")
-print(f"run modes: anchor_mode={ANCHOR_MODE}  late_cutoff_mode={LATE_CUTOFF_MODE}")
+GRID_RULE = _mode("grid_rule")
+print(f"run modes: anchor_mode={ANCHOR_MODE}  grid_rule={GRID_RULE}")
 
 # %% [markdown]
 # ## Claim-bearing population: â-reliable cells (π_anchored non-NaN)
@@ -192,7 +192,7 @@ if len(reliable_df) > 0 and null_arrays:
             cpo_threshold=CPO_P, cpo_null_mean=float(cpo_null_counts.mean()),
             cpo_null_sd=float(cpo_null_counts.std()), p_cpo=p_cpo,
             p_binom=binom_p, binom_mean=binom_mean,
-            anchor_mode=ANCHOR_MODE, late_cutoff_mode=LATE_CUTOFF_MODE,
+            anchor_mode=ANCHOR_MODE, grid_rule=GRID_RULE,
         )]).to_csv(OUT_DIR / "cpo.csv", index=False)
         print("  Saved cpo.csv")
 
@@ -226,20 +226,20 @@ print("=" * 62)
 pd.DataFrame([dict(decision=decision, p_cpo=p_cpo, n_obs=n_obs,
                    n_reliable=(len(reliable_df) if len(all_cells) else 0),
                    cpo_threshold=CPO_P,
-                   anchor_mode=ANCHOR_MODE, late_cutoff_mode=LATE_CUTOFF_MODE)]
+                   anchor_mode=ANCHOR_MODE, grid_rule=GRID_RULE)]
              ).to_csv(OUT_DIR / "go_no_go.csv", index=False)
 
 # %% [markdown]
-# ## CHECKPOINT-1 diagnostic — is the â-anchor in the acoustic-decay tail?
+# ## Reported diagnostic — â-anchor time vs POD (sanity check, non-gating)
 #
-# `phon_smax_c6` (~0.20–0.28s) sits at/before POD (dn 0.295, bm 0.28, pb 0.21),
-# and β_unamb *is* the acoustic contrast (peaks ~0.15–0.25s). So under
-# `late_cutoff_mode="phon_smax"` the â-anchor can be pulled into the acoustic
-# **residue**, in which case a GO would mean "late percept aligns with the
-# residual acoustic response," NOT reactivation of the integration-window tuning.
-# This tabulates where each â-reliable cell's integrated anchor sits relative to
-# its pair's POD. **Decision rule for checkpoint 1:** if anchors cluster in
-# `[phon_smax, POD)`, `phon_smax` is measuring acoustic residue → prefer `pod`.
+# The grid is the settled t_tests behavioral-effects window (`smin >= phon_smax_c6`,
+# `smax <= word_end offset + tail`), so this is **not** a decision knob — just an
+# observability check. Because `phon_smax_c6` (~0.20–0.28s) sits at/before POD
+# (dn 0.295, bm 0.28, pb 0.21) and β_unamb *is* the acoustic contrast, it is worth
+# seeing where each â-reliable cell's integrated anchor lands relative to its POD:
+# anchors piled up pre-POD would mean the reactivation is riding the acoustic
+# residue rather than the integration window — a caveat for the write-up, not a
+# re-selection of the grid.
 
 # %%
 if len(reliable_df) > 0 and "anchor_smin" in reliable_df.columns:
@@ -260,8 +260,8 @@ if len(reliable_df) > 0 and "anchor_smin" in reliable_df.columns:
               f"(POD={POD_dict.get(pp, float('nan'))}s, "
               f"median anchor={sub['anchor_center_s'].median():.3f}s)")
     if n_pre > n_post:
-        print("  ⚠ MOST anchors are pre-POD under this cutoff — phon_smax may be")
-        print("    measuring acoustic residue; consider late_cutoff_mode='pod' (checkpoint 1).")
+        print("  ⚠ MOST anchors are pre-POD — reactivation may be riding the acoustic")
+        print("    residue rather than the integration window; note as a write-up caveat.")
     rel[["subject", "electrode_idx", "phoneme_pair", "word_end",
          "anchor_center_s", "pod_s", "anchor_pre_pod", "pi_anchored"]].to_csv(
         OUT_DIR / "anchor_time_vs_pod.csv", index=False)

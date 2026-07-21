@@ -38,19 +38,20 @@
 # â comes from unambiguous trials, p from ambiguous trials — structurally
 # independent (ADR-0002 non-circularity, preserved). No per-cell sign flip.
 #
-# ## ⚠ Grid provenance (READ — flagged to #22)
+# ## Window grid = the t_tests behavioral-effects search window
 #
-# The spec/ADR describe the b4_bootstrap grid as *already* the late,
-# word-end-anchored grid ([acoustic-peak, word_offset+tail]). The **live**
-# `t_tests.py::behav_search_range` has a DEV override searching `(0, PAIR_SMAX)` —
-# from **onset**, **pair-level** upper bound. Applied unfiltered, the â-anchor
-# (argmax|β_unamb|) would land on the **early acoustic peak**, making this the
-# early projection again. This notebook therefore reconstructs the intended late
-# grid by filtering the live grid on **both** bounds:
-# `smin >= phon_smax_c6` (per-site acoustic-peak end) **and**
-# `smax <= word_end_offset + WORD_END_TAIL_SAMPLES` (per word_end). Controlled by
-# `late_cutoff_mode`. This is a faithful build of the LOCKED design, not a
-# re-opening — but the discrepancy is surfaced to Jon before the prod run.
+# The grid is the canonical "look for behavioral (percept) effects" window used
+# by the standard pipeline — `t_tests.py::behav_search_range` in its intended
+# per-word-end form (also used verbatim by `behavioral_discriminative_windows.py`):
+# the b4_bootstrap searchlight windows **post-acoustic and within the per-word-end
+# bound** —
+#     `smin >= phon_smax_c6`  (acoustic-peak end, per site)  AND
+#     `smax <= word_end_offset + WORD_END_TAIL_SAMPLES`  (per word_end).
+# (The *live* `behav_search_range` returns `(0, PAIR_SMAX)` — a DEV override that
+# widens to onset + pair-level so the star-plot x-axis lines up across word_ends;
+# `WE_SMAX[word_end]` is the intended per-word-end bound, which is what we want
+# since the projection is strictly same-word-end.) This is a settled definition,
+# not a knob — the same window the pipeline already searches for percept effects.
 
 # %%
 from __future__ import annotations
@@ -100,12 +101,9 @@ r_unamb = 1000
 ci_low = 2.5
 ci_high = 97.5
 min_endpoint_n = 3
-# Late-grid construction. "phon_smax": smin >= per-site acoustic-peak smax AND
-# smax <= word_end offset + tail (the spec's word-end-anchored late grid).
-# "pod": window-center >= pod_min_s fixed cutoff (strong_generator_scan precedent,
-# for the reconciliation check). Word-end offset cap always applied.
-late_cutoff_mode = "phon_smax"
-pod_min_s = 0.30
+# Grid = t_tests behavioral-effects search window: b4 windows with
+# smin >= phon_smax_c6 AND smax <= word_end offset + WORD_END_TAIL_SAMPLES.
+# word_end_tail_samples mirrors t_tests.py WORD_END_TAIL_SAMPLES (20 = +0.2s).
 word_end_tail_samples = 20
 # â-anchor reading (ADR-0003 §5 is ambiguous — ratification point, issue #22).
 # "reliable_max": anchor argmax|β| among reliable windows (any reliable ⇒ non-NaN).
@@ -127,10 +125,9 @@ N_PERMS = int(n_perms)
 MASTER_SEED = int(master_seed)
 FDR_ALPHA = float(fdr_alpha)
 WORD_END_TAIL_SAMPLES = int(word_end_tail_samples)
-POD_MIN_S = float(pod_min_s)
 
 print(f"subject={subject}  K={K}  R_unamb={R_UNAMB}  N_PERMS={N_PERMS}")
-print(f"late_cutoff_mode={late_cutoff_mode}  (word_end tail={WORD_END_TAIL_SAMPLES} samples)")
+print(f"grid = t_tests behavioral-effects window (word_end tail={WORD_END_TAIL_SAMPLES} samples)")
 
 
 def s_to_t(s) -> float:
@@ -186,33 +183,23 @@ print(f"Loaded {len(ep)} epochs; behavior col: {bhv_col}")
 
 
 # %% [markdown]
-# ## Late-grid construction per cell
+# ## Grid per cell — the t_tests behavioral-effects search window
 
 # %%
 def late_grid_for_cell(phon_smax, word_end):
-    """The late, word-end-anchored window list for one cell (ADR-0003 §2 + the
-    grid-provenance note above). Both bounds applied to the live b4 grid."""
+    """b4 windows in the behavioral-effects search window for one cell:
+    post-acoustic (``smin >= phon_smax_c6``) and within the per-word-end bound
+    (``smax <= word_end offset + WORD_END_TAIL_SAMPLES``). This is the intended
+    per-word-end form of ``t_tests.py::behav_search_range`` — the same window the
+    standard pipeline uses to look for percept effects (cf.
+    ``behavioral_discriminative_windows.py``)."""
+    if phon_smax is None:
+        return []
     we_smax = word_end_search_smax(word_end)
-    if late_cutoff_mode == "phon_smax":
-        if phon_smax is None:
-            return []
-        lo_ok = lambda smin: smin >= phon_smax
-    elif late_cutoff_mode == "pod":
-        lo_ok = lambda smin, smax=None: True  # replaced per-window below
-    else:
-        raise ValueError(f"unknown late_cutoff_mode={late_cutoff_mode!r}")
-    out = []
-    for (smin, smax) in GRID:
-        if smax > we_smax:
-            continue
-        if late_cutoff_mode == "phon_smax":
-            if smin < phon_smax:
-                continue
-        else:  # pod: center >= POD_MIN_S
-            if s_to_t(0.5 * (smin + smax)) < POD_MIN_S:
-                continue
-        out.append((smin, smax))
-    return out
+    return [
+        (smin, smax) for (smin, smax) in GRID
+        if smin >= phon_smax and smax <= we_smax
+    ]
 
 
 # %% [markdown]
@@ -258,7 +245,7 @@ for cell_i, (elec_idx, pp, we) in enumerate(tqdm(cells, desc="cells")):
         grid_smax=(windows[-1][1] if windows else -1),
         n_step1=n_step1, n_step6=n_step6,
         r_unamb=R_UNAMB, n_perms=N_PERMS, master_seed=MASTER_SEED, cell_offset=cell_i,
-        late_cutoff_mode=late_cutoff_mode, anchor_mode=anchor_mode,
+        grid_rule="behav_search", anchor_mode=anchor_mode,
     )
 
     metrics, null_pi, null_peak = compute_cell_projection(
