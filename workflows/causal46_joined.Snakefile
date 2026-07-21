@@ -1070,14 +1070,6 @@ rule joined_t_tests:
             "outputs/epochs_preprocessed/{subject}_epo.fif",
             subject=config["data"]["subjects"],
         ),
-        behav_dec_full      = expand(
-            "outputs/causal46_joined/behavior_decoding_single_electrode/{subject}/scores.parquet",
-            subject=config["data"]["subjects"],
-        ),
-        behav_dec_hga_only  = expand(
-            "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only/{subject}/scores.parquet",
-            subject=config["data"]["subjects"],
-        ),
         a_per_window        = "outputs/causal46_joined/acoustic_bootstrap/a_per_window.parquet",
         a_per_window_full   = "outputs/causal46_joined/acoustic_bootstrap/a_per_window_full.parquet",
         notebook            = "notebooks/causal46_joined/t_tests.py",
@@ -1104,14 +1096,13 @@ rule joined_t_tests:
                 epoch_dir=str(Path(input.epoch_fifs[0]).parent),
                 trial_balance_path=str(input.trial_balance),
                 outdir=str(outdir),
-                behav_dec_full_root=str(Path(input.behav_dec_full[0]).parent.parent),
-                behav_dec_hga_only_root=str(Path(input.behav_dec_hga_only[0]).parent.parent),
                 min_class_k=C46["min_class_k"],
                 window_size=C46["window_size"],
                 stride=C46["stride"],
                 ac_p_value_threshold=C46["ac_p_value_threshold"],
                 a_per_window_path=str(input.a_per_window),
                 a_per_window_full_path=str(input.a_per_window_full),
+                n_bootstrap=C46.get("n_bootstrap", 1000),
             ),
         )
 
@@ -1396,19 +1387,24 @@ rule joined_mismatch_regression:
 rule joined_early_perceptual_windows:
     """Infer early perceptual windows per B4 cell (pure post-processing).
 
-    For each (subject, electrode, phoneme_pair, word_end) cell annotated with
-    `behav @ac` in the manual manifest, finds time window(s) in [t=0, phon_smax]
-    with a reliable within-completion HGA contrast. Mirror of
+    For each site (subject, electrode, phoneme_pair) that passes the perceptual-
+    projection gate (uncorrected one-tailed pooled p < gate_alpha), finds time
+    window(s) in [t=0, phon_smax] with a reliable within-completion HGA contrast,
+    for both completions of the site. Mirror of
     joined_behavioral_discriminative_windows, which searches *beyond* the acoustic
-    peak. No epoch reload — pure post-processing over b4_bootstrap.parquet.
-    No fallback: cells with no significant early window emit zero rows.
+    peak. No epoch reload — pure post-processing over b4_bootstrap.parquet and the
+    projection site_results.csv. No fallback: cells with no significant early
+    window emit zero rows. Gate rationale: docs/adr/0001-early-perceptual-window-gate.md.
     """
     input:
         b4_bootstrap       = "outputs/causal46_joined/t_tests/b4_bootstrap.parquet",
         b4_per_cell        = "outputs/causal46_joined/t_tests/b4_per_cell.parquet",
         notebook           = "notebooks/causal46_joined/early_perceptual_windows.py",
-        manual_annotations = "outputs/causal46_joined/manual_annotations/filtered_manifest.csv",
-        early_annotations  = "outputs/causal46_joined/manual_annotations/early_acoustic_window.csv",
+        projection         = expand(
+            "outputs/causal46_joined/early_perceptual_projection/{subject}/site_results.csv",
+            subject=config["data"]["subjects"],
+        ),
+        site_class         = "outputs/causal46_joined/early_perceptual_projection/site_class.parquet",
         a_windows          = "outputs/causal46_joined/acoustic_endpoint_windows/a_windows.parquet",
 
     output:
@@ -1424,10 +1420,11 @@ rule joined_early_perceptual_windows:
                 b4_bootstrap_path=str(input.b4_bootstrap),
                 b4_per_cell_path=str(input.b4_per_cell),
                 outdir=str(outdir),
+                gate_alpha=0.05,
                 ci_low=2.5,
                 ci_high=97.5,
-                filtered_manifest_path=str(input.manual_annotations),
-                early_annotations_path=str(input.early_annotations),
+                projection_results_dir="outputs/causal46_joined/early_perceptual_projection",
+                site_class_path=str(input.site_class),
                 a_windows_path=str(input.a_windows),
             ),
         )
@@ -1583,19 +1580,6 @@ rule causal46_joined_all:
     """Default target: AS-filter + all joined aggregates."""
     input:
         "outputs/causal46_joined/electrodes_as_filtered/subjects_with_as.txt",
-        # Behavior with control — 4 flavors
-        # "outputs/causal46_joined/behavior_decoding_single_electrode_summarize/peak_summary_all.parquet",
-        # "outputs/causal46_joined/behavior_decoding_single_electrode_summarize/peak_summary_tstat_maxstat_all.parquet",
-        # "outputs/causal46_joined/behavior_decoding_single_electrode_summarize/peak_summary_foldmean_tfce_all.parquet",
-        # "outputs/causal46_joined/behavior_decoding_single_electrode_summarize/peak_summary_tstat_tfce_all.parquet",
-        # # Behavior HGA-only — 4 flavors
-        # "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only_summarize/peak_summary_all.parquet",
-        # "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only_summarize/peak_summary_tstat_maxstat_all.parquet",
-        # "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only_summarize/peak_summary_foldmean_tfce_all.parquet",
-        # "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only_summarize/peak_summary_tstat_tfce_all.parquet",
-        # # Ganong (single v1 flavor each)
-        # "outputs/causal46_joined/ganong_decoding_summarize/peak_summary_all.parquet",
-        # "outputs/causal46_joined/ganong_decoding_hga_only_summarize/peak_summary_all.parquet",
         # Trial balance index + B4 bootstrap t-tests
         "outputs/causal46_joined/trial_balance_index.csv",
         "outputs/causal46_joined/t_tests/population_summary.csv",
@@ -1619,15 +1603,13 @@ rule causal46_joined_all:
         "outputs/causal46_joined/acoustic_transfer/scores_all.parquet",
         "outputs/causal46_joined/acoustic_transfer/transfer_summary.pdf",
         "outputs/causal46_joined/acoustic_transfer/transfer_timing.pdf",
-        # Strong-generator test: β_ambig vs β_unamb per behavioral window
-        "outputs/causal46_joined/strong_generator/strong_generator.parquet",
         # sankey early late
         "outputs/causal46_joined/sankey_early_late/notebook.ipynb",
         # contrast plots
         "outputs/causal46_joined/contrast_plot/contrast_plot.ipynb",
-        "outputs/causal46_joined/contrast_plot/bm_contrast_plot.ipynb",
-        "outputs/causal46_joined/contrast_plot/dn_contrast_plot.ipynb",
-        "outputs/causal46_joined/contrast_plot/pb_contrast_plot.ipynb",
+        # "outputs/causal46_joined/contrast_plot/bm_contrast_plot.ipynb",
+        # "outputs/causal46_joined/contrast_plot/dn_contrast_plot.ipynb",
+        # "outputs/causal46_joined/contrast_plot/pb_contrast_plot.ipynb",
         # type1 coding on ambiguous trials
         "outputs/causal46_joined/type1_ambiguous_hga_coding/notebook.ipynb",
 
@@ -2069,8 +2051,6 @@ rule early_window_site_types:
         manifest            = "outputs/causal46_joined/manual_annotations/filtered_manifest.csv",
         trial_balance       = "outputs/causal46_joined/trial_balance_index.csv",
         phon_peaks          = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet",
-        behav_dec_full      = "outputs/causal46_joined/behavior_decoding_single_electrode/{subject}/scores.parquet",
-        behav_dec_hga_only  = "outputs/causal46_joined/behavior_decoding_single_electrode_hga_only/{subject}/scores.parquet",
         helper              = "notebooks/causal46_joined/_within_completion.py",
         notebook            = "notebooks/causal46_joined/early_window_site_types.py",
 
@@ -2095,8 +2075,6 @@ rule early_window_site_types:
                 epoch_dir=str(Path(input.epochs).parent),
                 trial_balance_path=str(input.trial_balance),
                 outdir=str(outdir),
-                behav_dec_full_path=str(input.behav_dec_full),
-                behav_dec_hga_only_path=str(input.behav_dec_hga_only),
                 min_class_k=C46["min_class_k"],
                 window_size=C46["window_size"],
                 stride=C46["stride"],
@@ -2176,6 +2154,12 @@ rule early_window_site_types_figures:
         population_bar   = "outputs/causal46_joined/early_window_site_types/population_site_type_counts.pdf",
         A_vs_B_scatter   = "outputs/causal46_joined/early_window_site_types/A_vs_B_scatter.pdf",
         star_plots_all   = "outputs/causal46_joined/early_window_site_types/star_plots_all.pdf",
+        # Written by the notebook (early_window_site_types_aggregate_figures.py);
+        # consumed by early_perceptual_projection as its A_significant site pool.
+        # Declared here so that dependency is an explicit DAG edge, not an
+        # undeclared side-effect. (Purely computed — the site_type_override
+        # column is emitted blank and read by nothing.)
+        site_type_relabel= "outputs/causal46_joined/early_window_site_types/site_type_relabel.csv",
 
     run:
         outdir = str(Path(output.notebook).parent)
@@ -2217,3 +2201,84 @@ rule reorder_star_plots_by_annotation:
             --star-dir  outputs/causal46_joined/early_window_site_types \
             --out       {output.pdf}
         """
+
+
+# =============================================================================
+# Early perceptual projection (projection-based detection of early perceptual
+# responses; candidate replacement for window-based bootstrap test)
+# =============================================================================
+
+
+rule early_perceptual_projection:
+    """Per-subject: compute projection statistic π and permutation null."""
+    input:
+        epochs           = "outputs/epochs_preprocessed/{subject}_epo.fif",
+        site_pool        = "outputs/causal46_joined/early_window_site_types/site_type_relabel.csv",
+        helper           = "notebooks/causal46_joined/_within_completion.py",
+        notebook         = "notebooks/causal46_joined/early_perceptual_projection.py",
+    output:
+        notebook     = "outputs/causal46_joined/early_perceptual_projection/{subject}/notebook.ipynb",
+        site_results = "outputs/causal46_joined/early_perceptual_projection/{subject}/site_results.csv",
+        null_pi      = "outputs/causal46_joined/early_perceptual_projection/{subject}/null_pi.npz",
+        pi_dist      = "outputs/causal46_joined/early_perceptual_projection/{subject}/pi_dist.png",
+    run:
+        outdir = Path(output.notebook).parent
+        C46 = config["causal46_joined"]
+        run_notebook(
+            str(input.notebook), str(output.notebook),
+            parameters=dict(
+                subject=wildcards.subject,
+                site_pool_path=str(input.site_pool),
+                epoch_dir=str(Path(input.epochs).parent),
+                outdir=str(outdir),
+                min_class_k=C46["min_class_k"],
+                window_size=C46["window_size"],
+                stride=C46["stride"],
+                ac_search_smin=config["analysis"]["decoding"]["acoustic_peak_search_smin"],
+                ac_search_smax=config["analysis"]["decoding"]["acoustic_peak_search_smax"],
+                n_perms=C46["n_perms_projection"],
+                master_seed=42,
+                fdr_alpha=config["analysis"]["fdr_alpha"],
+            ),
+        )
+
+
+rule early_perceptual_projection_aggregate:
+    """Aggregate: FDR (Test 1), CPO (Test 2), site-type cross-tab (Test 3), plots."""
+    input:
+        site_results = expand(
+            "outputs/causal46_joined/early_perceptual_projection/{subject}/site_results.csv",
+            subject=config["data"]["subjects"],
+        ),
+        null_pi = expand(
+            "outputs/causal46_joined/early_perceptual_projection/{subject}/null_pi.npz",
+            subject=config["data"]["subjects"],
+        ),
+        site_type_relabel = "outputs/causal46_joined/manual_annotations/early_acoustic_window.csv",
+        site_type_computed = "outputs/causal46_joined/early_window_site_types/site_type_relabel.csv",
+        notebook = "notebooks/causal46_joined/early_perceptual_projection_aggregate.py",
+    output:
+        notebook      = "outputs/causal46_joined/early_perceptual_projection/aggregate_notebook.ipynb",
+        all_sites     = "outputs/causal46_joined/early_perceptual_projection/all_sites.csv",
+        site_class    = "outputs/causal46_joined/early_perceptual_projection/site_class.parquet",
+        diagnostics   = "outputs/causal46_joined/early_perceptual_projection/diagnostics.pdf",
+        test1_list    = "outputs/causal46_joined/early_perceptual_projection/test1_one_tailed.csv",
+        test2_cpo     = "outputs/causal46_joined/early_perceptual_projection/test2_cpo.csv",
+        test3_crosstab= "outputs/causal46_joined/early_perceptual_projection/test3_crosstab.csv",
+        test3_detail  = "outputs/causal46_joined/early_perceptual_projection/test3_detail.csv",
+    run:
+        outdir = str(Path(output.notebook).parent)
+        C46 = config["causal46_joined"]
+        run_notebook(
+            str(input.notebook), str(output.notebook),
+            parameters=dict(
+                results_dir=outdir,
+                site_type_relabel_path=str(input.site_type_relabel),
+                site_type_computed_path=str(input.site_type_computed),
+                outdir=outdir,
+                fdr_alpha=config["analysis"]["fdr_alpha"],
+                cpo_p_threshold=0.05,
+                gate_alpha=0.05,
+                gate_mode="uncorrected",
+            ),
+        )

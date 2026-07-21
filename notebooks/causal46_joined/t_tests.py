@@ -78,7 +78,6 @@ sys.path.insert(0, str(Path(".").resolve() / "notebooks" / "causal46_joined"))
 from _within_completion import (  # noqa: E402
     acoustic_preferred_class,
     extract_hga,
-    load_behav_decoding_scores,
     n_per_class_from_per_step,
     per_step_class_counts,
     resolve_behavior_col,
@@ -92,14 +91,13 @@ phon_peaks_path = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parque
 epoch_dir = "outputs/epochs_preprocessed"
 trial_balance_path = "outputs/causal46_joined/trial_balance_index.csv"
 outdir = "outputs/causal46_joined/t_tests"
-behav_dec_full_root = "outputs_prod/causal46_joined/behavior_decoding_single_electrode"
-behav_dec_hga_only_root = "outputs_prod/causal46_joined/behavior_decoding_single_electrode_hga_only"
 min_class_k = 4
 window_size = 10
 stride = 10
 ac_p_value_threshold = 0.001
 a_per_window_path = "outputs_prod/causal46_joined/acoustic_bootstrap/a_per_window.parquet"
 a_per_window_full_path = "outputs_prod/causal46_joined/acoustic_bootstrap/a_per_window_full.parquet"
+n_bootstrap = 1000
 
 # %%
 REPO = Path(".").resolve()
@@ -121,7 +119,7 @@ AC_SEARCH_SMIN = int(_cfg["analysis"]["decoding"].get("acoustic_peak_search_smin
 AC_SEARCH_SMAX = int(_cfg["analysis"]["decoding"].get("acoustic_peak_search_smax", 50))
 
 K = min_class_k
-R = 1000              # bootstrap replicates per cell
+R = n_bootstrap        # bootstrap replicates per cell
 CI_LOW, CI_HIGH = 2.5, 97.5
 
 print(f"REPO:      {REPO}")
@@ -147,17 +145,6 @@ print(f"trial_balance: {trial_balance.height} rows")
 
 epochs_dict = load_epochs_dict(EPOCH_DIR)
 print(f"epochs loaded: {sorted(epochs_dict)}")
-
-# Behavioral decoding scores for star plot overlay
-_behav_dec_by_subject: dict = {}
-for _subj in sorted(epochs_dict):
-    _df = load_behav_decoding_scores(
-        f"{behav_dec_full_root}/{_subj}/scores.parquet",
-        f"{behav_dec_hga_only_root}/{_subj}/scores.parquet",
-    )
-    if _df is not None:
-        _behav_dec_by_subject[_subj] = _df
-print(f"behavioral decoding scores loaded for: {sorted(_behav_dec_by_subject)}")
 
 # %% [markdown]
 # ## Word-end behavioral search bound (samples)
@@ -1232,14 +1219,12 @@ if b4_per_cell.height:
                                epochs_dict=epochs_dict, pair_lookup=pair_lut,
                                ac_search_smin=AC_SEARCH_SMIN,
                                ac_search_smax=AC_SEARCH_SMAX,
-                               behav_dec_by_subject=_behav_dec_by_subject,
                                acoustic_site_sig_windows=acoustic_site_sig_windows or None)
     n_s = write_annotated_pdfs(sig_entries, b4_per_window, b4_cell_keys,
                                FILT_DIR / "b4_powered_significant.pdf",
                                epochs_dict=epochs_dict, pair_lookup=pair_lut,
                                ac_search_smin=AC_SEARCH_SMIN,
                                ac_search_smax=AC_SEARCH_SMAX,
-                               behav_dec_by_subject=_behav_dec_by_subject,
                                acoustic_site_sig_windows=acoustic_site_sig_windows or None)
     print(f"B4 filtered PDFs: powered={n_p}  significant={n_s}")
 

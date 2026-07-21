@@ -122,7 +122,9 @@ _Avoid_: behavioral window (ambiguous), late perceptual window.
 **Early-perceptual window** _(code: `ep_windows`)_:
 Bootstrap-contrast window for the within-completion percept contrast, searched
 in the *early* region up to and including the acoustic peak. The early
-counterpart of the behaviorally-discriminative window.
+counterpart of the behaviorally-discriminative window. Entry is set by the
+*projection gate* (not the manual `behav @ac` annotation): both completions of
+every projection-passing site enter the window search.
 
 ### Contrasts and tests
 
@@ -163,6 +165,34 @@ A test of whether an acoustic decoder trained at the acoustic window still reads
 out the acoustic cue when applied in a perceptual window — i.e. whether the
 acoustic *code* persists into the later window. The pipeline complement to the
 transfer analysis described in `CLAUDE.md`.
+
+**Perceptual projection** _(π; code: `early_perceptual_projection`)_:
+A per-*site* scalar measuring how much the report-driven percept contrast on
+ambiguous trials resembles that site's acoustic contrast on unambiguous trials,
+integrated over the whole early window (π = ⟨â, p⟩, â the unit-normalized
+acoustic template, p the B4 percept contrast). Template estimation uses
+unambiguous trials and testing uses ambiguous trials, so selection and test are
+structurally independent; its sign falls out of the fixed continuum polarity, so
+it needs no per-site tuning assignment (deliberately non-circular). Significance
+is a within-step label-permutation p-value (pooled across completions, plus
+per-completion). Spec: `docs/superpowers/plans/2026-07-16-early-perceptual-projection-spec.md`.
+_Avoid_: alignment score, template match.
+
+**Projection gate**:
+Site selection by uncorrected one-tailed perceptual-projection p < 0.05 (π > 0).
+The automated, non-circular replacement for the manual `behav @ac` annotation as
+the entry criterion to the early-perceptual-window analysis. Applied per site
+(pooled across completions); both of a passing site's cells then enter the
+window search. Distinct from FDR-significance (Test 1) — the gate is deliberately
+uncorrected.
+
+**Early response class** _(`early_response_class`; artifact: `site_class.parquet`)_:
+Manual-free three-way label composed in `early_perceptual_projection_aggregate`:
+`type2_aligned` (projection gate passes), `acoustic_only` (automated
+`site_type == type1_acoustic_only` AND not aligned), `neither` (the rest). The
+acoustic-only comparison group in `early_perceptual_windows` reads this, replacing
+the manual `type1_acoustic_only` filter. See
+[ADR 0003](docs/adr/0003-manual-free-acoustic-only-class.md).
 
 ### Site typology
 
@@ -215,8 +245,10 @@ site type.
 **Manual annotations**:
 Human review labels attached to sites/cells (acoustic tuning, and behavioral
 tags such as `behav @ac` for a split at the acoustic window vs `behav @late` for
-a much later one). They gate which cells enter the bootstrap-contrast window
-analyses. Canonical column meanings live in
+a much later one). They gate which cells enter the *late* behaviorally-
+discriminative window analysis; the *early-perceptual* window analysis is now
+gated by the automated projection gate instead (the `behav @ac` tag no longer
+selects early-window cells). Canonical column meanings live in
 `notebooks/causal46_joined/manual_annotation_schema.md`.
 
 **Peak-summary flavor**:
