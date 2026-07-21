@@ -261,7 +261,10 @@ for cell_i, (elec_idx, pp, we) in enumerate(tqdm(cells, desc="cells")):
 
 results_df = pd.DataFrame(results)
 print(f"\nTotal cells processed: {len(results_df)}")
-print("skip_reason counts:\n" + results_df["skip_reason"].value_counts(dropna=False).to_string())
+if len(results_df) > 0:
+    print("skip_reason counts:\n" + results_df["skip_reason"].value_counts(dropna=False).to_string())
+else:
+    print(f"No cells for {subject} (0 A_significant sites in pool) — writing empty site_results.csv")
 
 # %% [markdown]
 # ## Population preview (aggregate does the pre-registered CPO test)
