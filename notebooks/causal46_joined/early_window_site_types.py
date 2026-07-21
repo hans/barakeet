@@ -162,9 +162,6 @@ ep.metadata = md
 bhv_col = resolve_behavior_col(md)
 print(f"Loaded {len(ep)} epochs; behavior col: {bhv_col}")
 
-behav_decoding_df = load_behav_decoding_scores(behav_dec_full_path, behav_dec_hga_only_path)
-print(f"behavioral decoding scores: {'loaded' if behav_decoding_df is not None else 'not found'}")
-
 # %% [markdown]
 # ## Helper — per-window aggregate (A and B)
 
@@ -907,7 +904,6 @@ with PdfPages(pdf_path_gallery) as _pdf:
                 search_smax=PAIR_SMAX_HI.get(_pp, SMAX_HI_ABS),
                 b_search_smin=B_SEARCH_SMIN,
                 b_search_smax=B_SEARCH_SMAX,
-                behav_decoding_df=behav_decoding_df,
             )
             # Overlay cross-WE pooled pair bar on the B₂ panel (axes[2]).
             _pair_smin = _row.get("pair_smin")
@@ -1028,7 +1024,6 @@ with PdfPages(pdf_path_compact) as _pdf_c:
                 search_smax=PAIR_SMAX_HI.get(_pp, SMAX_HI_ABS),
                 b_search_smin=B_SEARCH_SMIN,
                 b_search_smax=B_SEARCH_SMAX,
-                behav_decoding_df=behav_decoding_df,
             )
             _pdf_c.savefig(_fig_c, bbox_inches="tight")
             plt.close(_fig_c)
