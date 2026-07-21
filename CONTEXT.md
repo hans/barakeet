@@ -186,6 +186,14 @@ the entry criterion to the early-perceptual-window analysis. Applied per site
 window search. Distinct from FDR-significance (Test 1) — the gate is deliberately
 uncorrected.
 
+**Early response class** _(`early_response_class`; artifact: `site_class.parquet`)_:
+Manual-free three-way label composed in `early_perceptual_projection_aggregate`:
+`type2_aligned` (projection gate passes), `acoustic_only` (automated
+`site_type == type1_acoustic_only` AND not aligned), `neither` (the rest). The
+acoustic-only comparison group in `early_perceptual_windows` reads this, replacing
+the manual `type1_acoustic_only` filter. See
+[ADR 0003](docs/adr/0003-manual-free-acoustic-only-class.md).
+
 ### Site typology
 
 **Site type**:

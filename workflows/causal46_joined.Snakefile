@@ -1414,7 +1414,7 @@ rule joined_early_perceptual_windows:
             "outputs/causal46_joined/early_perceptual_projection/{subject}/site_results.csv",
             subject=config["data"]["subjects"],
         ),
-        early_annotations  = "outputs/causal46_joined/manual_annotations/early_acoustic_window.csv",
+        site_class         = "outputs/causal46_joined/early_perceptual_projection/site_class.parquet",
         a_windows          = "outputs/causal46_joined/acoustic_endpoint_windows/a_windows.parquet",
 
     output:
@@ -1434,7 +1434,7 @@ rule joined_early_perceptual_windows:
                 ci_low=2.5,
                 ci_high=97.5,
                 projection_results_dir="outputs/causal46_joined/early_perceptual_projection",
-                early_annotations_path=str(input.early_annotations),
+                site_class_path=str(input.site_class),
                 a_windows_path=str(input.a_windows),
             ),
         )
@@ -2269,10 +2269,12 @@ rule early_perceptual_projection_aggregate:
             subject=config["data"]["subjects"],
         ),
         site_type_relabel = "outputs/causal46_joined/manual_annotations/early_acoustic_window.csv",
+        site_type_computed = "outputs/causal46_joined/early_window_site_types/site_type_relabel.csv",
         notebook = "notebooks/causal46_joined/early_perceptual_projection_aggregate.py",
     output:
         notebook      = "outputs/causal46_joined/early_perceptual_projection/aggregate_notebook.ipynb",
         all_sites     = "outputs/causal46_joined/early_perceptual_projection/all_sites.csv",
+        site_class    = "outputs/causal46_joined/early_perceptual_projection/site_class.parquet",
         diagnostics   = "outputs/causal46_joined/early_perceptual_projection/diagnostics.pdf",
         test1_list    = "outputs/causal46_joined/early_perceptual_projection/test1_one_tailed.csv",
         test2_cpo     = "outputs/causal46_joined/early_perceptual_projection/test2_cpo.csv",
@@ -2286,8 +2288,11 @@ rule early_perceptual_projection_aggregate:
             parameters=dict(
                 results_dir=outdir,
                 site_type_relabel_path=str(input.site_type_relabel),
+                site_type_computed_path=str(input.site_type_computed),
                 outdir=outdir,
                 fdr_alpha=config["analysis"]["fdr_alpha"],
                 cpo_p_threshold=0.05,
+                gate_alpha=0.05,
+                gate_mode="uncorrected",
             ),
         )

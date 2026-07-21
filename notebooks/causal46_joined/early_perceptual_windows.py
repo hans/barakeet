@@ -50,7 +50,9 @@
 b4_bootstrap_path = "outputs/causal46_joined/t_tests/b4_bootstrap.parquet"
 b4_per_cell_path = "outputs/causal46_joined/t_tests/b4_per_cell.parquet"
 projection_results_dir = "outputs/causal46_joined/early_perceptual_projection"
-early_annotations_path = "outputs/causal46_joined/manual_annotations/early_acoustic_window.csv"
+# Manual-free acoustic-only comparison group: site_class.parquet from the
+# projection aggregate (early_response_class == "acoustic_only").
+site_class_path = "outputs/causal46_joined/early_perceptual_projection/site_class.parquet"
 a_windows_path = "outputs/causal46_joined/acoustic_endpoint_windows/a_windows.parquet"
 outdir = "outputs/causal46_joined/early_perceptual_windows"
 
@@ -130,10 +132,10 @@ for col in ("phon_smin", "phon_smax"):
 # Both B4 cells (completions) of each passing site enter the window search.
 
 # %%
-# early_annotation_df carries the manual site_type_relabel labels, still used
-# below for the type1 (acoustic-only) comparison group — not for the gate.
-early_annotation_df = pl.read_csv(early_annotations_path)
-print(f"early_annotation_df: {early_annotation_df.height} rows, cols: {early_annotation_df.columns}")
+# site_class carries the manual-free early_response_class (from the projection
+# aggregate), used below for the acoustic-only comparison group — not for the gate.
+site_class_df = pl.read_parquet(site_class_path)
+print(f"site_class_df: {site_class_df.height} rows, cols: {site_class_df.columns}")
 
 # %%
 # Load per-subject projection site_results.csv and concatenate. Reading the
@@ -391,23 +393,25 @@ if ep_windows.height > 0:
     print(ep_windows.select(CELL_KEYS + ["window_id", "smin", "smax", "ci_excludes_zero", "pi_pooled", "p_one_tailed"]))
 
 # %% [markdown]
-# ## Type1 (acoustic-only) windows — from acoustic_endpoint_windows
+# ## Acoustic-only windows — from acoustic_endpoint_windows
 #
 # Load pre-computed unified endpoint windows (step6 − step1, unambiguous trials)
-# produced by `acoustic_endpoint_windows.py` and filter to the type1 subset.
+# produced by `acoustic_endpoint_windows.py` and filter to the acoustic-only
+# subset: manual-free `early_response_class == "acoustic_only"` from site_class
+# (automated type1 with projection-aligned type2 sites removed).
 # (SITE_KEYS defined above in the projection-gate section.)
 
 # %%
 a_windows = pl.read_parquet(a_windows_path)
 type1_sites = (
-    early_annotation_df
-    .filter(pl.col("site_type_relabel") == "type1_acoustic_only")
+    site_class_df
+    .filter(pl.col("early_response_class") == "acoustic_only")
     .select(SITE_KEYS)
     .with_columns(pl.col("electrode_idx").cast(pl.Int64))
     .unique()
 )
 type1_windows = a_windows.join(type1_sites, on=SITE_KEYS, how="semi")
-print(f"a_windows: {a_windows.height} rows; type1 subset: {type1_windows.height} rows")
+print(f"a_windows: {a_windows.height} rows; acoustic_only subset: {type1_windows.height} rows")
 
 # The projection gate now *defines* the Perceptual set: every ep_windows row is a
 # projection-passing cell, so no site_type_relabel re-filter. One row per cell.

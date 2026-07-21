@@ -46,9 +46,19 @@ os.environ.setdefault("NUMEXPR_MAX_THREADS", "1")
 # %% tags=["parameters"]
 results_dir = "outputs/causal46_joined/early_perceptual_projection"
 site_type_relabel_path = "outputs/causal46_joined/manual_annotations/early_acoustic_window.csv"
+# Automated (manual-free) site-type labels from early_window_site_types; its
+# `site_type` column is the assign_site_type() output. Used to build the
+# operational early_response_class; the manual relabel above is validation only.
+site_type_computed_path = "outputs/causal46_joined/early_window_site_types/site_type_relabel.csv"
 outdir = "outputs/causal46_joined/early_perceptual_projection"
 fdr_alpha = 0.05
 cpo_p_threshold = 0.05
+# Type2-removal gate for early_response_class. "uncorrected": p_one_tailed <
+# gate_alpha (matches the early_perceptual_windows operating point). "fdr":
+# cross-subject BH-FDR one-tailed significant (subtracts only high-confidence
+# aligned sites, retaining borderline type1s).
+gate_alpha = 0.05
+gate_mode = "uncorrected"
 
 # %%
 OUT_DIR = Path(outdir)
@@ -56,6 +66,9 @@ OUT_DIR.mkdir(parents=True, exist_ok=True)
 RESULTS_DIR = Path(results_dir)
 FDR_ALPHA = float(fdr_alpha)
 CPO_P = float(cpo_p_threshold)
+GATE_ALPHA = float(gate_alpha)
+GATE_MODE = str(gate_mode)
+assert GATE_MODE in {"uncorrected", "fdr"}, f"bad gate_mode: {GATE_MODE}"
 print(f"Aggregate: results_dir={RESULTS_DIR}  fdr_alpha={FDR_ALPHA}")
 
 # %% [markdown]
@@ -566,11 +579,77 @@ with PdfPages(str(OUT_DIR / "diagnostics.pdf")) as pdf:
 print("Saved diagnostics.pdf")
 
 # %% [markdown]
+# ## Early response class (operational, manual-free)
+#
+# Three-way label composed from the automated `assign_site_type` output and the
+# projection gate. Precedence:
+#   1. `type2_aligned`  — projection flags an aligned early perceptual response
+#      (`p_one_tailed < gate_alpha`, or FDR-significant one-tailed if gate_mode="fdr").
+#   2. `acoustic_only`  — automated `site_type == type1_acoustic_only` AND not aligned.
+#   3. `neither`        — everything else (complex / unknown / type3 / grab_bag /
+#      A_unsigned, plus mirrored/out-of-pool type2 the one-tailed gate can't catch).
+#
+# Built over the automated site-type universe (left-joined with projection p),
+# so a computed-type1 site with no projection result is still `acoustic_only`.
+# No manual annotation. Emitted as `site_class.parquet` for downstream consumers.
+
+# %%
+SITE_KEYS = ["subject", "electrode_idx", "phoneme_pair"]
+comp_path = Path(site_type_computed_path)
+if not comp_path.exists():
+    print(f"Computed site types not found at {comp_path} — skipping early_response_class.")
+    site_class = pd.DataFrame(columns=SITE_KEYS + ["computed_site_type", "early_response_class"])
+    site_class.to_parquet(OUT_DIR / "site_class.parquet", index=False)
+else:
+    comp = pd.read_csv(comp_path)
+    comp = comp[SITE_KEYS + ["site_type"]].rename(columns={"site_type": "computed_site_type"})
+    comp["electrode_idx"] = comp["electrode_idx"].astype("int64")
+
+    # Per-site projection p (and FDR flag) from valid_df; left-join keeps
+    # computed-type1 sites even when the projection produced no valid π.
+    if len(valid_df) > 0:
+        proj_cols = [c for c in ["p_one_tailed", "fdr_sig_one_tailed", "pi_pooled"]
+                     if c in valid_df.columns]
+        proj_p = valid_df[SITE_KEYS + proj_cols].copy()
+        proj_p["electrode_idx"] = proj_p["electrode_idx"].astype("int64")
+    else:
+        proj_p = pd.DataFrame(columns=SITE_KEYS + ["p_one_tailed", "fdr_sig_one_tailed", "pi_pooled"])
+
+    site_class = comp.merge(proj_p, on=SITE_KEYS, how="left")
+
+    if GATE_MODE == "uncorrected":
+        aligned = (site_class["p_one_tailed"] < GATE_ALPHA).fillna(False)
+    else:  # "fdr"
+        aligned = site_class.get(
+            "fdr_sig_one_tailed", pd.Series(False, index=site_class.index)
+        ).fillna(False).astype(bool)
+
+    is_type1 = site_class["computed_site_type"] == "type1_acoustic_only"
+    site_class["early_response_class"] = np.select(
+        [aligned, is_type1 & ~aligned],
+        ["type2_aligned", "acoustic_only"],
+        default="neither",
+    )
+
+    counts = site_class["early_response_class"].value_counts()
+    print(f"early_response_class (gate_mode={GATE_MODE}, gate_alpha={GATE_ALPHA}):")
+    for cls_name in ["type2_aligned", "acoustic_only", "neither"]:
+        print(f"  {cls_name}: {int(counts.get(cls_name, 0))}")
+
+    site_class.to_parquet(OUT_DIR / "site_class.parquet", index=False)
+    print(f"Saved site_class.parquet  ({len(site_class)} rows)")
+
+# %% [markdown]
 # ## Save all-sites CSV
 
 # %%
 if len(valid_df) > 0:
     all_sites_out = valid_df.copy()
+    if len(site_class) > 0:
+        all_sites_out = all_sites_out.merge(
+            site_class[SITE_KEYS + ["computed_site_type", "early_response_class"]],
+            on=SITE_KEYS, how="left",
+        )
     all_sites_out.to_csv(OUT_DIR / "all_sites.csv", index=False)
     print(f"Saved all_sites.csv  ({len(all_sites_out)} rows)")
 
