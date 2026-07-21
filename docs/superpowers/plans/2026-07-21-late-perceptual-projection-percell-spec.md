@@ -1,10 +1,13 @@
 # Spec: Late-window perceptual projection — per-cell statistic
 
-**Status:** ready to execute (design settled via grilling 2026-07-21, issue #20)
-**Scope:** the **per-cell half** of the late-projection spec only — π_cell, its
-window rule, normalization, and per-cell null. Does **not** decide the population
-test, the pass threshold, or *which* â-population is claim-bearing — those are the
-pre-run criterion ticket (#21). Map: #19.
+**Status:** ready to execute (per-cell design settled via grilling 2026-07-21,
+issue #20; population test + pre-registered pass criterion added 2026-07-21,
+issue #21)
+**Scope:** the **full late-projection design** — the per-cell statistic (π_cell,
+window rule, normalization, per-cell null; §§1–7, issue #20) **and** the
+population test + pre-registered pass criterion (§§8–9, issue #21). The pass
+criterion is **confirmatory: locked before the prod run** (#22), so the go/no-go
+is mechanical. Map: #19.
 **Pipeline:** `causal46_joined`. New notebook (`late_perceptual_projection` +
 aggregate); reuses `_within_completion` primitives and the `b4_bootstrap`
 searchlight windows. Prod-only inputs (see §7).
@@ -198,7 +201,108 @@ null correction.
 
 ---
 
-## 8. Recorded alternative — searchlight π-search (1b), the fallback
+## 8. Population test + pre-registered pass criterion
+
+Decided in issue #21, **locked 2026-07-21 via grilling** — a *confirmatory*
+pre-registration fixed **before** Jon runs the build on prod (#22), so the paper
+go/no-go is mechanical: plug the prod `p_cpo` into §8.4 and the answer falls out
+with no post-hoc judgment. Population statistic ported from the early aggregate's
+**Test 2** (CPO count-vs-permutation-null); FDR (Test 1) kept only as a reported
+reference.
+
+### 8.1 Claim-bearing population — â-reliable cells
+
+The tested universe is the **â-reliable** cells only: cells with a non-empty
+reliable run `R` (β_unamb CI-excludes-0), i.e. exactly the cells where
+`π_anchored` is non-NaN (~34/187 in the stage-1 preview). The **claim statistic is
+`π_anchored`** (§5). The broader â-*estimable* set (reachable only via `π_peak`) is
+**not** tested — it stays a diagnostic (§5.1).
+
+Rationale: the paper claim is reactivation *of the acoustic tuning*, interpretable
+only where a real tuning direction exists — a significant ⟨â_unit, p⟩ onto a noise
+â is "percept projected onto noise," not reactivation. The per-cell null is
+calibrated even at low ‖â‖ (§6, â_unit held fixed), so restricting to â-reliable
+cells is an **interpretive** choice, not a false-positive fix. This is why the
+tested N is small (~34) and the honest same-sign preview there is the harsher
+`9/77`-flavored one, not `49/77`.
+
+**Mutable design choice:** the population/statistic pairing (â-reliable ×
+π_anchored) is flagged **revisitable in a later effort**; it is **locked for this
+confirmatory run only**. A future re-scope could revisit the â-estimable / π_peak
+framing.
+
+### 8.2 Aggregation unit — per-cell
+
+The population unit is the **cell** = (site × word_end); **each word end is an
+independent unit**. A cell passing on only one word end is the word-end
+**interaction signature**, not noise (the late window is word-end-specific by
+construction). Per-site collapse and word-end asymmetry are **reported
+descriptively** — how many sites are â-reliable at both ends; of those, how many
+pass at one vs both — and are **never** folded into the bar.
+
+### 8.3 Population statistic — CPO count-vs-null
+
+Ported from the early aggregate Test 2, over the â-reliable cells:
+
+- **Observed** = number of cells passing the per-cell gate: uncorrected
+  **one-tailed** (`π ≥ π_obs`) permutation p **< 0.05**.
+- **Matched permutation null:** for each of the `n_perms` replicates, count the
+  cells whose `π_null` exceeds that cell's own 95th-percentile null threshold →
+  the null distribution of the count.
+- **`p_cpo`** = fraction of null counts ≥ the observed count.
+- **Reported references (non-gating):** Binomial(`N_reliable`, 0.05) analytic
+  reference (null count expectation ≈ **1.7** at N≈34) and BH-FDR survivors on the
+  per-cell one-tailed p (the conservative floor — expected to collapse to a
+  handful at this family size, as early did).
+
+### 8.4 Pre-registered go/no-go rule (LOCKED)
+
+> **GO** iff the CPO test is significant — **`p_cpo < 0.05`**, one-tailed
+> (**π > 0**, sign-aligned reactivation), over the **â-reliable** cells.
+> **No minimum-count floor.** Binomial and BH-FDR are reported references only;
+> **neither gates.**
+>
+> **NO-GO** = **`p_cpo ≥ 0.05`** → the integration section **retreats to negative
+> claims only** (map #19's fallback): *not* lexicality / mismatch / surprisal;
+> *not* an extended acoustic-or-perceptual response to the word-initial sound.
+
+A wrong-sign excess (`π < 0`) is **never** a GO — the tail is one-tailed by
+construction (ADR-0002). **No free parameters remain** (population, statistic,
+tail, threshold, `n_perms = 10000`, per-cell gate at p < 0.05 all fixed above and
+in §§5–6); NO-GO is exactly the negation of GO.
+
+### 8.5 Validation-against-labels — not in the bar
+
+The go/no-go is **purely** the CPO test on `π_anchored`. Any cross-tab against the
+late manual annotations (the analogue of the early aggregate's **Test 3**) is a
+**post-hoc diagnostic** — reported but non-gating, **"for now" (mutable)** — because
+the late manual vocabulary was not constructed as ground truth for *this*
+same-word-end reactivation statistic.
+
+---
+
+## 9. Claim licensing (the reconciliation hinge)
+
+A GO asserts **exactly and only**: *context-gated reactivation of the **perceptual**
+code along the acoustic-tuning direction* — **mechanism-1 (reactivation)**, in the
+narrow tuning-**direction** sense. The licensing chain:
+
+1. **p is within-completion** ⇒ the late percept gap reflects the *reported
+   percept*, not acoustic differences between -esolate and -ecessary.
+2. **π = ⟨â_unit, p⟩** projects that gap onto the **same word-end's own**
+   unambiguous /d/–/n/ tuning direction ⇒ a positive π means the late percept gap
+   **re-expresses that word-end's own acoustic-tuning axis**.
+3. ∴ positive π licenses reactivation of the *perceptual* code **along the
+   acoustic-tuning direction** — nothing broader: **not** "same full multivariate
+   code," **not** "single population."
+
+The **reconciliation** with the standing mechanism framing (transfer bimodality;
+local disambiguation) is **deferred to the write-up** — it graduates on GO from
+map #19's *Not-yet-specified*, and is **not** pre-registered here.
+
+---
+
+## 10. Recorded alternative — searchlight π-search (1b), the fallback
 
 If 1c under-detects (e.g. real alignments sit off the â peak, or the reliable-run
 localization is too conservative), revert to a **max-over-windows π-search**:
@@ -212,11 +316,11 @@ adopting it is a re-opened design decision, recorded here so the revert is cheap
 
 ---
 
-## 9. Non-goals (this ticket)
+## 11. Non-goals (this spec)
 
-- Population test / pass criterion / operating point → **#21**.
-- Which â-population is claim-bearing → **#21** (this ticket exports the
-  reliability measure; it does not gate on it beyond the mechanical NaN).
 - The build, the prod run, and recording numbers → **#22**.
-- The paper-claim go/no-go → **#23**.
+- The paper-claim go/no-go itself (mechanically *applying* §8.4 to the prod
+  result) → **#23**.
+- The write-up + reconciliation with the mechanism framing → map #19
+  *Not-yet-specified*, graduates on GO.
 - Downstream pipeline rewiring on a GO → out of scope (map #19).

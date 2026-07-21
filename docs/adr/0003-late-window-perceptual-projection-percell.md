@@ -56,6 +56,29 @@ argmax|â| window, reliability-ignored — diagnostic, not the claim) and the
 â-reliability descriptors (`n_reliable_windows`, run span, peak β_unamb median +
 CI, ‖â_raw‖).
 
+**Population test + pre-registered pass criterion (#21, locked 2026-07-21 — a
+confirmatory pre-registration fixed before the prod run #22).** Claim-bearing
+population = the **â-reliable** cells (non-empty reliable run; `π_anchored`
+non-NaN, ~34/187), claim statistic = **`π_anchored`**; the â-estimable/`π_peak`
+set stays diagnostic. Aggregation unit = the **cell** (site × word_end), each word
+end independent; per-site / word-end-asymmetry reported descriptively only.
+Population statistic = **CPO count-vs-permutation-null** (early aggregate Test 2):
+observed = cells passing the per-cell one-tailed p < 0.05 gate; matched
+permutation null of that count; `p_cpo` = fraction of null counts ≥ observed.
+
+**Pre-registered rule:** **GO** iff `p_cpo < 0.05`, one-tailed (π > 0) — no
+minimum-count floor; Binomial(N, 0.05) and BH-FDR reported as references, neither
+gates. **NO-GO** = `p_cpo ≥ 0.05` → integration section retreats to negative
+claims only. A wrong-sign (π < 0) excess is never a GO. The population/statistic
+pairing is a **mutable design choice**, locked for this run only.
+
+**Claim licensing:** a positive π licenses *only* context-gated reactivation of
+the **perceptual** code **along the acoustic-tuning direction** (mechanism-1,
+tuning-direction sense) — via (1) within-completion p ⇒ percept-not-acoustic and
+(2) ⟨â_unit, p⟩ ⇒ re-expresses the word-end's own tuning axis — **not** "same full
+code" or "single population." Reconciliation with the mechanism framing is
+deferred to the write-up (map #19), not decided here.
+
 ## Why
 
 - **Localizes without breaking independence.** â-anchoring uses only unambiguous
@@ -76,11 +99,12 @@ CI, ‖â_raw‖).
 
 ## Scope — what this decides and what it does not
 
-Decides the **per-cell statistic** only: the window rule, â normalization, p error
-model, and per-cell null. Does **not** decide the population test, the operating
-point (tail / threshold / FDR vs count-vs-null), or which â-population is
-claim-bearing — those are issue #21, and this ADR deliberately exports the
-reliability measure as *data* rather than gating on it.
+Decides the **per-cell statistic** (window rule, â normalization, p error model,
+per-cell null; #20) **and** the **population test + pre-registered pass criterion**
+(claim-bearing population, aggregation unit, CPO statistic, go/no-go rule, claim
+licensing; #21). Does **not** decide the build/prod run (#22), the mechanical
+*application* of the criterion to the prod result (#23), or the write-up +
+reconciliation with the mechanism framing (map #19, graduates on GO).
 
 ## Considered alternatives
 
