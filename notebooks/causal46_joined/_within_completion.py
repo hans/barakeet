@@ -433,6 +433,30 @@ def bootstrap_endpoint_beta(
     return out
 
 
+def beta_summary(arr, ci_low: float = 2.5, ci_high: float = 97.5) -> dict:
+    """Summarize a bootstrap slope array: median, CI, reliability, sign.
+
+    Shared by `strong_generator_demo` (single cell) and
+    `strong_generator_scan` (all cells) so both compute the β readout the same
+    way. `reliable` = the percentile CI excludes zero; `sign` is the sign of the
+    median (0 if exactly zero). NaN/inf replicates are dropped first; an empty
+    array yields all-NaN / reliable=False.
+    """
+    a = np.asarray(arr, dtype=float)
+    a = a[np.isfinite(a)]
+    if a.size == 0:
+        return dict(med=np.nan, ci_low=np.nan, ci_high=np.nan,
+                    reliable=False, sign=0, n=0)
+    med = float(np.median(a))
+    lo, hi = (float(x) for x in np.percentile(a, [ci_low, ci_high]))
+    return dict(
+        med=med, ci_low=lo, ci_high=hi,
+        reliable=bool(lo > 0 or hi < 0),
+        sign=int(np.sign(med)),
+        n=int(a.size),
+    )
+
+
 def load_behav_decoding_scores(full_path, hga_path=None):
     """Load and aggregate behavioral decoding scores from causal46_joined scores.parquet files.
 
