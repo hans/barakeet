@@ -1303,6 +1303,48 @@ rule joined_late_perceptual_significance:
         )
 
 
+rule joined_late_perceptual_significance_report:
+    """Diagnostics for the #10 TFCE late-gate (plan Step 6).
+
+    Read-only over site_results.parquet plus a re-derivation from the raw
+    bootstrap curves for the E/H param-sensitivity panel (D3, pre-registered,
+    previously never run): population headline recap, integral-vs-TFCE
+    agreement (is the gate a TFCE-specific artifact?), E/H sensitivity grid,
+    and manual `behav @late` calibration (2x2 table, Mann-Whitney/KS
+    separation, named disagreement cells). Never re-gates anything -- a leaf
+    downstream of joined_late_perceptual_significance.
+    """
+    input:
+        site_results = "outputs/causal46_joined/late_perceptual_significance/site_results.parquet",
+        b4_bootstrap  = "outputs/causal46_joined/t_tests/b4_bootstrap.parquet",
+        b4_per_cell   = "outputs/causal46_joined/t_tests/b4_per_cell.parquet",
+        notebook      = "notebooks/causal46_joined/late_perceptual_significance_report.py",
+        helper        = "notebooks/causal46_joined/_windows.py",
+
+    output:
+        notebook       = "outputs/causal46_joined/late_perceptual_significance_report/notebook.ipynb",
+        sensitivity    = "outputs/causal46_joined/late_perceptual_significance_report/sensitivity_grid.csv",
+        disagreements  = "outputs/causal46_joined/late_perceptual_significance_report/calibration_disagreements.csv",
+        summary_pdf    = "outputs/causal46_joined/late_perceptual_significance_report/report_summary.pdf",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                site_results_path=str(input.site_results),
+                b4_bootstrap_path=str(input.b4_bootstrap),
+                b4_per_cell_path=str(input.b4_per_cell),
+                outdir=str(outdir),
+                gate_alpha=0.05,
+                binom_null_p=0.05,
+                sensitivity_E_values=[0.5, 1.0],
+                sensitivity_H_values=[1.0, 2.0],
+            ),
+        )
+
+
 rule joined_behavioral_discriminative_windows:
     """Infer behaviorally-discriminative windows per B4 cell (pure post-processing).
 
@@ -1656,6 +1698,10 @@ rule causal46_joined_all:
         # Late within-completion perceptual significance (TFCE gate, #10) is an
         # input of behavioral_discriminative_windows (#11) and builds transitively.
         "outputs/causal46_joined/behavioral_discriminative_windows/b_windows.parquet",
+        # Report/diagnostics for the TFCE late-gate (plan Step 6): population
+        # headline recap, integral-vs-TFCE agreement, E/H sensitivity, manual
+        # behav@late calibration. Leaf -- doesn't feed back into the cascade.
+        "outputs/causal46_joined/late_perceptual_significance_report/report_summary.pdf",
 
         # Early perceptual windows: [t=0, phon_smax] behav @ac cells
         "outputs/causal46_joined/early_perceptual_windows/ep_windows.parquet",

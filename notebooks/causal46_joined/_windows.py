@@ -7,7 +7,10 @@ these helpers without duplication.
 """
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
+import polars as pl
 
 from src.models.significance import _tfce_1d
 
@@ -333,3 +336,109 @@ def late_cell_significance(
         "integral_emp_p": integral_emp_p,
         "splithalf_sign_agree": splithalf_sign_agree,
     }
+
+
+def extract_cell_curves(
+    b4_bootstrap: pl.DataFrame,
+    b4_per_cell: pl.DataFrame,
+    all_grid_windows: list[tuple[int, int]],
+    we_search_smax: dict[str, int | None],
+) -> dict[tuple, dict]:
+    """Per-cell candidate-window selection + curve extraction (plan Step 3).
+
+    Extracted from ``late_perceptual_significance.py`` so a second consumer
+    (the report notebook's param-sensitivity panel, which needs to rerun
+    `late_cell_significance` at several (E, H) without re-deriving candidate
+    windows each time) can share the exact same window-selection logic
+    instead of duplicating it.
+
+    Args:
+        b4_bootstrap: raw bootstrap replicate rows (``smin, smax, replicate,
+            mean_diff_raw, mean_diff_aligned_null`` + cell key columns).
+        b4_per_cell: one row per powered B4 cell, with ``phon_smin,
+            phon_smax`` (the acoustic boundary).
+        all_grid_windows: the full deduplicated, contiguous ``(smin, smax)``
+            grid (see `validate_contiguous_grid`).
+        we_search_smax: per-word-end post-acoustic search bound (D4),
+            ``smax <= we_search_smax[word_end]``. A missing/`None` entry
+            means no upper bound.
+
+    Returns:
+        Dict keyed by ``(subject, electrode_idx, phoneme_pair, word_end)``,
+        one entry per row of ``b4_per_cell``, each a dict with:
+            status: one of ``"ok"``, ``"missing"`` (no bootstrap rows for
+                this cell), ``"no_candidates"`` (no in-window smin present),
+                ``"tied"`` (``preferred is None`` — D2, no usable null).
+            phon_smin, phon_smax, search_smin, search_smax, n_windows.
+            rep_curves, null_curves: shape ``(R, n_windows)`` each, present
+                only when ``status == "ok"``; ``None`` otherwise.
+    """
+    cell_boot_partitioned: dict[tuple, pl.DataFrame] = {}
+    for row in b4_per_cell.iter_rows(named=True):
+        key = (row["subject"], row["electrode_idx"], row["phoneme_pair"], row["word_end"])
+        if key not in cell_boot_partitioned:
+            cell_boot_partitioned[key] = b4_bootstrap.filter(
+                (pl.col("subject") == key[0]) &
+                (pl.col("electrode_idx") == key[1]) &
+                (pl.col("phoneme_pair") == key[2]) &
+                (pl.col("word_end") == key[3])
+            )
+
+    out: dict[tuple, dict] = {}
+    for cell_row in b4_per_cell.iter_rows(named=True):
+        subj = cell_row["subject"]
+        eidx = int(cell_row["electrode_idx"])
+        pp = cell_row["phoneme_pair"]
+        we = cell_row["word_end"]
+        phon_smin = int(cell_row["phon_smin"])
+        phon_smax = int(cell_row["phon_smax"])
+        key = (subj, eidx, pp, we)
+
+        we_smax = we_search_smax.get(we)
+        base = {
+            "phon_smin": phon_smin, "phon_smax": phon_smax,
+            "search_smin": phon_smax, "search_smax": we_smax,
+            "n_windows": 0, "rep_curves": None, "null_curves": None,
+        }
+
+        cell_boot = cell_boot_partitioned.get(key)
+        if cell_boot is None or cell_boot.height == 0:
+            warnings.warn(f"No bootstrap data for {subj} e{eidx} {pp} {we}")
+            out[key] = {**base, "status": "missing"}
+            continue
+
+        cand_windows = [
+            (smin, smax) for smin, smax in all_grid_windows
+            if smin >= phon_smax and (we_smax is None or smax <= we_smax)
+        ]
+        if cand_windows:
+            cand_smins = [smin for smin, _ in cand_windows]
+            cand_boot = cell_boot.filter(pl.col("smin").is_in(cand_smins))
+            present_smins = set(cand_boot["smin"].unique().to_list())
+            cand_windows = [(smin, smax) for smin, smax in cand_windows if smin in present_smins]
+        if not cand_windows:
+            out[key] = {**base, "status": "no_candidates"}
+            continue
+
+        n_windows = len(cand_windows)
+        base["n_windows"] = n_windows
+        cand_boot = cand_boot.filter(pl.col("smin").is_in([smin for smin, _ in cand_windows]))
+        R = int(cand_boot["replicate"].max()) + 1
+
+        # mean_diff_aligned_null is written as float("nan") (not a polars null) for
+        # tied cells (t_tests.py bootstrap_cell, D2) — to_numpy() maps both to NaN.
+        is_tied = bool(np.all(np.isnan(cand_boot["mean_diff_aligned_null"].to_numpy())))
+        if is_tied:
+            out[key] = {**base, "status": "tied"}
+            continue
+
+        context = f"{subj} e{eidx} {pp} {we}"
+        assert_coherent_null_replicates(cand_boot.height, R, n_windows, context=context)
+
+        sorted_boot = cand_boot.sort(["replicate", "smin"])
+        rep_curves = sorted_boot["mean_diff_raw"].to_numpy().reshape(R, n_windows)
+        null_curves = sorted_boot["mean_diff_aligned_null"].to_numpy().reshape(R, n_windows)
+
+        out[key] = {**base, "status": "ok", "rep_curves": rep_curves, "null_curves": null_curves}
+
+    return out

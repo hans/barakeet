@@ -70,7 +70,6 @@ tfce_H = 2.0
 
 # %%
 import sys
-import warnings
 from pathlib import Path
 
 import matplotlib
@@ -87,7 +86,7 @@ from src.viz_paper import epoch_sfreq, epoch_tmin
 
 sys.path.insert(0, str(Path(".").resolve() / "notebooks" / "causal46_joined"))
 from _windows import (  # noqa: E402
-    assert_coherent_null_replicates,
+    extract_cell_curves,
     late_cell_significance,
     validate_contiguous_grid,
 )
@@ -151,23 +150,15 @@ WE_SEARCH_SMAX: dict[str, int] = {
 }
 print(f"word-end search_smax (samples): {WE_SEARCH_SMAX}")
 
-# %%
-# Pre-index b4_bootstrap by cell for fast per-cell slicing.
-_boot_partitioned: dict[tuple, pl.DataFrame] = {}
-for row in b4_per_cell.iter_rows(named=True):
-    key = (row["subject"], row["electrode_idx"], row["phoneme_pair"], row["word_end"])
-    if key not in _boot_partitioned:
-        _boot_partitioned[key] = b4_bootstrap.filter(
-            (pl.col("subject") == key[0]) &
-            (pl.col("electrode_idx") == key[1]) &
-            (pl.col("phoneme_pair") == key[2]) &
-            (pl.col("word_end") == key[3])
-        )
-
 # %% [markdown]
 # ## Per-cell TFCE gate
+#
+# Candidate-window selection + curve extraction is shared with the report
+# notebook's param-sensitivity panel via `_windows.extract_cell_curves`.
 
 # %%
+cell_curves = extract_cell_curves(b4_bootstrap, b4_per_cell, all_grid_windows, WE_SEARCH_SMAX)
+
 rows: list[dict] = []
 n_no_candidates = 0
 n_tied = 0
@@ -178,69 +169,35 @@ for cell_row in b4_per_cell.iter_rows(named=True):
     eidx = int(cell_row["electrode_idx"])
     pp = cell_row["phoneme_pair"]
     we = cell_row["word_end"]
-    phon_smin = int(cell_row["phon_smin"])
-    phon_smax = int(cell_row["phon_smax"])
+    key = (subj, eidx, pp, we)
+    c = cell_curves[key]
 
     base_row = {
         "subject": subj, "electrode_idx": eidx, "phoneme_pair": pp, "word_end": we,
-        "phon_smin": phon_smin, "phon_smax": phon_smax,
-        "search_smin": phon_smax, "search_smax": WE_SEARCH_SMAX.get(we),
-        "n_windows": 0,
+        "phon_smin": c["phon_smin"], "phon_smax": c["phon_smax"],
+        "search_smin": c["search_smin"], "search_smax": c["search_smax"],
+        "n_windows": c["n_windows"],
         "tfce_peak": None, "tfce_max_abs": None, "tfce_emp_p": None,
         "tfce_gate_pass": False,
         "integral_stat": None, "integral_emp_p": None,
         "splithalf_sign_agree": None,
-        "is_tied": False,
+        "is_tied": c["status"] == "tied",
     }
 
-    cell_boot = _boot_partitioned.get((subj, eidx, pp, we))
-    if cell_boot is None or cell_boot.height == 0:
-        warnings.warn(f"No bootstrap data for {subj} e{eidx} {pp} {we}")
+    if c["status"] == "missing":
         n_missing += 1
         rows.append(base_row)
         continue
-
-    we_search_smax = WE_SEARCH_SMAX.get(we)
-    cand_windows = [
-        (smin, smax) for smin, smax in all_grid_windows
-        if smin >= phon_smax and (we_search_smax is None or smax <= we_search_smax)
-    ]
-    if not cand_windows:
+    if c["status"] == "no_candidates":
         n_no_candidates += 1
         rows.append(base_row)
         continue
-
-    cand_smins = [smin for smin, _ in cand_windows]
-    cand_boot = cell_boot.filter(pl.col("smin").is_in(cand_smins))
-    # Keep only windows that actually have data for this cell.
-    present_smins = set(cand_boot["smin"].unique().to_list())
-    cand_windows = [(smin, smax) for smin, smax in cand_windows if smin in present_smins]
-    if not cand_windows:
-        n_no_candidates += 1
-        rows.append(base_row)
-        continue
-
-    n_windows = len(cand_windows)
-    base_row["n_windows"] = n_windows
-    R = int(cand_boot["replicate"].max()) + 1
-
-    # mean_diff_aligned_null is written as float("nan") (not a polars null) for
-    # tied cells (t_tests.py bootstrap_cell, D2) — to_numpy() maps both to NaN.
-    is_tied = bool(np.all(np.isnan(cand_boot["mean_diff_aligned_null"].to_numpy())))
-    base_row["is_tied"] = is_tied
-    if is_tied:
+    if c["status"] == "tied":
         n_tied += 1
         rows.append(base_row)
         continue
 
-    context = f"{subj} e{eidx} {pp} {we}"
-    assert_coherent_null_replicates(cand_boot.height, R, n_windows, context=context)
-
-    sorted_boot = cand_boot.sort(["replicate", "smin"])
-    rep_curves = sorted_boot["mean_diff_raw"].to_numpy().reshape(R, n_windows)
-    null_curves = sorted_boot["mean_diff_aligned_null"].to_numpy().reshape(R, n_windows)
-
-    sig = late_cell_significance(rep_curves, null_curves, E=TFCE_E, H=TFCE_H)
+    sig = late_cell_significance(c["rep_curves"], c["null_curves"], E=TFCE_E, H=TFCE_H)
 
     base_row.update({
         "tfce_peak": sig["tfce_peak"],

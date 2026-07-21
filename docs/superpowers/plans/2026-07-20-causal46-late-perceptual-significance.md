@@ -307,12 +307,36 @@ trial halves), reported, never gating.
       locally) — a pre-existing container limitation unrelated to this change,
       not yet re-verified as a full smoke run on prod.
 
-### Step 6 — Report — NOT STARTED
-- [ ] Population headline (count-vs-null p, BH-FDR survivors), run-length histogram,
-      param-sensitivity panel, integral-vs-TFCE agreement, 2×2 calibration table +
-      named disagreement cells.
+### Step 6 — Report — PARTIALLY DONE (2026-07-21)
+- [x] Population headline (count-vs-null p, BH-FDR survivors), param-sensitivity
+      panel, integral-vs-TFCE agreement, 2×2 calibration table + named
+      disagreement cells. New notebook `late_perceptual_significance_report.py`
+      + Snakefile rule `joined_late_perceptual_significance_report` (leaf,
+      downstream of `joined_late_perceptual_significance`), consuming
+      `site_results.parquet` read-only plus a re-derivation from the raw
+      bootstrap curves (via the new shared `_windows.extract_cell_curves`
+      helper, also used to refactor `late_perceptual_significance.py`'s
+      per-cell loop without changing its output — same 24 pre-existing tests
+      still green, plus 3 new `extract_cell_curves` unit tests and a new
+      end-to-end report-notebook test on synthetic fixtures, 28/28 total).
+      Verified via `py_compile` and `snakemake --list`; **not yet run against
+      real data as this notebook** — an earlier ad hoc (non-notebook) version
+      of this same analysis was run once b4_bootstrap.parquet was synced
+      (6/187 TFCE gate pass, Binomial(187,0.05) p=0.91 not significant;
+      integral-stat corroborates at 9/187, Spearman ρ=0.74 vs TFCE p;
+      E/H sensitivity grid stable at 6-8/187 across all 4 pre-registered
+      combinations; manual-label calibration highly significant, Mann-Whitney
+      p=3×10⁻¹⁸, zero false positives among 103 non-tagged cells) — this
+      notebook operationalizes that analysis so it reproduces on prod.
+- [ ] Run-length histogram — not implemented (wasn't part of the ad hoc
+      analysis this notebook operationalizes; would need a separate pass over
+      `b_windows.parquet`'s significant runs, mirroring D3's original
+      empirical-justification analysis over the 84 manual cells).
 - [ ] Draft **ADR-0003** recording the late-gate move (mirror ADR-0001 structure:
       what moved, why, consequences, the manual set retained as calibration only).
+      Blocked on deciding how to interpret the near-null population headline
+      (see D5) — worth a decision before writing the ADR's "consequences"
+      section.
 
 ---
 

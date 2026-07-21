@@ -11,11 +11,13 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import polars as pl
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "notebooks" / "causal46_joined"))
 from _windows import (  # noqa: E402
     assert_coherent_null_replicates,
+    extract_cell_curves,
     late_cell_significance,
     max_tfce_null,
     tfce_enhance,
@@ -288,3 +290,101 @@ def test_validate_contiguous_grid_raises_on_non_uniform_width():
 def test_validate_contiguous_grid_raises_on_empty():
     with pytest.raises(AssertionError, match="No windows"):
         validate_contiguous_grid([])
+
+
+# ---------------------------------------------------------------------------
+# extract_cell_curves
+# ---------------------------------------------------------------------------
+
+GRID = [(0, 10), (10, 20), (20, 30)]
+
+
+def _boot_rows(subject, eidx, pp, we, windows, R, rng, *, tied=False):
+    rows = []
+    for r in range(R):
+        for smin, smax in windows:
+            rows.append({
+                "subject": subject, "electrode_idx": eidx, "phoneme_pair": pp, "word_end": we,
+                "replicate": r, "smin": smin, "smax": smax,
+                "mean_diff_raw": float(rng.normal(0, 1)),
+                "mean_diff_aligned_null": float("nan") if tied else float(rng.normal(0, 1)),
+            })
+    return rows
+
+
+def _per_cell_row(subject, eidx, pp, we, phon_smax):
+    return {
+        "subject": subject, "electrode_idx": eidx, "phoneme_pair": pp, "word_end": we,
+        "phon_smin": 0, "phon_smax": phon_smax,
+    }
+
+
+def test_extract_cell_curves_four_statuses():
+    """Four cells covering every branch: ok, no_candidates, missing, tied."""
+    rng = np.random.default_rng(0)
+    per_cell_rows = [
+        _per_cell_row("S1", 1, "dn", "w1", phon_smax=10),   # ok: (10,20),(20,30)
+        _per_cell_row("S1", 2, "dn", "w1", phon_smax=25),   # no_candidates: grid maxes at smin=20
+        _per_cell_row("S1", 3, "dn", "w1", phon_smax=0),    # missing: no bootstrap rows at all
+        _per_cell_row("S1", 4, "dn", "w1", phon_smax=10),   # tied: null all-NaN
+    ]
+    boot_rows = []
+    boot_rows += _boot_rows("S1", 1, "dn", "w1", [(10, 20), (20, 30)], R=4, rng=rng)
+    boot_rows += _boot_rows("S1", 2, "dn", "w1", [(0, 10)], R=4, rng=rng)  # present but out of range
+    boot_rows += _boot_rows("S1", 4, "dn", "w1", [(10, 20), (20, 30)], R=4, rng=rng, tied=True)
+
+    b4_bootstrap = pl.DataFrame(boot_rows)
+    b4_per_cell = pl.DataFrame(per_cell_rows)
+
+    out = extract_cell_curves(b4_bootstrap, b4_per_cell, GRID, we_search_smax={"w1": None})
+
+    ok = out[("S1", 1, "dn", "w1")]
+    assert ok["status"] == "ok"
+    assert ok["n_windows"] == 2
+    assert ok["rep_curves"].shape == (4, 2)
+    assert ok["null_curves"].shape == (4, 2)
+    assert ok["search_smin"] == 10
+
+    no_cand = out[("S1", 2, "dn", "w1")]
+    assert no_cand["status"] == "no_candidates"
+    assert no_cand["rep_curves"] is None
+
+    missing = out[("S1", 3, "dn", "w1")]
+    assert missing["status"] == "missing"
+    assert missing["rep_curves"] is None
+
+    tied = out[("S1", 4, "dn", "w1")]
+    assert tied["status"] == "tied"
+    assert tied["rep_curves"] is None
+
+
+def test_extract_cell_curves_respects_we_search_smax_bound():
+    """A word-end search bound should exclude windows beyond it (D4)."""
+    rng = np.random.default_rng(1)
+    per_cell_rows = [_per_cell_row("S1", 1, "dn", "w1", phon_smax=0)]
+    boot_rows = _boot_rows("S1", 1, "dn", "w1", GRID, R=3, rng=rng)
+    b4_bootstrap = pl.DataFrame(boot_rows)
+    b4_per_cell = pl.DataFrame(per_cell_rows)
+
+    out = extract_cell_curves(b4_bootstrap, b4_per_cell, GRID, we_search_smax={"w1": 20})
+
+    cell = out[("S1", 1, "dn", "w1")]
+    assert cell["status"] == "ok"
+    assert cell["n_windows"] == 2  # (0,10) and (10,20); (20,30) excluded (smax > 20)
+    assert cell["search_smax"] == 20
+
+
+def test_extract_cell_curves_feeds_late_cell_significance_directly():
+    """The extracted curves should be usable as-is by late_cell_significance
+    (integration between the two shared helpers)."""
+    rng = np.random.default_rng(2)
+    per_cell_rows = [_per_cell_row("S1", 1, "dn", "w1", phon_smax=10)]
+    boot_rows = _boot_rows("S1", 1, "dn", "w1", [(10, 20), (20, 30)], R=50, rng=rng)
+    b4_bootstrap = pl.DataFrame(boot_rows)
+    b4_per_cell = pl.DataFrame(per_cell_rows)
+
+    out = extract_cell_curves(b4_bootstrap, b4_per_cell, GRID, we_search_smax={"w1": None})
+    cell = out[("S1", 1, "dn", "w1")]
+
+    sig = late_cell_significance(cell["rep_curves"], cell["null_curves"])
+    assert 0.0 < sig["tfce_emp_p"] <= 1.0
