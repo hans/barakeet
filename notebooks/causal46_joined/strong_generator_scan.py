@@ -254,29 +254,59 @@ print(f"\nwrote {scan.height} rows → {out_path}")
 # In `peak_beta_amb` mode there is exactly one row per cell.
 
 # %%
+from math import comb  # noqa: E402
+
+
+def binom_upper_p(k: int, n: int, p: float = 0.5) -> float:
+    """P(X ≥ k) for X ~ Binomial(n, p)."""
+    if n <= 0:
+        return float("nan")
+    return sum(comb(n, j) * p**j * (1 - p) ** (n - j) for j in range(k, n + 1))
+
+
 if scan.height == 0:
     print("no rows — check WINDOW_MODE / LATE_ONLY / data availability")
 else:
     n_cells = scan.height
-    n_a_hat = int(scan["beta_unamb_reliable"].sum())          # â exists (late, per word end)
     n_estimable = int(scan["beta_unamb_estimable"].sum())     # enough endpoint trials to estimate â
-    n_p = int(scan["beta_amb_reliable"].sum())                # reliable late percept slope (optimistic)
-    n_same = int(scan["same_sign"].sum())                     # projection-pass proxy (unbiased sign)
-    n_pass = int((scan["beta_amb_reliable"] & scan["beta_unamb_reliable"]
-                  & scan["same_sign"]).sum())                 # both reliable + aligned
+    n_a_hat = int(scan["beta_unamb_reliable"].sum())          # â exists (late, per word end)
+    n_p = int(scan["beta_amb_reliable"].sum())                # reliable late percept slope
 
-    # naive population null on sign agreement: under H0 (â ⟂ p), P(same sign)=0.5.
-    # A within-step label-permutation of the percept split is the principled CPO
-    # null (deferred to the method spec / issue #17); this binomial is a first cut.
-    from math import comb
-    base = int((scan["beta_amb_sign"] != 0).sum())  # cells with a defined β_amb sign
-    binom_p = (sum(comb(base, k) for k in range(n_same, base + 1)) / 2**base
-               if base > 0 else float("nan"))
+    # ── HEADLINE: sign agreement within the INTEGRATION-RESPONSE population ──
+    # The go/no-go (issue #17) is about the cells that HAVE a late integration
+    # response, not all 187 cells. A binomial over every cell is diluted by the
+    # ~majority of noise cells that sign-agree ~50% by construction and pins the
+    # test near-null regardless of the real effect — the wrong population.
+    #
+    # Non-circular conditioning: `beta_amb_reliable` is the ENTRY criterion
+    # ("is there an integration response here"), `beta_unamb_estimable` is a
+    # data-quantity gate, and the TESTED quantity is sign agreement — β_unamb is
+    # computed independently of β_amb, so its sign isn't set by the entry rule.
+    # ⚠ Caveat for #17: in WINDOW_MODE="peak_beta_amb" the window was picked by
+    # |β_amb|, so `beta_amb_reliable` as the SUBSET SELECTOR is optimistic (the
+    # clean version selects windows independently, e.g. from b_windows.parquet).
+    # The sign-agreement WITHIN the subset does not inherit that bias.
+    subset = scan.filter(pl.col("beta_amb_reliable") & pl.col("beta_unamb_estimable"))
+    n_sub = subset.height
+    n_same_sub = int(subset["same_sign"].sum())
+    p_sub = binom_upper_p(n_same_sub, n_sub)
+    n_pass = int((subset["beta_unamb_reliable"] & subset["same_sign"]).sum())
 
-    print(f"cells scanned                                    : {n_cells}")
-    print(f"â estimable (≥{MIN_ENDPOINT_N} endpoint trials/step)          : {n_estimable}")
-    print(f"â exists  (β_unamb reliable)  [NECESSARY cond.]  : {n_a_hat}")
-    print(f"p exists  (β_amb reliable)    [optimistic/circular]: {n_p}")
-    print(f"same-sign (projection-pass proxy, UNBIASED sign) : {n_same} / {base}")
-    print(f"    binomial(0.5) P(≥{n_same})                      : {binom_p:.4g}")
-    print(f"reactivation pass (both reliable + same sign)    : {n_pass}")
+    # diluted whole-population number, kept only for reference (NOT the go/no-go)
+    n_same_all = int(scan["same_sign"].sum())
+    base_all = int((scan["beta_amb_sign"] != 0).sum())
+    p_all = binom_upper_p(n_same_all, base_all)
+
+    print(f"cells scanned                                       : {n_cells}")
+    print(f"â estimable (≥{MIN_ENDPOINT_N} endpoint trials/step)             : {n_estimable}")
+    print(f"â exists  (β_unamb reliable)                        : {n_a_hat}")
+    print(f"integration responses (β_amb reliable & â estimable): {n_sub}   <- go/no-go population")
+    print("")
+    print(f"HEADLINE  same-sign within integration responses    : {n_same_sub} / {n_sub}")
+    print(f"          Binomial({n_sub}, 0.5)  P(≥{n_same_sub})               : {p_sub:.4g}")
+    print(f"          reactivation pass (+ β_unamb reliable)     : {n_pass} / {n_sub}")
+    print("")
+    print(f"(reference, diluted by noise cells — NOT the test)  : "
+          f"same-sign {n_same_all}/{base_all}, binom p {p_all:.4g}")
+    print("NOTE: Binomial(0.5) is a first-cut null; the principled CPO null is a "
+          "within-step label-permutation of the percept split (deferred to #17).")
