@@ -29,12 +29,17 @@ trial-selection.
 """
 from __future__ import annotations
 
+from math import comb
 from typing import Optional, Sequence
 
 import numpy as np
 import pandas as pd
 
-from _within_completion import per_step_class_counts
+from _within_completion import (
+    beta_summary,
+    bootstrap_endpoint_beta,
+    per_step_class_counts,
+)
 
 
 def get_qualifying_steps(
@@ -179,27 +184,44 @@ def permutation_null_pi(
 def anchored_reliable_run(
     beta_med: np.ndarray,
     reliable: np.ndarray,
+    mode: str = "reliable_max",
 ) -> Optional[tuple[int, int]]:
     """â-anchored contiguous reliable run (window-rule 1c, ADR-0003 §5).
 
     Given per-window median β_unamb (`beta_med`) and per-window reliability
     (`reliable`, bool: bootstrap CI excludes 0), both indexed over the ordered
-    late window grid:
+    late window grid, returns the maximal contiguous run of reliable windows
+    containing the anchor, as a half-open index range (lo, hi), or None.
 
-    1. Anchor at argmax|median β_unamb| over reliable windows.
-    2. Return the maximal contiguous run of reliable windows containing the
-       anchor, as a half-open index range (lo, hi) into the window list.
+    Two anchor readings — the spec (§5) is internally ambiguous and this is a
+    LOCKED-pre-reg ratification point (issue #22), so both are exposed:
 
-    Returns None if no window is reliable (no anchor, no run → π_anchored NaN).
+    - ``mode="reliable_max"`` (default): anchor = argmax|median β_unamb| **among
+      reliable windows only**. Any reliable window ⇒ non-empty run ⇒ non-NaN.
+      Matches the spec's population language ("NaN where no reliable window
+      exists", §5.5/§8.1: "cells with a non-empty reliable run R") and the stated
+      intent ("test the tuning where it reliably lives").
+    - ``mode="global_max"``: anchor = argmax|median β_unamb| over **all** windows
+      (spec §5 steps 2→3, literal); if that window is not itself reliable, no
+      reliable run contains it ⇒ None (cell excluded even if other windows are
+      reliable). "The *strongest* tuning window must itself be reliable."
+
+    The two agree exactly when the global-max-|β| window is reliable; they
+    diverge only when it isn't.
     """
     reliable = np.asarray(reliable, dtype=bool)
-    if not reliable.any():
-        return None
     abs_beta = np.abs(np.asarray(beta_med, dtype=float))
-    # Anchor: strongest tuning locus among reliable windows only.
-    masked = np.where(reliable, abs_beta, -np.inf)
-    anchor = int(np.argmax(masked))
-    # Expand contiguously while reliable.
+    if mode == "reliable_max":
+        if not reliable.any():
+            return None
+        masked = np.where(reliable, abs_beta, -np.inf)
+        anchor = int(np.argmax(masked))
+    elif mode == "global_max":
+        anchor = int(np.argmax(abs_beta))
+        if not reliable[anchor]:
+            return None
+    else:
+        raise ValueError(f"unknown anchor mode={mode!r}")
     lo = anchor
     while lo - 1 >= 0 and reliable[lo - 1]:
         lo -= 1
@@ -207,3 +229,152 @@ def anchored_reliable_run(
     while hi + 1 < len(reliable) and reliable[hi + 1]:
         hi += 1
     return lo, hi + 1  # half-open
+
+
+def compute_cell_projection(
+    hga: np.ndarray,
+    md_pp: pd.DataFrame,
+    *,
+    word_end: str,
+    group_col: str,
+    windows: Sequence[tuple[int, int]],
+    K: int,
+    n_perms: int,
+    rng: np.random.Generator,
+    r_unamb: int,
+    min_endpoint_n: int,
+    ci_low: float,
+    ci_high: float,
+    anchor_mode: str = "reliable_max",
+) -> tuple[dict, Optional[np.ndarray], Optional[np.ndarray]]:
+    """Full late per-cell projection statistic for one (word_end) cell.
+
+    Encapsulates the claim-critical per-cell path — â over the late grid,
+    reliability, the 1c anchored-run window rule, π_anchored + π_peak, and their
+    within-step label-permutation nulls (ADR-0003 §§3–6). Factored out of the
+    notebook loop so it is unit-testable on synthetic data (the notebook body is
+    otherwise unexercised in the dev container, where epochs are absent).
+
+    Returns ``(metrics, null_anchored, null_peak)``:
+      - ``metrics``: dict of every π + descriptor column + ``skip_reason``
+        (values NaN where undefined). Does not include cell-identity keys — the
+        caller merges those.
+      - ``null_anchored``: (n_perms,) π_anchored null, or None (not â-reliable).
+      - ``null_peak``: (n_perms,) π_peak null, or None (â not estimable / no p).
+    """
+    metric_keys = [
+        "pi_anchored", "pi_peak", "pi_anchored_raw",
+        "p_one_tailed", "p_two_tailed",
+        "p_one_tailed_peak", "p_two_tailed_peak",
+        "null_mean", "null_sd",
+        "n_reliable_windows", "run_smin", "run_smax", "run_len",
+        "peak_smin", "peak_smax", "peak_beta_unamb_median",
+        "peak_beta_unamb_ci_low", "peak_beta_unamb_ci_high",
+        "a_raw_norm", "N_ambiguous", "n_qualifying_steps",
+        "exhaustive", "perm_space", "min_p",
+    ]
+
+    def _nan_metrics(reason, extra=None):
+        m = {k: np.nan for k in metric_keys}
+        m["skip_reason"] = reason
+        if extra:
+            m.update(extra)
+        return m
+
+    if not windows:
+        return _nan_metrics("no_late_windows"), None, None
+
+    # ── â over the late grid (unambiguous endpoints, this word_end) ──────────
+    n_w = len(windows)
+    beta_med = np.full(n_w, np.nan)
+    beta_ci_lo = np.full(n_w, np.nan)
+    beta_ci_hi = np.full(n_w, np.nan)
+    reliable = np.zeros(n_w, dtype=bool)
+    for wi, (smin, smax) in enumerate(windows):
+        arr = bootstrap_endpoint_beta(
+            hga, md_pp, word_end=word_end, smin=smin, smax=smax,
+            R=r_unamb, min_n=min_endpoint_n,
+        )
+        if arr is None:
+            return _nan_metrics("a_not_estimable"), None, None
+        bs = beta_summary(arr, ci_low, ci_high)
+        beta_med[wi] = bs["med"]
+        beta_ci_lo[wi] = bs["ci_low"]
+        beta_ci_hi[wi] = bs["ci_high"]
+        reliable[wi] = bs["reliable"]
+
+    # ── p over the late grid (ambiguous, this word_end) ─────────────────────
+    per_step_filtered, min_classes, N_we = select_per_step_balanced(
+        md_pp, word_end=word_end, group_col=group_col, K=K
+    )
+    if per_step_filtered is None:
+        return _nan_metrics("no_ambiguous_cells",
+                            extra={"n_reliable_windows": int(reliable.sum())}), None, None
+
+    p_full = windowed_deterministic_p(hga, per_step_filtered, min_classes, N_we, windows)
+    cell_data = [
+        (by_cls[1], by_cls[0], min_classes[s] / N_we)
+        for s, by_cls in per_step_filtered.items()
+    ]
+
+    # ── π_peak (diagnostic): single argmax|β_unamb| window, reliability-ignored ─
+    peak_i = int(np.argmax(np.abs(beta_med)))
+    peak_sign = float(np.sign(beta_med[peak_i]))
+    a_unit_peak = np.array([peak_sign])
+    pi_peak = float(peak_sign * p_full[peak_i])
+    peak_window = windows[peak_i]
+    null_peak = permutation_null_pi(hga, cell_data, a_unit_peak, [peak_window], n_perms, rng)
+    p_one_peak = float(np.mean(null_peak >= pi_peak))
+    p_two_peak = float(np.mean(np.abs(null_peak) >= abs(pi_peak)))
+
+    peak_descr = dict(
+        peak_smin=peak_window[0], peak_smax=peak_window[1],
+        peak_beta_unamb_median=float(beta_med[peak_i]),
+        peak_beta_unamb_ci_low=float(beta_ci_lo[peak_i]),
+        peak_beta_unamb_ci_high=float(beta_ci_hi[peak_i]),
+        N_ambiguous=int(N_we), n_qualifying_steps=int(len(per_step_filtered)),
+        n_reliable_windows=int(reliable.sum()),
+        pi_peak=pi_peak, p_one_tailed_peak=p_one_peak, p_two_tailed_peak=p_two_peak,
+    )
+
+    # ── π_anchored (claim statistic): â-anchored contiguous reliable run ─────
+    run = anchored_reliable_run(beta_med, reliable, mode=anchor_mode)
+    if run is None:
+        m = {k: np.nan for k in metric_keys}
+        m.update(peak_descr)
+        m.update(dict(run_len=0, skip_reason="a_not_reliable"))
+        return m, None, null_peak
+
+    lo, hi = run
+    run_windows = list(windows[lo:hi])
+    a_raw_run = beta_med[lo:hi]
+    a_raw_norm = float(np.linalg.norm(a_raw_run))
+    a_unit = a_raw_run / a_raw_norm
+    p_run = p_full[lo:hi]
+
+    pi_anchored = float(np.dot(a_unit, p_run))
+    pi_anchored_raw = float(np.dot(a_raw_run, p_run))
+    null_pi = permutation_null_pi(hga, cell_data, a_unit, run_windows, n_perms, rng)
+    p_one = float(np.mean(null_pi >= pi_anchored))
+    p_two = float(np.mean(np.abs(null_pi) >= abs(pi_anchored)))
+
+    _space = 1
+    for idx1_c, idx0_c, _w in cell_data:
+        _space *= comb(len(idx1_c) + len(idx0_c), len(idx1_c))
+        if _space > n_perms * 100:
+            _space = n_perms * 100 + 1
+            break
+    perm_space = int(_space)
+
+    m = dict(peak_descr)
+    m.update(dict(
+        pi_anchored=pi_anchored, pi_anchored_raw=pi_anchored_raw,
+        p_one_tailed=p_one, p_two_tailed=p_two,
+        null_mean=float(null_pi.mean()), null_sd=float(null_pi.std()),
+        run_smin=int(run_windows[0][0]), run_smax=int(run_windows[-1][1]),
+        run_len=int(hi - lo), a_raw_norm=a_raw_norm,
+        exhaustive=bool(perm_space <= n_perms), perm_space=perm_space,
+        min_p=(1.0 / perm_space if perm_space > 0 else np.nan),
+        skip_reason="",
+    ))
+    return m, null_pi, null_peak

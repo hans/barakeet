@@ -57,7 +57,6 @@ from __future__ import annotations
 
 import os
 import sys
-from math import comb
 from pathlib import Path
 
 import matplotlib
@@ -80,17 +79,10 @@ from src.viz_paper import epoch_sfreq, epoch_tmin
 
 sys.path.insert(0, str(Path(".").resolve() / "notebooks" / "causal46_joined"))
 from _within_completion import (  # noqa: E402
-    beta_summary,
-    bootstrap_endpoint_beta,
     extract_hga,
     resolve_behavior_col,
 )
-from _projection import (  # noqa: E402
-    anchored_reliable_run,
-    permutation_null_pi,
-    select_per_step_balanced,
-    windowed_deterministic_p,
-)
+from _projection import compute_cell_projection  # noqa: E402
 
 # %% tags=["parameters"]
 subject = "EC250"
@@ -115,6 +107,10 @@ min_endpoint_n = 3
 late_cutoff_mode = "phon_smax"
 pod_min_s = 0.30
 word_end_tail_samples = 20
+# â-anchor reading (ADR-0003 §5 is ambiguous — ratification point, issue #22).
+# "reliable_max": anchor argmax|β| among reliable windows (any reliable ⇒ non-NaN).
+# "global_max": anchor argmax|β| over all windows; NaN unless that window is reliable.
+anchor_mode = "reliable_max"
 n_perms = 10000
 master_seed = 42
 fdr_alpha = 0.05
@@ -221,19 +217,14 @@ def late_grid_for_cell(phon_smax, word_end):
 
 # %% [markdown]
 # ## Per-cell projection loop
+#
+# The claim-critical per-cell path (â over the late grid → 1c anchored run →
+# π_anchored + π_peak + nulls) lives in `_projection.compute_cell_projection`
+# (unit-tested on synthetic data — the notebook body is otherwise unexercised in
+# dev where epochs are absent). This loop only handles grid construction, epoch
+# subsetting, and record assembly.
 
 # %%
-NAN_METRIC_KEYS = [
-    "pi_anchored", "pi_peak", "pi_anchored_raw",
-    "p_one_tailed", "p_two_tailed",
-    "p_one_tailed_peak", "p_two_tailed_peak",
-    "null_mean", "null_sd",
-    "n_reliable_windows", "run_smin", "run_smax", "run_len",
-    "peak_smin", "peak_smax", "peak_beta_unamb_median",
-    "peak_beta_unamb_ci_low", "peak_beta_unamb_ci_high",
-    "a_raw_norm", "N_ambiguous", "n_qualifying_steps",
-]
-
 results = []
 null_arrays = {}       # cell_key → (N_PERMS,) anchored null π
 null_arrays_peak = {}  # cell_key → (N_PERMS,) peak null π (diagnostic)
@@ -244,6 +235,7 @@ for _, srow in included_sites.iterrows():
     for we in PHONEME_PAIR_TO_WORD_ENDS[pp]:
         cells.append((int(srow["electrode_idx"]), pp, we))
 
+# Cache per-(pp) epoch subset + per-(pp, elec) HGA to avoid recomputation.
 for cell_i, (elec_idx, pp, we) in enumerate(tqdm(cells, desc="cells")):
     cell_key = f"{subject}_{elec_idx}_{pp}_{we}"
     rng = np.random.default_rng(MASTER_SEED + cell_i)
@@ -266,150 +258,32 @@ for cell_i, (elec_idx, pp, we) in enumerate(tqdm(cells, desc="cells")):
         grid_smax=(windows[-1][1] if windows else -1),
         n_step1=n_step1, n_step6=n_step6,
         r_unamb=R_UNAMB, n_perms=N_PERMS, master_seed=MASTER_SEED, cell_offset=cell_i,
-        late_cutoff_mode=late_cutoff_mode,
+        late_cutoff_mode=late_cutoff_mode, anchor_mode=anchor_mode,
     )
 
-    def _emit_nan(reason, extra=None):
-        rec = {**base_rec, **{k: np.nan for k in NAN_METRIC_KEYS}, "skip_reason": reason}
-        if extra:
-            rec.update(extra)
-        results.append(rec)
-
-    if not windows:
-        _emit_nan("no_late_windows")
-        continue
-
-    # ── â over the late grid (unambiguous endpoints, this word_end) ──────────
-    beta_med = np.full(len(windows), np.nan)
-    beta_ci_lo = np.full(len(windows), np.nan)
-    beta_ci_hi = np.full(len(windows), np.nan)
-    reliable = np.zeros(len(windows), dtype=bool)
-    a_estimable = True
-    for wi, (smin, smax) in enumerate(windows):
-        arr = bootstrap_endpoint_beta(
-            hga, md_pp, word_end=we, smin=smin, smax=smax,
-            R=R_UNAMB, min_n=MIN_ENDPOINT_N,
-        )
-        if arr is None:
-            a_estimable = False
-            break
-        bs = beta_summary(arr, CI_LOW, CI_HIGH)
-        beta_med[wi] = bs["med"]
-        beta_ci_lo[wi] = bs["ci_low"]
-        beta_ci_hi[wi] = bs["ci_high"]
-        reliable[wi] = bs["reliable"]
-
-    if not a_estimable:
-        _emit_nan("a_not_estimable")
-        continue
-
-    # ── p over the late grid (ambiguous, this word_end) ─────────────────────
-    per_step_filtered, min_classes, N_we = select_per_step_balanced(
-        md_pp, word_end=we, group_col=bhv_col, K=K
+    metrics, null_pi, null_peak = compute_cell_projection(
+        hga, md_pp, word_end=we, group_col=bhv_col, windows=windows, K=K,
+        n_perms=N_PERMS, rng=rng, r_unamb=R_UNAMB, min_endpoint_n=MIN_ENDPOINT_N,
+        ci_low=CI_LOW, ci_high=CI_HIGH, anchor_mode=anchor_mode,
     )
-    if per_step_filtered is None:
-        _emit_nan("no_ambiguous_cells", extra={
-            "n_reliable_windows": int(reliable.sum()),
-        })
-        continue
-
-    p_full = windowed_deterministic_p(hga, per_step_filtered, min_classes, N_we, windows)
-    n_qual_steps = len(per_step_filtered)
-
-    # ── π_peak (diagnostic): single argmax|β_unamb| window, reliability-ignored ─
-    peak_i = int(np.argmax(np.abs(beta_med)))
-    peak_sign = float(np.sign(beta_med[peak_i]))
-    a_unit_peak = np.array([peak_sign])
-    p_peak = np.array([p_full[peak_i]])
-    pi_peak = float(np.dot(a_unit_peak, p_peak))
-    peak_window = windows[peak_i]
-
-    peak_cell_data = [
-        (by_cls[1], by_cls[0], min_classes[s] / N_we)
-        for s, by_cls in per_step_filtered.items()
-    ]
-    null_peak = permutation_null_pi(
-        hga, peak_cell_data, a_unit_peak, [peak_window], N_PERMS, rng
-    )
-    p_one_peak = float(np.mean(null_peak >= pi_peak))
-    p_two_peak = float(np.mean(np.abs(null_peak) >= abs(pi_peak)))
-    null_arrays_peak[cell_key] = null_peak
-
-    # ── π_anchored (claim statistic): â-anchored contiguous reliable run ─────
-    run = anchored_reliable_run(beta_med, reliable)
-    n_reliable = int(reliable.sum())
-    peak_descr = dict(
-        peak_smin=peak_window[0], peak_smax=peak_window[1],
-        peak_beta_unamb_median=float(beta_med[peak_i]),
-        peak_beta_unamb_ci_low=float(beta_ci_lo[peak_i]),
-        peak_beta_unamb_ci_high=float(beta_ci_hi[peak_i]),
-        N_ambiguous=int(N_we), n_qualifying_steps=int(n_qual_steps),
-        n_reliable_windows=n_reliable,
-    )
-
-    if run is None:
-        # â-estimable but not â-reliable → π_anchored NaN (outside the claim-
-        # bearing population). π_peak + descriptors still recorded (diagnostic).
-        rec = {**base_rec, **{k: np.nan for k in NAN_METRIC_KEYS}, "skip_reason": "a_not_reliable"}
-        rec.update(peak_descr)
-        rec.update(dict(
-            pi_peak=pi_peak, p_one_tailed_peak=p_one_peak, p_two_tailed_peak=p_two_peak,
-            run_smin=np.nan, run_smax=np.nan, run_len=0,
-        ))
-        results.append(rec)
-        continue
-
-    lo, hi = run  # half-open indices into windows
-    run_windows = windows[lo:hi]
-    a_raw_run = beta_med[lo:hi]
-    a_raw_norm = float(np.linalg.norm(a_raw_run))
-    a_unit = a_raw_run / a_raw_norm
-    p_run = p_full[lo:hi]
-
-    pi_anchored = float(np.dot(a_unit, p_run))
-    pi_anchored_raw = float(np.dot(a_raw_run, p_run))
-
-    # Per-cell null: â_unit and the run window-set held fixed; only labels permute.
-    cell_data = peak_cell_data  # same per-step (idx1, idx0, weight)
-    null_pi = permutation_null_pi(hga, cell_data, a_unit, run_windows, N_PERMS, rng)
-    p_one = float(np.mean(null_pi >= pi_anchored))
-    p_two = float(np.mean(np.abs(null_pi) >= abs(pi_anchored)))
-    null_arrays[cell_key] = null_pi
-
-    # Permutation-space accounting (small-cell exactness), ported from early.
-    _space = 1
-    for idx1_c, idx0_c, _w in cell_data:
-        _space *= comb(len(idx1_c) + len(idx0_c), len(idx1_c))
-        if _space > N_PERMS * 100:
-            _space = N_PERMS * 100 + 1
-            break
-    perm_space = int(_space)
-
-    rec = {**base_rec, **peak_descr}
-    rec.update(dict(
-        pi_anchored=pi_anchored, pi_anchored_raw=pi_anchored_raw, pi_peak=pi_peak,
-        p_one_tailed=p_one, p_two_tailed=p_two,
-        p_one_tailed_peak=p_one_peak, p_two_tailed_peak=p_two_peak,
-        null_mean=float(null_pi.mean()), null_sd=float(null_pi.std()),
-        run_smin=int(run_windows[0][0]), run_smax=int(run_windows[-1][1]),
-        run_len=int(hi - lo), a_raw_norm=a_raw_norm,
-        exhaustive=bool(perm_space <= N_PERMS), perm_space=perm_space,
-        min_p=(1.0 / perm_space if perm_space > 0 else np.nan),
-        skip_reason="",
-    ))
-    results.append(rec)
+    results.append({**base_rec, **metrics})
+    if null_pi is not None:
+        null_arrays[cell_key] = null_pi
+    if null_peak is not None:
+        null_arrays_peak[cell_key] = null_peak
 
 results_df = pd.DataFrame(results)
 print(f"\nTotal cells processed: {len(results_df)}")
+print("skip_reason counts:\n" + results_df["skip_reason"].value_counts(dropna=False).to_string())
 
 # %% [markdown]
 # ## Population preview (aggregate does the pre-registered CPO test)
 
 # %%
 if len(results_df) > 0:
-    n_estimable = int((results_df["skip_reason"] != "a_not_estimable").sum() -
-                      (results_df["skip_reason"] == "no_late_windows").sum())
+    n_estimable = int(results_df["pi_peak"].notna().sum())
     n_reliable_cells = int(results_df["pi_anchored"].notna().sum())
+    print(f"â-estimable (π_peak non-NaN)          : {n_estimable}")
     print(f"cells                                : {len(results_df)}")
     print(f"â-reliable (π_anchored non-NaN)       : {n_reliable_cells}   <- claim-bearing population")
     if n_reliable_cells > 0:

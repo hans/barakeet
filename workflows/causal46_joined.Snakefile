@@ -2327,6 +2327,7 @@ rule late_perceptual_projection:
                 late_cutoff_mode="phon_smax",
                 pod_min_s=0.30,
                 word_end_tail_samples=20,
+                anchor_mode="reliable_max",
                 n_perms=C46["n_perms_projection"],
                 master_seed=42,
                 fdr_alpha=config["analysis"]["fdr_alpha"],

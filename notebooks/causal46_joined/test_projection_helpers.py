@@ -19,6 +19,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _projection import (  # noqa: E402
     anchored_reliable_run,
+    compute_cell_projection,
     permutation_null_pi,
     select_per_step_balanced,
     windowed_deterministic_p,
@@ -144,9 +145,112 @@ def test_anchored_run():
     print("  anchored_reliable_run OK")
 
 
+def test_anchor_mode_divergence():
+    # The discriminating case (advisor #22): global-max |beta| window (idx9, 0.99)
+    # is UNRELIABLE; a weaker window (idx2, 0.30) IS reliable.
+    beta = np.array([0, 0, 0.30, 0, 0, 0, 0, 0, 0, 0.99])
+    rel = np.array([0, 0, 1, 0, 0, 0, 0, 0, 0, 0], dtype=bool)
+    # reliable_max: anchor the best *reliable* window → non-None (cell included)
+    assert anchored_reliable_run(beta, rel, mode="reliable_max") == (2, 3)
+    # global_max: anchor = idx9 (unreliable) → None (cell excluded)
+    assert anchored_reliable_run(beta, rel, mode="global_max") is None
+    # when the global max IS reliable, the two agree
+    rel2 = np.array([0, 0, 1, 0, 0, 0, 0, 0, 0, 1], dtype=bool)
+    assert (anchored_reliable_run(beta, rel2, mode="reliable_max")
+            == anchored_reliable_run(beta, rel2, mode="global_max") == (9, 10))
+    print("  anchor_mode divergence OK")
+
+
+def _make_cell_synth(seed, *, n_times=160, effect=0.0, endpoint_sep=0.0):
+    """One phoneme_pair's worth of trials for a single word_end cell.
+
+    `effect` shifts heard-1 vs heard-0 on ambiguous steps (drives p);
+    `endpoint_sep` shifts step6 vs step1 on unambiguous trials (drives â) in a
+    late band so some windows are reliable.
+    """
+    rng = np.random.default_rng(seed)
+    rows = []
+    hga_rows = []
+    late = slice(70, 120)
+    # endpoints (unambiguous): steps 1 and 6, 20 trials each
+    for _ in range(20):
+        base = rng.standard_normal(n_times) * 0.3
+        base[late] += endpoint_sep / 2
+        hga_rows.append(base); rows.append(dict(word_end="necessary", resampled=6, behavior_dummy_forced=1))
+        base = rng.standard_normal(n_times) * 0.3
+        base[late] -= endpoint_sep / 2
+        hga_rows.append(base); rows.append(dict(word_end="necessary", resampled=1, behavior_dummy_forced=0))
+    # ambiguous steps 3,4: both reported classes, 12 each, with a percept effect
+    for step in (3, 4):
+        for _ in range(12):
+            base = rng.standard_normal(n_times) * 0.3
+            base[late] += effect / 2
+            hga_rows.append(base); rows.append(dict(word_end="necessary", resampled=step, behavior_dummy_forced=1))
+            base = rng.standard_normal(n_times) * 0.3
+            base[late] -= effect / 2
+            hga_rows.append(base); rows.append(dict(word_end="necessary", resampled=step, behavior_dummy_forced=0))
+    return np.array(hga_rows), pd.DataFrame(rows)
+
+
+def test_compute_cell_projection_wiring():
+    windows = [(s, s + 5) for s in range(65, 120, 5)]
+    # Cell with a real late â (endpoint_sep) and a percept effect → â-reliable, π defined.
+    hga, md = _make_cell_synth(11, effect=1.5, endpoint_sep=1.5)
+    m, null_a, null_p = compute_cell_projection(
+        hga, md, word_end="necessary", group_col="behavior_dummy_forced",
+        windows=windows, K=3, n_perms=300, rng=np.random.default_rng(0),
+        r_unamb=200, min_endpoint_n=3, ci_low=2.5, ci_high=97.5, anchor_mode="reliable_max",
+    )
+    assert m["skip_reason"] == "", m["skip_reason"]
+    assert np.isfinite(m["pi_anchored"]) and np.isfinite(m["pi_peak"])
+    assert null_a is not None and len(null_a) == 300
+    assert null_p is not None and len(null_p) == 300
+    assert 0.0 <= m["p_one_tailed"] <= 1.0 and 0.0 <= m["p_two_tailed"] <= 1.0
+    assert m["run_smin"] < m["run_smax"] and m["run_len"] >= 1
+    assert m["n_reliable_windows"] >= 1
+    # π_anchored should be > 0 when percept and acoustic effects share sign.
+    assert m["pi_anchored"] > 0, m["pi_anchored"]
+
+    # â-estimable but NEVER reliable → a_not_reliable branch (π_anchored NaN,
+    # π_peak diagnostic preserved). Force it deterministically: constant endpoint
+    # trials ⇒ β_unamb ≡ 0 ⇒ bootstrap CI = [0,0] ⇒ no reliable window.
+    rng2 = np.random.default_rng(22)
+    rows2, hga2_rows = [], []
+    for _ in range(20):
+        hga2_rows.append(np.zeros(160)); rows2.append(dict(word_end="necessary", resampled=6, behavior_dummy_forced=1))
+        hga2_rows.append(np.zeros(160)); rows2.append(dict(word_end="necessary", resampled=1, behavior_dummy_forced=0))
+    for step in (3, 4):
+        for _ in range(12):
+            v = rng2.standard_normal(160) * 0.3; v[70:120] += 0.5
+            hga2_rows.append(v); rows2.append(dict(word_end="necessary", resampled=step, behavior_dummy_forced=1))
+            v = rng2.standard_normal(160) * 0.3; v[70:120] -= 0.5
+            hga2_rows.append(v); rows2.append(dict(word_end="necessary", resampled=step, behavior_dummy_forced=0))
+    hga2, md2 = np.array(hga2_rows), pd.DataFrame(rows2)
+    m2, null_a2, null_p2 = compute_cell_projection(
+        hga2, md2, word_end="necessary", group_col="behavior_dummy_forced",
+        windows=windows, K=3, n_perms=200, rng=np.random.default_rng(1),
+        r_unamb=200, min_endpoint_n=3, ci_low=2.5, ci_high=97.5, anchor_mode="reliable_max",
+    )
+    assert m2["skip_reason"] == "a_not_reliable", m2["skip_reason"]
+    assert np.isnan(m2["pi_anchored"]) and null_a2 is None
+    assert np.isfinite(m2["pi_peak"]) and null_p2 is not None  # diagnostic preserved
+    assert m2["n_reliable_windows"] == 0
+
+    # Empty grid / no ambiguous trials guard.
+    m3, na3, np3 = compute_cell_projection(
+        hga, md, word_end="necessary", group_col="behavior_dummy_forced",
+        windows=[], K=3, n_perms=50, rng=np.random.default_rng(2),
+        r_unamb=50, min_endpoint_n=3, ci_low=2.5, ci_high=97.5, anchor_mode="reliable_max",
+    )
+    assert m3["skip_reason"] == "no_late_windows" and na3 is None and np3 is None
+    print("  compute_cell_projection wiring OK")
+
+
 if __name__ == "__main__":
     print("test_projection_helpers:")
     test_p_equivalence()
     test_null_equivalence()
     test_anchored_run()
+    test_anchor_mode_divergence()
+    test_compute_cell_projection_wiring()
     print("ALL PASS")
