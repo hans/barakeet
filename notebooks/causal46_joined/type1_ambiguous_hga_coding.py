@@ -1062,7 +1062,3 @@ if np.isfinite(x0) and np.isfinite(k):
             label="sigmoid fit")
 
 ax.legend(loc="upper left", frameon=False)
-
-# %%
-print("y_tr range:", y_tr_norm.min(), y_tr_norm.max(), "mean:", y_tr_norm.mean())
-print("yhat range:", yhat.min(), yhat.max())
