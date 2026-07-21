@@ -2282,3 +2282,93 @@ rule early_perceptual_projection_aggregate:
                 gate_mode="uncorrected",
             ),
         )
+
+
+rule late_perceptual_projection:
+    """Per-subject: late (integration-window) projection statistic π + null.
+
+    Ports early_perceptual_projection to the late window per cell (subject,
+    electrode, phoneme_pair, word_end), strict same-word-end. â-anchored
+    contiguous-reliable-run window rule over the late, word-end-anchored
+    b4_bootstrap grid (filtered smin>=phon_smax_c6 & smax<=word_end offset+tail).
+    Spec: docs/superpowers/plans/2026-07-21-late-perceptual-projection-percell-spec.md;
+    ADR-0003. Prod-only inputs (epochs + b4_bootstrap)."""
+    input:
+        epochs           = "outputs/epochs_preprocessed/{subject}_epo.fif",
+        site_pool        = "outputs/causal46_joined/early_window_site_types/site_type_relabel.csv",
+        b4_bootstrap     = "outputs/causal46_joined/t_tests/b4_bootstrap.parquet",
+        phon_peaks_all   = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet",
+        helper           = "notebooks/causal46_joined/_within_completion.py",
+        projection_helper = "notebooks/causal46_joined/_projection.py",
+        notebook         = "notebooks/causal46_joined/late_perceptual_projection.py",
+    output:
+        notebook     = "outputs/causal46_joined/late_perceptual_projection/{subject}/notebook.ipynb",
+        site_results = "outputs/causal46_joined/late_perceptual_projection/{subject}/site_results.csv",
+        null_pi      = "outputs/causal46_joined/late_perceptual_projection/{subject}/null_pi.npz",
+        null_pi_peak = "outputs/causal46_joined/late_perceptual_projection/{subject}/null_pi_peak.npz",
+        pi_dist      = "outputs/causal46_joined/late_perceptual_projection/{subject}/pi_dist.png",
+    run:
+        outdir = Path(output.notebook).parent
+        C46 = config["causal46_joined"]
+        run_notebook(
+            str(input.notebook), str(output.notebook),
+            parameters=dict(
+                subject=wildcards.subject,
+                site_pool_path=str(input.site_pool),
+                b4_bootstrap_path=str(input.b4_bootstrap),
+                phon_peaks_path=str(input.phon_peaks_all),
+                epoch_dir=str(Path(input.epochs).parent),
+                outdir=str(outdir),
+                min_class_k=C46["min_class_k"],
+                r_unamb=C46["n_bootstrap"],
+                ci_low=2.5,
+                ci_high=97.5,
+                min_endpoint_n=3,
+                late_cutoff_mode="phon_smax",
+                pod_min_s=0.30,
+                word_end_tail_samples=20,
+                n_perms=C46["n_perms_projection"],
+                master_seed=42,
+                fdr_alpha=config["analysis"]["fdr_alpha"],
+            ),
+        )
+
+
+rule late_perceptual_projection_aggregate:
+    """Aggregate: pre-registered CPO go/no-go over â-reliable cells (issue #21/#23).
+
+    GO iff p_cpo < 0.05 (one-tailed π>0, no floor). Binomial + BH-FDR reported,
+    non-gating. Late-annotation cross-tab is a non-gating diagnostic."""
+    input:
+        site_results = expand(
+            "outputs/causal46_joined/late_perceptual_projection/{subject}/site_results.csv",
+            subject=config["data"]["subjects"],
+        ),
+        null_pi = expand(
+            "outputs/causal46_joined/late_perceptual_projection/{subject}/null_pi.npz",
+            subject=config["data"]["subjects"],
+        ),
+        null_pi_peak = expand(
+            "outputs/causal46_joined/late_perceptual_projection/{subject}/null_pi_peak.npz",
+            subject=config["data"]["subjects"],
+        ),
+        late_annotations = "outputs/causal46_joined/manual_annotations/filtered_manifest.csv",
+        notebook = "notebooks/causal46_joined/late_perceptual_projection_aggregate.py",
+    output:
+        notebook      = "outputs/causal46_joined/late_perceptual_projection/aggregate_notebook.ipynb",
+        all_cells     = "outputs/causal46_joined/late_perceptual_projection/all_cells.csv",
+        cpo           = "outputs/causal46_joined/late_perceptual_projection/cpo.csv",
+        go_no_go      = "outputs/causal46_joined/late_perceptual_projection/go_no_go.csv",
+        diagnostics   = "outputs/causal46_joined/late_perceptual_projection/diagnostics.pdf",
+    run:
+        outdir = str(Path(output.notebook).parent)
+        run_notebook(
+            str(input.notebook), str(output.notebook),
+            parameters=dict(
+                results_dir=outdir,
+                late_annotations_path=str(input.late_annotations),
+                outdir=outdir,
+                fdr_alpha=config["analysis"]["fdr_alpha"],
+                cpo_p_threshold=0.05,
+            ),
+        )

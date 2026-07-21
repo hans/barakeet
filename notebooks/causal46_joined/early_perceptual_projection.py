@@ -61,6 +61,7 @@ from _within_completion import (  # noqa: E402
     per_step_class_counts,
     resolve_behavior_col,
 )
+from _projection import get_qualifying_steps  # noqa: E402
 
 # %% tags=["parameters"]
 subject = "EC250"
@@ -136,23 +137,8 @@ print(f"Loaded {len(ep)} epochs; behavior col: {bhv_col}")
 # ## Helper functions
 
 # %%
-def get_qualifying_steps(md_pp, *, word_end, group_col, ambiguous_threshold=2):
-    """Ambiguous steps for one (phoneme_pair, word_end) cell.
-
-    Step s qualifies if: not in endpoints {1,6}, both behavior classes
-    present, and minority class count > ambiguous_threshold.
-    Matches src.data.get_ambiguous_resampled_steps criterion.
-    """
-    we_mask = md_pp["word_end"] == word_end
-    ambiguous_mask = ~md_pp["resampled"].isin([1, 6])
-    steps = sorted(md_pp.loc[we_mask & ambiguous_mask, "resampled"].unique())
-    qualifying = []
-    for s in steps:
-        step_mask = we_mask & ambiguous_mask & (md_pp["resampled"] == s)
-        counts = md_pp.loc[step_mask, group_col].value_counts()
-        if len(counts) >= 2 and int(counts.min()) > ambiguous_threshold:
-            qualifying.append(int(s))
-    return qualifying
+# get_qualifying_steps is imported from _projection (shared with the late
+# projection notebook; moved there verbatim — issue #22).
 
 
 def compute_a_vector(hga, md_pp):
