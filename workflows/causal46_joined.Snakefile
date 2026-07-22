@@ -1286,6 +1286,50 @@ rule joined_behavioral_discriminative_windows:
         )
 
 
+rule joined_late_perceptual_significance:
+    """Per-cell TFCE permutation gate for the late within-completion percept contrast.
+
+    Replaces the manual `behav @late` entry gate with a per-cell TFCE
+    permutation test on the post-acoustic `/n/-/d/` within-completion
+    contrast (D1-D3), pure post-processing over b4_bootstrap.parquet --
+    no epoch reload. Emits site_results.parquet (one row per powered B4
+    cell: TFCE gate stat/p, knob-free integral robustness stat/p,
+    split-half descriptive column, BH-FDR floor, manual_behav_late for
+    calibration) and a population_summary.pdf count-vs-null headline.
+
+    Wired as behavioral_discriminative_windows' entry gate (#11).
+    """
+    input:
+        b4_bootstrap = "outputs/causal46_joined/t_tests/b4_bootstrap.parquet",
+        b4_per_cell  = "outputs/causal46_joined/t_tests/b4_per_cell.parquet",
+        notebook     = "notebooks/causal46_joined/late_perceptual_significance.py",
+        helper       = "notebooks/causal46_joined/_windows.py",
+        manifest     = "outputs/causal46_joined/manual_annotations/filtered_manifest.csv",
+
+    output:
+        notebook       = "outputs/causal46_joined/late_perceptual_significance/notebook.ipynb",
+        site_results   = "outputs/causal46_joined/late_perceptual_significance/site_results.parquet",
+        population_pdf = "outputs/causal46_joined/late_perceptual_significance/population_summary.pdf",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                b4_bootstrap_path=str(input.b4_bootstrap),
+                b4_per_cell_path=str(input.b4_per_cell),
+                filtered_manifest_path=str(input.manifest),
+                outdir=str(outdir),
+                gate_alpha=0.05,
+                fdr_alpha=0.05,
+                binom_null_p=0.05,
+                tfce_E=0.5,
+                tfce_H=2.0,
+            ),
+        )
+
+
 rule joined_acoustic_discriminative_windows:
     """Discover acoustic-step discriminative windows per B4 cell (post-processing).
 
