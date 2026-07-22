@@ -88,34 +88,42 @@ for col in ("phon_smin", "phon_smax"):
     )
 
 # %% [markdown]
-# ## Filter cells to those with a post-acoustic behavioral label
+# ## Filter cells to those with a post-acoustic behavioral label (optional)
 #
-# Only cells annotated with `behav @late` in the
-# filtered_manifest are processed. `behav @ac` is excluded — that timing bin
-# overlaps the acoustic window and is not a "behavioral discriminative window."
+# When `filtered_manifest_path` is set, only cells annotated with `behav @late`
+# in the filtered_manifest are processed. `behav @ac` is excluded — that timing
+# bin overlaps the acoustic window and is not a "behavioral discriminative
+# window." When `filtered_manifest_path` is None/empty, the manual gate is
+# skipped and every powered B4 cell is processed (manifest-free run).
 
 # %%
-manifest = pl.read_csv(filtered_manifest_path)
-print(f"filtered_manifest: {manifest.height} rows")
+if filtered_manifest_path:
+    manifest = pl.read_csv(filtered_manifest_path)
+    print(f"filtered_manifest: {manifest.height} rows")
 
-behav_post_ac = manifest.filter(
-    pl.col("behav @late").is_not_null()
-)
-behav_keys: set[tuple] = {
-    (r["subject"], int(r["electrode_idx"]), r["phoneme_pair"], r["word_end"])
-    for r in behav_post_ac.iter_rows(named=True)
-}
-print(f"cells with behav @late: {len(behav_keys)}")
-
-n_before = b4_per_cell.height
-b4_per_cell = b4_per_cell.filter(
-    pl.struct(["subject", "electrode_idx", "phoneme_pair", "word_end"]).map_elements(
-        lambda r: (r["subject"], int(r["electrode_idx"]), r["phoneme_pair"], r["word_end"])
-                  in behav_keys,
-        return_dtype=pl.Boolean,
+    behav_post_ac = manifest.filter(
+        pl.col("behav @late").is_not_null()
     )
-)
-print(f"b4_per_cell after manifest filter: {b4_per_cell.height} / {n_before} cells")
+    behav_keys: set[tuple] = {
+        (r["subject"], int(r["electrode_idx"]), r["phoneme_pair"], r["word_end"])
+        for r in behav_post_ac.iter_rows(named=True)
+    }
+    print(f"cells with behav @late: {len(behav_keys)}")
+
+    n_before = b4_per_cell.height
+    b4_per_cell = b4_per_cell.filter(
+        pl.struct(["subject", "electrode_idx", "phoneme_pair", "word_end"]).map_elements(
+            lambda r: (r["subject"], int(r["electrode_idx"]), r["phoneme_pair"], r["word_end"])
+                      in behav_keys,
+            return_dtype=pl.Boolean,
+        )
+    )
+    print(f"b4_per_cell after manifest filter: {b4_per_cell.height} / {n_before} cells")
+else:
+    print(
+        f"filtered_manifest_path is None/empty -> no manual gate; "
+        f"processing all {b4_per_cell.height} powered B4 cells"
+    )
 
 # %% [markdown]
 # ## Global grid validation

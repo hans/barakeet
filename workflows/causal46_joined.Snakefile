@@ -1286,6 +1286,43 @@ rule joined_behavioral_discriminative_windows:
         )
 
 
+rule joined_behavioral_discriminative_windows_all:
+    """Manifest-free variant of joined_behavioral_discriminative_windows.
+
+    Identical union-run window discovery, but with no manual `behav @late`
+    gate: every powered B4 cell in b4_bootstrap is processed. Consumed by the
+    late perceptual projection so its cell pool carries no dependency on manual
+    annotations. Pure post-processing over b4_bootstrap.parquet — no epoch
+    reload.
+    """
+    input:
+        b4_bootstrap = "outputs/causal46_joined/t_tests/b4_bootstrap.parquet",
+        b4_per_cell  = "outputs/causal46_joined/t_tests/b4_per_cell.parquet",
+        notebook     = "notebooks/causal46_joined/behavioral_discriminative_windows.py",
+
+    output:
+        notebook        = "outputs/causal46_joined/behavioral_discriminative_windows_all/notebook.ipynb",
+        b_windows       = "outputs/causal46_joined/behavioral_discriminative_windows_all/b_windows.parquet",
+        b_windows_boot  = "outputs/causal46_joined/behavioral_discriminative_windows_all/b_windows_bootstrap.parquet",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                b4_bootstrap_path=str(input.b4_bootstrap),
+                b4_per_cell_path=str(input.b4_per_cell),
+                outdir=str(outdir),
+                ci_low=2.5,
+                ci_high=97.5,
+                decoder_window_size=config["analysis"]["decoding"]["window_size"],
+                filtered_manifest_path=None,
+                manual_override_path=None,
+            ),
+        )
+
+
 rule joined_late_perceptual_significance:
     """Per-cell TFCE permutation gate for the late within-completion percept contrast.
 
