@@ -70,17 +70,10 @@ outdir = "outputs/causal46_joined/early_perceptual_projection/EC250"
 min_class_k = 3
 
 # window parameters for the HGA sampling
-window_size = 4
-stride = 4
+window_size = 2
+stride = 2
 
-search_smin = 45
-search_smax = 150 # TODO get the word_end-specific logic from decoding etc.
-
-# super-window parameters for the projection comparison
-super_window_size = 10
-super_window_stride = 10
-
-n_perms = 1000
+n_perms = 500000
 master_seed = 42
 fdr_alpha = 0.05
 
@@ -92,19 +85,10 @@ WINDOW_SIZE = int(window_size)
 STRIDE = int(stride)
 K = int(min_class_k)
 N_PERMS = int(n_perms)
-SMIN = int(search_smin)
-SMAX = int(search_smax)
 MASTER_SEED = int(master_seed)
 FDR_ALPHA = float(fdr_alpha)
 
-# Window grid: same range() as searchlight_mean_diff
-WINDOW_STARTS = list(range(SMIN, SMAX - WINDOW_SIZE + 1, STRIDE))
-N_WINDOWS = len(WINDOW_STARTS)
-WINDOW_TMINS = [s / epoch_sfreq + epoch_tmin for s in WINDOW_STARTS]
-
 print(f"subject={subject}  K={K}  N_PERMS={N_PERMS}")
-print(f"Window: [{SMIN},{SMAX}] samples = [{SMIN/epoch_sfreq+epoch_tmin:.3f},{SMAX/epoch_sfreq+epoch_tmin:.3f}] s")
-print(f"Window grid smin values: {WINDOW_STARTS}  (N_WINDOWS={N_WINDOWS})")
 
 # %%
 b_windows = pd.read_parquet(b_windows_path)
@@ -177,22 +161,72 @@ def get_qualifying_steps(md_pp, *, word_end, group_col, ambiguous_threshold=2):
     return qualifying
 
 
-def compute_a_vector(hga, md_pp):
+def compute_a_vector(hga, md_pp, smin, smax):
     """Acoustic template a(w) = mean HGA[step6] - mean HGA[step1], pooled word_ends.
 
     Positive direction = phoneme_pair[1] (the 'step6' phoneme). No sign flip.
     """
-    idx1 = md_pp.index[md_pp["resampled"] == 1].tolist()
-    idx6 = md_pp.index[md_pp["resampled"] == 6].tolist()
+    assert len(hga) == len(md_pp)
+
+    step1_mask = md_pp["resampled"] == 1
+    step6_mask = md_pp["resampled"] == 6
+
+    if step1_mask.sum() == 0 or step6_mask.sum() == 0:
+        raise ValueError(f"No trials for one of the endpoints: step 1 = {step1_mask.sum()}, step 6 = {step6_mask.sum()}")
+
+    window_starts = np.arange(smin, smax - WINDOW_SIZE + 1, STRIDE)
     a = np.array([
-        (hga[idx6, s:s + WINDOW_SIZE].mean() - hga[idx1, s:s + WINDOW_SIZE].mean())
-        if (len(idx6) > 0 and len(idx1) > 0) else 0.0
-        for s in WINDOW_STARTS
+        (hga[step6_mask, s:s + WINDOW_SIZE].mean() - hga[step1_mask, s:s + WINDOW_SIZE].mean())
+        for s in window_starts
     ])
     return a
 
 
-def compute_p(hga, md_pp, *, word_end, group_col):
+def compute_a_vector_null(hga, md_pp, smin, smax, rng):
+    """
+    Compute null distribution of acoustic template a(w) under label shuffling.
+
+    Shuffles acoustic labels preserving the observed (n_step1, n_step6) split.
+
+    Returns:
+        a_perm: (N_PERMS, N_WINDOWS) null
+    """
+    assert len(hga) == len(md_pp)
+
+    step1_mask = md_pp["resampled"] == 1
+    step6_mask = md_pp["resampled"] == 6
+
+    if step1_mask.sum() == 0 or step6_mask.sum() == 0:
+        raise ValueError(f"No trials for one of the endpoints: step 1 = {step1_mask.sum()}, step 6 = {step6_mask.sum()}")
+
+    window_starts = np.arange(smin, smax - WINDOW_SIZE + 1, STRIDE)
+    n_windows = len(window_starts)
+    a_perm = np.zeros((N_PERMS, n_windows))
+
+    idx_step1 = np.where(step1_mask)[0]
+    idx_step6 = np.where(step6_mask)[0]
+    idx_all = np.concatenate([idx_step1, idx_step6])
+    n_step1 = len(idx_step1)
+    n_total = n_step1 + len(idx_step6)
+
+    # Vectorized permutations: N_PERMS × n_total
+    u = rng.random((N_PERMS, n_total))
+    perm_matrix = np.argsort(u, axis=1)  # uniform random permutations
+
+    for w_idx, smin_w in enumerate(window_starts):
+        smax_w = smin_w + WINDOW_SIZE
+        X = hga[idx_all, smin_w:smax_w].mean(axis=1)  # (n_total,)
+        X_perm = X[perm_matrix]               # (N_PERMS, n_total)
+        diff_perm = (
+            X_perm[:, :n_step1].mean(axis=1) - X_perm[:, n_step1:].mean(axis=1)
+        )  # (N_PERMS,)
+        a_perm[:, w_idx] = diff_perm
+
+    return a_perm
+
+
+def compute_p(hga, md_pp, word_end, group_col,
+              smin, smax):
     """
     Compute perceptual contrast:
 
@@ -211,9 +245,11 @@ def compute_p(hga, md_pp, *, word_end, group_col):
     N : int
         Total number of trials across all qualifying steps.
     """
+    assert len(hga) == len(md_pp)
+
     qualifying = get_qualifying_steps(md_pp, word_end=word_end, group_col=group_col)
     if not qualifying:
-        return None, None, None, 0
+        return None, None, None, 0, None
 
     per_step = per_step_class_counts(
         md_pp, word_end=word_end, qualifying_steps=qualifying, group_col=group_col
@@ -228,7 +264,7 @@ def compute_p(hga, md_pp, *, word_end, group_col):
     }
     if not per_step_filtered:
         # No qualifying steps after filtering by min_class_k
-        return None, None, None, 0
+        return None, None, None, 0, None
 
     min_classes = {
         s: min(len(by_cls[0]), len(by_cls[1]))
@@ -236,24 +272,32 @@ def compute_p(hga, md_pp, *, word_end, group_col):
     }
     N = int(sum(min_classes.values()))
 
-    p = np.zeros(N_WINDOWS)
+    window_starts = np.arange(smin, smax - WINDOW_SIZE + 1, STRIDE)
+    print(smin, smax, window_starts)
+    n_windows = len(window_starts)
+    p = np.zeros(n_windows)
+    traces = np.zeros((2, len(ep.times)))
     for s, by_cls in per_step_filtered.items():
         w_s = min_classes[s] / N
         idx1 = by_cls[1]
         idx0 = by_cls[0]
-        for i, smin in enumerate(WINDOW_STARTS):
-            smax_w = smin + WINDOW_SIZE
+        for i, smin in enumerate(window_starts):
+            smax_w = smin + window_size
             diff = (
                 hga[idx1, smin:smax_w].mean()
                 - hga[idx0, smin:smax_w].mean()
             )
             p[i] += w_s * diff
+        
+        traces[0] += w_s * hga[idx0].mean(axis=0)
+        traces[1] += w_s * hga[idx1].mean(axis=0)
 
-    return p, min_classes, per_step_filtered, N
+    return p, min_classes, per_step_filtered, N, traces
 
 
 def compute_permutation_null(hga, cell_data, a_hat, rng):
-    """Pooled and per-we permutation null distributions (N_PERMS each).
+    """
+    Compute permutation null distributions.
 
     cell_data: list of (idx1, idx0, weight_pooled, weight_we) tuples.
     Shuffles report labels independently within each cell,
@@ -290,6 +334,12 @@ def compute_permutation_null(hga, cell_data, a_hat, rng):
 # ## Per-cell projection
 
 # %%
+hga = ep.copy().apply_baseline((None, 0)).get_data()
+
+# %%
+cell_pool
+
+# %%
 results = []
 
 for _, site_row in tqdm(cell_pool.iterrows(), total=len(cell_pool), desc="Cells"):
@@ -303,38 +353,40 @@ for _, site_row in tqdm(cell_pool.iterrows(), total=len(cell_pool), desc="Cells"
     ep_i = ep[(ep.metadata["phoneme_pair"] == phoneme_pair)
               & (ep.metadata["word_end"] == word_end)]
     md_i = ep_i.metadata
+    assert md_i is not None
+
     if len(md_i) == 0:
         continue
+    hga_i = extract_hga(ep_i, electrode_idx)
     print(len(ep_i), len(md_i), subject, electrode_idx, phoneme_pair, word_end)
 
+    smin, smax = int(site_row.smin), int(site_row.smax)
+
     # Compute perceptual template
-    b4_matches = b4_windows[
-        (b4_windows["subject"] == subject)
-        & (b4_windows["electrode_idx"] == electrode_idx)
-        & (b4_windows["phoneme_pair"] == phoneme_pair)
-        & (b4_windows["word_end"] == word_end)
-        & (b4_windows["smin"] >= site_row.smin)
-        & (b4_windows["smax"] <= site_row.smax)
-    ].sort_values("smin")
-    
-    # Compute matching acoustic windowed data
-    # TODO this needs to be word-end-specific ..
-    a_matches = a_windows[
-        (a_windows["subject"] == subject)
-        & (a_windows["electrode_idx"] == electrode_idx)
-        & (a_windows["phoneme_pair"] == phoneme_pair)
-        & (a_windows["smin"] >= site_row.smin)
-        & (a_windows["smax"] <= site_row.smax)
-    ].sort_values("smin")
+    p_vec, min_classes, per_step_filtered, N, p_traces = compute_p(
+        hga=hga_i,
+        md_pp=md_i,
+        word_end=word_end,
+        group_col=bhv_col,
+        smin=smin,
+        smax=smax,
+    )
+    if p_vec is None:
+        print(f"No qualifying steps for {subject} {electrode_idx} {phoneme_pair} {word_end}")
+        continue
 
-    assert len(b4_matches) == len(a_matches), f"Mismatch in number of matching windows: {len(b4_matches)} vs {len(a_matches)}"
-    assert (b4_matches["smin"].values == a_matches["smin"].values).all(), "Mismatch in smin values between b4 and a matches"
+    # Compute acoustic vector
+    a_vec = compute_a_vector(hga_i, md_i, smin, smax)
 
-    # Acoustic and perceptual vectors
-    a_vec = a_matches.mean_diff_raw_med
-    p_vec = b4_matches.mean_diff_raw_med
+    projection = np.dot(p_vec, a_vec)
 
-    projection = np.dot(p_vec, a_vec) / np.linalg.norm(a_vec)
+    # Compute null distribution of projection
+    a_null = compute_a_vector_null(hga_i, md_i, smin, smax, rng=np.random.default_rng(MASTER_SEED))
+    projection_null = np.dot(p_vec, a_null.T)
+    projection_null_ci_low, projection_null_ci_high = \
+        np.percentile(projection_null, [2.5, 97.5])
+
+    pval = (np.sum(projection_null >= projection) + 1) / (N_PERMS + 1)
 
     results.append({
         "subject": subject,
@@ -342,13 +394,54 @@ for _, site_row in tqdm(cell_pool.iterrows(), total=len(cell_pool), desc="Cells"
         "phoneme_pair": phoneme_pair,
         "word_end": word_end,
 
-        "n_windows": len(b4_matches),
-
+        "n_windows": p_vec.shape[0],
+        "smin": smin,
+        "smax": smax,
         "projection": projection,
+
+        "projection_null_mean": projection_null.mean(),
+        "projection_null_ci_low": projection_null_ci_low,
+        "projection_null_ci_high": projection_null_ci_high,
+        "projection_p_value": pval,
     })
 
 
 results_df = pd.DataFrame(results)
 print(f"\nTotal sites processed: {len(results_df)}")
-if len(results_df) > 0:
-    print(results_df[["electrode_idx", "phoneme_pair", "projection"]].to_string(index=False))
+
+# %%
+results_df
+
+# %%
+site_row
+
+# %%
+xs = ep_i.times
+
+for step in [1, 6]:
+    step_mask = md_i["resampled"] == step
+    plt.plot(xs, hga_i[step_mask].mean(axis=0), label=f"Step {step}")
+
+plt.xlim(-0.05, 0.8)
+ax = plt.gca()
+ax.axvspan(site_row.smin / 100 - 0.4, site_row.smax / 100 - 0.4,
+           alpha=0.3)
+ax.legend()
+
+# %%
+plt.plot(xs, p_traces[0], label="Perceptual class 0", color="blue")
+plt.plot(xs, p_traces[1], label="Perceptual class 1", color="orange")
+plt.xlim(-0.05, 0.8)
+plt.axvspan(site_row.smin / 100 - 0.4, site_row.smax / 100 - 0.4,
+              alpha=0.3)
+
+# %%
+p_vec
+
+# %%
+a_vec
+
+# %%
+site_row[["smin", "smax"]]
+
+# %%
