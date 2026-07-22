@@ -7,7 +7,12 @@ these helpers without duplication.
 """
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
+import polars as pl
+
+from src.models.significance import _tfce_1d
 
 
 def _window_sign(median: float) -> int:
@@ -69,3 +74,371 @@ def _fallback_run(
 
     all_indices = sorted(set(left_indices + right_indices))
     return [cand_windows[i] for i in all_indices]
+
+
+# =============================================================================
+# TFCE gate helpers
+#
+# Two-tailed wrapper around the one-tailed TFCE engine in
+# src/models/significance.py::_tfce_1d (validated there against
+# mne.stats.cluster_level._find_clusters; see tests/test_significance.py).
+# We enhance |curve| so that both positive (/n/ > /d/) and negative
+# (/d/ > /n/) excursions accumulate cluster credit, per plan decision D1/D3
+# (no presupposed alignment; report the signed peak).
+# See: docs/superpowers/plans/2026-07-20-causal46-late-perceptual-significance.md
+# =============================================================================
+
+
+def tfce_enhance(
+    curve: np.ndarray,
+    dt: float,
+    E: float = 0.5,
+    H: float = 2.0,
+) -> np.ndarray:
+    """Two-tailed 1D TFCE enhancement over the post-acoustic window axis.
+
+    Enhances ``|curve|`` (so both signed excursions accumulate cluster
+    credit) via the validated one-tailed engine ``_tfce_1d``, then restores
+    the original per-index sign of ``curve`` so the enhanced peak can still
+    be reported as signed (plan D3: "enhance |curve|; report the signed
+    peak"). Where ``curve[i] == 0`` the enhanced value is also 0 (an exactly
+    zero point is never inside a ``stat > 0`` run). A sign flip with no
+    zero sample between the two excursions (e.g. ``[1, 2, -2, -1]``) is one
+    contiguous run in ``|curve|`` space, so it accumulates extent credit as
+    a single cluster; the per-index sign restore still reports each side
+    with its own local sign.
+
+    Args:
+        curve: 1D array, one value per candidate window, ordered by smin
+            (e.g. the per-window median of ``mean_diff_raw`` across
+            bootstrap replicates).
+        dt: threshold step for the TFCE height integration (same role as
+            ``dh`` in ``_tfce_1d``); smaller steps approximate the
+            continuous integral more closely at added compute cost.
+        E: extent exponent (TFCE 1D default 0.5, pre-registered — D3).
+        H: height exponent (TFCE 1D default 2.0, pre-registered — D3).
+
+    Returns:
+        1D array, same shape as ``curve``: signed TFCE-enhanced values.
+    """
+    curve = np.asarray(curve, dtype=np.float64)
+    enhanced_abs = _tfce_1d(np.abs(curve), E=E, H=H, dh=dt, threshold=0.0)
+    sign = np.sign(curve)
+    return enhanced_abs * sign
+
+
+def max_tfce_null(
+    null_curves: np.ndarray,
+    dt: float,
+    obs_tfce_max_abs: float,
+    E: float = 0.5,
+    H: float = 2.0,
+) -> tuple[np.ndarray, float]:
+    """Max-|TFCE| permutation null + two-tailed empirical p for one cell.
+
+    Each row of ``null_curves`` is one coherent across-window null curve
+    from a single within-step label permutation (plan D2: replicate r's
+    rows in ``b4_bootstrap`` form one coherent curve from one shuffle, not
+    ``n_windows`` independent per-window draws). Each replicate's curve is
+    TFCE-enhanced independently — windows are never mixed across
+    replicates — and reduced to that replicate's max |TFCE|, the standard
+    max-statistic construction for family-wise control across windows
+    (Westfall & Young 1993; Nichols & Holmes 2002).
+
+    ``null_curves`` must be NaN-free: tied cells (D2's ``preferred is
+    None``) have no usable null and must be dropped by the caller before
+    this point, not passed in here.
+
+    Args:
+        null_curves: shape ``(R, n_windows)``; row r is replicate r's curve
+            across all candidate windows, in the same window order as the
+            observed curve passed to `tfce_enhance`.
+        dt: threshold step, passed through to `tfce_enhance`.
+        obs_tfce_max_abs: the observed cell's gate statistic —
+            ``np.max(np.abs(tfce_enhance(obs_curve, dt, E=E, H=H)))``.
+        E: extent exponent — must match the observed-curve enhancement.
+        H: height exponent — must match the observed-curve enhancement.
+
+    Returns:
+        ``(null_vec, emp_p)``:
+            null_vec: shape ``(R,)``, max |TFCE| per replicate.
+            emp_p: two-tailed empirical p on magnitude,
+                ``(1 + #{null >= obs}) / (1 + R)``.
+    """
+    null_curves = np.asarray(null_curves, dtype=np.float64)
+    R = null_curves.shape[0]
+    null_vec = np.empty(R, dtype=np.float64)
+    for r in range(R):
+        enhanced = tfce_enhance(null_curves[r], dt, E=E, H=H)
+        null_vec[r] = np.max(np.abs(enhanced))
+    emp_p = (1 + np.sum(null_vec >= obs_tfce_max_abs)) / (1 + R)
+    return null_vec, float(emp_p)
+
+
+def assert_coherent_null_replicates(
+    n_rows: int,
+    R: int,
+    n_windows: int,
+    *,
+    context: str = "",
+) -> None:
+    """Assert a cell's null rows form R coherent, complete across-window curves.
+
+    Mirrors the union-beta row-count assertion in
+    ``behavioral_discriminative_windows.py`` (``union_boot.height == R *
+    n_comp``): a partial replicate (missing a window) would silently bias
+    ``max_tfce_null`` low for that replicate, so we fail loudly instead of
+    reshaping around a hole.
+
+    Args:
+        n_rows: observed row count for the cell's null data.
+        R: number of bootstrap replicates.
+        n_windows: number of candidate windows for the cell.
+        context: optional string identifying the cell, included in the
+            assertion message.
+
+    Raises:
+        AssertionError: if ``n_rows != R * n_windows``.
+    """
+    expected = R * n_windows
+    assert n_rows == expected, (
+        f"Expected {expected} rows (R={R} × {n_windows} windows)"
+        f"{f' for {context}' if context else ''}, got {n_rows}. "
+        "Check that every candidate window has a null value for every replicate."
+    )
+
+
+def validate_contiguous_grid(windows: list[tuple[int, int]]) -> int:
+    """Assert `windows` form a contiguous, uniform-width grid sorted by smin.
+
+    Shared by the window-discovery notebooks (`behavioral_discriminative_windows.py`,
+    `late_perceptual_significance.py`) so "valid grid" (stride == window_size,
+    no gaps) is defined once instead of re-derived per notebook.
+
+    Args:
+        windows: deduplicated ``(smin, smax)`` pairs, sorted by smin.
+
+    Returns:
+        The common window width (``smax - smin``).
+
+    Raises:
+        AssertionError: on an empty, non-uniform-width, or non-contiguous grid.
+    """
+    assert windows, "No windows to validate."
+    widths = {smax - smin for smin, smax in windows}
+    assert len(widths) == 1, (
+        f"Non-uniform grid window widths detected: {widths}. "
+        "Grid must have stride == window_size."
+    )
+    for i in range(len(windows) - 1):
+        assert windows[i][1] == windows[i + 1][0], (
+            f"Grid gap between {windows[i]} and {windows[i + 1]}. "
+            "Grid must be contiguous (smax_i == smin_{i+1})."
+        )
+    return next(iter(widths))
+
+
+def late_cell_significance(
+    rep_curves: np.ndarray,
+    null_curves: np.ndarray,
+    *,
+    E: float = 0.5,
+    H: float = 2.0,
+) -> dict:
+    """Per-cell late-perceptual significance bundle (plan Step 3).
+
+    Composes the TFCE gate (`tfce_enhance` + `max_tfce_null`) with the
+    knob-free integral robustness statistic (D3) and a descriptive
+    split-half reliability column (D7), sharing one adaptive ``dt`` (TFCE
+    threshold step) across the observed curve and the null so the two are
+    enhanced on the same threshold grid.
+
+    Args:
+        rep_curves: shape ``(R, n_windows)``, one row per bootstrap
+            replicate, the replicate's raw ``mean_diff_raw`` value per
+            candidate window (in window order, ordered by smin). The
+            observed curve is ``median(rep_curves, axis=0)`` (plan Step 3:
+            "median over replicates ... per window").
+        null_curves: shape ``(R, n_windows)``, row r the coherent
+            within-step label-permutation null curve for replicate r
+            (plan D2). NaN-free — tied cells (``preferred is None``) must
+            be dropped by the caller before this point.
+        E: TFCE extent exponent (pre-registered default 0.5, D3).
+        H: TFCE height exponent (pre-registered default 2.0, D3).
+
+    Returns:
+        dict with keys:
+            tfce_peak: signed TFCE-enhanced value at the observed curve's
+                peak |enhancement| (the window driving the gate).
+            tfce_max_abs: ``abs(tfce_peak)`` — the gate statistic.
+            tfce_emp_p: two-tailed max-TFCE permutation p-value.
+            integral_stat: knob-free robustness statistic — mean of the
+                observed curve over all candidate windows (D3's rejected-
+                as-gate, reported-as-robustness-check integrated-window
+                statistic).
+            integral_emp_p: two-tailed permutation p for `integral_stat`,
+                against the per-replicate null curve means.
+            splithalf_sign_agree: descriptive-only reliability column
+                (D7), not used for gating. A *replicate*-split proxy for
+                the plan's trial-split (this module only sees persisted
+                per-replicate curves, not raw trial draws — no epoch
+                reload here): replicates are split into first/second
+                halves, each half's median curve is evaluated at the
+                observed peak window, and the two signs are compared.
+                ``None`` when ``R < 2`` (no split is possible) or when
+                either half's value at the peak is exactly zero (no sign
+                to compare).
+    """
+    rep_curves = np.asarray(rep_curves, dtype=np.float64)
+    null_curves = np.asarray(null_curves, dtype=np.float64)
+    R, n_windows = rep_curves.shape
+    assert null_curves.shape == (R, n_windows), (
+        f"rep_curves and null_curves shape mismatch: {rep_curves.shape} vs "
+        f"{null_curves.shape}"
+    )
+    assert not np.isnan(null_curves).any(), (
+        "null_curves contains NaN — tied cells must be dropped by the caller "
+        "before calling late_cell_significance."
+    )
+
+    obs_curve = np.median(rep_curves, axis=0)
+
+    dt_base = max(float(np.max(np.abs(obs_curve))), float(np.max(np.abs(null_curves))))
+    dt = dt_base / 100.0 if dt_base > 0 else 1.0  # inert: both curves all-zero
+
+    enhanced = tfce_enhance(obs_curve, dt, E=E, H=H)
+    peak_idx = int(np.argmax(np.abs(enhanced)))
+    tfce_peak = float(enhanced[peak_idx])
+    tfce_max_abs = float(abs(tfce_peak))
+
+    _, tfce_emp_p = max_tfce_null(null_curves, dt, tfce_max_abs, E=E, H=H)
+
+    integral_stat = float(np.mean(obs_curve))
+    null_integral = np.mean(null_curves, axis=1)
+    integral_emp_p = float(
+        (1 + np.sum(np.abs(null_integral) >= abs(integral_stat))) / (1 + R)
+    )
+
+    splithalf_sign_agree: bool | None = None
+    if R >= 2:
+        half = R // 2
+        first_val = float(np.median(rep_curves[:half], axis=0)[peak_idx])
+        second_val = float(np.median(rep_curves[half:], axis=0)[peak_idx])
+        s1, s2 = np.sign(first_val), np.sign(second_val)
+        if s1 != 0 and s2 != 0:
+            splithalf_sign_agree = bool(s1 == s2)
+
+    return {
+        "tfce_peak": tfce_peak,
+        "tfce_max_abs": tfce_max_abs,
+        "tfce_emp_p": tfce_emp_p,
+        "integral_stat": integral_stat,
+        "integral_emp_p": integral_emp_p,
+        "splithalf_sign_agree": splithalf_sign_agree,
+    }
+
+
+def extract_cell_curves(
+    b4_bootstrap: pl.DataFrame,
+    b4_per_cell: pl.DataFrame,
+    all_grid_windows: list[tuple[int, int]],
+    we_search_smax: dict[str, int | None],
+) -> dict[tuple, dict]:
+    """Per-cell candidate-window selection + curve extraction (plan Step 3).
+
+    Extracted from ``late_perceptual_significance.py`` so a second consumer
+    (the report notebook's param-sensitivity panel, which needs to rerun
+    `late_cell_significance` at several (E, H) without re-deriving candidate
+    windows each time) can share the exact same window-selection logic
+    instead of duplicating it.
+
+    Args:
+        b4_bootstrap: raw bootstrap replicate rows (``smin, smax, replicate,
+            mean_diff_raw, mean_diff_aligned_null`` + cell key columns).
+        b4_per_cell: one row per powered B4 cell, with ``phon_smin,
+            phon_smax`` (the acoustic boundary).
+        all_grid_windows: the full deduplicated, contiguous ``(smin, smax)``
+            grid (see `validate_contiguous_grid`).
+        we_search_smax: per-word-end post-acoustic search bound (D4),
+            ``smax <= we_search_smax[word_end]``. A missing/`None` entry
+            means no upper bound.
+
+    Returns:
+        Dict keyed by ``(subject, electrode_idx, phoneme_pair, word_end)``,
+        one entry per row of ``b4_per_cell``, each a dict with:
+            status: one of ``"ok"``, ``"missing"`` (no bootstrap rows for
+                this cell), ``"no_candidates"`` (no in-window smin present),
+                ``"tied"`` (``preferred is None`` — D2, no usable null).
+            phon_smin, phon_smax, search_smin, search_smax, n_windows.
+            rep_curves, null_curves: shape ``(R, n_windows)`` each, present
+                only when ``status == "ok"``; ``None`` otherwise.
+    """
+    cell_boot_partitioned: dict[tuple, pl.DataFrame] = {}
+    for row in b4_per_cell.iter_rows(named=True):
+        key = (row["subject"], row["electrode_idx"], row["phoneme_pair"], row["word_end"])
+        if key not in cell_boot_partitioned:
+            cell_boot_partitioned[key] = b4_bootstrap.filter(
+                (pl.col("subject") == key[0]) &
+                (pl.col("electrode_idx") == key[1]) &
+                (pl.col("phoneme_pair") == key[2]) &
+                (pl.col("word_end") == key[3])
+            )
+
+    out: dict[tuple, dict] = {}
+    for cell_row in b4_per_cell.iter_rows(named=True):
+        subj = cell_row["subject"]
+        eidx = int(cell_row["electrode_idx"])
+        pp = cell_row["phoneme_pair"]
+        we = cell_row["word_end"]
+        phon_smin = int(cell_row["phon_smin"])
+        phon_smax = int(cell_row["phon_smax"])
+        key = (subj, eidx, pp, we)
+
+        we_smax = we_search_smax.get(we)
+        base = {
+            "phon_smin": phon_smin, "phon_smax": phon_smax,
+            "search_smin": phon_smax, "search_smax": we_smax,
+            "n_windows": 0, "rep_curves": None, "null_curves": None,
+        }
+
+        cell_boot = cell_boot_partitioned.get(key)
+        if cell_boot is None or cell_boot.height == 0:
+            warnings.warn(f"No bootstrap data for {subj} e{eidx} {pp} {we}")
+            out[key] = {**base, "status": "missing"}
+            continue
+
+        cand_windows = [
+            (smin, smax) for smin, smax in all_grid_windows
+            if smin >= phon_smax and (we_smax is None or smax <= we_smax)
+        ]
+        if cand_windows:
+            cand_smins = [smin for smin, _ in cand_windows]
+            cand_boot = cell_boot.filter(pl.col("smin").is_in(cand_smins))
+            present_smins = set(cand_boot["smin"].unique().to_list())
+            cand_windows = [(smin, smax) for smin, smax in cand_windows if smin in present_smins]
+        if not cand_windows:
+            out[key] = {**base, "status": "no_candidates"}
+            continue
+
+        n_windows = len(cand_windows)
+        base["n_windows"] = n_windows
+        cand_boot = cand_boot.filter(pl.col("smin").is_in([smin for smin, _ in cand_windows]))
+        R = int(cand_boot["replicate"].max()) + 1
+
+        # mean_diff_aligned_null is written as float("nan") (not a polars null) for
+        # tied cells (t_tests.py bootstrap_cell, D2) — to_numpy() maps both to NaN.
+        is_tied = bool(np.all(np.isnan(cand_boot["mean_diff_aligned_null"].to_numpy())))
+        if is_tied:
+            out[key] = {**base, "status": "tied"}
+            continue
+
+        context = f"{subj} e{eidx} {pp} {we}"
+        assert_coherent_null_replicates(cand_boot.height, R, n_windows, context=context)
+
+        sorted_boot = cand_boot.sort(["replicate", "smin"])
+        rep_curves = sorted_boot["mean_diff_raw"].to_numpy().reshape(R, n_windows)
+        null_curves = sorted_boot["mean_diff_aligned_null"].to_numpy().reshape(R, n_windows)
+
+        out[key] = {**base, "status": "ok", "rep_curves": rep_curves, "null_curves": null_curves}
+
+    return out
