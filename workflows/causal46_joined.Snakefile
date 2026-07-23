@@ -1557,6 +1557,53 @@ rule joined_strong_generator:
         )
 
 
+rule late_perceptual_projection:
+    """Project late within-completion perceptual contrast onto acoustic response."""
+    input:
+        epoch_fifs = expand(
+            "outputs/epochs_preprocessed/{subject}_epo.fif",
+            subject=config["data"]["subjects"],
+        ),
+
+        site_pool = "outputs/causal46_joined/early_window_site_types/site_type_relabel.csv",
+        early_projs = "outputs/causal46_joined/early_perceptual_projection/site_class.parquet",
+
+        # bootstrap results
+        a_bootstrap = "outputs/causal46_joined/acoustic_bootstrap/a_per_window_full_all.parquet",
+        b4_bootstrap = "outputs/causal46_joined/t_tests/b4_per_window.parquet",
+
+        # unified bootstrap
+        unified_b_windows = "outputs/causal46_joined/behavioral_discriminative_windows_all/b_windows.parquet",
+
+        notebook = "notebooks/causal46_joined/late_perceptual_projection.py",
+
+    output:
+        notebook = "outputs/causal46_joined/late_perceptual_projection/notebook.ipynb",
+        site_results = "outputs/causal46_joined/late_perceptual_projection/results.csv",
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                epoch_dir=str(Path(input.epoch_fifs[0]).parent),
+                site_pool_path=str(input.site_pool),
+                early_window_path=str(input.early_projs),
+                b4_windows_path=str(input.b4_bootstrap),
+                a_windows_path=str(input.a_bootstrap),
+
+                b_windows_path = str(input.unified_b_windows),
+                outdir=str(outdir),
+                window_size=1, stride=1,
+                min_component_windows=2,
+                n_perms=50000,
+                master_seed=42,
+                fdr_alpha=0.05,
+            ),
+        )
+
+
 rule joined_acoustic_transfer:
     """Acoustic transfer decoding: phonemic peak window vs. behavioral target window.
 
@@ -1571,7 +1618,7 @@ rule joined_acoustic_transfer:
     """
     input:
         epochs   = "outputs/epochs_preprocessed/{subject}_epo.fif",
-        b_windows = "outputs/causal46_joined/behavioral_discriminative_windows/b_windows.parquet",
+        late_projs = "outputs/causal46_joined/late_perceptual_projection/results.csv",
         winners  = "outputs/causal6/reg_lambda_sweep/reg_lambda_winners.json",
         notebook = "notebooks/causal46_joined/acoustic_transfer.py",
 
@@ -1588,7 +1635,7 @@ rule joined_acoustic_transfer:
             parameters=dict(
                 subject=wildcards.subject,
                 epochs_path=str(input.epochs),
-                b_windows_path=str(input.b_windows),
+                late_projection_path=str(input.late_projs),
                 reg_lambda_winners_path=str(input.winners),
                 outdir=str(outdir),
                 window_size=config["analysis"]["decoding"]["window_size"],

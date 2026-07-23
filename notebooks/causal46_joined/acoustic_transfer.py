@@ -9,7 +9,7 @@
 #       format_version: '1.3'
 #       jupytext_version: 1.19.1
 #   kernelspec:
-#     display_name: barakeet
+#     display_name: barakeet (3.12.13)
 #     language: python
 #     name: python3
 # ---
@@ -34,7 +34,7 @@
 # %% tags=["parameters"]
 subject = "EC282"
 epochs_path = "outputs/epochs_preprocessed/EC282_epo.fif"
-b_windows_path = "outputs/causal46_joined/behavioral_discriminative_windows/b_windows.parquet"
+late_projection_path = "outputs/causal46_joined/late_perceptual_projection/late_perceptual_projection_results.csv"
 reg_lambda_winners_path = "outputs/causal6/reg_lambda_sweep/reg_lambda_winners.json"
 outdir = "."
 
@@ -69,8 +69,10 @@ epochs = mne.read_epochs(epochs_path, verbose=False)
 assert epochs.metadata is not None
 epochs.metadata = add_metadata_features(epochs.metadata)
 
-b_windows_all = pl.read_parquet(b_windows_path).filter(pl.col("subject") == subject)
-print(f"b_windows rows for {subject}: {b_windows_all.height}")
+# %%
+late_perceptual_df = pl.read_csv(late_projection_path).filter(pl.col("subject") == subject)
+print(f"late_perceptual rows for {subject}: {late_perceptual_df.height}")
+
 
 # %% [markdown]
 # ## Sub-window selection helper
@@ -111,7 +113,7 @@ def pick_best_subwindow(
 output_rows: list = []
 md = epochs.metadata
 
-for (electrode_idx, phoneme_pair), group in b_windows_all.group_by(
+for (electrode_idx, phoneme_pair), group in late_perceptual_df.group_by(
     ["electrode_idx", "phoneme_pair"], maintain_order=True
 ):
     electrode_idx = int(electrode_idx)
@@ -123,22 +125,17 @@ for (electrode_idx, phoneme_pair), group in b_windows_all.group_by(
     # Epoch data for this electrode (needed for argmax selection).
     ep_data = epochs.get_data(picks=[electrode_idx]).squeeze(1)  # (N_epochs, N_times)
 
-    # Resolve behavioral sub-window for every b_windows row.
+    # Resolve behavioral sub-window
     row_behav_windows: list = []
     for row in group.iter_rows(named=True):
-        dec_smin = row["behav_decoder_smin"]
-        dec_smax = row["behav_decoder_smax"]
-        if dec_smin is not None:
-            row_behav_windows.append((int(dec_smin), int(dec_smax)))
-        else:
-            bsmin, bsmax = pick_best_subwindow(
-                ep_data, md,
-                phoneme_pair=phoneme_pair,
-                union_smin=int(row["smin"]),
-                union_smax=int(row["smax"]),
-                window_size=window_size,
-            )
-            row_behav_windows.append((bsmin, bsmax))
+        bsmin, bsmax = pick_best_subwindow(
+            ep_data, md,
+            phoneme_pair=phoneme_pair,
+            union_smin=int(row["smin"]),
+            union_smax=int(row["smax"]),
+            window_size=window_size,
+        )
+        row_behav_windows.append((bsmin, bsmax))
 
     # Unique windows: phonemic peak + all behavioral sub-windows.
     unique_windows = sorted({(phon_smin, phon_smax)} | set(row_behav_windows))
@@ -194,11 +191,14 @@ for (electrode_idx, phoneme_pair), group in b_windows_all.group_by(
                 "phon_smax": phon_smax,
                 "behav_smin": behav_smin,
                 "behav_smax": behav_smax,
-                "is_fallback": row["is_fallback"],
-                "ci_excludes_zero": row["ci_excludes_zero"],
                 "fold": fold,
                 "phon_roc_auc": phon_auc,
                 "behav_roc_auc": behav_auc,
+
+                # facts about the source
+                "late_projection": row["projection"],
+                "late_projection_p_value": row["projection_p_value"],
+                "late_projection_q_value": row["projection_q_value"],
             })
 
 print(f"Total output rows: {len(output_rows)}")
@@ -210,7 +210,7 @@ print(f"Total output rows: {len(output_rows)}")
 EXPECTED_COLS = [
     "subject", "electrode_idx", "phoneme_pair", "word_end", "window_id",
     "phon_smin", "phon_smax", "behav_smin", "behav_smax",
-    "is_fallback", "ci_excludes_zero",
+    "late_projection", "late_projection_p_value", "late_projection_q_value",
     "fold", "phon_roc_auc", "behav_roc_auc",
 ]
 
@@ -226,11 +226,13 @@ else:
         "phon_smax": pl.Int64,
         "behav_smin": pl.Int64,
         "behav_smax": pl.Int64,
-        "is_fallback": pl.Boolean,
-        "ci_excludes_zero": pl.Boolean,
         "fold": pl.Int64,
         "phon_roc_auc": pl.Float64,
         "behav_roc_auc": pl.Float64,
+
+        "late_projection": pl.Float64,
+        "late_projection_p_value": pl.Float64,
+        "late_projection_q_value": pl.Float64,
     })
 
 missing = set(EXPECTED_COLS) - set(out_df.columns)
