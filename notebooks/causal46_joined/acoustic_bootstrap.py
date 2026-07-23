@@ -30,6 +30,12 @@
 #
 # **No behavioural (ambiguous) trials are used here** — only unambiguous endpoint
 # steps 1 and 6, pooled across both word_ends per phoneme_pair.
+#
+# A third pass (`a_*_by_word_end_all.parquet` / `a_*_by_word_end.parquet`) reruns
+# the same endpoint contrast **split by word_end** instead of pooled — same site
+# loop, same trial draws unaffected (independent RNG per pass), but each word_end
+# gets its own trial subset and its own search ceiling (`_WE_SMAX[we]` rather than
+# the pair-pooled `phon_smax`/`PAIR_SMAX[pp]`).
 
 # %% tags=["parameters"]
 early_annotations_path = "outputs/causal46_joined/manual_annotations/early_acoustic_window.csv"
@@ -68,6 +74,7 @@ OUT_DIR = Path(outdir)
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 SITE_KEYS = ["subject", "electrode_idx", "phoneme_pair"]
+SITE_KEYS_WE = SITE_KEYS + ["word_end"]
 
 # t=0 in sample space
 SAMPLE_T0 = int(round((0.0 - epoch_tmin) * epoch_sfreq))
@@ -129,9 +136,12 @@ print(f"all annotated sites: {all_sites.height}; type1 sites: {type1_sites.heigh
 # %%
 boot_rows: list[dict] = []
 boot_rows_full: list[dict] = []
+boot_rows_by_we: list[dict] = []
 per_site_rows: list[dict] = []
+per_site_by_we_rows: list[dict] = []
 n_skipped_no_peaks = 0
 n_skipped_underpowered = 0
+n_skipped_underpowered_we = 0
 
 for subject, subj_sites in all_sites.to_pandas().groupby("subject"):
     ep_path = Path(epoch_dir) / f"{subject}_epo.fif"
@@ -223,12 +233,66 @@ for subject, subj_sites in all_sites.to_pandas().groupby("subject"):
                     "n_per_class": r["n_per_class"],
                 })
 
-        print(f"  e{eidx} {pp}: n_lo={n_lo} n_hi={n_hi}  {len(rows)} rows (early)  {len(rows_full) if result_full else 0} rows (full)")
+        # Third pass: per-word_end endpoint bootstrap (split, not pooled).
+        # Independent RNG from the pooled/full passes (bootstrap_A_site reseeds
+        # per call), so this is an additional analysis, not a re-derivation.
+        we_rows_total = 0
+        for we in PHONEME_PAIR_TO_WORD_ENDS[pp]:
+            we_mask = (md_pp["word_end"] == we).values
+            if not we_mask.any():
+                continue
+            hga_we = hga[we_mask]
+            md_we  = md_pp[we_mask].reset_index(drop=True)
+
+            result_we = bootstrap_A_site(
+                hga_we, md_we,
+                search_smin=SAMPLE_T0,
+                search_smax=_WE_SMAX[we],
+                window_size=window_size,
+                stride=stride,
+                R=R,
+                min_n=min_n,
+            )
+            if result_we is None:
+                warnings.warn(
+                    f"{subject} e{eidx} {pp} {we}: fewer than {min_n} endpoint trials — skipping"
+                )
+                n_skipped_underpowered_we += 1
+                continue
+
+            rows_we, n_lo_we, n_hi_we = result_we
+            we_rows_total += len(rows_we)
+            for r in rows_we:
+                boot_rows_by_we.append({
+                    "subject": subject,
+                    "electrode_idx": eidx,
+                    "phoneme_pair": pp,
+                    "word_end": we,
+                    "replicate": r["replicate"],
+                    "smin": r["smin"],
+                    "smax": r["smax"],
+                    "mean_diff_raw": r["mean_diff_raw"],
+                    "n_per_class": r["n_per_class"],
+                })
+
+            per_site_by_we_rows.append({
+                "subject": subject,
+                "electrode_idx": eidx,
+                "phoneme_pair": pp,
+                "word_end": we,
+                "we_smax": _WE_SMAX[we],
+                "n_lo": n_lo_we,
+                "n_hi": n_hi_we,
+                "n_per_class": min(n_lo_we, n_hi_we),
+            })
+
+        print(f"  e{eidx} {pp}: n_lo={n_lo} n_hi={n_hi}  {len(rows)} rows (early)  {len(rows_full) if result_full else 0} rows (full)  {we_rows_total} rows (by_word_end)")
 
 print(
     f"\nDone: {len(per_site_rows)} sites processed, "
     f"{n_skipped_no_peaks} skipped (no phon_peaks), "
-    f"{n_skipped_underpowered} skipped (underpowered)"
+    f"{n_skipped_underpowered} skipped (underpowered), "
+    f"{n_skipped_underpowered_we} word_end splits skipped (underpowered)"
 )
 
 # %% [markdown]
@@ -268,18 +332,39 @@ else:
 
 # Per-window CI summary for star-plot significance bars on ax_top.
 # mean_diff_aligned = mean_diff_raw (step6 > step1 polarity is fixed).
-def _boot_to_per_window(df: pl.DataFrame) -> pl.DataFrame:
+def _boot_to_per_window(df: pl.DataFrame, site_keys: list[str] = SITE_KEYS) -> pl.DataFrame:
     aligned = df.with_columns(
         pl.col("mean_diff_raw").alias("mean_diff_aligned"),
         (pl.col("smin") / epoch_sfreq + epoch_tmin).alias("tmin"),
         (pl.col("smax") / epoch_sfreq + epoch_tmin).alias("tmax"),
         pl.lit(None).cast(pl.Float64).alias("acoustic_peak_auc"),
     )
-    return per_window_summary(aligned, SITE_KEYS)
+    return per_window_summary(aligned, site_keys)
 
 
 a_per_window      = _boot_to_per_window(a_bootstrap)
 a_per_window_full_df = _boot_to_per_window(a_bootstrap_full)
+
+A_BOOT_WE_COLS = ["subject", "electrode_idx", "phoneme_pair", "word_end",
+                   "replicate", "smin", "smax", "mean_diff_raw", "n_per_class"]
+A_SITE_WE_COLS = ["subject", "electrode_idx", "phoneme_pair", "word_end",
+                   "we_smax", "n_lo", "n_hi", "n_per_class"]
+
+if boot_rows_by_we:
+    a_bootstrap_by_we = pl.DataFrame(boot_rows_by_we)
+    a_per_site_by_we  = pl.DataFrame(per_site_by_we_rows)
+else:
+    a_bootstrap_by_we = pl.DataFrame(
+        {c: pl.Series([], dtype=pl.Utf8) for c in A_BOOT_WE_COLS}
+    ).cast({"electrode_idx": pl.Int64, "replicate": pl.Int64,
+            "smin": pl.Int64, "smax": pl.Int64,
+            "mean_diff_raw": pl.Float64, "n_per_class": pl.Int64})
+    a_per_site_by_we = pl.DataFrame(
+        {c: pl.Series([], dtype=pl.Utf8) for c in A_SITE_WE_COLS}
+    ).cast({"electrode_idx": pl.Int64, "we_smax": pl.Int64,
+            "n_lo": pl.Int64, "n_hi": pl.Int64, "n_per_class": pl.Int64})
+
+a_per_window_by_we_df = _boot_to_per_window(a_bootstrap_by_we, SITE_KEYS_WE)
 
 # Full (all-site) early-window outputs — consumed by contrast_plot.py to orient
 # every acoustic site by its endpoint sign (must not include late windows).
@@ -290,6 +375,13 @@ a_per_window.write_parquet(OUT_DIR / "a_per_window_all.parquet")
 # Full-timecourse outputs — star-plot ax_top significance bars across full trial.
 a_per_window_full_df.write_parquet(OUT_DIR / "a_per_window_full_all.parquet")
 _type1_subset(a_per_window_full_df).write_parquet(OUT_DIR / "a_per_window_full.parquet")
+
+# Word_end-split outputs — same endpoint contrast, run separately per word_end
+# (search ceiling = _WE_SMAX[we]) instead of pooled across word_ends.
+a_bootstrap_by_we.write_parquet(OUT_DIR / "a_bootstrap_by_word_end_all.parquet")
+a_per_site_by_we.write_parquet(OUT_DIR / "a_per_site_by_word_end_all.parquet")
+a_per_window_by_we_df.write_parquet(OUT_DIR / "a_per_window_by_word_end_all.parquet")
+_type1_subset(a_per_window_by_we_df).write_parquet(OUT_DIR / "a_per_window_by_word_end.parquet")
 
 
 # Type1 subset under the original names, preserving existing type1-only
@@ -306,5 +398,10 @@ print(f"a_bootstrap:       {a_bootstrap.height:,} rows (all)  {a_bootstrap_t1.he
 print(f"a_per_site:        {a_per_site.height} rows (all)  {a_per_site_t1.height} rows (type1)")
 print(f"a_per_window:      {a_per_window.height} rows (all)  {a_per_window_t1.height} rows (type1)")
 print(f"a_per_window_full: {a_per_window_full_df.height} rows (all)  {_type1_subset(a_per_window_full_df).height} rows (type1)")
+print(f"a_bootstrap_by_we: {a_bootstrap_by_we.height:,} rows (all)")
+print(f"a_per_site_by_we:  {a_per_site_by_we.height} rows (all)")
+print(f"a_per_window_by_we: {a_per_window_by_we_df.height} rows (all)  {_type1_subset(a_per_window_by_we_df).height} rows (type1)")
 if a_per_site.height > 0:
     print(a_per_site)
+if a_per_site_by_we.height > 0:
+    print(a_per_site_by_we)

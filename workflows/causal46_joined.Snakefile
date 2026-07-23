@@ -1168,6 +1168,9 @@ rule joined_acoustic_bootstrap:
     Emits two tiers: `a_*_all.parquet` (all sites; feeds contrast_plot's
     endpoint-orientation of the acoustic panel and joined_acoustic_endpoint_windows)
     and `a_*.parquet` (the type1 subset, byte-content-identical to a type1-only run).
+    Also emits `a_*_by_word_end*.parquet`: the same endpoint contrast rerun
+    separately per word_end (not pooled), for comparing endpoint timing/sign
+    across the two lexical completions.
     """
     input:
         epoch_fifs        = expand(
@@ -1190,6 +1193,10 @@ rule joined_acoustic_bootstrap:
         a_per_window_all     = "outputs/causal46_joined/acoustic_bootstrap/a_per_window_all.parquet",
         a_per_window_full    = "outputs/causal46_joined/acoustic_bootstrap/a_per_window_full.parquet",
         a_per_window_full_all= "outputs/causal46_joined/acoustic_bootstrap/a_per_window_full_all.parquet",
+        a_bootstrap_by_we_all      = "outputs/causal46_joined/acoustic_bootstrap/a_bootstrap_by_word_end_all.parquet",
+        a_per_site_by_we_all       = "outputs/causal46_joined/acoustic_bootstrap/a_per_site_by_word_end_all.parquet",
+        a_per_window_by_we_all     = "outputs/causal46_joined/acoustic_bootstrap/a_per_window_by_word_end_all.parquet",
+        a_per_window_by_we         = "outputs/causal46_joined/acoustic_bootstrap/a_per_window_by_word_end.parquet",
 
     run:
         outdir = Path(output.notebook).parent
