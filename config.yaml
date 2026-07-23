@@ -89,8 +89,8 @@ analysis:
 
 causal46_joined:
   min_class_k: 3            # minimum per-class trials to include a cell
-  window_size: 5           # searchlight window in samples (100ms at 100 Hz)
-  stride: 5
+  window_size: 2           # searchlight window in samples (100ms at 100 Hz)
+  stride: 2
   ac_p_value_threshold: 0.01   # uncorrected p-value cutoff for AS-site inclusion
   n_bootstrap: 1000        # bootstrap replicates (reduce for smoke testing)
   n_perm: 1000             # permutation null replicates for contrast_plot behavioral band
