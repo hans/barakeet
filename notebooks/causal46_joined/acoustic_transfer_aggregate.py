@@ -86,7 +86,7 @@ scores_all.write_parquet(OUT_DIR / "scores_all.parquet")
 # %%
 CELL_KEYS = ["subject", "electrode_idx", "phoneme_pair", "word_end", "window_id",
              "phon_smin", "phon_smax", "behav_smin", "behav_smax",
-             "is_fallback", "ci_excludes_zero"]
+             "late_projection", "late_projection_p_value", "late_projection_q_value"]
 
 if scores_all.height > 0:
     cell_means = (
@@ -110,7 +110,7 @@ if scores_all.height > 0:
     print(cell_means.select([
         "subject", "electrode_idx", "phoneme_pair", "word_end", "window_id",
         "phon_auc_mean", "behav_auc_mean", "transfer_drop",
-        "is_fallback", "ci_excludes_zero",
+        "late_projection", "late_projection_p_value", "late_projection_q_value",
     ]).sort("transfer_drop").head(10))
 else:
     cell_means = pl.DataFrame()
@@ -125,13 +125,8 @@ else:
     phon = cell_means["phon_auc_mean"].to_numpy()
     behav = cell_means["behav_auc_mean"].to_numpy()
     drop = cell_means["transfer_drop"].to_numpy()
-    ci_excl = cell_means["ci_excludes_zero"].to_numpy()
-    fallback = cell_means["is_fallback"].to_numpy()
+    sig_mask = cell_means["late_projection_p_value"].to_numpy() < 0.05
     pps = cell_means["phoneme_pair"].to_list()
-
-    sig_mask = ci_excl & ~fallback
-    fallback_mask = fallback
-    insig_mask = ~ci_excl & ~fallback
 
     # --- Panel layout ---
     fig, axes = plt.subplots(1, 3, figsize=(13, 4))
@@ -143,8 +138,7 @@ else:
              max(phon.max(), behav.max()) + 0.02]
     for mask, label, color, marker, zorder in [
         (sig_mask,     "CI excl. 0",   "#2166ac", "o", 3),
-        (insig_mask,   "CI ∩ 0",       "#92c5de", "o", 2),
-        (fallback_mask,"fallback",      "#d1e5f0", "^", 1),
+        (~sig_mask,   "CI ∩ 0",       "#92c5de", "o", 2),
     ]:
         if mask.any():
             ax.scatter(phon[mask], behav[mask], c=color, marker=marker,
@@ -164,8 +158,7 @@ else:
     bins = np.linspace(drop.min() - 0.02, drop.max() + 0.02, 30)
     for mask, label, color, alpha in [
         (sig_mask,     "CI excl. 0",  "#2166ac", 0.75),
-        (insig_mask,   "CI ∩ 0",      "#92c5de", 0.6),
-        (fallback_mask,"fallback",     "#d1e5f0", 0.5),
+        (~sig_mask,   "CI ∩ 0",      "#92c5de", 0.6),
     ]:
         if mask.any():
             ax.hist(drop[mask], bins=bins, color=color, alpha=alpha, label=label)
@@ -201,8 +194,7 @@ else:
     fig2, ax2 = plt.subplots(figsize=(5, 4))
     for mask, label, color, marker in [
         (sig_mask,     "CI excl. 0",  "#2166ac", "o"),
-        (insig_mask,   "CI ∩ 0",      "#92c5de", "o"),
-        (fallback_mask,"fallback",     "#d1e5f0", "^"),
+        (~sig_mask,   "CI ∩ 0",      "#92c5de", "o"),
     ]:
         if mask.any():
             sc = ax2.scatter(phon_t[mask], behav_t[mask],
@@ -288,31 +280,3 @@ ax.set_ylabel("Decoding\nperformance\n(ROC-AUC)", rotation=0, labelpad=40)
 
 ax.spines["top"].set_visible(False)
 ax.spines["right"].set_visible(False)
-
-# %%
-plot_subject = "EC253"
-plot_electrode_idx = 21
-plot_phoneme_pair = "pb"
-
-plot_transfer_result = cell_means.to_pandas().query("subject == 'EC253' and electrode_idx == 21 and phoneme_pair == 'pb'").sort_values("window_id").iloc[0]
-
-# n is number of folds
-n = scores_all.filter(
-    (pl.col("subject") == plot_subject) &
-    (pl.col("electrode_idx") == plot_electrode_idx) &
-    (pl.col("phoneme_pair") == plot_phoneme_pair)
-).select(pl.col("fold").n_unique()).item()
-phon_auc_sem = plot_transfer_result["phon_auc_std"] / np.sqrt(n)
-behav_auc_sem = plot_transfer_result["behav_auc_std"] / np.sqrt(n)
-
-f, ax = plt.subplots(figsize=(2.5, 2.5))
-
-ax.bar([0, 1], [plot_transfer_result["phon_auc_mean"], plot_transfer_result["behav_auc_mean"]],
-       yerr=[phon_auc_sem, behav_auc_sem],
-       color=["#2166ac", "#b2182b"], alpha=0.8)
-ax.set_xticks([0, 1])
-ax.set_xlabel("Decoding time window")
-ax.set_xticklabels(["Early window", "Integration window"])
-ax.set_ylabel("Decoding\nperformance\n(ROC-AUC)", rotation=0, labelpad=40)
-ax.axhline(0.5, color="gray", lw=0.5, ls=":")
-ax.yaxis.set_major_formatter(PercentFormatter(1.0))
