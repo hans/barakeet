@@ -49,7 +49,7 @@ from _within_completion import (  # noqa: E402
     resolve_behavior_col,
 )
 
-# %%
+# %% tags=["parameters"]
 # Computed site-type table (early_window_site_types); consumed ONLY for its
 # A_significant column to define the projection site pool. NOT the manual
 # type1-5 authority (that is early_acoustic_window.csv, read by the aggregate).

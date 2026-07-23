@@ -1583,6 +1583,7 @@ rule late_perceptual_projection:
 
     run:
         outdir = Path(output.notebook).parent
+        C46 = config["causal46_joined"]
         run_notebook(
             str(input.notebook),
             str(output.notebook),
@@ -1594,7 +1595,10 @@ rule late_perceptual_projection:
                 a_windows_path=str(input.a_bootstrap),
 
                 b_windows_path = str(input.unified_b_windows),
+
                 outdir=str(outdir),
+
+                min_class_k=C46["min_class_k"],
                 window_size=1, stride=1,
                 min_component_windows=2,
                 n_perms=50000,
