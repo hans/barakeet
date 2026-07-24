@@ -284,13 +284,14 @@ def bootstrap_cell(
         null_diff_by_window = {(w.smin, w.smax): w.mean_diff for w in res_null}
         for w in res:
             mean_diff_raw = w.mean_diff
+            null_raw = null_diff_by_window.get((w.smin, w.smax), float("nan"))
+
             if preferred is None:
                 mean_diff_aligned = float("nan")
                 mean_diff_aligned_null = float("nan")
             else:
                 sign = 1 if raw_pos_key == preferred else -1
                 mean_diff_aligned = sign * mean_diff_raw
-                null_raw = null_diff_by_window.get((w.smin, w.smax), float("nan"))
                 mean_diff_aligned_null = sign * null_raw
             rows.append({
                 "replicate": r,
@@ -300,6 +301,7 @@ def bootstrap_cell(
                 "mean_pos_raw": w.mean_pos,
                 "mean_neg_raw": w.mean_neg,
                 "mean_diff_raw": mean_diff_raw,
+                "mean_diff_raw_null": null_raw,
                 "mean_diff_aligned": mean_diff_aligned,
                 "mean_diff_aligned_null": mean_diff_aligned_null,
                 "n_per_class": n_per_class,
