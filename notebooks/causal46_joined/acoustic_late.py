@@ -21,9 +21,11 @@ import json
 from pathlib import Path
 
 from loguru import logger as L
+import matplotlib.pyplot as plt
 import mne
 import numpy as np
 import pandas as pd
+import seaborn as sns
 from tqdm.auto import tqdm
 
 from src.data import add_metadata_features
@@ -43,6 +45,11 @@ cv_random_state = 42
 device = "cpu"
 tol = 1e-6
 max_iter = 50
+
+# Permutation-null significance (single test per site; no searchlight).
+n_permutations = 500
+permutation_seed = 0
+permutation_chunk_size = 6
 
 # %%
 b4_per_cell = pd.read_parquet(b4_per_cell_path)
@@ -74,7 +81,7 @@ import polars as pl
 from sklearn.model_selection import StratifiedKFold
 import torch
 
-from src.models.decoding_gpu import batched_roc_auc, compute_balanced_sample_weight, fit_batched_l2_logreg, standardise_per_batch
+from src.models.decoding_gpu import batched_roc_auc, compute_balanced_sample_weight, fit_batched_l2_logreg, fit_batched_l2_logreg_perms, standardise_per_batch
 
 
 def _fit_batched_cv(
@@ -452,3 +459,419 @@ plt.axvline(x=0.5, color="k", ls="--", lw=1)
 plt.axhline(y=0.5, color="k", ls="--", lw=1)
 plt.xlabel("AUC decoding: lexical evidence 0")
 plt.ylabel("AUC decoding: lexical evidence 1")
+
+# %% [markdown]
+# ## Permutation-null significance test (one test per site)
+#
+# For each site we refit the acoustic decoder under `n_permutations` shuffles
+# of the acoustic label, using the *same* trial selection (target word-end,
+# unambiguous steps 1 & 6) and the *same* late window `[phon_smax, dec_smax]`
+# as the real decoder above. Splits come from the real (unshuffled) labels, so
+# fold sizes match the real run. We null **`test_roc_auc`** — i.e. whether the
+# within-word-end acoustic decoder beats chance in the late window. (The
+# headline plots key on `test_vs`; testing that difference would need a
+# different null. Switch here if that's what's wanted.)
+
+# %%
+def _fit_batched_cv_null(
+    X: np.ndarray,               # (n_trials, B, d)
+    y: np.ndarray,                # (n_trials,) real labels (used for splits only)
+    problem_meta: pl.DataFrame,   # (B rows)
+    *,
+    permute_seeds: Sequence[int],
+    permutation_chunk_size: int,
+    reg_lambda: float,
+    n_folds: int,
+    cv_random_state: int,
+    device: str,
+    dtype: torch.dtype,
+    tol: float,
+    max_iter: int,
+    X_ho_test: np.ndarray | None = None,   # (n_ho, B, d) — alternate word-end trials
+    y_ho_test: np.ndarray | None = None,    # (n_ho,) TRUE (unpermuted) labels
+) -> pl.DataFrame:
+    """
+    Batched CV fit under label permutations — refit-based null.
+
+    Copied and stripped down from `src.models.causal6._fit_batched_cv_permutations`
+    (dropped spill/pbar): for each of B problems and K = len(permute_seeds)
+    permutations, fit a fresh L2 LogReg on (X, shuffled y) using StratifiedKFold
+    splits taken from the *real* labels. Returns test ROC-AUC per
+    (problem × fold × permutation).
+
+    If `X_ho_test`/`y_ho_test` are provided (for the `test_vs` null), the same
+    permuted-label refit is *also* scored against the alternate word-end trials
+    using their TRUE labels, adding a `ho_test_roc_auc` column. Only the training
+    labels are permuted; both test sets are evaluated against true labels, so
+    `test_roc_auc - ho_test_roc_auc` under this null is centered at ~0.
+    """
+    compute_ho = X_ho_test is not None
+    n_trials, B, _d = X.shape
+    K = len(permute_seeds)
+    assert y.shape == (n_trials,)
+    assert problem_meta.height == B
+    if K == 0:
+        return pl.DataFrame()
+
+    skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=cv_random_state)
+
+    # Pre-shuffle labels deterministically per permutation.
+    y_perms = np.empty((K, n_trials), dtype=np.int64)
+    y_int = y.astype(np.int64)
+    for k, seed in enumerate(permute_seeds):
+        y_perms[k] = np.random.default_rng(int(seed)).permutation(y_int)
+
+    X_gpu = torch.tensor(
+        X.transpose(1, 0, 2).copy(), dtype=dtype, device=device
+    )  # (B, n_trials, d)
+    y_perms_gpu = torch.tensor(y_perms.astype(np.float64), dtype=dtype, device=device)
+
+    if compute_ho:
+        assert y_ho_test is not None
+        n_ho = X_ho_test.shape[0]
+        X_ho_gpu = torch.tensor(
+            X_ho_test.transpose(1, 0, 2).copy(), dtype=dtype, device=device
+        )  # (B, n_ho, d)
+        y_ho_gpu = torch.tensor(y_ho_test.astype(np.float64), dtype=dtype, device=device)
+
+    scores_frames: list[pl.DataFrame] = []
+    problem_idx = np.arange(B, dtype=np.int64)
+    problem_meta_with_idx = problem_meta.with_row_index("_problem_idx").with_columns(
+        pl.col("_problem_idx").cast(pl.Int64)
+    )
+
+    for fold, (train_idx, test_idx) in enumerate(skf.split(np.zeros(n_trials), y)):
+        n_tr, n_te = len(train_idx), len(test_idx)
+
+        train_idx_t = torch.as_tensor(train_idx, dtype=torch.long, device=device)
+        test_idx_t = torch.as_tensor(test_idx, dtype=torch.long, device=device)
+
+        X_train_t = X_gpu.index_select(1, train_idx_t)  # (B, n_tr, d)
+        X_test_t = X_gpu.index_select(1, test_idx_t)    # (B, n_te, d)
+        mask_tr_b = torch.ones(B, n_tr, dtype=dtype, device=device)
+
+        # Standardisation is label-independent — compute once per fold.
+        X_tr_std_b, X_te_std_b, _, _ = standardise_per_batch(
+            X_train_t, mask_tr_b, X_test_t
+        )
+        if compute_ho:
+            # Standardise the alternate word-end trials with this fold's train stats.
+            X_ho_std_b = standardise_per_batch(X_train_t, mask_tr_b, X_ho_gpu)[1]  # (B, n_ho, d)
+
+        for chunk_start in range(0, K, permutation_chunk_size):
+            chunk_end = min(chunk_start + permutation_chunk_size, K)
+            Kc = chunk_end - chunk_start
+
+            y_perm_chunk = y_perms_gpu[chunk_start:chunk_end]                # (Kc, n_trials)
+            y_train_kn = y_perm_chunk.index_select(1, train_idx_t)           # (Kc, n_tr)
+            y_test_kn = y_perm_chunk.index_select(1, test_idx_t)             # (Kc, n_te)
+            y_test_kbn = y_test_kn.unsqueeze(1).expand(Kc, B, n_te)          # broadcast view
+
+            sw_train_kn = compute_balanced_sample_weight(
+                y_train_kn,
+                torch.ones(Kc, n_tr, dtype=dtype, device=device),
+            )                                                                # (Kc, n_tr)
+            y_train_kbn = y_train_kn.unsqueeze(1).expand(Kc, B, n_tr)        # broadcast view
+            sw_train_kbn = sw_train_kn.unsqueeze(1).expand(Kc, B, n_tr)      # broadcast view
+
+            beta, _, _ = fit_batched_l2_logreg_perms(
+                X_tr_std_b, y_train_kbn, mask_tr_b, sw_train_kbn,
+                reg_lambda=reg_lambda, tol=tol, max_iter=max_iter,
+            )                                                                # (Kc, B, d)
+
+            z_te = torch.einsum("bnd,kbd->kbn", X_te_std_b, beta)            # (Kc, B, n_te)
+            proba_te = torch.sigmoid(z_te)
+            aucs = batched_roc_auc(
+                proba_te.reshape(Kc * B, n_te),
+                y_test_kbn.reshape(Kc * B, n_te),
+            ).cpu().numpy()
+
+            perm_ids = np.repeat(np.arange(chunk_start, chunk_end, dtype=np.int64), B)
+            prob_ids = np.tile(problem_idx, Kc)
+            chunk_cols = {
+                "_problem_idx": prob_ids,
+                "fold": np.full(Kc * B, fold, dtype=np.int32),
+                "permutation_idx": perm_ids,
+                "test_roc_auc": aucs,
+            }
+            if compute_ho:
+                # Score the same permuted-fit decoder on the alternate word-end
+                # trials against their TRUE labels (labels not permuted here).
+                z_ho = torch.einsum("bnd,kbd->kbn", X_ho_std_b, beta)        # (Kc, B, n_ho)
+                proba_ho = torch.sigmoid(z_ho)
+                y_ho_kbn = y_ho_gpu.view(1, 1, n_ho).expand(Kc, B, n_ho)     # broadcast view
+                chunk_cols["ho_test_roc_auc"] = batched_roc_auc(
+                    proba_ho.reshape(Kc * B, n_ho),
+                    y_ho_kbn.reshape(Kc * B, n_ho),
+                ).cpu().numpy()
+            scores_frames.append(pl.DataFrame(chunk_cols))
+
+    return pl.concat(scores_frames).join(
+        problem_meta_with_idx, on="_problem_idx", how="left"
+    ).drop("_problem_idx")
+
+
+# %%
+def run_acoustic_cross_decoder_null(
+    epochs: mne.Epochs,
+    subject: str,
+    phoneme_pair: str,
+    word_end: str,
+    electrode_idx: int,
+    window: tuple[int, int],
+    *,
+    reg_lambda: float,
+    permute_seeds: Sequence[int],
+    permutation_chunk_size: int,
+    target: Literal["categorical_acoustic_cue", "subject_specific_acoustics"]
+        = "categorical_acoustic_cue",
+    resampled_steps: tuple[int, ...] = (1, 6),
+    compute_ho: bool = False,
+    n_folds: int = 5,
+    cv_random_state: int = 42,
+    device: str = "cpu",
+    dtype: torch.dtype = torch.float32,
+    tol: float = 1e-6,
+    max_iter: int = 50,
+):
+    """Permutation null for a single site, mirroring `run_acoustic_cross_decoder`
+    selection (target word-end + unambiguous steps) and the same window, but
+    refitting under shuffled acoustic labels. Coef/pred outputs are dropped.
+
+    With `compute_ho=True` the alternate word-end trials are also scored under
+    each permuted-label refit (adds a `ho_test_roc_auc` column), so the caller
+    can build the `test_vs = test_roc_auc - ho_test_roc_auc` null."""
+    assert epochs.metadata is not None
+    md = epochs.metadata
+
+    target_mask = (md.word_end == word_end).values
+    resampled_mask = md.resampled.isin(resampled_steps).values
+    target_selection = (md.phoneme_pair == phoneme_pair).values & target_mask & resampled_mask
+    if target_selection.sum() == 0:
+        return None
+
+    y = _resolve_target(md, target, phoneme_pair, target_selection)
+    if not _has_enough_per_class(y, n_folds):
+        return None
+
+    data = epochs.get_data(picks=[electrode_idx])  # (n_trials, 1, n_samples)
+    smin, smax = window
+    X_sel = data[target_selection][:, 0, smin:smax]           # (n_trials, win)
+    X_batch = X_sel[:, None, :].astype(np.float64)            # (n_trials, B=1, win)
+
+    X_ho_batch = y_ho = None
+    if compute_ho:
+        alternate_word_end = next(iter(set(PHONEME_PAIR_TO_WORD_ENDS[phoneme_pair]) - {word_end}))
+        alternate_selection = (
+            (md.phoneme_pair == phoneme_pair).values
+            & (md.word_end == alternate_word_end).values
+            & resampled_mask
+        )
+        X_ho_batch = data[alternate_selection][:, 0, smin:smax][:, None, :].astype(np.float64)
+        y_ho = _resolve_target(md, target, phoneme_pair, alternate_selection)
+
+    problem_meta = pl.DataFrame({
+        "subject": [subject],
+        "phoneme_pair": [phoneme_pair],
+        "electrode_idx": [int(electrode_idx)],
+        "smin": [int(smin)],
+        "smax": [int(smax)],
+    })
+
+    return _fit_batched_cv_null(
+        X_batch, y, problem_meta,
+        permute_seeds=permute_seeds,
+        permutation_chunk_size=permutation_chunk_size,
+        reg_lambda=reg_lambda,
+        n_folds=n_folds, cv_random_state=cv_random_state,
+        device=device, dtype=dtype, tol=tol, max_iter=max_iter,
+        X_ho_test=X_ho_batch, y_ho_test=y_ho,
+    ).with_columns(pl.lit(target).alias("target"))
+
+
+# %%
+permute_seeds = list(range(permutation_seed, permutation_seed + n_permutations))
+
+null_results = []
+for _, row in tqdm(to_study.iterrows(), total=len(to_study)):
+    subject = row["subject"]
+    electrode_idx = row["electrode_idx"]
+    phoneme_pair = row["phoneme_pair"]
+    word_end = row["word_end"]
+
+    phon_smax = row["phon_smax"]
+    dec_smin = phon_smax
+    dec_smax = int(round((OFFSET_DICT[word_end] + 0.1 - epoch_tmin) * epoch_sfreq))
+
+    null_scores = run_acoustic_cross_decoder_null(
+        epochs_dict[subject],
+        subject=subject,
+        electrode_idx=electrode_idx,
+        phoneme_pair=phoneme_pair,
+        word_end=word_end,
+        window=(dec_smin, dec_smax),
+        target="categorical_acoustic_cue",
+        reg_lambda=reg_lambda,
+        permute_seeds=permute_seeds,
+        permutation_chunk_size=permutation_chunk_size,
+        n_folds=n_folds,
+        cv_random_state=cv_random_state,
+        device=device,
+        tol=tol,
+        max_iter=max_iter,
+    )
+    if null_scores is None:
+        continue
+
+    null_results.append(null_scores.to_pandas().assign(word_end=word_end))
+
+# %%
+# Null statistic per (site × permutation): mean test_roc_auc over folds
+# (nanmean — permuted labels can leave a test fold single-class -> NaN AUC),
+# matching how the real per-site stat is aggregated below.
+null_df = pd.concat(null_results, ignore_index=True)
+site_keys = ["subject", "electrode_idx", "phoneme_pair", "word_end"]
+null_per_perm = (
+    null_df.groupby(site_keys + ["permutation_idx"]).test_roc_auc.mean().reset_index()
+)
+
+# %%
+# Observed statistic: reuse the real per-site mean test_roc_auc from the loop above.
+real_per_site = (
+    dec_results_df.groupby(site_keys).test_roc_auc.mean().rename("real_test_roc_auc")
+)
+
+# One-sided permutation p-value: P(null >= observed), with +1 smoothing.
+def _perm_pvalue(g):
+    key = g.name
+    obs = real_per_site.loc[key]
+    null_vals = g.test_roc_auc.to_numpy()
+    K = len(null_vals)
+    return pd.Series({
+        "real_test_roc_auc": obs,
+        "null_mean": np.nanmean(null_vals),
+        "n_permutations": K,
+        "p_value": (1 + np.sum(null_vals >= obs)) / (1 + K),
+    })
+
+sig_df = null_per_perm.groupby(site_keys).apply(_perm_pvalue).reset_index()
+sig_df["significant"] = sig_df.p_value < 0.05
+sig_df
+
+# %%
+# Observed AUC vs. permutation-null mean, coloured by significance.
+sns.scatterplot(data=sig_df, x="null_mean", y="real_test_roc_auc", hue="significant")
+plt.axline((0.5, 0.5), slope=1, color="k", ls="--", lw=1)
+plt.xlabel("null mean AUC")
+plt.ylabel("observed AUC")
+
+# %% [markdown]
+# ## Word-end specificity: permutation-null significance for `test_vs`
+#
+# This is the *direct*, non-circular test of `test_vs = test_roc_auc -
+# ho_test_roc_auc` (own word-end AUC minus alternate word-end AUC). We run it on
+# the full `to_study` population, which is already selected by the independent
+# early-window `epp` filter — NOT gated on the late `test_roc_auc` significance
+# above, which shares the `test_roc_auc` term with `test_vs` and would bias it
+# upward (see notes). Selection on a different window/contrast keeps the noise
+# decoupled, so the late `test_vs` p-values here are not circular.
+#
+# Null: same permuted-training-label refit as above, additionally scored on the
+# alternate word-end trials (true labels) → `ho_test_roc_auc`. Under the null
+# both AUCs collapse to ~chance, so `test_vs` is centered at ~0. One-sided
+# (`test_vs > 0`).
+
+# %%
+null_vs_results = []
+for _, row in tqdm(to_study.iterrows(), total=len(to_study)):
+    subject = row["subject"]
+    electrode_idx = row["electrode_idx"]
+    phoneme_pair = row["phoneme_pair"]
+    word_end = row["word_end"]
+
+    phon_smax = row["phon_smax"]
+    dec_smin = phon_smax
+    dec_smax = int(round((OFFSET_DICT[word_end] + 0.1 - epoch_tmin) * epoch_sfreq))
+
+    null_scores = run_acoustic_cross_decoder_null(
+        epochs_dict[subject],
+        subject=subject,
+        electrode_idx=electrode_idx,
+        phoneme_pair=phoneme_pair,
+        word_end=word_end,
+        window=(dec_smin, dec_smax),
+        target="categorical_acoustic_cue",
+        compute_ho=True,
+        reg_lambda=reg_lambda,
+        permute_seeds=permute_seeds,
+        permutation_chunk_size=permutation_chunk_size,
+        n_folds=n_folds,
+        cv_random_state=cv_random_state,
+        device=device,
+        tol=tol,
+        max_iter=max_iter,
+    )
+    if null_scores is None:
+        continue
+
+    null_vs_results.append(null_scores.to_pandas().assign(word_end=word_end))
+
+# %%
+# Null test_vs per (site × permutation): mean over folds of each AUC (nanmean via
+# pandas .mean), then their difference — matching how the real per-site test_vs
+# is aggregated (mean over folds of per-fold test_roc_auc - ho_test_roc_auc).
+null_vs_df = pd.concat(null_vs_results, ignore_index=True)
+null_vs_per_perm = (
+    null_vs_df.groupby(site_keys + ["permutation_idx"])
+    .agg(test_roc_auc=("test_roc_auc", "mean"),
+         ho_test_roc_auc=("ho_test_roc_auc", "mean"))
+    .reset_index()
+)
+null_vs_per_perm["test_vs"] = null_vs_per_perm.test_roc_auc - null_vs_per_perm.ho_test_roc_auc
+
+# %%
+# Observed test_vs: reuse the real per-site mean test_vs from the real loop above.
+real_per_site_vs = (
+    dec_results_df.groupby(site_keys).test_vs.mean().rename("real_test_vs")
+)
+
+def _perm_pvalue_vs(g):
+    key = g.name
+    obs = real_per_site_vs.loc[key]
+    null_vals = g.test_vs.to_numpy()
+    K = len(null_vals)
+    return pd.Series({
+        "real_test_vs": obs,
+        "null_mean": np.nanmean(null_vals),
+        "n_permutations": K,
+        "p_value": (1 + np.sum(null_vals >= obs)) / (1 + K),
+    })
+
+sig_vs_df = null_vs_per_perm.groupby(site_keys).apply(_perm_pvalue_vs).reset_index()
+sig_vs_df["significant"] = sig_vs_df.p_value < 0.05
+sig_vs_df
+
+# %%
+# Side-by-side: acoustic-decodability significance (target word end) next to
+# word-end-specificity significance (test_vs).
+fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
+sns.scatterplot(data=sig_df, x="null_mean", y="real_test_roc_auc",
+                hue="significant", ax=axes[0])
+axes[0].axline((0.5, 0.5), slope=1, color="k", ls="--", lw=1)
+axes[0].set(xlabel="null mean AUC", ylabel="observed AUC",
+            title="Acoustic decoding (target word end)")
+sns.scatterplot(data=sig_vs_df, x="null_mean", y="real_test_vs",
+                hue="significant", ax=axes[1])
+axes[1].axhline(0, color="k", ls="--", lw=1)
+axes[1].set(xlabel="null mean test_vs", ylabel="observed test_vs",
+            title="Word-end specificity (test_vs)")
+fig.tight_layout()
+
+# %%
+# Per-site table joining both tests side by side.
+sig_side_by_side = pd.merge(
+    sig_df[site_keys + ["real_test_roc_auc", "p_value", "significant"]],
+    sig_vs_df[site_keys + ["real_test_vs", "p_value", "significant"]],
+    on=site_keys, suffixes=("_acoustic", "_vs"),
+)
+sig_side_by_side
