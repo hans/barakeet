@@ -93,6 +93,22 @@ import torch
 from src.models.decoding_gpu import batched_roc_auc, compute_balanced_sample_weight, fit_batched_l2_logreg, fit_batched_l2_logreg_perms, standardise_per_batch
 
 
+def _pooled_oof_auc(oof_proba, labels):
+    """Pooled out-of-fold ROC-AUC over ALL held-out predictions jointly, rather
+    than averaging per-fold AUCs. `oof_proba` (M, n) holds each trial's single
+    held-out probability (one per trial, filled exactly once across folds);
+    `labels` (M, n) the matching labels. Returns (M,) AUC. M = B (real) or
+    K*B (null). Real and null both route through this same `batched_roc_auc`
+    call so the observed and null statistics are computed identically.
+
+    On ~10-trial CV folds, averaging five per-fold AUCs is dominated by
+    per-fold sampling noise; pooling the ~48 OOF predictions into one AUC
+    roughly halves the per-site SD. Used for the target test only — the
+    transfer test already scores the full alternate set every fold.
+    """
+    return batched_roc_auc(oof_proba, labels)
+
+
 def _fit_batched_cv(
     X: np.ndarray,            # (n_trials, B, d) — B problems on the same trials
     y: np.ndarray,             # (n_trials,)      — labels
@@ -157,6 +173,11 @@ def _fit_batched_cv(
         X_ho_test.transpose(1, 0, 2).copy(), dtype=dtype, device=device
     )  # (B, n_ho_te, d)
 
+    # Out-of-fold target probabilities: each trial filled once by its test fold,
+    # then pooled into a single AUC per problem (see _pooled_oof_auc). NaN-init
+    # so a leftover NaN would flag an unfilled trial (indexing bug).
+    oof_proba = torch.full((B, n_trials), float("nan"), dtype=dtype, device=device)
+
     scores_frames: list[pl.DataFrame] = []
     predictions_frames: list[pl.DataFrame] = []
     coefficients_frames: list[pl.DataFrame] = []
@@ -191,6 +212,7 @@ def _fit_batched_cv(
 
         z_te = torch.einsum("bnd,bd->bn", X_te_std, beta)
         proba_te_gpu = torch.sigmoid(z_te)  # (B, n_te)
+        oof_proba.index_copy_(1, test_idx_t, proba_te_gpu)  # stash this fold's OOF probas
 
         # Vectorised per-problem AUCs on GPU; NaN when only one class is present.
         y_te = y[test_idx]  # numpy slice — still needed for the predictions frame
@@ -247,8 +269,21 @@ def _fit_batched_cv(
             "decoder_proba": proba_te.reshape(-1),
         }))
 
+    # Pooled out-of-fold target AUC per problem (one number over all OOF trials),
+    # broadcast across the per-fold rows via the join below.
+    assert not torch.isnan(oof_proba).any(), "OOF proba has unfilled trials"
+    pooled_auc = _pooled_oof_auc(
+        oof_proba, y_gpu.unsqueeze(0).expand(B, -1)
+    ).cpu().numpy()
+    pooled_pl = pl.DataFrame({
+        "_problem_idx": problem_idx,
+        "test_roc_auc_pooled": pooled_auc,
+    })
+
     # Concat across folds, join problem_meta back in to replace _problem_idx with actual keys
     scores = pl.concat(scores_frames).join(
+        pooled_pl, on="_problem_idx", how="left"
+    ).join(
         problem_meta_with_idx, on="_problem_idx", how="left"
     ).drop("_problem_idx")
     predictions = pl.concat(predictions_frames).join(
@@ -570,6 +605,10 @@ def _fit_batched_cv_null(
         )  # (B, n_ho, d)
         y_ho_gpu = torch.tensor(y_ho_test.astype(np.float64), dtype=dtype, device=device)
 
+    # Out-of-fold target probabilities per permutation, filled once per trial
+    # across folds, then pooled into one AUC per (permutation × problem).
+    oof_proba = torch.full((K, B, n_trials), float("nan"), dtype=dtype, device=device)
+
     scores_frames: list[pl.DataFrame] = []
     problem_idx = np.arange(B, dtype=np.int64)
     problem_meta_with_idx = problem_meta.with_row_index("_problem_idx").with_columns(
@@ -617,6 +656,8 @@ def _fit_batched_cv_null(
 
             z_te = torch.einsum("bnd,kbd->kbn", X_te_std_b, beta)            # (Kc, B, n_te)
             proba_te = torch.sigmoid(z_te)
+            # Stash OOF probas for this permutation-chunk × fold into the pool.
+            oof_proba[chunk_start:chunk_end].index_copy_(2, test_idx_t, proba_te)
             aucs = batched_roc_auc(
                 proba_te.reshape(Kc * B, n_te),
                 y_test_kbn.reshape(Kc * B, n_te),
@@ -642,7 +683,24 @@ def _fit_batched_cv_null(
                 ).cpu().numpy()
             scores_frames.append(pl.DataFrame(chunk_cols))
 
+    # Pooled OOF target AUC per (permutation × problem), scored against the
+    # PERMUTED labels (for the target null the label IS what's permuted, so the
+    # statistic is the pooled CV score of the shuffled-label refit end-to-end).
+    assert not torch.isnan(oof_proba).any(), "OOF proba has unfilled trials"
+    y_perms_kbn = y_perms_gpu.unsqueeze(1).expand(K, B, n_trials)  # (K, B, n_trials)
+    pooled = _pooled_oof_auc(
+        oof_proba.reshape(K * B, n_trials),
+        y_perms_kbn.reshape(K * B, n_trials),
+    ).cpu().numpy()
+    pooled_df = pl.DataFrame({
+        "_problem_idx": np.tile(problem_idx, K),
+        "permutation_idx": np.repeat(np.arange(K, dtype=np.int64), B),
+        "test_roc_auc_pooled": pooled,
+    })
+
     return pl.concat(scores_frames).join(
+        pooled_df, on=["_problem_idx", "permutation_idx"], how="left"
+    ).join(
         problem_meta_with_idx, on="_problem_idx", how="left"
     ).drop("_problem_idx")
 
@@ -768,9 +826,12 @@ for _, row in tqdm(to_study.iterrows(), total=len(to_study)):
 null_df = pd.concat(null_results, ignore_index=True)
 null_df.to_parquet(Path(outdir) / "acoustic_late_null.parquet")
 site_keys = ["subject", "electrode_idx", "phoneme_pair", "word_end"]
+# Target test uses the pooled OOF AUC (constant across a permutation's fold rows
+# -> `first`); transfer test stays mean-over-folds (full alternate set per fold).
 null_per_perm = (
     null_df.groupby(site_keys + ["permutation_idx"])
-    .agg({"test_roc_auc": "mean", "ho_test_roc_auc": "mean"})
+    .agg(test_roc_auc=("test_roc_auc_pooled", "first"),
+         ho_test_roc_auc=("ho_test_roc_auc", "mean"))
     .reset_index()
 )
 
@@ -795,7 +856,9 @@ def _perm_pvalue(g, real_df, col="test_roc_auc", alpha=0.05):
         "significant": p_value < alpha
     })
 
-real_target = dec_results_df.groupby(site_keys).test_roc_auc.mean()
+# Target test compares the pooled OOF AUC (constant across folds); transfer test
+# uses the mean over per-fold AUCs. Both matched to their respective null above.
+real_target = dec_results_df.groupby(site_keys).test_roc_auc_pooled.mean()
 real_transfer = dec_results_df.groupby(site_keys).ho_test_roc_auc.mean()
 
 sig_target = null_per_perm.groupby(site_keys).apply(_perm_pvalue, real_df=real_target, col="test_roc_auc").reset_index()
