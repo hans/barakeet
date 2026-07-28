@@ -30,26 +30,31 @@ from tqdm.auto import tqdm
 
 from src.data import add_metadata_features
 from src.models.causal6 import run_acoustic_searchlight, _resolve_target, _has_enough_per_class
-from src.stimuli import OFFSET_DICT, PHONEME_PAIR_TO_WORD_ENDS
+from src.stimuli import OFFSET_DICT, PHONEME_PAIR_TO_WORD_ENDS, WORD_PHASE_DF
 
 # %%
 b4_per_cell_path = "outputs/causal46_joined/t_tests/b4_per_cell.parquet"
 epp_path = "outputs/causal46_joined/early_perceptual_projection/all_sites.csv"
 reg_lambda_winners_path = "outputs/causal6/reg_lambda_sweep/reg_lambda_winners.json"
+outdir = "outputs/causal46_joined/acoustic_late"
 
 epoch_tmin = -0.4
 epoch_sfreq = 100
 
 n_folds = 5
 cv_random_state = 42
-device = "cpu"
+device = "cuda:1"
 tol = 1e-6
 max_iter = 50
+null_max_iter = 15
 
 # Permutation-null significance (single test per site; no searchlight).
-n_permutations = 500
+n_permutations = 5000
 permutation_seed = 0
-permutation_chunk_size = 6
+permutation_chunk_size = 500
+
+# %%
+Path(outdir).mkdir(parents=True, exist_ok=True)
 
 # %%
 b4_per_cell = pd.read_parquet(b4_per_cell_path)
@@ -68,6 +73,10 @@ for p in Path("outputs/epochs_preprocessed").glob("*.fif"):
     ep = mne.read_epochs(p, verbose=False)
     ep.metadata = add_metadata_features(ep.metadata)
     epochs_dict[p.stem.rstrip("_epo")] = ep
+
+# %%
+pod_df = WORD_PHASE_DF.query("phase == 'pod'").rename(columns={'start': 'pod'}).drop(columns=["end", "phase"]).set_index("word").pod
+pod_df
 
 # %%
 to_study = pd.merge(
@@ -377,7 +386,21 @@ def run_acoustic_cross_decoder(
 
 
 # %%
+def prepare_decoder_bounds(phoneme_pair, word_end, phon_smax):
+    other_word_end = next(iter(set(PHONEME_PAIR_TO_WORD_ENDS[phoneme_pair]) - {word_end}))
+
+    # Compute sample bounds for the decoder windows
+    dec_smin = int(round(min(phon_smax + 10, (pod_df.loc[word_end] - epoch_tmin) * epoch_sfreq)))
+    dec_smax = max(
+        int(round((OFFSET_DICT[word_end] + 0.1 - epoch_tmin) * epoch_sfreq)),
+        int(round((OFFSET_DICT[other_word_end] + 0.1 - epoch_tmin) * epoch_sfreq))
+    )
+    return dec_smin, dec_smax
+
+
+# %%
 dec_results = []
+dec_coefs = []
 
 # Run acoustic decoding by training on the target word end
 # and evaluating on both (1) held-out trials with the target word-end and
@@ -395,13 +418,10 @@ for _, row in tqdm(to_study.iterrows(), total=len(to_study)):
     phon_smin = row["phon_smin"]
     phon_smax = row["phon_smax"]
 
-    dec_smin = phon_smax
-    dec_smax = int(round((OFFSET_DICT[word_end] + 0.1 - epoch_tmin) * epoch_sfreq))
-    dec_smax_other = int(round((OFFSET_DICT[other_word_end] + 0.1 - epoch_tmin) * epoch_sfreq))
-
+    dec_smin, dec_smax = prepare_decoder_bounds(phoneme_pair, word_end, phon_smax)
     ep_i = epochs_dict[subject]
 
-    scores, _, _ = run_acoustic_cross_decoder(
+    scores_i, _, coefs_i = run_acoustic_cross_decoder(
         ep_i,
         subject=subject,
         electrode_idxs=[electrode_idx],
@@ -418,7 +438,20 @@ for _, row in tqdm(to_study.iterrows(), total=len(to_study)):
     )
 
     dec_results.append(
-        scores
+        scores_i
+        .to_pandas()
+        .assign(
+            subject=subject,
+            word_end=word_end,
+            phon_smin=phon_smin,
+            phon_smax=phon_smax,
+            dec_smin=dec_smin,
+            dec_smax=dec_smax,
+        )
+    )
+
+    dec_coefs.append(
+        coefs_i
         .to_pandas()
         .assign(
             subject=subject,
@@ -436,10 +469,13 @@ dec_results_df = pd.merge(
     epp,
     on=["subject", "electrode_idx", "phoneme_pair"]
 )
-
-# %%
 dec_results_df["test_vs"] = dec_results_df.test_roc_auc - dec_results_df.ho_test_roc_auc
 dec_results_df["lexical_evidence"] = 1 - (dec_results_df.word_end.str[0] == dec_results_df.phoneme_pair.str[0]).astype(int)
+dec_results_df.to_csv(Path(outdir) / "acoustic_late_results.csv", index=False)
+
+# %%
+dec_coefs_df = pd.concat(dec_coefs)
+dec_coefs_df.to_parquet(Path(outdir) / "acoustic_late_coefs.parquet", index=False)
 
 # %%
 # Expectation: test_vs > 0 because the acoustic contrast is specific to one word end
@@ -700,8 +736,7 @@ for _, row in tqdm(to_study.iterrows(), total=len(to_study)):
     word_end = row["word_end"]
 
     phon_smax = row["phon_smax"]
-    dec_smin = phon_smax
-    dec_smax = int(round((OFFSET_DICT[word_end] + 0.1 - epoch_tmin) * epoch_sfreq))
+    dec_smin, dec_smax = prepare_decoder_bounds(phoneme_pair, word_end, phon_smax)
 
     null_scores = run_acoustic_cross_decoder_null(
         epochs_dict[subject],
@@ -711,6 +746,7 @@ for _, row in tqdm(to_study.iterrows(), total=len(to_study)):
         word_end=word_end,
         window=(dec_smin, dec_smax),
         target="categorical_acoustic_cue",
+        compute_ho=True,
         reg_lambda=reg_lambda,
         permute_seeds=permute_seeds,
         permutation_chunk_size=permutation_chunk_size,
@@ -718,7 +754,7 @@ for _, row in tqdm(to_study.iterrows(), total=len(to_study)):
         cv_random_state=cv_random_state,
         device=device,
         tol=tol,
-        max_iter=max_iter,
+        max_iter=null_max_iter,
     )
     if null_scores is None:
         continue
@@ -730,9 +766,12 @@ for _, row in tqdm(to_study.iterrows(), total=len(to_study)):
 # (nanmean — permuted labels can leave a test fold single-class -> NaN AUC),
 # matching how the real per-site stat is aggregated below.
 null_df = pd.concat(null_results, ignore_index=True)
+null_df.to_parquet(Path(outdir) / "acoustic_late_null.parquet")
 site_keys = ["subject", "electrode_idx", "phoneme_pair", "word_end"]
 null_per_perm = (
-    null_df.groupby(site_keys + ["permutation_idx"]).test_roc_auc.mean().reset_index()
+    null_df.groupby(site_keys + ["permutation_idx"])
+    .agg({"test_roc_auc": "mean", "ho_test_roc_auc": "mean"})
+    .reset_index()
 )
 
 # %%
@@ -742,28 +781,56 @@ real_per_site = (
 )
 
 # One-sided permutation p-value: P(null >= observed), with +1 smoothing.
-def _perm_pvalue(g):
+def _perm_pvalue(g, real_df, col="test_roc_auc", alpha=0.05):
     key = g.name
-    obs = real_per_site.loc[key]
-    null_vals = g.test_roc_auc.to_numpy()
+    obs = real_df.loc[key]
+    null_vals = g[col].to_numpy()
     K = len(null_vals)
+    p_value = (1 + np.sum(null_vals >= obs)) / (1 + K)
     return pd.Series({
-        "real_test_roc_auc": obs,
+        f"real_{col}": obs,
         "null_mean": np.nanmean(null_vals),
         "n_permutations": K,
-        "p_value": (1 + np.sum(null_vals >= obs)) / (1 + K),
+        "p_value": p_value,
+        "significant": p_value < alpha
     })
 
-sig_df = null_per_perm.groupby(site_keys).apply(_perm_pvalue).reset_index()
-sig_df["significant"] = sig_df.p_value < 0.05
-sig_df
+real_target = dec_results_df.groupby(site_keys).test_roc_auc.mean()
+real_transfer = dec_results_df.groupby(site_keys).ho_test_roc_auc.mean()
+
+sig_target = null_per_perm.groupby(site_keys).apply(_perm_pvalue, real_df=real_target, col="test_roc_auc").reset_index()
+sig_transfer = null_per_perm.groupby(site_keys).apply(_perm_pvalue, real_df=real_transfer, col="ho_test_roc_auc").reset_index()
+
+sig_df = pd.merge(
+    sig_target[site_keys + ["real_test_roc_auc", "p_value", "null_mean", "n_permutations", "significant"]],
+    sig_transfer[site_keys + ["real_ho_test_roc_auc", "p_value", "null_mean", "n_permutations", "significant"]],
+    on=site_keys,
+    suffixes=("_target", "_transfer")
+)
+
+sig_df.to_csv(Path(outdir) / "acoustic_late_summary.csv", index=False)
+
+sig_df.sort_values("p_value_target").head(20)
 
 # %%
 # Observed AUC vs. permutation-null mean, coloured by significance.
-sns.scatterplot(data=sig_df, x="null_mean", y="real_test_roc_auc", hue="significant")
+sns.scatterplot(data=sig_df, x="null_mean_target", y="real_test_roc_auc", hue="significant_target")
 plt.axline((0.5, 0.5), slope=1, color="k", ls="--", lw=1)
 plt.xlabel("null mean AUC")
 plt.ylabel("observed AUC")
+
+# %%
+# Observed AUC vs. permutation-null mean, coloured by significance.
+sns.scatterplot(data=sig_df, x="real_ho_test_roc_auc", y="real_test_roc_auc", hue="significant_target")
+plt.axline((0.5, 0.5), slope=1, color="k", ls="--", lw=1)
+plt.axvline(x=0.5, color="k", ls="--", lw=1)
+plt.xlabel("transfer AUC")
+plt.ylabel("target AUC")
+
+from scipy import stats
+ttest_df = sig_df.query("significant_target")
+rvalue, pvalue = stats.pearsonr(ttest_df.real_ho_test_roc_auc, ttest_df.real_test_roc_auc)
+print(f"Pearson r = {rvalue:.3f}, p = {pvalue:.3g} for {len(ttest_df)} significant sites")
 
 # %% [markdown]
 # ## Word-end specificity: permutation-null significance for `test_vs`
@@ -790,8 +857,7 @@ for _, row in tqdm(to_study.iterrows(), total=len(to_study)):
     word_end = row["word_end"]
 
     phon_smax = row["phon_smax"]
-    dec_smin = phon_smax
-    dec_smax = int(round((OFFSET_DICT[word_end] + 0.1 - epoch_tmin) * epoch_sfreq))
+    dec_smin, dec_smax = prepare_decoder_bounds(phoneme_pair, word_end, phon_smax)
 
     null_scores = run_acoustic_cross_decoder_null(
         epochs_dict[subject],
@@ -809,7 +875,7 @@ for _, row in tqdm(to_study.iterrows(), total=len(to_study)):
         cv_random_state=cv_random_state,
         device=device,
         tol=tol,
-        max_iter=max_iter,
+        max_iter=null_max_iter,
     )
     if null_scores is None:
         continue
@@ -821,6 +887,7 @@ for _, row in tqdm(to_study.iterrows(), total=len(to_study)):
 # pandas .mean), then their difference — matching how the real per-site test_vs
 # is aggregated (mean over folds of per-fold test_roc_auc - ho_test_roc_auc).
 null_vs_df = pd.concat(null_vs_results, ignore_index=True)
+null_vs_df.to_csv(Path(outdir) / "acoustic_late_null_vs.csv", index=False)
 null_vs_per_perm = (
     null_vs_df.groupby(site_keys + ["permutation_idx"])
     .agg(test_roc_auc=("test_roc_auc", "mean"),
@@ -849,7 +916,8 @@ def _perm_pvalue_vs(g):
 
 sig_vs_df = null_vs_per_perm.groupby(site_keys).apply(_perm_pvalue_vs).reset_index()
 sig_vs_df["significant"] = sig_vs_df.p_value < 0.05
-sig_vs_df
+sig_vs_df.to_csv(Path(outdir) / "acoustic_late_summary_vs.csv", index=False)
+sig_vs_df.sort_values("p_value")
 
 # %%
 # Side-by-side: acoustic-decodability significance (target word end) next to
@@ -868,10 +936,78 @@ axes[1].set(xlabel="null mean test_vs", ylabel="observed test_vs",
 fig.tight_layout()
 
 # %%
+sig_side_by_side
+
+# %%
 # Per-site table joining both tests side by side.
 sig_side_by_side = pd.merge(
-    sig_df[site_keys + ["real_test_roc_auc", "p_value", "significant"]],
-    sig_vs_df[site_keys + ["real_test_vs", "p_value", "significant"]],
-    on=site_keys, suffixes=("_acoustic", "_vs"),
+    sig_df[site_keys + ["real_test_roc_auc", "p_value_target", "significant_target",
+                        "real_ho_test_roc_auc", "p_value_transfer", "significant_transfer"]],
+    sig_vs_df[site_keys + ["real_test_vs", "p_value", "significant"]].rename(columns={
+        "p_value": "p_value_vs",
+        "significant": "significant_vs",
+    }),
+    on=site_keys,
 )
-sig_side_by_side
+
+from statsmodels.stats.multitest import multipletests
+# FDR-correct both tests separately.
+for test in ["target", "transfer", "vs"]:
+    pvals = sig_side_by_side[f"p_value_{test}"].to_numpy()
+    reject, pvals_corrected, _, _ = multipletests(pvals, alpha=0.05, method="fdr_bh")
+    sig_side_by_side[f"p_value_{test}_fdr"] = pvals_corrected
+    sig_side_by_side[f"significant_{test}_fdr"] = reject
+sig_side_by_side.sort_values("p_value_target_fdr")
+
+# %% [markdown]
+# ## Examine coefs for sig sites
+
+# %%
+coef_study_df
+
+# %%
+coef_study_df = pd.merge(
+    sig_side_by_side.query("significant_target_fdr"),
+    dec_coefs_df.drop(columns=["mean", "scale"]),
+    on=site_keys
+)
+
+# %%
+xs = coef_study_df.explode("coef")
+xs["coef2"] = xs.coef ** 2
+xs["coef2_of_max"] = xs.groupby(["subject", "phoneme_pair", "electrode_idx", "word_end", "fold"])["coef2"].transform(lambda xs: xs / xs.max())
+xs["coef_idx"] = xs.groupby(level=0).cumcount()
+xs["dec_sample"] = xs.dec_smin + xs.coef_idx
+xs["dec_t"] = xs.dec_sample / epoch_sfreq + epoch_tmin
+
+# merge in PoD information
+xs = pd.merge(
+    xs,
+    WORD_PHASE_DF.query("phase == 'pod'").rename(columns={"start": "pod"})[["word", "pod"]],
+    left_on=["word_end"], right_on=["word"],
+    how="left"
+)
+xs["dec_t_from_pod"] = xs.dec_t - xs.pod
+
+# %%
+sns.lineplot(data=xs,#.query("subject == 'EC243' and electrode_idx == 102 and word_end == 'desolate'"),
+             x="dec_t", y="coef2_of_max", hue="phoneme_pair")#, hue="fold")
+
+# %%
+sns.lineplot(data=xs,#.query("subject == 'EC243' and electrode_idx == 102 and word_end == 'desolate'"),
+             x="dec_t_from_pod", y="coef2_of_max", hue="phoneme_pair")#, hue="fold")
+
+# %%
+for (subject, electrode_idx, phoneme_pair, word_end), group in coef_study_df.groupby(site_keys):
+    coefs_i = group.drop(columns=["mean", "scale"]).explode("coef")
+    coefs_i["coef_idx"] = coefs_i.groupby(level=0).cumcount()
+    sns.lineplot(data=coefs_i, x="coef_idx", y="coef", legend=False)
+    break
+    # fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
+    # sns.histplot(data=group.explode("coef"), x="coef", bins=50, ax=axes[0])
+    # axes[0].set(title=f"Coefficients: {subject}/{electrode_idx}/{phoneme_pair}/{word_end}",
+    #             xlabel="Coefficient value", ylabel="Count")
+    # sns.histplot(data=group.explode("mean"), x="mean", bins=50, ax=axes[1])
+    # axes[1].set(title=f"Means: {subject}/{electrode_idx}/{phoneme_pair}/{word_end}",
+    #             xlabel="Mean value", ylabel="Count")
+    # fig.tight_layout()
