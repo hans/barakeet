@@ -1160,14 +1160,16 @@ rule acoustic_on_ambiguous:
 
 
 rule joined_acoustic_bootstrap:
-    """Acoustic endpoint bootstrap over all annotated acoustic sites.
+    """Acoustic endpoint bootstrap over all sites in site_class.parquet.
 
     Runs bootstrap_A_site (step6 − step1, unambiguous endpoint trials) in
-    [t=0, phon_smax] for every site in the early_acoustic_window manifest,
-    using the same window_size / stride as b4_bootstrap (causal46_joined config).
+    [t=0, phon_smax] for every site in the automated, manual-free
+    site_class.parquet (ADR 0003), using the same window_size / stride as
+    b4_bootstrap (causal46_joined config).
     Emits two tiers: `a_*_all.parquet` (all sites; feeds contrast_plot's
     endpoint-orientation of the acoustic panel and joined_acoustic_endpoint_windows)
-    and `a_*.parquet` (the type1 subset, byte-content-identical to a type1-only run).
+    and `a_*.parquet` (the early_response_class == "acoustic_only" subset,
+    byte-content-identical to a subset-only run).
     Also emits `a_*_by_word_end*.parquet`: the same endpoint contrast rerun
     separately per word_end (not pooled), for comparing endpoint timing/sign
     across the two lexical completions.
@@ -1178,7 +1180,7 @@ rule joined_acoustic_bootstrap:
             subject=config["data"]["subjects"],
         ),
         phon_peaks_all    = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet",
-        early_annotations = "outputs/causal46_joined/manual_annotations/early_acoustic_window.csv",
+        site_class        = "outputs/causal46_joined/early_perceptual_projection/site_class.parquet",
         helper            = "notebooks/causal46_joined/_within_completion.py",
         helper_contrasts  = "notebooks/causal46_joined/_acoustic_step_bootstrap.py",
         notebook          = "notebooks/causal46_joined/acoustic_bootstrap.py",
@@ -1205,7 +1207,7 @@ rule joined_acoustic_bootstrap:
             str(input.notebook),
             str(output.notebook),
             parameters=dict(
-                early_annotations_path=str(input.early_annotations),
+                site_class_path=str(input.site_class),
                 phon_peaks_path=str(input.phon_peaks_all),
                 epoch_dir=str(Path(input.epoch_fifs[0]).parent),
                 outdir=str(outdir),

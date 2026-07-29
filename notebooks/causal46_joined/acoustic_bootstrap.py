@@ -16,17 +16,20 @@
 # %% [markdown]
 # # Acoustic bootstrap (endpoint contrast)
 #
-# Runs `bootstrap_A_site` (step6 − step1 endpoint contrast) for every annotated
-# acoustic site in the early_acoustic_window manifest, searching in
+# Runs `bootstrap_A_site` (step6 − step1 endpoint contrast) for every site in
+# `site_class.parquet` (automated, manual-free — see
+# `docs/adr/0003-manual-free-acoustic-only-class.md`), searching in
 # `[t=0, phon_smax]` with the same window_size and stride as `b4_bootstrap`.
 #
 # Two output tiers:
-# - `a_*_all.parquet` — all annotated sites. Consumed by `contrast_plot.py` to
-#   fix each acoustic site's sign/window from the clean endpoint contrast.
-# - `a_*.parquet` — the type1 subset, under the original names, feeding the type1
-#   comparison section of `early_perceptual_windows.py` (which assumes type1-only
-#   rows). Per-site RNG is independent of the site loop, so these are
-#   content-identical to a type1-only run.
+# - `a_*_all.parquet` — all sites in `site_class.parquet`. Consumed by
+#   `contrast_plot.py` to fix each acoustic site's sign/window from the clean
+#   endpoint contrast.
+# - `a_*.parquet` — the `early_response_class == "acoustic_only"` subset, under
+#   the original ("type1") output names, feeding the type1 comparison section
+#   of `early_perceptual_windows.py` (which assumes type1-only rows). Per-site
+#   RNG is independent of the site loop, so these are content-identical to a
+#   subset-only run.
 #
 # **No behavioural (ambiguous) trials are used here** — only unambiguous endpoint
 # steps 1 and 6, pooled across both word_ends per phoneme_pair.
@@ -38,7 +41,7 @@
 # the pair-pooled `phon_smax`/`PAIR_SMAX[pp]`).
 
 # %% tags=["parameters"]
-early_annotations_path = "outputs/causal46_joined/manual_annotations/early_acoustic_window.csv"
+site_class_path = "outputs/causal46_joined/early_perceptual_projection/site_class.parquet"
 phon_peaks_path = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet"
 epoch_dir = "outputs/epochs_preprocessed"
 outdir = "outputs/causal46_joined/acoustic_bootstrap"
@@ -108,27 +111,30 @@ phon_peak_lookup: dict[tuple, tuple[int, int]] = {
 }
 
 # %%
-early_annotation_df = pl.read_csv(early_annotations_path)
-print(f"early_annotation_df: {early_annotation_df.height} rows, cols: {early_annotation_df.columns}")
+site_class_df = pl.read_parquet(site_class_path)
+print(f"site_class_df: {site_class_df.height} rows, cols: {site_class_df.columns}")
 
-# Run the endpoint bootstrap over ALL annotated acoustic sites (not just type1)
-# so that contrast_plot.py can orient every acoustic site by its endpoint sign.
-# The type1 subset is written back under the original output names for the
-# existing type1-only consumers (early_perceptual_windows.py etc.).
+# Run the endpoint bootstrap over ALL sites in site_class.parquet (not just
+# acoustic_only) so that contrast_plot.py can orient every acoustic site by
+# its endpoint sign. The acoustic_only subset is written back under the
+# original ("type1") output names for the existing type1-only consumers
+# (early_perceptual_windows.py etc.). early_response_class is the automated,
+# manual-free composite (ADR 0003) — replaces the old manual
+# site_type_relabel == "type1_acoustic_only" filter.
 all_sites = (
-    early_annotation_df
+    site_class_df
     .select(SITE_KEYS)
     .with_columns(pl.col("electrode_idx").cast(pl.Int64))
     .unique()
 )
 type1_sites = (
-    early_annotation_df
-    .filter(pl.col("site_type_relabel") == "type1_acoustic_only")
+    site_class_df
+    .filter(pl.col("early_response_class") == "acoustic_only")
     .select(SITE_KEYS)
     .with_columns(pl.col("electrode_idx").cast(pl.Int64))
     .unique()
 )
-print(f"all annotated sites: {all_sites.height}; type1 sites: {type1_sites.height}")
+print(f"all sites: {all_sites.height}; acoustic_only (type1) sites: {type1_sites.height}")
 
 # %% [markdown]
 # ## Per-site acoustic bootstrap
