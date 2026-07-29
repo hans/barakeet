@@ -1096,7 +1096,6 @@ def matched_n_star_plot_paper(
     qualifying_steps,
     *,
     epochs_dict,
-    n_per_class,
     phon_smin=None,
     phon_smax=None,
     phon_search_smin=None,
@@ -1104,17 +1103,24 @@ def matched_n_star_plot_paper(
     textgrid_dir=None,
     plot_phonemes=False,
     figsize=(4.5, 4.5),
-    acoustic_peak_auc=None,
     R_plot=200,
+
     sig_windows=None,
     top_sig_windows=None,
-    mean_diff_arrays=None,
+
+    epp_window=None,
+    epp_color="#1b7837",
+    lpp_window=None,
+    lpp_color="#762a83",
+    
     xlim=None,
     resampled_cmap: Optional[dict[int, str]] = None,
     top_legend_loc="lower right",
     bottom_legend_loc="lower right",
     behav_decoding_df=None,
     early_smax_s=None,
+    top_include_traces=False,
+    bottom_include_traces=False,
     axs=None,
 ):
     """Two-panel B4 star plot.
@@ -1195,6 +1201,13 @@ def matched_n_star_plot_paper(
                     label=f"step {step}  (n={mask.sum()})")
         ax_top.fill_between(times, m - se, m + se, color=color, alpha=0.18,
                             rasterized=True)
+
+        if top_include_traces:
+            plot_trace_count = mask.sum()
+            plot_trace_idxs = np.random.choice(np.where(mask)[0], size=plot_trace_count, replace=False)
+            for idx in plot_trace_idxs:
+                ax_top.plot(times, hga[idx], color=color, lw=0.5, alpha=0.3, zorder=1)
+
     if phon_search_smin is not None and phon_search_smax is not None:
         for s in (phon_search_smin, phon_search_smax):
             ax_top.axvline(s / epoch_sfreq + epoch_tmin,
@@ -1257,18 +1270,18 @@ def matched_n_star_plot_paper(
         ax_bot.fill_between(times, m - se, m + se, color=color, alpha=0.18,
                             rasterized=True)
 
-    # Bootstrap mean aligned diff overlay (dashed line + CI band).
-    if mean_diff_arrays is not None:
-        tc = mean_diff_arrays["tcenter"]
-        mv = mean_diff_arrays["mean"]
-        cl = mean_diff_arrays["ci_lo"]
-        ch = mean_diff_arrays["ci_hi"]
-        valid = np.isfinite(mv)
-        if valid.any():
-            ax_bot.plot(tc[valid], mv[valid], color="#4d4d4d", lw=1.3, ls="--",
-                        label="bootstrap mean diff (aligned)", zorder=4)
-            ax_bot.fill_between(tc[valid], cl[valid], ch[valid],
-                                color="#4d4d4d", alpha=0.12, zorder=3)
+    if bottom_include_traces:
+        per_bhv = {int(bhv): np.concatenate([step_trials[bhv] for step_trials in per_step.values()
+                                            if bhv in step_trials])
+                for bhv in bhv_vals}
+        for bhv_val, trials in per_bhv.items():
+            if len(trials) == 0:
+                continue
+            plot_trace_count = len(trials)#min(5, len(trials))
+            plot_trace_idxs = np.random.choice(trials, size=plot_trace_count, replace=False)
+            trace_color = step_colors[1 if bhv_val == bhv_vals[0] else 6]
+            for idx in plot_trace_idxs:
+                ax_bot.plot(times, hga[idx], color=trace_color, lw=0.5, alpha=0.3, zorder=1)
 
     ax_bot.axhline(0, color="k", lw=0.5, ls=":")
     ax_bot.axvline(0, color="k", lw=0.5, ls=":")
@@ -1281,6 +1294,40 @@ def matched_n_star_plot_paper(
     # )
 
     # ax_bot.legend(fontsize=7, loc=bottom_legend_loc, framealpha=0.7)
+
+    if epp_window is not None or lpp_window is not None:
+        ymin_top, ymax_top = ax_top.get_ylim()
+        ymin_bot, ymax_bot = ax_bot.get_ylim()
+        bar_h_top = (ymax_top - ymin_top) * 0.04
+        bar_y_top = ymin_top + (ymax_top - ymin_top) * 0.95
+        bar_h_bot = (ymax_bot - ymin_bot) * 0.04
+        bar_y_bot = ymin_bot + (ymax_bot - ymin_bot) * 0.95
+
+        if epp_window is not None:
+            t_epp = np.array(epp_window) / epoch_sfreq + epoch_tmin
+            ax_top.barh(y=bar_y_top, width=t_epp[1] - t_epp[0], left=t_epp[0],
+                        height=bar_h_top, color=epp_color, alpha=0.6,
+                        edgecolor="none", zorder=5)
+            ax_bot.barh(y=bar_y_bot, width=t_epp[1] - t_epp[0], left=t_epp[0],
+                        height=bar_h_bot, color=epp_color, alpha=0.6,
+                        edgecolor="none", zorder=5)
+        if lpp_window is not None:
+            t_lpp = np.array(lpp_window) / epoch_sfreq + epoch_tmin
+            ax_top.barh(y=bar_y_top, width=t_lpp[1] - t_lpp[0], left=t_lpp[0],
+                        height=bar_h_top, color=lpp_color, alpha=0.6,
+                        edgecolor="none", zorder=5)
+            ax_bot.barh(y=bar_y_bot, width=t_lpp[1] - t_lpp[0], left=t_lpp[0],
+                        height=bar_h_bot, color=lpp_color, alpha=0.6,
+                        edgecolor="none", zorder=5)
+
+    #     # ax_top.axvspan(*t_epp, color=epp_color, alpha=0.30)
+    #     # ax_bot.axvspan(*t_epp, color=epp_color, alpha=0.30)
+
+    # if lpp_window is not None:
+    #     t_lpp = np.array(lpp_window) / epoch_sfreq + epoch_tmin
+
+    #     # ax_top.axvspan(*t_lpp, color=lpp_color, alpha=0.30)
+    #     # ax_bot.axvspan(*t_lpp, color=lpp_color, alpha=0.30)
 
     if textgrid_dir is not None:
         textgrid_file = next(iter(
