@@ -39,6 +39,12 @@
 # loop, same trial draws unaffected (independent RNG per pass), but each word_end
 # gets its own trial subset and its own search ceiling (`_WE_SMAX[we]` rather than
 # the pair-pooled `phon_smax`/`PAIR_SMAX[pp]`).
+#
+# Per-replicate rows carry, alongside `mean_diff_raw` (= mean_pos − mean_neg),
+# the raw per-class activation `mean_pos`/`mean_neg` (mean HGA in the window
+# for step hi / step lo respectively). The per-window summary tables
+# (`a_per_window*.parquet`) carry their medians across replicates as
+# `mean_pos_med`/`mean_neg_med`, alongside `mean_diff_raw_med`.
 
 # %% tags=["parameters"]
 site_class_path = "outputs/causal46_joined/early_perceptual_projection/site_class.parquet"
@@ -199,6 +205,8 @@ for subject, subj_sites in all_sites.to_pandas().groupby("subject"):
                 "smin": r["smin"],
                 "smax": r["smax"],
                 "mean_diff_raw": r["mean_diff_raw"],
+                "mean_pos": r["mean_pos"],
+                "mean_neg": r["mean_neg"],
                 "n_per_class": r["n_per_class"],
             })
 
@@ -236,6 +244,8 @@ for subject, subj_sites in all_sites.to_pandas().groupby("subject"):
                     "smin": r["smin"],
                     "smax": r["smax"],
                     "mean_diff_raw": r["mean_diff_raw"],
+                    "mean_pos": r["mean_pos"],
+                    "mean_neg": r["mean_neg"],
                     "n_per_class": r["n_per_class"],
                 })
 
@@ -278,6 +288,8 @@ for subject, subj_sites in all_sites.to_pandas().groupby("subject"):
                     "smin": r["smin"],
                     "smax": r["smax"],
                     "mean_diff_raw": r["mean_diff_raw"],
+                    "mean_pos": r["mean_pos"],
+                    "mean_neg": r["mean_neg"],
                     "n_per_class": r["n_per_class"],
                 })
 
@@ -306,7 +318,8 @@ print(
 
 # %%
 A_BOOT_COLS = ["subject", "electrode_idx", "phoneme_pair",
-               "replicate", "smin", "smax", "mean_diff_raw", "n_per_class"]
+               "replicate", "smin", "smax", "mean_diff_raw", "mean_pos", "mean_neg",
+               "n_per_class"]
 A_SITE_COLS = ["subject", "electrode_idx", "phoneme_pair",
                "phon_smin", "phon_smax", "n_lo", "n_hi", "n_per_class"]
 
@@ -321,14 +334,16 @@ if boot_rows:
         {c: pl.Series([], dtype=pl.Utf8) for c in A_BOOT_COLS}
     ).cast({"electrode_idx": pl.Int64, "replicate": pl.Int64,
             "smin": pl.Int64, "smax": pl.Int64,
-            "mean_diff_raw": pl.Float64, "n_per_class": pl.Int64})
+            "mean_diff_raw": pl.Float64, "mean_pos": pl.Float64, "mean_neg": pl.Float64,
+            "n_per_class": pl.Int64})
     a_per_site  = pl.DataFrame(per_site_rows)
 else:
     a_bootstrap = pl.DataFrame(
         {c: pl.Series([], dtype=pl.Utf8) for c in A_BOOT_COLS}
     ).cast({"electrode_idx": pl.Int64, "replicate": pl.Int64,
             "smin": pl.Int64, "smax": pl.Int64,
-            "mean_diff_raw": pl.Float64, "n_per_class": pl.Int64})
+            "mean_diff_raw": pl.Float64, "mean_pos": pl.Float64, "mean_neg": pl.Float64,
+            "n_per_class": pl.Int64})
     a_bootstrap_full = a_bootstrap.clone()
     a_per_site = pl.DataFrame(
         {c: pl.Series([], dtype=pl.Utf8) for c in A_SITE_COLS}
@@ -352,7 +367,8 @@ a_per_window      = _boot_to_per_window(a_bootstrap)
 a_per_window_full_df = _boot_to_per_window(a_bootstrap_full)
 
 A_BOOT_WE_COLS = ["subject", "electrode_idx", "phoneme_pair", "word_end",
-                   "replicate", "smin", "smax", "mean_diff_raw", "n_per_class"]
+                   "replicate", "smin", "smax", "mean_diff_raw", "mean_pos", "mean_neg",
+                   "n_per_class"]
 A_SITE_WE_COLS = ["subject", "electrode_idx", "phoneme_pair", "word_end",
                    "we_smax", "n_lo", "n_hi", "n_per_class"]
 
@@ -364,7 +380,8 @@ else:
         {c: pl.Series([], dtype=pl.Utf8) for c in A_BOOT_WE_COLS}
     ).cast({"electrode_idx": pl.Int64, "replicate": pl.Int64,
             "smin": pl.Int64, "smax": pl.Int64,
-            "mean_diff_raw": pl.Float64, "n_per_class": pl.Int64})
+            "mean_diff_raw": pl.Float64, "mean_pos": pl.Float64, "mean_neg": pl.Float64,
+            "n_per_class": pl.Int64})
     a_per_site_by_we = pl.DataFrame(
         {c: pl.Series([], dtype=pl.Utf8) for c in A_SITE_WE_COLS}
     ).cast({"electrode_idx": pl.Int64, "we_smax": pl.Int64,
