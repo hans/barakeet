@@ -158,9 +158,20 @@ def bootstrap_cell_acoustic(
 
 
 def per_window_summary(boot: pl.DataFrame, cell_keys: list[str]) -> pl.DataFrame:
-    """Aggregate bootstrap rows into per-(cell × window) summary statistics."""
+    """Aggregate bootstrap rows into per-(cell × window) summary statistics.
+
+    If `boot` carries per-class raw activation columns `mean_pos`/`mean_neg`
+    (e.g. from `bootstrap_A_site`), their per-window medians are also emitted
+    as `mean_pos_med`/`mean_neg_med`. Callers whose bootstrap rows lack these
+    columns (e.g. `acoustic_on_ambiguous.py`) are unaffected.
+    """
     if boot.height == 0:
         return pl.DataFrame()
+    class_aggs = []
+    if "mean_pos" in boot.columns:
+        class_aggs.append(pl.col("mean_pos").median().alias("mean_pos_med"))
+    if "mean_neg" in boot.columns:
+        class_aggs.append(pl.col("mean_neg").median().alias("mean_neg_med"))
     grouped = (
         boot
         .group_by(cell_keys + ["smin", "smax", "tmin", "tmax"])
@@ -183,6 +194,8 @@ def per_window_summary(boot: pl.DataFrame, cell_keys: list[str]) -> pl.DataFrame
             pl.col("n_per_class").first().alias("n_per_class"),
             pl.col("acoustic_peak_auc").first().alias("acoustic_peak_auc"),
             pl.col("replicate").max().alias("R_replicates"),
+
+            *class_aggs,
         )
     )
     grouped = grouped.with_columns([

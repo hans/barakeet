@@ -346,7 +346,9 @@ def bootstrap_A_site(
 
     Returns (rows, n_lo, n_hi) or None if either endpoint has < min_n trials.
     rows: list of dicts with keys replicate, smin, smax, tmin, tmax,
-          mean_diff_raw, n_per_class (= min(n_lo, n_hi) for that replicate).
+          mean_diff_raw, mean_pos, mean_neg, n_per_class (= min(n_lo, n_hi)
+          for that replicate). mean_pos/mean_neg are the raw per-class mean
+          HGA in the window (mean_diff_raw = mean_pos − mean_neg).
     """
     lo, hi = endpoints
     lo_idx = np.where((md_pp["resampled"] == lo).values)[0]
@@ -372,6 +374,8 @@ def bootstrap_A_site(
                 "tmin": w.smin / epoch_sfreq + epoch_tmin,
                 "tmax": w.smax / epoch_sfreq + epoch_tmin,
                 "mean_diff_raw": w.mean_diff,
+                "mean_pos": w.mean_pos,
+                "mean_neg": w.mean_neg,
                 "n_per_class": n_bal,
             })
     return rows, n_lo, n_hi
