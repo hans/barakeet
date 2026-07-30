@@ -74,6 +74,7 @@ epp["significant_uncorrected"] = epp.p_one_tailed < 0.05
 
 # %%
 reg_lambda = json.loads(Path(reg_lambda_winners_path).read_text())["reg_lambda_acoustic"]
+reg_lambda *= 1000 # DEV
 
 # %%
 epochs_dict = {}
@@ -646,6 +647,12 @@ dec_results_df = pd.merge(
     epp,
     on=["subject", "electrode_idx", "phoneme_pair"]
 )
+dec_results_df = pd.merge(
+    dec_results_df,
+    to_study[["subject", "electrode_idx", "phoneme_pair", "word_end", "s_trough"]],
+    on=["subject", "electrode_idx", "phoneme_pair", "word_end"]
+)
+
 dec_results_df["test_vs"] = dec_results_df.test_roc_auc - dec_results_df.ho_test_roc_auc
 dec_results_df["lexical_evidence"] = 1 - (dec_results_df.word_end.str[0] == dec_results_df.phoneme_pair.str[0]).astype(int)
 dec_results_df.to_csv(Path(outdir) / "acoustic_late_results.csv", index=False)
@@ -1012,6 +1019,16 @@ sig_df = pd.merge(
     on=site_keys,
     suffixes=("_target", "_transfer")
 )
+
+sig_df = pd.merge(
+    sig_df,
+    to_study[["subject", "electrode_idx", "phoneme_pair", "word_end", "s_trough"]],
+    on=site_keys,
+    how="left"
+)
+
+# only retain examples that have a trough in the mean trace
+sig_df = sig_df[~sig_df.s_trough.isna()]
 
 from statsmodels.stats.multitest import multipletests
 # FDR-correct both tests separately.
