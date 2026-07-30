@@ -45,7 +45,7 @@ epoch_sfreq = 100
 #   "trough" (new)  -> start past the per-site trough of the mean activation trace
 #                      (decay->rise turning point of the early acoustic response),
 #                      mirroring the trough gate in plot_for_paper.
-#   "pod"    (old)  -> the previous heuristic, min(phon_smax + 10, POD sample).
+#   "pod"    (old)  -> the previous heuristic, min(phon_smax + 20, POD sample).
 # Flip to "pod" to reproduce the pre-trough behavior exactly.
 smin_mode = "trough"
 
@@ -59,7 +59,7 @@ null_max_iter = 15
 # Permutation-null significance (single test per site; no searchlight).
 n_permutations = 5000
 permutation_seed = 0
-permutation_chunk_size = 500
+permutation_chunk_size = 5000
 
 # %%
 Path(outdir).mkdir(parents=True, exist_ok=True)
@@ -88,10 +88,17 @@ pod_df
 
 # %%
 to_study = pd.merge(
-    epp[["subject", "electrode_idx", "phoneme_pair"]],
+    (
+        epp
+        [epp.early_response_class.isin(("acoustic_only", "type2_aligned"))]
+        [["subject", "electrode_idx", "phoneme_pair", "early_response_class"]]
+    ),
     b4_per_cell,
     how="left", on=["subject", "electrode_idx", "phoneme_pair"]
 )
+
+# %%
+to_study.early_response_class.value_counts()
 
 # %%
 # Per-site trough of the mean activation trace. The acoustic decoder's late
@@ -551,11 +558,11 @@ def prepare_decoder_bounds(phoneme_pair, word_end, phon_smax, s_trough=None):
     # smin is conditioned on the per-site trough of the mean activation trace:
     # only look past the trough (the decay->rise turning point of the early
     # acoustic response). Falls back to the old POD/phon_smax heuristic only
-    # where no trough was detected.
+    # where no trough was detected (or under smin_mode == "pod").
     if s_trough is not None and np.isfinite(s_trough):
         dec_smin = int(s_trough)
     else:
-        dec_smin = int(round(min(phon_smax + 10, (pod_df.loc[word_end] - epoch_tmin) * epoch_sfreq)))
+        dec_smin = int(round(min(phon_smax + 20, (pod_df.loc[word_end] - epoch_tmin) * epoch_sfreq)))
 
     assert dec_smin < dec_smax, f"empty window: dec_smin={dec_smin} >= dec_smax={dec_smax}"
     return dec_smin, dec_smax
@@ -999,6 +1006,14 @@ sig_df = pd.merge(
     suffixes=("_target", "_transfer")
 )
 
+from statsmodels.stats.multitest import multipletests
+# FDR-correct both tests separately.
+for test in ["target", "transfer"]:
+    pvals = sig_df[f"p_value_{test}"].to_numpy()
+    reject, pvals_corrected, _, _ = multipletests(pvals, alpha=0.05, method="fdr_bh")
+    sig_df[f"p_value_{test}_fdr"] = pvals_corrected
+    sig_df[f"significant_{test}_fdr"] = reject
+
 sig_df.to_csv(Path(outdir) / "acoustic_late_summary.csv", index=False)
 
 sig_df.sort_values("p_value_target").head(20)
@@ -1012,7 +1027,8 @@ plt.ylabel("observed AUC")
 
 # %%
 # Observed AUC vs. permutation-null mean, coloured by significance.
-sns.scatterplot(data=sig_df, x="real_ho_test_roc_auc", y="real_test_roc_auc", hue="significant_target")
+sns.scatterplot(data=sig_df.query("significant_target"),
+                x="real_ho_test_roc_auc", y="real_test_roc_auc")
 plt.axline((0.5, 0.5), slope=1, color="k", ls="--", lw=1)
 plt.axvline(x=0.5, color="k", ls="--", lw=1)
 plt.xlabel("transfer AUC")
@@ -1023,142 +1039,28 @@ ttest_df = sig_df.query("significant_target")
 rvalue, pvalue = stats.pearsonr(ttest_df.real_ho_test_roc_auc, ttest_df.real_test_roc_auc)
 print(f"Pearson r = {rvalue:.3f}, p = {pvalue:.3g} for {len(ttest_df)} significant sites")
 
-# %% [markdown]
-# ## Word-end specificity: permutation-null significance for `test_vs`
-#
-# This is the *direct*, non-circular test of `test_vs = test_roc_auc -
-# ho_test_roc_auc` (own word-end AUC minus alternate word-end AUC). We run it on
-# the full `to_study` population, which is already selected by the independent
-# early-window `epp` filter — NOT gated on the late `test_roc_auc` significance
-# above, which shares the `test_roc_auc` term with `test_vs` and would bias it
-# upward (see notes). Selection on a different window/contrast keeps the noise
-# decoupled, so the late `test_vs` p-values here are not circular.
-#
-# Null: same permuted-training-label refit as above, additionally scored on the
-# alternate word-end trials (true labels) → `ho_test_roc_auc`. Under the null
-# both AUCs collapse to ~chance, so `test_vs` is centered at ~0. One-sided
-# (`test_vs > 0`).
+# %%
+g = sns.jointplot(data=sig_df.query("significant_target"),
+                  x="real_test_roc_auc", y="real_ho_test_roc_auc",
+                  xlim=(0.5, 1), ylim=(0.3, 1),
+                  kind="reg",
+                  height=3)
 
 # %%
-null_vs_results = []
-for _, row in tqdm(to_study.iterrows(), total=len(to_study)):
-    subject = row["subject"]
-    electrode_idx = row["electrode_idx"]
-    phoneme_pair = row["phoneme_pair"]
-    word_end = row["word_end"]
-
-    phon_smax = row["phon_smax"]
-    dec_smin, dec_smax = prepare_decoder_bounds(phoneme_pair, word_end, phon_smax, row["s_trough"])
-
-    null_scores = run_acoustic_cross_decoder_null(
-        epochs_dict[subject],
-        subject=subject,
-        electrode_idx=electrode_idx,
-        phoneme_pair=phoneme_pair,
-        word_end=word_end,
-        window=(dec_smin, dec_smax),
-        target="categorical_acoustic_cue",
-        compute_ho=True,
-        reg_lambda=reg_lambda,
-        permute_seeds=permute_seeds,
-        permutation_chunk_size=permutation_chunk_size,
-        n_folds=n_folds,
-        cv_random_state=cv_random_state,
-        device=device,
-        tol=tol,
-        max_iter=null_max_iter,
-    )
-    if null_scores is None:
-        continue
-
-    null_vs_results.append(null_scores.to_pandas().assign(word_end=word_end))
+sig_df.sort_values("p_value_target_fdr")
 
 # %%
-# Null test_vs per (site × permutation): mean over folds of each AUC (nanmean via
-# pandas .mean), then their difference — matching how the real per-site test_vs
-# is aggregated (mean over folds of per-fold test_roc_auc - ho_test_roc_auc).
-null_vs_df = pd.concat(null_vs_results, ignore_index=True)
-null_vs_df.to_csv(Path(outdir) / "acoustic_late_null_vs.csv", index=False)
-null_vs_per_perm = (
-    null_vs_df.groupby(site_keys + ["permutation_idx"])
-    .agg(test_roc_auc=("test_roc_auc", "mean"),
-         ho_test_roc_auc=("ho_test_roc_auc", "mean"))
-    .reset_index()
-)
-null_vs_per_perm["test_vs"] = null_vs_per_perm.test_roc_auc - null_vs_per_perm.ho_test_roc_auc
+sig_df.significant_target.sum(), sig_df.significant_target_fdr.sum()
 
 # %%
-# Observed test_vs: reuse the real per-site mean test_vs from the real loop above.
-real_per_site_vs = (
-    dec_results_df.groupby(site_keys).test_vs.mean().rename("real_test_vs")
-)
-
-def _perm_pvalue_vs(g):
-    key = g.name
-    obs = real_per_site_vs.loc[key]
-    null_vals = g.test_vs.to_numpy()
-    K = len(null_vals)
-    return pd.Series({
-        "real_test_vs": obs,
-        "null_mean": np.nanmean(null_vals),
-        "n_permutations": K,
-        "p_value": (1 + np.sum(null_vals >= obs)) / (1 + K),
-    })
-
-sig_vs_df = null_vs_per_perm.groupby(site_keys).apply(_perm_pvalue_vs).reset_index()
-sig_vs_df["significant"] = sig_vs_df.p_value < 0.05
-sig_vs_df.to_csv(Path(outdir) / "acoustic_late_summary_vs.csv", index=False)
-sig_vs_df.sort_values("p_value")
-
-# %%
-# Side-by-side: acoustic-decodability significance (target word end) next to
-# word-end-specificity significance (test_vs).
-fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
-sns.scatterplot(data=sig_df, x="null_mean", y="real_test_roc_auc",
-                hue="significant", ax=axes[0])
-axes[0].axline((0.5, 0.5), slope=1, color="k", ls="--", lw=1)
-axes[0].set(xlabel="null mean AUC", ylabel="observed AUC",
-            title="Acoustic decoding (target word end)")
-sns.scatterplot(data=sig_vs_df, x="null_mean", y="real_test_vs",
-                hue="significant", ax=axes[1])
-axes[1].axhline(0, color="k", ls="--", lw=1)
-axes[1].set(xlabel="null mean test_vs", ylabel="observed test_vs",
-            title="Word-end specificity (test_vs)")
-fig.tight_layout()
-
-# %%
-sig_side_by_side
-
-# %%
-# Per-site table joining both tests side by side.
-sig_side_by_side = pd.merge(
-    sig_df[site_keys + ["real_test_roc_auc", "p_value_target", "significant_target",
-                        "real_ho_test_roc_auc", "p_value_transfer", "significant_transfer"]],
-    sig_vs_df[site_keys + ["real_test_vs", "p_value", "significant"]].rename(columns={
-        "p_value": "p_value_vs",
-        "significant": "significant_vs",
-    }),
-    on=site_keys,
-)
-
-from statsmodels.stats.multitest import multipletests
-# FDR-correct both tests separately.
-for test in ["target", "transfer", "vs"]:
-    pvals = sig_side_by_side[f"p_value_{test}"].to_numpy()
-    reject, pvals_corrected, _, _ = multipletests(pvals, alpha=0.05, method="fdr_bh")
-    sig_side_by_side[f"p_value_{test}_fdr"] = pvals_corrected
-    sig_side_by_side[f"significant_{test}_fdr"] = reject
-sig_side_by_side.sort_values("p_value_target_fdr")
+sig_df.significant_transfer.sum(), sig_df.significant_transfer_fdr.sum()
 
 # %% [markdown]
 # ## Examine coefs for sig sites
 
 # %%
-coef_study_df
-
-# %%
 coef_study_df = pd.merge(
-    sig_side_by_side.query("significant_target_fdr"),
+    sig_df.query("significant_target_fdr"),
     dec_coefs_df.drop(columns=["mean", "scale"]),
     on=site_keys
 )
@@ -1179,6 +1081,7 @@ xs = pd.merge(
     how="left"
 )
 xs["dec_t_from_pod"] = xs.dec_t - xs.pod
+xs["dec_t_from_pod_bin"] = pd.cut(xs.dec_t_from_pod, bins=np.arange(-0.1, 0.7, 0.15))
 
 # %%
 sns.lineplot(data=xs,#.query("subject == 'EC243' and electrode_idx == 102 and word_end == 'desolate'"),
@@ -1189,16 +1092,5 @@ sns.lineplot(data=xs,#.query("subject == 'EC243' and electrode_idx == 102 and wo
              x="dec_t_from_pod", y="coef2_of_max", hue="phoneme_pair")#, hue="fold")
 
 # %%
-for (subject, electrode_idx, phoneme_pair, word_end), group in coef_study_df.groupby(site_keys):
-    coefs_i = group.drop(columns=["mean", "scale"]).explode("coef")
-    coefs_i["coef_idx"] = coefs_i.groupby(level=0).cumcount()
-    sns.lineplot(data=coefs_i, x="coef_idx", y="coef", legend=False)
-    break
-    # fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
-    # sns.histplot(data=group.explode("coef"), x="coef", bins=50, ax=axes[0])
-    # axes[0].set(title=f"Coefficients: {subject}/{electrode_idx}/{phoneme_pair}/{word_end}",
-    #             xlabel="Coefficient value", ylabel="Count")
-    # sns.histplot(data=group.explode("mean"), x="mean", bins=50, ax=axes[1])
-    # axes[1].set(title=f"Means: {subject}/{electrode_idx}/{phoneme_pair}/{word_end}",
-    #             xlabel="Mean value", ylabel="Count")
-    # fig.tight_layout()
+sns.catplot(data=xs,#.query("subject == 'EC243' and electrode_idx == 102 and word_end == 'desolate'"),
+             x="dec_t_from_pod_bin", y="coef2_of_max", hue="phoneme_pair", kind="point")#, hue="fold")
