@@ -37,8 +37,9 @@
 # A third pass (`a_*_by_word_end_all.parquet` / `a_*_by_word_end.parquet`) reruns
 # the same endpoint contrast **split by word_end** instead of pooled — same site
 # loop, same trial draws unaffected (independent RNG per pass), but each word_end
-# gets its own trial subset and its own search ceiling (`_WE_SMAX[we]` rather than
-# the pair-pooled `phon_smax`/`PAIR_SMAX[pp]`).
+# gets its own trial subset but a shared search ceiling (`PAIR_SMAX[pp]`, the max
+# `_WE_SMAX` across the pair's word_ends) so both word_ends span the same window
+# grid — required for the pair to share an smax downstream.
 #
 # Per-replicate rows carry, alongside `mean_diff_raw` (= mean_pos − mean_neg),
 # the raw per-class activation `mean_pos`/`mean_neg` (mean HGA in the window
@@ -263,7 +264,9 @@ for subject, subj_sites in all_sites.to_pandas().groupby("subject"):
             result_we = bootstrap_A_site(
                 hga_we, md_we,
                 search_smin=SAMPLE_T0,
-                search_smax=_WE_SMAX[we],
+                # Shared ceiling across the pair's word_ends (max _WE_SMAX), so
+                # both word_ends span the same window grid / smax.
+                search_smax=PAIR_SMAX[pp],
                 window_size=window_size,
                 stride=stride,
                 R=R,
@@ -298,7 +301,7 @@ for subject, subj_sites in all_sites.to_pandas().groupby("subject"):
                 "electrode_idx": eidx,
                 "phoneme_pair": pp,
                 "word_end": we,
-                "we_smax": _WE_SMAX[we],
+                "we_smax": PAIR_SMAX[pp],
                 "n_lo": n_lo_we,
                 "n_hi": n_hi_we,
                 "n_per_class": min(n_lo_we, n_hi_we),
@@ -400,7 +403,8 @@ a_per_window_full_df.write_parquet(OUT_DIR / "a_per_window_full_all.parquet")
 _type1_subset(a_per_window_full_df).write_parquet(OUT_DIR / "a_per_window_full.parquet")
 
 # Word_end-split outputs — same endpoint contrast, run separately per word_end
-# (search ceiling = _WE_SMAX[we]) instead of pooled across word_ends.
+# (shared search ceiling = PAIR_SMAX[pp], so both word_ends share an smax)
+# instead of pooled across word_ends.
 a_bootstrap_by_we.write_parquet(OUT_DIR / "a_bootstrap_by_word_end_all.parquet")
 a_per_site_by_we.write_parquet(OUT_DIR / "a_per_site_by_word_end_all.parquet")
 a_per_window_by_we_df.write_parquet(OUT_DIR / "a_per_window_by_word_end_all.parquet")
