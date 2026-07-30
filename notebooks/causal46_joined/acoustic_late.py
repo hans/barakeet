@@ -118,11 +118,17 @@ SMOOTH_WINDOWS = 3       # boxcar width on the pooled trace, in windows
 SUSTAIN = 2              # consecutive positive-derivative samples to accept a crossing
 PEAK_MIN_PROM_SD = 2.0   # first peak must exceed this many noise_sd over the trace min
 
-# Per-word-end search ceiling: word offset + 200 ms, matching `_WE_SMAX` in
-# acoustic_bootstrap (the trace plot_for_paper's trough gate ran on).
+# Search ceiling: word offset + 200 ms per word_end (`_WE_SMAX`), then pooled to
+# a shared per-pair ceiling (`PAIR_SMAX`, the max across the pair's word_ends).
+# Mirrors acoustic_bootstrap: a_per_window_by_word_end — the trace plot_for_paper's
+# trough gate runs on — uses PAIR_SMAX[pp], so both word_ends span the same grid.
 _WE_SMAX = {
     we: int(round((OFFSET_DICT[we] - epoch_tmin) * epoch_sfreq)) + WORD_END_TAIL_SAMPLES
     for we in OFFSET_DICT
+}
+PAIR_SMAX = {
+    pp: max(_WE_SMAX[we] for we in wes)
+    for pp, wes in PHONEME_PAIR_TO_WORD_ENDS.items()
 }
 
 
@@ -151,8 +157,9 @@ def find_trough_sample(mean_trace, *, sample_t0=SAMPLE_T0, search_smax=None,
     non-overlapping bins from t=0), boxcar-smoothed, first prominent peak, then the
     first derivative zero-crossing sustained for `sustain` windows.
 
-    `search_smax` caps the trace at that sample (matching the `_WE_SMAX[we]` =
-    word offset + 200 ms ceiling the original ran on); windows are included while
+    `search_smax` caps the trace at that sample (the caller passes the shared
+    per-pair ceiling `PAIR_SMAX[pp]` = max word offset + 200 ms across the pair,
+    matching the trace the original ran on); windows are included while
     `smin + win_size <= search_smax`. None searches to the end of the trace."""
     hi = len(mean_trace) if search_smax is None else min(int(search_smax), len(mean_trace))
     starts = np.arange(sample_t0, hi - win_size + 1, stride)
@@ -190,7 +197,7 @@ def _site_trough(subject, electrode_idx, phoneme_pair, word_end):
         return None
     data = epochs_dict[subject].get_data(picks=[electrode_idx])  # (n_trials, 1, n_samples)
     mean_trace = data[sel, 0, :].mean(axis=0)
-    return find_trough_sample(mean_trace, search_smax=_WE_SMAX[word_end])
+    return find_trough_sample(mean_trace, search_smax=PAIR_SMAX[phoneme_pair])
 
 
 # Precompute once per (site × word-end) and carry as a column, so the real
