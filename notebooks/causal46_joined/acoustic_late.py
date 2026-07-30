@@ -41,6 +41,14 @@ outdir = "outputs/causal46_joined/acoustic_late"
 epoch_tmin = -0.4
 epoch_sfreq = 100
 
+# smin selection for the late acoustic decoder window:
+#   "trough" (new)  -> start past the per-site trough of the mean activation trace
+#                      (decay->rise turning point of the early acoustic response),
+#                      mirroring the trough gate in plot_for_paper.
+#   "pod"    (old)  -> the previous heuristic, min(phon_smax + 10, POD sample).
+# Flip to "pod" to reproduce the pre-trough behavior exactly.
+smin_mode = "trough"
+
 n_folds = 5
 cv_random_state = 42
 device = "cuda:1"
@@ -84,6 +92,116 @@ to_study = pd.merge(
     b4_per_cell,
     how="left", on=["subject", "electrode_idx", "phoneme_pair"]
 )
+
+# %%
+# Per-site trough of the mean activation trace. The acoustic decoder's late
+# window starts *past* this trough — the decay->rise turning point of the early
+# acoustic response — mirroring the trough gate in plot_for_paper
+# (find_early_peak_and_trough). The trace is the mean HGA over the decoder's own
+# training trials (target word-end, unambiguous steps 1 & 6), pooled over both
+# acoustic classes and hence label-blind, so anchoring the window edge on it
+# introduces no acoustic-contrast leakage. Detection is invariant to a constant
+# vertical shift (diff/prominence/diff-MAD), so raw get_data (no baseline) gives
+# the same trough as the baseline-corrected trace used upstream.
+trough_window_size = 5   # must match acoustic_bootstrap window_size
+trough_stride = 5        # must match acoustic_bootstrap stride
+SAMPLE_T0 = int(round((0.0 - epoch_tmin) * epoch_sfreq))  # t=0 (word onset)
+WORD_END_TAIL_SAMPLES = 20  # +200 ms tail past word offset (search ceiling)
+SMOOTH_WINDOWS = 3       # boxcar width on the pooled trace, in windows
+SUSTAIN = 2              # consecutive positive-derivative samples to accept a crossing
+PEAK_MIN_PROM_SD = 2.0   # first peak must exceed this many noise_sd over the trace min
+
+# Per-word-end search ceiling: word offset + 200 ms, matching `_WE_SMAX` in
+# acoustic_bootstrap (the trace plot_for_paper's trough gate ran on).
+_WE_SMAX = {
+    we: int(round((OFFSET_DICT[we] - epoch_tmin) * epoch_sfreq)) + WORD_END_TAIL_SAMPLES
+    for we in OFFSET_DICT
+}
+
+
+def _smooth(y, w):
+    if w <= 1:
+        return y
+    k = np.ones(w) / w
+    return np.convolve(np.pad(y, w // 2, mode="edge"), k, mode="valid")[:len(y)]
+
+
+def _diff_mad(y):
+    d = np.diff(y)
+    if not len(d):
+        return np.nan
+    return 1.4826 * np.median(np.abs(d - np.median(d)))
+
+
+def find_trough_sample(mean_trace, *, sample_t0=SAMPLE_T0, search_smax=None,
+                       win_size=trough_window_size, stride=trough_stride,
+                       smooth=SMOOTH_WINDOWS, sustain=SUSTAIN,
+                       min_prom=PEAK_MIN_PROM_SD):
+    """First evoked peak of the windowed mean-activation trace, then the following
+    sustained decay->rise crossing (the trough). Returns the trough's sample index
+    (its window smin) or None if no peak/crossing is found. Ported verbatim from
+    `find_early_peak_and_trough` in plot_for_paper: windowed pooled trace (5-sample
+    non-overlapping bins from t=0), boxcar-smoothed, first prominent peak, then the
+    first derivative zero-crossing sustained for `sustain` windows.
+
+    `search_smax` caps the trace at that sample (matching the `_WE_SMAX[we]` =
+    word offset + 200 ms ceiling the original ran on); windows are included while
+    `smin + win_size <= search_smax`. None searches to the end of the trace."""
+    hi = len(mean_trace) if search_smax is None else min(int(search_smax), len(mean_trace))
+    starts = np.arange(sample_t0, hi - win_size + 1, stride)
+    if len(starts) < 3:
+        return None
+    pooled = np.array([mean_trace[s:s + win_size].mean() for s in starts])
+
+    y = _smooth(pooled, smooth)
+    sd = _diff_mad(pooled)
+    ok_sd = np.isfinite(sd) and sd > 0
+    d = np.diff(y)
+    prom = (y - y.min()) / sd if ok_sd else np.full_like(y, np.inf)
+
+    i_peak = next((i for i in range(1, len(y) - 1)
+                   if d[i - 1] > 0 >= d[i] and prom[i] >= min_prom), None)
+    if i_peak is None:
+        return None
+    i_trough = None
+    for i in range(i_peak + 1, len(d) - sustain + 1):
+        if d[i] > 0 and all(d[i + j] > 0 for j in range(sustain)):
+            i_trough = i
+            break
+    if i_trough is None:
+        return None
+    return int(starts[i_trough])
+
+
+def _site_trough(subject, electrode_idx, phoneme_pair, word_end):
+    """Trough sample for one site, computed on the same trial selection the
+    acoustic decoder trains on (target word-end, unambiguous steps 1 & 6)."""
+    md = epochs_dict[subject].metadata
+    sel = ((md.phoneme_pair == phoneme_pair) & (md.word_end == word_end)
+           & md.resampled.isin((1, 6))).values
+    if sel.sum() == 0:
+        return None
+    data = epochs_dict[subject].get_data(picks=[electrode_idx])  # (n_trials, 1, n_samples)
+    mean_trace = data[sel, 0, :].mean(axis=0)
+    return find_trough_sample(mean_trace, search_smax=_WE_SMAX[word_end])
+
+
+# Precompute once per (site × word-end) and carry as a column, so the real
+# decoder loop and both permutation-null loops read the *same* window edge
+# (identical windows are required for the null p-values to be valid). Under
+# smin_mode == "pod" the column is all-NaN, so prepare_decoder_bounds falls
+# through to the old POD/phon_smax heuristic for every site.
+if smin_mode == "trough":
+    to_study["s_trough"] = [
+        _site_trough(r.subject, r.electrode_idx, r.phoneme_pair, r.word_end)
+        for r in to_study.itertuples()
+    ]
+    n_no_trough = int(to_study["s_trough"].isna().sum())
+    print(f"no trough detected: {n_no_trough} / {len(to_study)} sites "
+          "(these fall back to the old POD/phon_smax smin)")
+else:
+    to_study["s_trough"] = np.nan
+    print(f"smin_mode={smin_mode!r}: using the old POD/phon_smax smin for all sites")
 
 # %%
 import polars as pl
@@ -421,15 +539,25 @@ def run_acoustic_cross_decoder(
 
 
 # %%
-def prepare_decoder_bounds(phoneme_pair, word_end, phon_smax):
+def prepare_decoder_bounds(phoneme_pair, word_end, phon_smax, s_trough=None):
     other_word_end = next(iter(set(PHONEME_PAIR_TO_WORD_ENDS[phoneme_pair]) - {word_end}))
 
-    # Compute sample bounds for the decoder windows
-    dec_smin = int(round(min(phon_smax + 10, (pod_df.loc[word_end] - epoch_tmin) * epoch_sfreq)))
+    # smax unchanged: word offset + 100ms, whichever word-end runs later.
     dec_smax = max(
         int(round((OFFSET_DICT[word_end] + 0.1 - epoch_tmin) * epoch_sfreq)),
         int(round((OFFSET_DICT[other_word_end] + 0.1 - epoch_tmin) * epoch_sfreq))
     )
+
+    # smin is conditioned on the per-site trough of the mean activation trace:
+    # only look past the trough (the decay->rise turning point of the early
+    # acoustic response). Falls back to the old POD/phon_smax heuristic only
+    # where no trough was detected.
+    if s_trough is not None and np.isfinite(s_trough):
+        dec_smin = int(s_trough)
+    else:
+        dec_smin = int(round(min(phon_smax + 10, (pod_df.loc[word_end] - epoch_tmin) * epoch_sfreq)))
+
+    assert dec_smin < dec_smax, f"empty window: dec_smin={dec_smin} >= dec_smax={dec_smax}"
     return dec_smin, dec_smax
 
 
@@ -453,7 +581,7 @@ for _, row in tqdm(to_study.iterrows(), total=len(to_study)):
     phon_smin = row["phon_smin"]
     phon_smax = row["phon_smax"]
 
-    dec_smin, dec_smax = prepare_decoder_bounds(phoneme_pair, word_end, phon_smax)
+    dec_smin, dec_smax = prepare_decoder_bounds(phoneme_pair, word_end, phon_smax, row["s_trough"])
     ep_i = epochs_dict[subject]
 
     scores_i, _, coefs_i = run_acoustic_cross_decoder(
@@ -794,7 +922,7 @@ for _, row in tqdm(to_study.iterrows(), total=len(to_study)):
     word_end = row["word_end"]
 
     phon_smax = row["phon_smax"]
-    dec_smin, dec_smax = prepare_decoder_bounds(phoneme_pair, word_end, phon_smax)
+    dec_smin, dec_smax = prepare_decoder_bounds(phoneme_pair, word_end, phon_smax, row["s_trough"])
 
     null_scores = run_acoustic_cross_decoder_null(
         epochs_dict[subject],
@@ -920,7 +1048,7 @@ for _, row in tqdm(to_study.iterrows(), total=len(to_study)):
     word_end = row["word_end"]
 
     phon_smax = row["phon_smax"]
-    dec_smin, dec_smax = prepare_decoder_bounds(phoneme_pair, word_end, phon_smax)
+    dec_smin, dec_smax = prepare_decoder_bounds(phoneme_pair, word_end, phon_smax, row["s_trough"])
 
     null_scores = run_acoustic_cross_decoder_null(
         epochs_dict[subject],
