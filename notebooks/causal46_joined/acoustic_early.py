@@ -1,6 +1,7 @@
 # ---
 # jupyter:
 #   jupytext:
+#     cell_metadata_filter: tags,-all
 #     text_representation:
 #       extension: .py
 #       format_name: percent
@@ -40,7 +41,7 @@ from src.data import add_metadata_features
 from src.models.causal6 import run_acoustic_searchlight, _resolve_target, _has_enough_per_class
 from src.stimuli import OFFSET_DICT, PHONEME_PAIR_TO_WORD_ENDS, WORD_PHASE_DF
 
-# %%
+# %% tags=["parameters"]
 epp_path = "outputs/causal46_joined/early_perceptual_projection/all_sites.csv"
 phon_peaks_path = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet"
 reg_lambda_winners_path = "outputs/causal6/reg_lambda_sweep/reg_lambda_winners.json"
