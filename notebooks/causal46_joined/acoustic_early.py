@@ -12,6 +12,14 @@
 #     name: python3
 # ---
 
+# %% [markdown]
+# A redo of acoustic decoding in the early window using
+# the same per-word-end evaluation technique as in acoustic_late.
+# Should reproduce the basic acoustic decoding results (roughly)
+# while also giving us results that we can use to build a parallel
+# figure to what we derive in acoustic_late (testing within/across
+# the two word completions).
+
 # %%
 # %load_ext autoreload
 # %autoreload 2
@@ -33,21 +41,13 @@ from src.models.causal6 import run_acoustic_searchlight, _resolve_target, _has_e
 from src.stimuli import OFFSET_DICT, PHONEME_PAIR_TO_WORD_ENDS, WORD_PHASE_DF
 
 # %%
-b4_per_cell_path = "outputs/causal46_joined/t_tests/b4_per_cell.parquet"
 epp_path = "outputs/causal46_joined/early_perceptual_projection/all_sites.csv"
+phon_peaks_path = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet"
 reg_lambda_winners_path = "outputs/causal6/reg_lambda_sweep/reg_lambda_winners.json"
-outdir = "outputs/causal46_joined/acoustic_late"
+outdir = "outputs/causal46_joined/acoustic_early"
 
 epoch_tmin = -0.4
 epoch_sfreq = 100
-
-# smin selection for the late acoustic decoder window:
-#   "trough" (new)  -> start past the per-site trough of the mean activation trace
-#                      (decay->rise turning point of the early acoustic response),
-#                      mirroring the trough gate in plot_for_paper.
-#   "pod"    (old)  -> the previous heuristic, min(phon_smax + 20, POD sample).
-# Flip to "pod" to reproduce the pre-trough behavior exactly.
-smin_mode = "trough"
 
 n_folds = 5
 cv_random_state = 42
@@ -65,16 +65,15 @@ permutation_chunk_size = 5000
 Path(outdir).mkdir(parents=True, exist_ok=True)
 
 # %%
-b4_per_cell = pd.read_parquet(b4_per_cell_path)
-
-# %%
 epp = pd.read_csv(epp_path)
 epp["significant"] = epp.q_one_tailed < 0.05
 epp["significant_uncorrected"] = epp.p_one_tailed < 0.05
 
 # %%
+phon_peaks = pd.read_parquet(phon_peaks_path)
+
+# %%
 reg_lambda = json.loads(Path(reg_lambda_winners_path).read_text())["reg_lambda_acoustic"]
-reg_lambda *= 1000 # DEV
 
 # %%
 epochs_dict = {}
@@ -84,139 +83,23 @@ for p in Path("outputs/epochs_preprocessed").glob("*.fif"):
     epochs_dict[p.stem.rstrip("_epo")] = ep
 
 # %%
-pod_df = WORD_PHASE_DF.query("phase == 'pod'").rename(columns={'start': 'pod'}).drop(columns=["end", "phase"]).set_index("word").pod
-pod_df
-
-# %%
 to_study = pd.merge(
     (
         epp
         [epp.early_response_class.isin(("acoustic_only", "type2_aligned"))]
         [["subject", "electrode_idx", "phoneme_pair", "early_response_class"]]
     ),
-    b4_per_cell,
-    how="left", on=["subject", "electrode_idx", "phoneme_pair"]
+    (
+        phon_peaks[["subject", "electrode_idx", "phoneme_pair", "test_roc_auc", "smin", "smax"]]
+        .rename(columns={"test_roc_auc": "decoder_test_roc_auc",
+                         "smin": "decoder_smin", "smax": "decoder_smax"})
+    ),
+    how="left",
+    on=["subject", "electrode_idx", "phoneme_pair"],
 )
 
 # %%
 to_study.early_response_class.value_counts()
-
-# %%
-# Per-site trough of the mean activation trace. The acoustic decoder's late
-# window starts *past* this trough — the decay->rise turning point of the early
-# acoustic response — mirroring the trough gate in plot_for_paper
-# (find_early_peak_and_trough). The trace is the mean HGA over the decoder's own
-# training trials (target word-end, unambiguous steps 1 & 6), pooled over both
-# acoustic classes and hence label-blind, so anchoring the window edge on it
-# introduces no acoustic-contrast leakage. Detection is invariant to a constant
-# vertical shift (diff/prominence/diff-MAD), so raw get_data (no baseline) gives
-# the same trough as the baseline-corrected trace used upstream.
-trough_window_size = 5   # must match acoustic_bootstrap window_size
-trough_stride = 5        # must match acoustic_bootstrap stride
-SAMPLE_T0 = int(round((0.0 - epoch_tmin) * epoch_sfreq))  # t=0 (word onset)
-WORD_END_TAIL_SAMPLES = 20  # +200 ms tail past word offset (search ceiling)
-SMOOTH_WINDOWS = 3       # boxcar width on the pooled trace, in windows
-SUSTAIN = 2              # consecutive positive-derivative samples to accept a crossing
-PEAK_MIN_PROM_SD = 2.0   # first peak must exceed this many noise_sd over the trace min
-
-# Search ceiling: word offset + 200 ms per word_end (`_WE_SMAX`), then pooled to
-# a shared per-pair ceiling (`PAIR_SMAX`, the max across the pair's word_ends).
-# Mirrors acoustic_bootstrap: a_per_window_by_word_end — the trace plot_for_paper's
-# trough gate runs on — uses PAIR_SMAX[pp], so both word_ends span the same grid.
-_WE_SMAX = {
-    we: int(round((OFFSET_DICT[we] - epoch_tmin) * epoch_sfreq)) + WORD_END_TAIL_SAMPLES
-    for we in OFFSET_DICT
-}
-PAIR_SMAX = {
-    pp: max(_WE_SMAX[we] for we in wes)
-    for pp, wes in PHONEME_PAIR_TO_WORD_ENDS.items()
-}
-
-
-def _smooth(y, w):
-    if w <= 1:
-        return y
-    k = np.ones(w) / w
-    return np.convolve(np.pad(y, w // 2, mode="edge"), k, mode="valid")[:len(y)]
-
-
-def _diff_mad(y):
-    d = np.diff(y)
-    if not len(d):
-        return np.nan
-    return 1.4826 * np.median(np.abs(d - np.median(d)))
-
-
-def find_trough_sample(mean_trace, *, sample_t0=SAMPLE_T0, search_smax=None,
-                       win_size=trough_window_size, stride=trough_stride,
-                       smooth=SMOOTH_WINDOWS, sustain=SUSTAIN,
-                       min_prom=PEAK_MIN_PROM_SD):
-    """First evoked peak of the windowed mean-activation trace, then the following
-    sustained decay->rise crossing (the trough). Returns the trough's sample index
-    (its window smin) or None if no peak/crossing is found. Ported verbatim from
-    `find_early_peak_and_trough` in plot_for_paper: windowed pooled trace (5-sample
-    non-overlapping bins from t=0), boxcar-smoothed, first prominent peak, then the
-    first derivative zero-crossing sustained for `sustain` windows.
-
-    `search_smax` caps the trace at that sample (the caller passes the shared
-    per-pair ceiling `PAIR_SMAX[pp]` = max word offset + 200 ms across the pair,
-    matching the trace the original ran on); windows are included while
-    `smin + win_size <= search_smax`. None searches to the end of the trace."""
-    hi = len(mean_trace) if search_smax is None else min(int(search_smax), len(mean_trace))
-    starts = np.arange(sample_t0, hi - win_size + 1, stride)
-    if len(starts) < 3:
-        return None
-    pooled = np.array([mean_trace[s:s + win_size].mean() for s in starts])
-
-    y = _smooth(pooled, smooth)
-    sd = _diff_mad(pooled)
-    ok_sd = np.isfinite(sd) and sd > 0
-    d = np.diff(y)
-    prom = (y - y.min()) / sd if ok_sd else np.full_like(y, np.inf)
-
-    i_peak = next((i for i in range(1, len(y) - 1)
-                   if d[i - 1] > 0 >= d[i] and prom[i] >= min_prom), None)
-    if i_peak is None:
-        return None
-    i_trough = None
-    for i in range(i_peak + 1, len(d) - sustain + 1):
-        if d[i] > 0 and all(d[i + j] > 0 for j in range(sustain)):
-            i_trough = i
-            break
-    if i_trough is None:
-        return None
-    return int(starts[i_trough])
-
-
-def _site_trough(subject, electrode_idx, phoneme_pair, word_end):
-    """Trough sample for one site, computed on the same trial selection the
-    acoustic decoder trains on (target word-end, unambiguous steps 1 & 6)."""
-    md = epochs_dict[subject].metadata
-    sel = ((md.phoneme_pair == phoneme_pair) & (md.word_end == word_end)
-           & md.resampled.isin((1, 6))).values
-    if sel.sum() == 0:
-        return None
-    data = epochs_dict[subject].get_data(picks=[electrode_idx])  # (n_trials, 1, n_samples)
-    mean_trace = data[sel, 0, :].mean(axis=0)
-    return find_trough_sample(mean_trace, search_smax=PAIR_SMAX[phoneme_pair])
-
-
-# Precompute once per (site × word-end) and carry as a column, so the real
-# decoder loop and both permutation-null loops read the *same* window edge
-# (identical windows are required for the null p-values to be valid). Under
-# smin_mode == "pod" the column is all-NaN, so prepare_decoder_bounds falls
-# through to the old POD/phon_smax heuristic for every site.
-if smin_mode == "trough":
-    to_study["s_trough"] = [
-        _site_trough(r.subject, r.electrode_idx, r.phoneme_pair, r.word_end)
-        for r in to_study.itertuples()
-    ]
-    n_no_trough = int(to_study["s_trough"].isna().sum())
-    print(f"no trough detected: {n_no_trough} / {len(to_study)} sites "
-          "(these fall back to the old POD/phon_smax smin)")
-else:
-    to_study["s_trough"] = np.nan
-    print(f"smin_mode={smin_mode!r}: using the old POD/phon_smax smin for all sites")
 
 # %%
 import polars as pl
@@ -554,27 +437,8 @@ def run_acoustic_cross_decoder(
 
 
 # %%
-def prepare_decoder_bounds(phoneme_pair, word_end, phon_smax, s_trough=None):
-    other_word_end = next(iter(set(PHONEME_PAIR_TO_WORD_ENDS[phoneme_pair]) - {word_end}))
-
-    # smax unchanged: word offset + 100ms, whichever word-end runs later.
-    dec_smax = max(
-        int(round((OFFSET_DICT[word_end] + 0.1 - epoch_tmin) * epoch_sfreq)),
-        int(round((OFFSET_DICT[other_word_end] + 0.1 - epoch_tmin) * epoch_sfreq))
-    )
-
-    # smin is conditioned on the per-site trough of the mean activation trace:
-    # only look past the trough (the decay->rise turning point of the early
-    # acoustic response). Falls back to the old POD/phon_smax heuristic only
-    # where no trough was detected (or under smin_mode == "pod").
-    if s_trough is not None and np.isfinite(s_trough):
-        dec_smin = int(s_trough)
-    else:
-        dec_smin = int(round(min(phon_smax + 20, (pod_df.loc[word_end] - epoch_tmin) * epoch_sfreq)))
-
-    assert dec_smin < dec_smax, f"empty window: dec_smin={dec_smin} >= dec_smax={dec_smax}"
-    return dec_smin, dec_smax
-
+_, row = next(iter(to_study.iterrows()))
+row
 
 # %%
 dec_results = []
@@ -586,60 +450,57 @@ dec_coefs = []
 #
 # We expect (1) to succeed (generalizable decoder) but (2) to fail
 # because the acoustic contrast is specific to one word end.
-for _, row in tqdm(to_study.iterrows(), total=len(to_study)):
+for i, row in tqdm(to_study.iterrows(), total=len(to_study)):
     subject = row["subject"]
     electrode_idx = row["electrode_idx"]
     phoneme_pair = row["phoneme_pair"]
-    word_end = row["word_end"]
-    other_word_end = next(iter(set(PHONEME_PAIR_TO_WORD_ENDS[phoneme_pair]) - {word_end}))
 
-    phon_smin = row["phon_smin"]
-    phon_smax = row["phon_smax"]
-
-    dec_smin, dec_smax = prepare_decoder_bounds(phoneme_pair, word_end, phon_smax, row["s_trough"])
+    dec_smin, dec_smax = row["decoder_smin"], row["decoder_smax"]
     ep_i = epochs_dict[subject]
 
-    scores_i, _, coefs_i = run_acoustic_cross_decoder(
-        ep_i,
-        subject=subject,
-        electrode_idxs=[electrode_idx],
-        phoneme_pair=phoneme_pair,
-        word_end=word_end,
-        windows=np.array([(dec_smin, dec_smax)]),
-        target="categorical_acoustic_cue",
-        reg_lambda=reg_lambda,
-        n_folds=n_folds,
-        cv_random_state=cv_random_state,
-        device=device,
-        tol=tol,
-        max_iter=max_iter,
-    )
+    word_ends_i = PHONEME_PAIR_TO_WORD_ENDS[row["phoneme_pair"]]
+    for j in range(len(word_ends_i)):
+        word_end = word_ends_i[j]
+        other_word_end = word_ends_i[1 - j]
 
-    dec_results.append(
-        scores_i
-        .to_pandas()
-        .assign(
+        scores_j, _, coefs_j = run_acoustic_cross_decoder(
+            ep_i,
             subject=subject,
+            electrode_idxs=[electrode_idx],
+            phoneme_pair=phoneme_pair,
             word_end=word_end,
-            phon_smin=phon_smin,
-            phon_smax=phon_smax,
-            dec_smin=dec_smin,
-            dec_smax=dec_smax,
+            windows=np.array([(dec_smin, dec_smax)]),
+            target="categorical_acoustic_cue",
+            reg_lambda=reg_lambda,
+            n_folds=n_folds,
+            cv_random_state=cv_random_state,
+            device=device,
+            tol=tol,
+            max_iter=max_iter,
         )
-    )
 
-    dec_coefs.append(
-        coefs_i
-        .to_pandas()
-        .assign(
-            subject=subject,
-            word_end=word_end,
-            phon_smin=phon_smin,
-            phon_smax=phon_smax,
-            dec_smin=dec_smin,
-            dec_smax=dec_smax,
+        dec_results.append(
+            scores_j
+            .to_pandas()
+            .assign(
+                subject=subject,
+                word_end=word_end,
+                ho_word_end=other_word_end,
+                dec_smin=dec_smin,
+                dec_smax=dec_smax,
+            )
         )
-    )
+
+        dec_coefs.append(
+            coefs_j
+            .to_pandas()
+            .assign(
+                subject=subject,
+                word_end=word_end,
+                dec_smin=dec_smin,
+                dec_smax=dec_smax,
+            )
+        )
 
 # %%
 dec_results_df = pd.merge(
@@ -649,28 +510,24 @@ dec_results_df = pd.merge(
 )
 dec_results_df = pd.merge(
     dec_results_df,
-    to_study[["subject", "electrode_idx", "phoneme_pair", "word_end", "s_trough"]],
-    on=["subject", "electrode_idx", "phoneme_pair", "word_end"]
+    to_study[["subject", "electrode_idx", "phoneme_pair"]],
+    on=["subject", "electrode_idx", "phoneme_pair"]
 )
 
 dec_results_df["test_vs"] = dec_results_df.test_roc_auc - dec_results_df.ho_test_roc_auc
 dec_results_df["lexical_evidence"] = 1 - (dec_results_df.word_end.str[0] == dec_results_df.phoneme_pair.str[0]).astype(int)
-dec_results_df.to_csv(Path(outdir) / "acoustic_late_results.csv", index=False)
+dec_results_df.to_csv(Path(outdir) / "acoustic_early_results.csv", index=False)
 
 # %%
 dec_coefs_df = pd.concat(dec_coefs)
-dec_coefs_df.to_parquet(Path(outdir) / "acoustic_late_coefs.parquet", index=False)
+dec_coefs_df.to_parquet(Path(outdir) / "acoustic_early_coefs.parquet", index=False)
 
 # %%
-# Expectation: test_vs > 0 because the acoustic contrast is specific to one word end
 sns.displot(data=dec_results_df.query("significant_uncorrected").groupby(["subject", "electrode_idx", "phoneme_pair", "word_end"]).test_vs.mean(),
             kind="kde", fill=True)
 plt.axvline(x=0, color="k", ls="--", lw=1)
 
 # %%
-# No strong expectation here. Sites might show an acoustic context effect at both
-# word ends (that's what this plot looks for) -- but we expect it won't generalize
-# (not what this plot looks for; that's tested above).
 sns.scatterplot(
     data=dec_results_df.groupby(["subject", "phoneme_pair", "electrode_idx", "lexical_evidence"]).test_roc_auc.mean().unstack(),
     x=0, y=1
@@ -940,33 +797,36 @@ for _, row in tqdm(to_study.iterrows(), total=len(to_study)):
     subject = row["subject"]
     electrode_idx = row["electrode_idx"]
     phoneme_pair = row["phoneme_pair"]
-    word_end = row["word_end"]
 
-    phon_smax = row["phon_smax"]
-    dec_smin, dec_smax = prepare_decoder_bounds(phoneme_pair, word_end, phon_smax, row["s_trough"])
+    dec_smin, dec_smax = row["decoder_smin"], row["decoder_smax"]
 
-    null_scores = run_acoustic_cross_decoder_null(
-        epochs_dict[subject],
-        subject=subject,
-        electrode_idx=electrode_idx,
-        phoneme_pair=phoneme_pair,
-        word_end=word_end,
-        window=(dec_smin, dec_smax),
-        target="categorical_acoustic_cue",
-        compute_ho=True,
-        reg_lambda=reg_lambda,
-        permute_seeds=permute_seeds,
-        permutation_chunk_size=permutation_chunk_size,
-        n_folds=n_folds,
-        cv_random_state=cv_random_state,
-        device=device,
-        tol=tol,
-        max_iter=null_max_iter,
-    )
-    if null_scores is None:
-        continue
+    word_ends_i = PHONEME_PAIR_TO_WORD_ENDS[phoneme_pair]
+    for j in range(len(word_ends_i)):
+        word_end = word_ends_i[j]
+        other_word_end = word_ends_i[1 - j]
 
-    null_results.append(null_scores.to_pandas().assign(word_end=word_end))
+        null_scores = run_acoustic_cross_decoder_null(
+            epochs_dict[subject],
+            subject=subject,
+            electrode_idx=electrode_idx,
+            phoneme_pair=phoneme_pair,
+            word_end=word_end,
+            window=(dec_smin, dec_smax),
+            target="categorical_acoustic_cue",
+            compute_ho=True,
+            reg_lambda=reg_lambda,
+            permute_seeds=permute_seeds,
+            permutation_chunk_size=permutation_chunk_size,
+            n_folds=n_folds,
+            cv_random_state=cv_random_state,
+            device=device,
+            tol=tol,
+            max_iter=null_max_iter,
+        )
+        if null_scores is None:
+            continue
+
+        null_results.append(null_scores.to_pandas().assign(word_end=word_end))
 
 # %%
 # Null statistic per (site × permutation): mean test_roc_auc over folds
@@ -1022,13 +882,10 @@ sig_df = pd.merge(
 
 sig_df = pd.merge(
     sig_df,
-    to_study[["subject", "electrode_idx", "phoneme_pair", "word_end", "s_trough"]],
-    on=site_keys,
+    to_study[["subject", "electrode_idx", "phoneme_pair"]],
+    on=["subject", "electrode_idx", "phoneme_pair"],
     how="left"
 )
-
-# only retain examples that have a trough in the mean trace
-sig_df = sig_df[~sig_df.s_trough.isna()]
 
 from statsmodels.stats.multitest import multipletests
 # FDR-correct both tests separately.
@@ -1038,7 +895,7 @@ for test in ["target", "transfer"]:
     sig_df[f"p_value_{test}_fdr"] = pvals_corrected
     sig_df[f"significant_{test}_fdr"] = reject
 
-sig_df.to_csv(Path(outdir) / "acoustic_late_summary.csv", index=False)
+sig_df.to_csv(Path(outdir) / "acoustic_early_summary.csv", index=False)
 
 sig_df.sort_values("p_value_target").head(20)
 
