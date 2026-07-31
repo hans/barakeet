@@ -1713,6 +1713,126 @@ rule reorder_t_test_star_plots_by_type:
 
 
 # =============================================================================
+# Early/late acoustic decoding, per-word-end (feeds plot_for_paper.ipynb).
+#
+# Both notebooks load ALL subjects' epochs at once (glob over
+# outputs/epochs_preprocessed/*.fif) rather than running per-subject, so
+# these rules have no {subject} wildcard.
+# =============================================================================
+
+
+rule joined_acoustic_early:
+    """Early-window acoustic decoding, evaluated per word-end.
+
+    Redo of acoustic decoding in the early window using the same per-word-end
+    evaluation technique as acoustic_late, for a parallel early/late figure.
+    """
+    input:
+        epp        = "outputs/causal46_joined/early_perceptual_projection/all_sites.csv",
+        phon_peaks = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet",
+        winners    = REG_LAMBDA_WINNERS,
+        epochs_dir = "outputs/epochs_preprocessed",
+        notebook   = "notebooks/causal46_joined/acoustic_early.py",
+
+    output:
+        notebook = "outputs/causal46_joined/acoustic_early/notebook.ipynb",
+        results  = "outputs/causal46_joined/acoustic_early/acoustic_early_results.csv",
+        summary  = "outputs/causal46_joined/acoustic_early/acoustic_early_summary.csv",
+        coefs    = "outputs/causal46_joined/acoustic_early/acoustic_early_coefs.parquet",
+        # NB: acoustic_early.py writes its null distribution under the
+        # "acoustic_late_null.parquet" filename (copy-paste artifact from
+        # acoustic_late.py) — declared here as-is to match actual behavior.
+        null     = "outputs/causal46_joined/acoustic_early/acoustic_late_null.parquet",
+
+    resources:
+        gpu = 1
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook_with_gpu(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                epp_path=str(input.epp),
+                phon_peaks_path=str(input.phon_peaks),
+                reg_lambda_winners_path=str(input.winners),
+                outdir=str(outdir),
+
+                epoch_tmin=config["analysis"]["epoch_tmin"],
+                epoch_sfreq=config["analysis"]["epoch_sfreq"],
+
+                n_folds=C6["n_folds"],
+                cv_random_state=C6["cv_random_state"],
+                device=C6["device"],
+                tol=C6["tol"],
+                max_iter=C6["max_iter"],
+                null_max_iter=15,
+
+                n_permutations=5000,
+                permutation_seed=0,
+                permutation_chunk_size=5000,
+            ),
+            wildcards=wildcards,
+            resources=resources,
+        )
+
+
+rule joined_acoustic_late:
+    """Late-window acoustic decoding, evaluated per word-end.
+
+    Decoder window starts past the per-site trough of the mean early-response
+    trace (smin_mode="trough"), mirroring the trough gate used in
+    plot_for_paper's find_early_peak_and_trough.
+    """
+    input:
+        b4_per_cell = "outputs/causal46_joined/t_tests/b4_per_cell.parquet",
+        epp         = "outputs/causal46_joined/early_perceptual_projection/all_sites.csv",
+        winners     = REG_LAMBDA_WINNERS,
+        epochs_dir  = "outputs/epochs_preprocessed",
+        notebook    = "notebooks/causal46_joined/acoustic_late.py",
+
+    output:
+        notebook = "outputs/causal46_joined/acoustic_late/notebook.ipynb",
+        results  = "outputs/causal46_joined/acoustic_late/acoustic_late_results.csv",
+        summary  = "outputs/causal46_joined/acoustic_late/acoustic_late_summary.csv",
+        coefs    = "outputs/causal46_joined/acoustic_late/acoustic_late_coefs.parquet",
+        null     = "outputs/causal46_joined/acoustic_late/acoustic_late_null.parquet",
+
+    resources:
+        gpu = 1
+
+    run:
+        outdir = Path(output.notebook).parent
+        run_notebook_with_gpu(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                b4_per_cell_path=str(input.b4_per_cell),
+                epp_path=str(input.epp),
+                reg_lambda_winners_path=str(input.winners),
+                outdir=str(outdir),
+
+                epoch_tmin=config["analysis"]["epoch_tmin"],
+                epoch_sfreq=config["analysis"]["epoch_sfreq"],
+                smin_mode="trough",
+
+                n_folds=C6["n_folds"],
+                cv_random_state=C6["cv_random_state"],
+                device=C6["device"],
+                tol=C6["tol"],
+                max_iter=C6["max_iter"],
+                null_max_iter=15,
+
+                n_permutations=5000,
+                permutation_seed=0,
+                permutation_chunk_size=5000,
+            ),
+            wildcards=wildcards,
+            resources=resources,
+        )
+
+
+# =============================================================================
 # Default target — AS-filter + the 10 cross-subject aggregate _all parquets.
 # =============================================================================
 
@@ -1753,6 +1873,57 @@ rule causal46_joined_all:
         # "outputs/causal46_joined/contrast_plot/pb_contrast_plot.ipynb",
         # type1 coding on ambiguous trials
         "outputs/causal46_joined/type1_ambiguous_hga_coding/notebook.ipynb",
+
+
+rule plot_for_paper_inputs:
+    """Every output that plot_for_paper.ipynb reads, as an explicit Snakemake target.
+
+    plot_for_paper.ipynb is the final figure notebook and is not itself a
+    Snakemake rule (it's run interactively). This rule exists so that
+    `snakemake plot_for_paper_inputs` builds — or verifies the freshness of —
+    everything it depends on, in one shot. Keep this list in sync with the
+    `*_path` variables and `pd.read_*`/`pl.read_*`/`mne.read_epochs` calls in
+    the notebook's setup cells; if plot_for_paper starts reading something
+    new, it belongs here too.
+    """
+    input:
+        # t_tests: B4 per-cell/per-window/bootstrap
+        "outputs/causal46_joined/t_tests/b4_per_cell.parquet",
+        "outputs/causal46_joined/t_tests/b4_per_window.parquet",
+        "outputs/causal46_joined/t_tests/b4_bootstrap.parquet",
+        # acoustic_bootstrap: A per-window (full + by-word-end)
+        "outputs/causal46_joined/acoustic_bootstrap/a_per_window_full_all.parquet",
+        "outputs/causal46_joined/acoustic_bootstrap/a_per_window_by_word_end_all.parquet",
+        # speech-responsive electrodes, per subject (glob'd in the notebook)
+        expand(
+            "outputs/causal6/find_speech_responsive/{subject}_results.csv",
+            subject=config["data"]["subjects"],
+        ),
+        # acoustic decoding peaks (peak acoustic window per site)
+        "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet",
+        # acoustic transfer: phonemic peak window vs. behavioral target window
+        "outputs/causal46_joined/acoustic_transfer/scores_all.parquet",
+        # early/late per-word-end acoustic decoding
+        "outputs/causal46_joined/acoustic_early/acoustic_early_summary.csv",
+        "outputs/causal46_joined/acoustic_early/acoustic_early_results.csv",
+        "outputs/causal46_joined/acoustic_late/acoustic_late_summary.csv",
+        "outputs/causal46_joined/acoustic_late/acoustic_late_results.csv",
+        # early/late perceptual projection
+        "outputs/causal46_joined/early_perceptual_projection/all_sites.csv",
+        "outputs/causal46_joined/late_perceptual_projection/results.csv",
+        # unified endpoint acoustic windows + early perceptual windows
+        "outputs/causal46_joined/acoustic_endpoint_windows/a_windows.parquet",
+        "outputs/causal46_joined/early_perceptual_windows/ep_windows.parquet",
+        # behaviorally-discriminative windows
+        "outputs/causal46_joined/behavioral_discriminative_windows/b_windows.parquet",
+        # preprocessed epochs, per subject (glob'd in the notebook)
+        expand(
+            "outputs/epochs_preprocessed/{subject}_epo.fif",
+            subject=config["data"]["subjects"],
+        ),
+        # acoustic univariate gradient (sigmoid fits + trial-level HGA)
+        "outputs/causal46_joined/acoustic_univariate_gradient/model_comparison_df_all.parquet",
+        "outputs/causal46_joined/acoustic_univariate_gradient/trial_df_all.parquet",
 
 
 # =============================================================================
