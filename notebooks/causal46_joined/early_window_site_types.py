@@ -463,8 +463,13 @@ def assign_site_type(
     if not A_significant or not np.isfinite(acoustic_sign):
         return "A_unsigned", "ok"
 
-    # B power check — requires both cells to be classified
-    if not B1_powered or not B2_powered:
+    # B power check — only both-unpowered is unclassifiable. When exactly one
+    # word-end is powered, classify from that side alone: the unpowered side
+    # contributes all-False aligned/anti flags, so the pattern logic below
+    # resolves non-sig → type1_acoustic_only, sig → type3_asymmetric. Such
+    # single-word-end calls are flagged via `single_we_fallback` at the call
+    # site for downstream sensitivity separability.
+    if not B1_powered and not B2_powered:
         return "unknown", "unclassifiable_B_power"
 
     # Classify by aligned/anti-aligned pattern
@@ -557,6 +562,7 @@ for site in tqdm(sites, desc="early_window sites"):
             "B1_qualifying_steps": "", "B2_qualifying_steps": "",
             "B1_n_per_class": 0, "B2_n_per_class": 0,
             "site_type": "unknown", "status": "search_range_too_narrow",
+            "single_we_fallback": False,
             "B_pooled_sig": False, "pair_emp_p": float("nan"),
             "pair_statistic_med": float("nan"), "sign_concordance": float("nan"),
             "pair_smin": None, "pair_smax": None,
@@ -597,6 +603,7 @@ for site in tqdm(sites, desc="early_window sites"):
                 "B1_qualifying_steps": "", "B2_qualifying_steps": "",
                 "B1_n_per_class": 0, "B2_n_per_class": 0,
                 "site_type": "A_unsigned", "status": "A_endpoint_underpowered",
+                "single_we_fallback": False,
                 "A_n_step1": n_lo, "A_n_step6": n_hi,
                 "B_pooled_sig": False, "pair_emp_p": float("nan"),
                 "pair_statistic_med": float("nan"), "sign_concordance": float("nan"),
@@ -757,6 +764,7 @@ for site in tqdm(sites, desc="early_window sites"):
             "A_n_step6": n_hi,
             "site_type": site_type,
             "status": status,
+            "single_we_fallback": bool(r0["powered"]) != bool(r1["powered"]),
             **pair_stat,
         })
 
