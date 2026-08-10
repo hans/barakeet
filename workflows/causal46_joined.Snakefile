@@ -1780,15 +1780,17 @@ rule joined_acoustic_early:
 rule joined_acoustic_late:
     """Late-window acoustic decoding, evaluated per word-end.
 
-    Decoder window starts past the per-site trough of the mean early-response
-    trace (smin_mode="trough"), mirroring the trough gate used in
-    plot_for_paper's find_early_peak_and_trough.
+    Decoder window starts at the per-site early acoustic offset — the sample
+    where the endpoint acoustic contrast (step6 - step1) returns to
+    non-significance, read from the acoustic_bootstrap full-timecourse
+    per-window table — so the window excludes the early acoustic response.
     """
     input:
         b4_per_cell = "outputs/causal46_joined/t_tests/b4_per_cell.parquet",
         epp         = "outputs/causal46_joined/early_perceptual_projection/all_sites.csv",
         winners     = REG_LAMBDA_WINNERS,
         epochs_dir  = "outputs/epochs_preprocessed",
+        a_per_window_full = "outputs/causal46_joined/acoustic_bootstrap/a_per_window_full_all.parquet",
         notebook    = "notebooks/causal46_joined/acoustic_late.py",
 
     output:
@@ -1814,7 +1816,8 @@ rule joined_acoustic_late:
 
                 epoch_tmin=config["analysis"]["epoch_tmin"],
                 epoch_sfreq=config["analysis"]["epoch_sfreq"],
-                smin_mode="trough",
+                a_per_window_full_path=str(input.a_per_window_full),
+                early_offset_min_sig_run=2,
 
                 n_folds=C6["n_folds"],
                 cv_random_state=C6["cv_random_state"],
