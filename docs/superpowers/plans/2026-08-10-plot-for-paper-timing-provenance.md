@@ -56,17 +56,23 @@ note the choice so future-you doesn't re-derive both.
 
 - **The late-acoustic window start is the early acoustic *offset*, not a
   pooled-mean trough.** `acoustic_late.py` (`find_early_offset_smin`) starts the
-  window where the endpoint acoustic contrast (step6 − step1) has returned to
-  non-significance — the end of the first significant *run* of length
-  >= `early_offset_min_sig_run` (default 2, skips single-window onset blips) in
-  `acoustic_bootstrap/a_per_window_full_all.parquet`. It anchors on the
-  *contrast* (not pooled mean HGA, which cancels a differential late response by
-  construction) and is pooled over word_end (the early response is pre-lexical).
-  Still one decoder + one permutation test per site, so the FWER argument holds.
-  **History:** superseded the earlier `smin_mode="trough"` mean-activation-trace
-  detector, which anchored on the left edge of the min *bin* and fired on onset
-  blips — placing the window start up to ~470 ms too early and re-including the
-  early response (verified on the 13 late-acoustic sites, 2026-08-10).
+  window at the first non-significant window of the endpoint acoustic contrast
+  (step6 − step1) **at or after the acoustic boundary `phon_smax`**, read from
+  `acoustic_bootstrap/a_per_window_full_all.parquet`. Searching from `phon_smax`
+  (not word onset) is load-bearing: the early acoustic response is multi-phase
+  (the two classes peak at slightly different times — distinct /d/ and /n/
+  peaks), so the contrast dips below significance *between* phases before
+  `phon_smax`; anchoring the drop at the boundary skips those within-response
+  dips. It anchors on the *contrast* (not pooled mean HGA, which cancels a
+  differential late response by construction) and is pooled over word_end (both
+  the offset and `phon_smax` are pre-lexical). Still one decoder + one
+  permutation test per site, so the FWER argument holds.
+  **History (2026-08-10, on the 13 late-acoustic / 95 prod sites):** superseded
+  (1) the `smin_mode="trough"` mean-activation-trace detector — anchored on the
+  min-*bin* left edge, fired on onset blips, window start up to ~470 ms too
+  early; then (2) a contrast run-based detector ("end of first significant run")
+  — put 57% of offsets *before* `phon_smax`, i.e. mid-early-response, because the
+  multi-phase contrast dips terminated the "first run" early.
 - **The perceptual searchlight's multiple-comparisons cost is paid explicitly**
   by the TFCE max-|statistic| permutation gate in
   `notebooks/causal46_joined/_windows.py` (`tfce_enhance`, `max_tfce_null`,

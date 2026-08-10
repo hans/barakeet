@@ -1817,7 +1817,6 @@ rule joined_acoustic_late:
                 epoch_tmin=config["analysis"]["epoch_tmin"],
                 epoch_sfreq=config["analysis"]["epoch_sfreq"],
                 a_per_window_full_path=str(input.a_per_window_full),
-                early_offset_min_sig_run=2,
 
                 n_folds=C6["n_folds"],
                 cv_random_state=C6["cv_random_state"],

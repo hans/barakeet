@@ -47,10 +47,6 @@ epoch_sfreq = 100
 # non-significance (see the early-offset cell below). Sites without a detectable
 # offset fall back to the POD/phon_smax smin.
 a_per_window_full_path = "outputs/causal46_joined/acoustic_bootstrap/a_per_window_full_all.parquet"
-# Minimum consecutive significant windows for a run to count as the early
-# acoustic response. >=2 skips single-window onset blips that would otherwise
-# anchor the offset at word onset (dec_smin ~0 -> "late" window = whole epoch).
-early_offset_min_sig_run = 2
 
 n_folds = 5
 cv_random_state = 42
@@ -106,68 +102,77 @@ to_study.early_response_class.value_counts()
 
 # %%
 # Per-site early acoustic offset: the sample at which the early acoustic
-# contrast (step6 - step1) has returned to non-significance. The late decoder
-# window starts here, so it excludes the early acoustic response's active
-# region. Read directly from the endpoint-contrast bootstrap
-# (`a_per_window_full_all.parquet`: full word timecourse, 50 ms non-overlapping
-# windows, 1000 replicates) — the same bootstrap and window grid used across the
-# joined pipeline — so no epochs are re-read and no threshold is re-derived here.
+# contrast (step6 - step1) has returned to non-significance, searched from the
+# acoustic boundary `phon_smax` onward. The late decoder window starts here, so
+# it excludes the early acoustic response's active region. Read directly from
+# the endpoint-contrast bootstrap (`a_per_window_full_all.parquet`, full word
+# timecourse per sliding window) — the same bootstrap and window grid used
+# across the joined pipeline — so no epochs are re-read and no threshold is
+# re-derived here.
 #
-# Two deliberate choices:
+# Three deliberate choices:
+#   - Searched from `phon_smax` onward, not from word onset. The early acoustic
+#     response is multi-phase: the two classes can peak at slightly different
+#     times (e.g. distinct /d/ and /n/ peaks), so the contrast dips below
+#     significance *between* phases — before `phon_smax`. Anchoring the drop at
+#     the acoustic boundary skips those within-response dips (which otherwise put
+#     >50% of offsets mid-early-response).
 #   - Anchored on the *contrast*, not the pooled mean HGA. A late acoustic
 #     response is a difference between the two classes, which a pooled trace
 #     cancels by construction — so a pooled-mean trough can fire on noise. The
 #     contrast bootstrap tracks exactly the signal being dissociated.
 #   - Pooled over word_end. The early acoustic response is pre-lexical (identical
 #     across completions before the point of disambiguation), so one offset per
-#     (subject, electrode_idx, phoneme_pair) is broadcast to both word_ends.
+#     (subject, electrode_idx, phoneme_pair) — with a per-site `phon_smax`, also
+#     pre-lexical — is broadcast to both word_ends.
 a_per_window_full = pd.read_parquet(a_per_window_full_path)
 
 
-def find_early_offset_smin(site_windows, min_sig_run=early_offset_min_sig_run):
-    """Window-start at which the early acoustic contrast has diminished — the end
-    of the first significant *run*, i.e. the start of the region past the early
-    acoustic response.
+def find_early_offset_smin(site_windows, phon_smax):
+    """Window-start at which the early acoustic contrast has diminished — the
+    first non-significant window at or after the acoustic boundary `phon_smax`,
+    i.e. the start of the region past the early acoustic response.
 
     `site_windows` is the per-window endpoint-contrast summary for one
     (subject, electrode_idx, phoneme_pair): needs columns `smin` and
     `ci_raw_excludes_zero` (bootstrap 95% CI of step6 - step1 excludes zero).
-    Anchors on the first *run* of >= `min_sig_run` consecutive significant
-    windows (the early acoustic response — not a single-window onset blip, which
-    would anchor the offset at word onset), and returns the `smin` of the first
-    non-significant window after that run.
+    `phon_smax` is the per-site acoustic boundary (pre-lexical). Restricting the
+    search to `smin >= phon_smax` makes the offset robust to a multi-phase early
+    response whose contrast dips between phases before the boundary. When the
+    contrast is already non-significant at `phon_smax`, that boundary is returned
+    (the early response is done by the boundary); when it extends past
+    `phon_smax`, the data-driven drop past it is used.
 
-    Returns None when there is no significant run of length >= `min_sig_run`
-    (no early response to exclude) or when that run extends to the end of the
-    searched range (never returns to non-significance); such sites fall back to
-    the POD/phon_smax smin in `prepare_decoder_bounds` and are dropped from the
+    Returns None only when the contrast is significant through the *entire*
+    post-`phon_smax` range (never returns to non-significance — a sustained
+    acoustic response that cannot be dissociated); such sites fall back to the
+    POD/phon_smax smin in `prepare_decoder_bounds` and are dropped from the
     significance summary.
     """
     sw = site_windows.sort_values("smin")
+    sw = sw[sw["smin"] >= phon_smax]
+    if sw.empty:
+        return None
     sig = sw["ci_raw_excludes_zero"].to_numpy().astype(bool)
     smin = sw["smin"].to_numpy()
-    n = len(sig)
-    i = 0
-    while i < n:
-        if not sig[i]:
-            i += 1
-            continue
-        j = i
-        while j < n and sig[j]:          # extent of this significant run: [i, j)
-            j += 1
-        if j - i >= min_sig_run:          # first real run = the early response
-            return int(smin[j]) if j < n else None
-        i = j                             # too short (blip) — skip and keep looking
-    return None
+    nonsig = np.flatnonzero(~sig)
+    if len(nonsig) == 0:
+        return None
+    return int(smin[nonsig[0]])
 
 
 # Precompute once per site and carry as a column, so the real decoder loop and
 # both permutation-null loops read the *same* window edge (identical windows are
-# required for the null p-values to be valid). Pooled over word_end, so the
-# offset is broadcast to both word_ends of each pair by the merge below.
+# required for the null p-values to be valid). Pooled over word_end (with a
+# per-site phon_smax), so the offset is broadcast to both word_ends by the merge
+# below.
+_phon_smax_by_site = to_study.groupby(
+    ["subject", "electrode_idx", "phoneme_pair"]
+)["phon_smax"].first()
 _offsets = {
-    keys: find_early_offset_smin(g)
+    keys: find_early_offset_smin(g, int(_phon_smax_by_site.loc[keys]))
     for keys, g in a_per_window_full.groupby(["subject", "electrode_idx", "phoneme_pair"])
+    if keys in _phon_smax_by_site.index
 }
 _early_offset = pd.DataFrame(
     [(*k, v) for k, v in _offsets.items()],
@@ -180,8 +185,8 @@ to_study = pd.merge(
 no_offset = to_study[to_study["s_early_offset"].isna()]
 print(f"no early-offset detected: {len(no_offset)} / {len(to_study)} sites "
       "(these fall back to the POD/phon_smax smin and are dropped from the summary). "
-      "None = no significant run >= min_sig_run, or a sustained contrast that never "
-      "returns to non-significance (worth inspecting, not silently trusting):")
+      "None = a sustained acoustic contrast that never returns to non-significance "
+      "past phon_smax (cannot be dissociated; worth inspecting, not silently trusting):")
 if len(no_offset):
     print(no_offset[["subject", "electrode_idx", "phoneme_pair", "word_end"]].to_string(index=False))
 
