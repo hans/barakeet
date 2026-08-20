@@ -5,6 +5,12 @@ Provides:
                              ambiguous trials, with behavioral report controlled.
   per_window_summary       — aggregates (median, CI, emp_p) over bootstrap rows.
   per_cell_best            — picks the best window per cell from per_window.
+  step_tuning_curve        — R replicates of the windowed mean HGA at EVERY
+                             qualifying step (not just s_lo/s_hi) — the
+                             "per-step profile" facet of the same bootstrap
+                             draw, for gradient/tuning inspection.
+  step_tuning_summary      — aggregates step_tuning_curve rows to one
+                             (mean, CI) row per step.
 """
 from __future__ import annotations
 
@@ -245,4 +251,76 @@ def per_cell_best(per_window: pl.DataFrame, cell_keys: list[str]) -> pl.DataFram
             "ci_raw_excludes_zero": "best_ci_raw_excludes_zero",
             "ci_aligned_excludes_zero": "best_ci_aligned_excludes_zero",
         })
+    )
+
+
+def step_tuning_curve(
+    per_step: dict[int, dict[int, np.ndarray]],
+    hga: np.ndarray,
+    *,
+    window_smin: int,
+    window_smax: int,
+    R: int = 1000,
+    base_seed: int = 0,
+) -> list[dict]:
+    """R bootstrap replicates of the windowed mean HGA at every qualifying step.
+
+    Third facet of the shared bootstrap draw (see
+    select_cell_trials_bootstrap_perstep's docstring: "Per-step profile:
+    concat_b d[s][b] for each qualifying step s"). For each qualifying step s,
+    pools both behavior classes (50/50 by construction) and takes the mean
+    HGA over [window_smin, window_smax) per replicate. Same RNG call sequence
+    as bootstrap_cell_acoustic under matching (per_step, seed) — this is an
+    orthogonal readout of the same replicates used for the s_lo/s_hi contrast,
+    not a new bootstrap draw.
+
+    Unlike bootstrap_cell_acoustic (searchlight over many windows, extreme
+    steps only), this fixes ONE window (typically the cell's best_smin/
+    best_smax from the s_lo/s_hi contrast) and evaluates ALL qualifying steps,
+    to visualize whether the acoustic effect is graded across the continuum
+    or concentrated at the extremes.
+
+    Returns one row per (step, replicate): {replicate, step, mean_windowed}.
+    Aggregate with step_tuning_summary.
+    """
+    steps_sorted = sorted(per_step.keys())
+    rows: list[dict] = []
+    for r in range(R):
+        rng = np.random.default_rng(base_seed + r)
+        d = select_cell_trials_bootstrap_perstep(per_step, rng=rng)
+        for s in steps_sorted:
+            if s not in d:
+                continue
+            idx = np.concatenate(list(d[s].values()))
+            if len(idx) == 0:
+                continue
+            rows.append({
+                "replicate": r,
+                "step": s,
+                "mean_windowed": float(hga[idx, window_smin:window_smax].mean()),
+            })
+    return rows
+
+
+def step_tuning_summary(
+    rows: list[dict],
+    ci_low: float = CI_LOW,
+    ci_high: float = CI_HIGH,
+) -> list[dict]:
+    """Aggregate step_tuning_curve rows to one (mean, CI) row per step."""
+    if not rows:
+        return []
+    df = pl.DataFrame(rows)
+    return (
+        df.group_by("step")
+        .agg(
+            pl.col("mean_windowed").mean().alias("mean"),
+            pl.col("mean_windowed").median().alias("median"),
+            pl.col("mean_windowed").quantile(ci_low / 100).alias("ci_lo"),
+            pl.col("mean_windowed").quantile(ci_high / 100).alias("ci_hi"),
+            pl.col("mean_windowed").std().alias("std"),
+            pl.len().alias("n_replicates"),
+        )
+        .sort("step")
+        .to_dicts()
     )

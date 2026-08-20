@@ -1113,7 +1113,9 @@ rule acoustic_on_ambiguous:
     Mirror of joined_t_tests: contrasts s_hi vs s_lo among qualifying ambiguous
     steps while holding behavioral report at 50/50 per step (same bootstrap draw
     as the perceptual contrast). Scope: B4 cells with n_qualifying_steps ≥ 2.
-    Produces combined star-plot gallery (behavior + acoustic facets).
+    Also computes a step-tuning curve (windowed mean HGA at every qualifying
+    step, not just the extremes, in each cell's best_smin/best_smax window).
+    Produces combined star-plot gallery (behavior + acoustic + tuning facets).
     """
     input:
         phon_peaks_all  = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet",
@@ -1134,6 +1136,7 @@ rule acoustic_on_ambiguous:
         b4_acoustic_per_window = "outputs/causal46_joined/acoustic_on_ambiguous/b4_acoustic_per_window.parquet",
         b4_acoustic_per_cell   = "outputs/causal46_joined/acoustic_on_ambiguous/b4_acoustic_per_cell.parquet",
         acoustic_cell_manifest = "outputs/causal46_joined/acoustic_on_ambiguous/acoustic_cell_manifest.parquet",
+        b4_step_tuning         = "outputs/causal46_joined/acoustic_on_ambiguous/b4_step_tuning.parquet",
         gallery_powered        = "outputs/causal46_joined/acoustic_on_ambiguous/star_plots_both/powered.pdf",
         gallery_powered_sig    = "outputs/causal46_joined/acoustic_on_ambiguous/star_plots_both/powered_significant.pdf",
 

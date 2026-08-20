@@ -79,6 +79,7 @@ def write_annotated_pdfs(
     acoustic_per_window: pl.DataFrame | None = None,
     acoustic_R_plot: int = 200,
     acoustic_site_sig_windows: dict | None = None,
+    step_tuning_df: pl.DataFrame | None = None,
 ) -> int:
     """Filtered-gallery PDF: regenerated star plot per cell.
 
@@ -89,6 +90,11 @@ def write_annotated_pdfs(
     acoustic_per_window: optional per-window summary for the acoustic-step contrast
     (b4_acoustic_per_window.parquet). When provided, adds an acoustic panel to
     each star plot (via matched_n_star_plot acoustic_* params).
+
+    step_tuning_df: optional per-(cell, step) summary (b4_step_tuning.parquet,
+    from step_tuning_curve/step_tuning_summary). When provided, adds a step-
+    tuning panel (windowed mean HGA vs. acoustic step, all qualifying steps)
+    to each star plot.
     """
     if not entries or not HAS_PYPDF:
         return 0
@@ -164,6 +170,23 @@ def write_annotated_pdfs(
                 elif row.get("s_lo") is not None and row.get("s_hi") is not None:
                     ac_extreme_steps = (int(row["s_lo"]), int(row["s_hi"]))
 
+        # Extract step-tuning panel data when step_tuning_df is available.
+        step_tuning_rows = None
+        step_tuning_window = None
+        if step_tuning_df is not None and step_tuning_df.height > 0:
+            st_filt = (
+                (pl.col("subject") == row["subject"])
+                & (pl.col("electrode_idx") == row["electrode_idx"])
+                & (pl.col("phoneme_pair") == row["phoneme_pair"])
+                & (pl.col("word_end") == row["word_end"])
+            )
+            st_rows = step_tuning_df.filter(st_filt).sort("step")
+            if st_rows.height > 0:
+                step_tuning_rows = st_rows.to_dicts()
+                step_tuning_window = (
+                    int(st_rows["best_smin"][0]), int(st_rows["best_smax"][0])
+                )
+
         qs = row.get("qualifying_steps")
         can_regen = (
             epochs_dict is not None
@@ -206,6 +229,9 @@ def write_annotated_pdfs(
                 acoustic_sig_windows=ac_sig_wins,
                 acoustic_extreme_steps=ac_extreme_steps,
                 acoustic_R_plot=acoustic_R_plot if ac_extreme_steps is not None else None,
+                step_tuning=step_tuning_rows,
+                step_tuning_window=step_tuning_window,
+                step_tuning_extreme_steps=ac_extreme_steps,
             )
             if pair_lookup is not None:
                 pair_key_lut = (

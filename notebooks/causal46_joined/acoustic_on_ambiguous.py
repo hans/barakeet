@@ -25,11 +25,20 @@
 #
 # Scope: B4 cells with n_qualifying_steps ≥ 2 only.
 #
+# Also computes a step-tuning curve: the windowed mean HGA (behavior-
+# controlled) at EVERY qualifying step, not just s_lo/s_hi, evaluated in each
+# cell's own best_smin/best_smax window (from the s_lo/s_hi contrast). This
+# is for visualizing whether the acoustic effect is graded across the
+# continuum or concentrated at the extremes — the gallery now carries both
+# the full timecourse per-step ramp (ax_acoustic) and this windowed
+# point-estimate curve (ax_tuning).
+#
 # Outputs (schema-identical to b4_*.parquet plus s_lo/s_hi columns):
 # - `b4_acoustic_bootstrap.parquet`
 # - `b4_acoustic_per_window.parquet`
 # - `b4_acoustic_per_cell.parquet`
 # - `acoustic_cell_manifest.parquet`
+# - `b4_step_tuning.parquet`
 # - `star_plots_both/{powered,powered_significant}.pdf`
 
 # %%
@@ -58,6 +67,8 @@ from _acoustic_step_bootstrap import (  # noqa: E402
     bootstrap_cell_acoustic,
     per_cell_best,
     per_window_summary,
+    step_tuning_curve,
+    step_tuning_summary,
 )
 from _star_gallery import HAS_PYPDF, write_annotated_pdfs  # noqa: E402
 
@@ -309,6 +320,58 @@ if ac_per_cell.height:
     print(f"  cells with CI excludes 0: {n_sig} / {ac_per_cell.height}")
 
 # %% [markdown]
+# ## Step tuning curve (best-window-per-cell, all qualifying steps)
+#
+# Second pass over "ok" cells: now that best_smin/best_smax (the window where
+# the s_lo/s_hi contrast peaks) is known, re-extract HGA for each cell and run
+# step_tuning_curve in that one fixed window across ALL qualifying steps —
+# not just the extremes. Cheap relative to the main loop (one window, not a
+# searchlight).
+
+# %%
+tuning_rows: list[dict] = []
+if ac_per_cell.height:
+    for row in tqdm(ac_per_cell.iter_rows(named=True),
+                     total=ac_per_cell.height, desc="step tuning"):
+        subj = row["subject"]
+        if subj not in epochs_dict:
+            continue
+        if row["best_smin"] is None or row["best_smax"] is None:
+            continue
+        ep = epochs_dict[subj]
+        md = ep.metadata
+        bhv_col = resolve_behavior_col(md)
+        pp_mask = (md["phoneme_pair"] == row["phoneme_pair"]).values
+        ep_pp = ep[pp_mask]
+        md_pp = md[pp_mask].reset_index(drop=True)
+        hga = extract_hga(ep_pp, int(row["electrode_idx"]))
+        steps = [int(s) for s in row["qualifying_steps"].split(",") if s]
+        per_step = per_step_class_counts(
+            md_pp, word_end=row["word_end"],
+            qualifying_steps=steps, group_col=bhv_col,
+        )
+        raw = step_tuning_curve(
+            per_step, hga,
+            window_smin=int(row["best_smin"]), window_smax=int(row["best_smax"]),
+            R=R,
+        )
+        for d in step_tuning_summary(raw):
+            tuning_rows.append({
+                "subject": subj,
+                "electrode_idx": int(row["electrode_idx"]),
+                "phoneme_pair": row["phoneme_pair"],
+                "word_end": row["word_end"],
+                "best_smin": int(row["best_smin"]),
+                "best_smax": int(row["best_smax"]),
+                **d,
+            })
+
+step_tuning_df = pl.DataFrame(tuning_rows)
+if step_tuning_df.height:
+    step_tuning_df.write_parquet(OUT_DIR / "b4_step_tuning.parquet")
+print(f"step tuning rows: {step_tuning_df.height}")
+
+# %% [markdown]
 # ## Combined gallery (behavior + acoustic facets)
 
 # %%
@@ -355,6 +418,7 @@ else:
             epochs_dict=epochs_dict,
             acoustic_per_window=ac_per_window,
             acoustic_R_plot=200,
+            step_tuning_df=step_tuning_df,
         )
         print(f"  {label}.pdf: {n_written} pages written → {out_pdf}")
 
