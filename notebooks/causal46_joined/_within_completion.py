@@ -601,6 +601,8 @@ def matched_n_star_plot(
     step_tuning=None,
     step_tuning_window=None,
     step_tuning_extreme_steps=None,
+    step_tuning_late=None,
+    step_tuning_late_window=None,
 ):
     """Two-panel B4 star plot (+ optional acoustic / tuning / decoding panels).
 
@@ -633,8 +635,15 @@ def matched_n_star_plot(
         the cell's best_smin/best_smax from the s_lo/s_hi contrast). Used
         only for the panel title.
     step_tuning_extreme_steps : (int, int), optional
-        (s_lo, s_hi) to highlight in the tuning panel, matching ax_acoustic's
-        bold extreme-step convention.
+        (s_lo, s_hi) to highlight in the tuning panel(s), matching
+        ax_acoustic's bold extreme-step convention.
+    step_tuning_late, step_tuning_late_window : optional
+        Same shape as step_tuning/step_tuning_window, for a second tuning
+        panel evaluated in a window that excludes overlap with the site's
+        acoustic-peak window (phon_smin/phon_smax) — isolates the late
+        acoustic/perceptual effect from cells whose unrestricted best window
+        lands on/near the transient acoustic response. Drawn as a second
+        panel stacked below the unrestricted (step_tuning) one.
     """
     ep = epochs_dict[subject]
     md = ep.metadata
@@ -651,15 +660,18 @@ def matched_n_star_plot(
     _add_dec = behav_decoding_df is not None
     _add_acoustic = acoustic_extreme_steps is not None
     _add_tuning = step_tuning is not None
+    _add_tuning_late = step_tuning_late is not None
 
     # Optional panels, in display order below ax_top/ax_bot. (name, height_ratio,
-    # figure-height contribution, is_time_axis). ax_tuning's x-axis is acoustic
+    # figure-height contribution, is_time_axis). ax_tuning*'s x-axis is acoustic
     # step, not time, so it is excluded from the shared time axis below.
     _optional_specs = []
     if _add_acoustic:
         _optional_specs.append(("acoustic", 1.0, 1.5, True))
     if _add_tuning:
         _optional_specs.append(("tuning", 0.7, 1.1, False))
+    if _add_tuning_late:
+        _optional_specs.append(("tuning_late", 0.7, 1.1, False))
     if _add_dec:
         _optional_specs.append(("dec", 0.45, 1.5, True))
 
@@ -678,6 +690,7 @@ def matched_n_star_plot(
     _panel_axes = dict(zip((spec[0] for spec in _optional_specs), axes[2:]))
     ax_acoustic = _panel_axes.get("acoustic")
     ax_tuning = _panel_axes.get("tuning")
+    ax_tuning_late = _panel_axes.get("tuning_late")
     ax_dec = _panel_axes.get("dec")
 
     # Link x-axes only across time-domain panels (ax_tuning's x-axis is step index).
@@ -890,14 +903,17 @@ def matched_n_star_plot(
                                  height=bar_h_ac, color="gray", alpha=0.6,
                                  edgecolor="none", zorder=5)
 
-    # Step-tuning panel: windowed mean HGA (behavior-controlled) vs. acoustic
-    # step, for ALL qualifying steps — not just s_lo/s_hi. x-axis is step
-    # index (not time), so this panel is deliberately excluded from sharex.
-    if _add_tuning and ax_tuning is not None:
-        steps_t = [d["step"] for d in step_tuning]
-        means_t = [d["mean"] for d in step_tuning]
-        ci_lo_t = [d["ci_lo"] for d in step_tuning]
-        ci_hi_t = [d["ci_hi"] for d in step_tuning]
+    # Step-tuning panel(s): windowed mean HGA (behavior-controlled) vs.
+    # acoustic step, for ALL qualifying steps — not just s_lo/s_hi. x-axis is
+    # step index (not time), so these panels are deliberately excluded from
+    # sharex. Two variants may be drawn: the unrestricted best window
+    # (step_tuning) and one excluding overlap with the acoustic-peak window
+    # (step_tuning_late), for isolating the late acoustic/perceptual effect.
+    def _draw_tuning_panel(ax, rows, window, title_prefix):
+        steps_t = [d["step"] for d in rows]
+        means_t = [d["mean"] for d in rows]
+        ci_lo_t = [d["ci_lo"] for d in rows]
+        ci_hi_t = [d["ci_hi"] for d in rows]
         yerr = [
             [m - lo for m, lo in zip(means_t, ci_lo_t)],
             [hi - m for m, hi in zip(means_t, ci_hi_t)],
@@ -908,25 +924,33 @@ def matched_n_star_plot(
             else ("#2166ac" if s == min(extreme) else "#d73027")
             for s in steps_t
         ]
-        ax_tuning.plot(steps_t, means_t, color="#999999", lw=1.0, alpha=0.6, zorder=1)
-        ax_tuning.errorbar(
+        ax.plot(steps_t, means_t, color="#999999", lw=1.0, alpha=0.6, zorder=1)
+        ax.errorbar(
             steps_t, means_t, yerr=yerr, fmt="none",
             ecolor="#999999", elinewidth=1.2, capsize=3, zorder=2,
         )
-        ax_tuning.scatter(steps_t, means_t, c=point_colors, s=40, zorder=3,
-                          edgecolor="k", linewidth=0.4)
-        ax_tuning.axhline(0, color="k", lw=0.5, ls=":")
-        ax_tuning.set_xticks(steps_t)
-        ax_tuning.set_ylabel("HGA (z)")
-        ax_tuning.set_xlabel("acoustic step")
+        ax.scatter(steps_t, means_t, c=point_colors, s=40, zorder=3,
+                   edgecolor="k", linewidth=0.4)
+        ax.axhline(0, color="k", lw=0.5, ls=":")
+        ax.set_xticks(steps_t)
+        ax.set_ylabel("HGA (z)")
+        ax.set_xlabel("acoustic step")
         win_str = ""
-        if step_tuning_window is not None:
-            wt0 = step_tuning_window[0] / epoch_sfreq + epoch_tmin
-            wt1 = step_tuning_window[1] / epoch_sfreq + epoch_tmin
+        if window is not None:
+            wt0 = window[0] / epoch_sfreq + epoch_tmin
+            wt1 = window[1] / epoch_sfreq + epoch_tmin
             win_str = f"  [{wt0:.3f}–{wt1:.3f}s]"
-        ax_tuning.set_title(
-            f"Step tuning (windowed mean, behavior-controlled){win_str}",
-            fontsize=9, pad=10,
+        ax.set_title(f"{title_prefix}{win_str}", fontsize=9, pad=10)
+
+    if _add_tuning and ax_tuning is not None:
+        _draw_tuning_panel(
+            ax_tuning, step_tuning, step_tuning_window,
+            "Step tuning (windowed mean, behavior-controlled)",
+        )
+    if _add_tuning_late and ax_tuning_late is not None:
+        _draw_tuning_panel(
+            ax_tuning_late, step_tuning_late, step_tuning_late_window,
+            "Step tuning, late (excl. acoustic-peak overlap)",
         )
 
     # Behavioral decoding panel (thin, below ax_bot).
@@ -944,6 +968,7 @@ def matched_n_star_plot(
     fig._ax_behav = ax_bot
     fig._ax_acoustic = ax_acoustic
     fig._ax_tuning = ax_tuning
+    fig._ax_tuning_late = ax_tuning_late
     fig.tight_layout()
     return fig
 

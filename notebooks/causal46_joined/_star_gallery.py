@@ -91,10 +91,11 @@ def write_annotated_pdfs(
     (b4_acoustic_per_window.parquet). When provided, adds an acoustic panel to
     each star plot (via matched_n_star_plot acoustic_* params).
 
-    step_tuning_df: optional per-(cell, step) summary (b4_step_tuning.parquet,
-    from step_tuning_curve/step_tuning_summary). When provided, adds a step-
-    tuning panel (windowed mean HGA vs. acoustic step, all qualifying steps)
-    to each star plot.
+    step_tuning_df: optional per-(cell, step, window_kind) summary
+    (b4_step_tuning.parquet, from step_tuning_pass). When provided, adds
+    step-tuning panel(s) (windowed mean HGA vs. acoustic step, all
+    qualifying steps) to each star plot: one for window_kind=="global_best"
+    rows and, if present, a second for window_kind=="late_excl_phon" rows.
     """
     if not entries or not HAS_PYPDF:
         return 0
@@ -171,20 +172,35 @@ def write_annotated_pdfs(
                     ac_extreme_steps = (int(row["s_lo"]), int(row["s_hi"]))
 
         # Extract step-tuning panel data when step_tuning_df is available.
+        # Two variants, disambiguated by `window_kind`: the unrestricted
+        # global-best window, and the late window excluding overlap with the
+        # site's acoustic-peak window (see exclude_overlapping_windows).
         step_tuning_rows = None
         step_tuning_window = None
+        step_tuning_late_rows = None
+        step_tuning_late_window = None
         if step_tuning_df is not None and step_tuning_df.height > 0:
-            st_filt = (
+            st_base_filt = (
                 (pl.col("subject") == row["subject"])
                 & (pl.col("electrode_idx") == row["electrode_idx"])
                 & (pl.col("phoneme_pair") == row["phoneme_pair"])
                 & (pl.col("word_end") == row["word_end"])
             )
-            st_rows = step_tuning_df.filter(st_filt).sort("step")
+            st_rows = step_tuning_df.filter(
+                st_base_filt & (pl.col("window_kind") == "global_best")
+            ).sort("step")
             if st_rows.height > 0:
                 step_tuning_rows = st_rows.to_dicts()
                 step_tuning_window = (
                     int(st_rows["best_smin"][0]), int(st_rows["best_smax"][0])
+                )
+            st_late_rows = step_tuning_df.filter(
+                st_base_filt & (pl.col("window_kind") == "late_excl_phon")
+            ).sort("step")
+            if st_late_rows.height > 0:
+                step_tuning_late_rows = st_late_rows.to_dicts()
+                step_tuning_late_window = (
+                    int(st_late_rows["best_smin"][0]), int(st_late_rows["best_smax"][0])
                 )
 
         qs = row.get("qualifying_steps")
@@ -232,6 +248,8 @@ def write_annotated_pdfs(
                 step_tuning=step_tuning_rows,
                 step_tuning_window=step_tuning_window,
                 step_tuning_extreme_steps=ac_extreme_steps,
+                step_tuning_late=step_tuning_late_rows,
+                step_tuning_late_window=step_tuning_late_window,
             )
             if pair_lookup is not None:
                 pair_key_lut = (

@@ -11,6 +11,16 @@ Provides:
                              draw, for gradient/tuning inspection.
   step_tuning_summary      — aggregates step_tuning_curve rows to one
                              (mean, CI) row per step.
+  exclude_overlapping_windows — drops per-window rows overlapping a per-cell
+                             excluded range (e.g. the acoustic-peak window),
+                             so per_cell_best can be re-run to find the best
+                             window that DOESN'T overlap it (the "late,
+                             excl. phon-peak" variant of the tuning curve).
+  step_tuning_pass          — runs step_tuning_curve/summary over every row
+                             of a per_cell table (needs best_smin/best_smax),
+                             tagging output with a window_kind label. Used to
+                             produce both the global-best and late-window
+                             tuning curves from the same per_cell shape.
 """
 from __future__ import annotations
 
@@ -19,13 +29,16 @@ from pathlib import Path
 
 import numpy as np
 import polars as pl
+from tqdm.auto import tqdm
 
 from src.viz_paper import epoch_sfreq, epoch_tmin
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _within_completion import (  # noqa: E402
+    extract_hga,
     n_per_class_from_per_step,
     per_step_class_counts,
+    resolve_behavior_col,
     searchlight_mean_diff,
     select_cell_trials_bootstrap_perstep,
 )
@@ -324,3 +337,104 @@ def step_tuning_summary(
         .sort("step")
         .to_dicts()
     )
+
+
+def exclude_overlapping_windows(
+    per_window: pl.DataFrame,
+    excl: pl.DataFrame,
+    cell_keys: list[str],
+    *,
+    excl_smin_col: str = "phon_smin",
+    excl_smax_col: str = "phon_smax",
+) -> pl.DataFrame:
+    """Drop per-window rows whose [smin, smax) overlaps a per-cell excluded range.
+
+    `excl` must carry cell_keys + excl_smin_col + excl_smax_col (one row per
+    cell; extra columns are ignored). Intended use: re-run per_cell_best on
+    the result to find the best window that does NOT overlap the site's
+    acoustic-peak window (phon_smin/phon_smax) — the "late, excludes
+    phon-peak" variant of the step-tuning curve, isolating a later effect
+    from cells whose global-best window happens to land on/near the
+    transient acoustic response.
+
+    Overlap test: [smin, smax) and [excl_smin, excl_smax) overlap iff
+    smin < excl_smax and smax > excl_smin. Cells absent from `excl` are kept
+    unfiltered (nothing to exclude for them).
+    """
+    if per_window.height == 0:
+        return per_window
+    joined = per_window.join(
+        excl.select(cell_keys + [excl_smin_col, excl_smax_col]).unique(subset=cell_keys),
+        on=cell_keys, how="left",
+    )
+    overlaps = (
+        (pl.col("smin") < pl.col(excl_smax_col))
+        & (pl.col("smax") > pl.col(excl_smin_col))
+    )
+    return (
+        joined
+        .filter(pl.col(excl_smin_col).is_null() | ~overlaps)
+        .drop([excl_smin_col, excl_smax_col])
+    )
+
+
+def step_tuning_pass(
+    per_cell: pl.DataFrame,
+    epochs_dict: dict,
+    *,
+    cell_keys: list[str],
+    R: int,
+    window_kind: str,
+    desc: str = "step tuning",
+) -> list[dict]:
+    """Run step_tuning_curve/summary for every row of `per_cell`.
+
+    `per_cell` needs columns: cell_keys + best_smin/best_smax (the window to
+    evaluate) + qualifying_steps (comma-joined string). Rows with a null
+    best_smin/best_smax (e.g. no window survived exclusion — see
+    exclude_overlapping_windows) are skipped.
+
+    Output rows are tagged with `window_kind` (e.g. "global_best" or
+    "late_excl_phon") so multiple passes can be concatenated into one
+    parquet and disambiguated downstream.
+
+    Returns a flat list of dicts: cell_keys + window_kind + best_smin +
+    best_smax + step_tuning_summary()'s per-step fields (step, mean, median,
+    ci_lo, ci_hi, std, n_replicates). Ready for pl.DataFrame(...).
+    """
+    rows: list[dict] = []
+    for row in tqdm(per_cell.iter_rows(named=True), total=per_cell.height, desc=desc):
+        subj = row["subject"]
+        if subj not in epochs_dict:
+            continue
+        if row.get("best_smin") is None or row.get("best_smax") is None:
+            continue
+        ep = epochs_dict[subj]
+        md = ep.metadata
+        bhv_col = resolve_behavior_col(md)
+        pp_mask = (md["phoneme_pair"] == row["phoneme_pair"]).values
+        ep_pp = ep[pp_mask]
+        md_pp = md[pp_mask].reset_index(drop=True)
+        hga = extract_hga(ep_pp, int(row["electrode_idx"]))
+        steps = [int(s) for s in row["qualifying_steps"].split(",") if s]
+        per_step = per_step_class_counts(
+            md_pp, word_end=row["word_end"],
+            qualifying_steps=steps, group_col=bhv_col,
+        )
+        raw = step_tuning_curve(
+            per_step, hga,
+            window_smin=int(row["best_smin"]), window_smax=int(row["best_smax"]),
+            R=R,
+        )
+        for d in step_tuning_summary(raw):
+            rows.append({
+                "subject": subj,
+                "electrode_idx": int(row["electrode_idx"]),
+                "phoneme_pair": row["phoneme_pair"],
+                "word_end": row["word_end"],
+                "window_kind": window_kind,
+                "best_smin": int(row["best_smin"]),
+                "best_smax": int(row["best_smax"]),
+                **d,
+            })
+    return rows

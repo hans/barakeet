@@ -26,19 +26,27 @@
 # Scope: B4 cells with n_qualifying_steps ≥ 2 only.
 #
 # Also computes a step-tuning curve: the windowed mean HGA (behavior-
-# controlled) at EVERY qualifying step, not just s_lo/s_hi, evaluated in each
-# cell's own best_smin/best_smax window (from the s_lo/s_hi contrast). This
-# is for visualizing whether the acoustic effect is graded across the
-# continuum or concentrated at the extremes — the gallery now carries both
-# the full timecourse per-step ramp (ax_acoustic) and this windowed
-# point-estimate curve (ax_tuning).
+# controlled) at EVERY qualifying step, not just s_lo/s_hi. Two window
+# variants are computed per cell, both from `b4_acoustic_per_window.parquet`
+# (already a full searchlight, no extra bootstrap needed to pick a window):
+#   - `global_best`     — best_smin/best_smax from the unrestricted s_lo/s_hi
+#                          contrast (per_cell_best over the full search range).
+#   - `late_excl_phon`   — best window excluding any overlap with the site's
+#                          acoustic-peak window (phon_smin/phon_smax), for
+#                          isolating the late acoustic/perceptual effect from
+#                          cells whose global-best window sits on/near the
+#                          transient acoustic response.
+# Rows for both variants are concatenated into one parquet, tagged by
+# `window_kind`. The gallery draws both as stacked tuning panels alongside
+# the full timecourse per-step ramp (ax_acoustic).
 #
 # Outputs (schema-identical to b4_*.parquet plus s_lo/s_hi columns):
 # - `b4_acoustic_bootstrap.parquet`
 # - `b4_acoustic_per_window.parquet`
 # - `b4_acoustic_per_cell.parquet`
+# - `b4_acoustic_per_cell_late.parquet`
 # - `acoustic_cell_manifest.parquet`
-# - `b4_step_tuning.parquet`
+# - `b4_step_tuning.parquet`  (window_kind ∈ {global_best, late_excl_phon})
 # - `star_plots_both/{powered,powered_significant}.pdf`
 
 # %%
@@ -60,15 +68,14 @@ from src.viz_provisional import load_epochs_dict
 sys.path.insert(0, str(Path(".").resolve() / "notebooks" / "causal46_joined"))
 from _within_completion import (  # noqa: E402
     extract_hga,
-    per_step_class_counts,
     resolve_behavior_col,
 )
 from _acoustic_step_bootstrap import (  # noqa: E402
     bootstrap_cell_acoustic,
+    exclude_overlapping_windows,
     per_cell_best,
     per_window_summary,
-    step_tuning_curve,
-    step_tuning_summary,
+    step_tuning_pass,
 )
 from _star_gallery import HAS_PYPDF, write_annotated_pdfs  # noqa: E402
 
@@ -301,10 +308,11 @@ print(f"acoustic per_window rows: {ac_per_window.height}")
 # ## Per-cell best window
 
 # %%
+manifest_ok = acoustic_cell_manifest.filter(pl.col("status") == "ok")
+
 ac_per_cell = per_cell_best(ac_per_window, CELL_KEYS)
 if ac_per_cell.height:
     # Augment with fields needed for gallery regeneration.
-    manifest_ok = acoustic_cell_manifest.filter(pl.col("status") == "ok")
     ac_per_cell = ac_per_cell.join(
         manifest_ok.select([
             "subject", "electrode_idx", "phoneme_pair", "word_end",
@@ -320,56 +328,63 @@ if ac_per_cell.height:
     print(f"  cells with CI excludes 0: {n_sig} / {ac_per_cell.height}")
 
 # %% [markdown]
+# ## Per-cell best window, late variant (excludes acoustic-peak overlap)
+#
+# Same rank criterion as per_cell_best, but restricted to windows that don't
+# overlap the site's acoustic-peak window (phon_smin/phon_smax — the ~150-
+# 250ms transient acoustic response). We're especially interested in the
+# late acoustic/perceptual effect, and a cell's unrestricted best window can
+# land on/near the acoustic peak, masking a distinct later effect.
+
+# %%
+ac_per_window_late = exclude_overlapping_windows(
+    ac_per_window, manifest_ok, CELL_KEYS,
+    excl_smin_col="phon_smin", excl_smax_col="phon_smax",
+)
+ac_per_cell_late = per_cell_best(ac_per_window_late, CELL_KEYS)
+if ac_per_cell_late.height:
+    ac_per_cell_late = ac_per_cell_late.join(
+        manifest_ok.select([
+            "subject", "electrode_idx", "phoneme_pair", "word_end",
+            "qualifying_steps", "s_lo", "s_hi", "phon_smin", "phon_smax",
+        ]),
+        on=CELL_KEYS, how="left",
+    )
+    ac_per_cell_late.write_parquet(OUT_DIR / "b4_acoustic_per_cell_late.parquet")
+print(f"acoustic per_cell (late, excl phon overlap) rows: {ac_per_cell_late.height}"
+      f"  (of {ac_per_cell.height} global-best cells)")
+
+# %% [markdown]
 # ## Step tuning curve (best-window-per-cell, all qualifying steps)
 #
-# Second pass over "ok" cells: now that best_smin/best_smax (the window where
-# the s_lo/s_hi contrast peaks) is known, re-extract HGA for each cell and run
-# step_tuning_curve in that one fixed window across ALL qualifying steps —
-# not just the extremes. Cheap relative to the main loop (one window, not a
-# searchlight).
+# Second pass over "ok" cells: now that best_smin/best_smax is known — both
+# the unrestricted global-best window and the late/excl-phon-overlap
+# variant — re-extract HGA for each cell and run step_tuning_curve in that
+# one fixed window across ALL qualifying steps, not just the extremes.
+# Cheap relative to the main loop (one window, not a searchlight). Both
+# passes are concatenated into one parquet, disambiguated by `window_kind`.
 
 # %%
 tuning_rows: list[dict] = []
 if ac_per_cell.height:
-    for row in tqdm(ac_per_cell.iter_rows(named=True),
-                     total=ac_per_cell.height, desc="step tuning"):
-        subj = row["subject"]
-        if subj not in epochs_dict:
-            continue
-        if row["best_smin"] is None or row["best_smax"] is None:
-            continue
-        ep = epochs_dict[subj]
-        md = ep.metadata
-        bhv_col = resolve_behavior_col(md)
-        pp_mask = (md["phoneme_pair"] == row["phoneme_pair"]).values
-        ep_pp = ep[pp_mask]
-        md_pp = md[pp_mask].reset_index(drop=True)
-        hga = extract_hga(ep_pp, int(row["electrode_idx"]))
-        steps = [int(s) for s in row["qualifying_steps"].split(",") if s]
-        per_step = per_step_class_counts(
-            md_pp, word_end=row["word_end"],
-            qualifying_steps=steps, group_col=bhv_col,
-        )
-        raw = step_tuning_curve(
-            per_step, hga,
-            window_smin=int(row["best_smin"]), window_smax=int(row["best_smax"]),
-            R=R,
-        )
-        for d in step_tuning_summary(raw):
-            tuning_rows.append({
-                "subject": subj,
-                "electrode_idx": int(row["electrode_idx"]),
-                "phoneme_pair": row["phoneme_pair"],
-                "word_end": row["word_end"],
-                "best_smin": int(row["best_smin"]),
-                "best_smax": int(row["best_smax"]),
-                **d,
-            })
+    tuning_rows += step_tuning_pass(
+        ac_per_cell, epochs_dict, cell_keys=CELL_KEYS, R=R,
+        window_kind="global_best", desc="step tuning (global best)",
+    )
+if ac_per_cell_late.height:
+    tuning_rows += step_tuning_pass(
+        ac_per_cell_late, epochs_dict, cell_keys=CELL_KEYS, R=R,
+        window_kind="late_excl_phon", desc="step tuning (late, excl phon overlap)",
+    )
 
 step_tuning_df = pl.DataFrame(tuning_rows)
 if step_tuning_df.height:
     step_tuning_df.write_parquet(OUT_DIR / "b4_step_tuning.parquet")
 print(f"step tuning rows: {step_tuning_df.height}")
+if step_tuning_df.height:
+    print(step_tuning_df.group_by("window_kind").agg(
+        pl.col("subject").n_unique().alias("n_cells_x_steps_rows")
+    ))
 
 # %% [markdown]
 # ## Combined gallery (behavior + acoustic facets)
