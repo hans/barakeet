@@ -160,6 +160,29 @@ def acoustic_search_range(phoneme_pair):
     return 0, int(PAIR_SMAX[phoneme_pair])
 
 
+def late_window_smax_bound(phoneme_pair, word_end):
+    """Late-window smax bound: word offset + 100ms, whichever word-end in the
+    pair runs later — same convention as `dec_smax` in acoustic_late.py's
+    prepare_decoder_bounds(). Deliberately NOT acoustic_search_range's
+    PAIR_SMAX (200ms tail): that bound is shared with the unrestricted
+    searchlight and is "briefly past word end" only for the pipeline's
+    ordinary acoustic contrast, not for the late-window variant, which should
+    match the acoustic_late rule's own notion of "briefly past word end".
+    """
+    other_word_end = next(iter(set(PHONEME_PAIR_TO_WORD_ENDS[phoneme_pair]) - {word_end}))
+    return max(
+        int(round((OFFSET_DICT[word_end] + 0.1 - epoch_tmin) * epoch_sfreq)),
+        int(round((OFFSET_DICT[other_word_end] + 0.1 - epoch_tmin) * epoch_sfreq)),
+    )
+
+
+LATE_WINDOW_SMAX_BOUNDS = pl.DataFrame([
+    {"phoneme_pair": pp, "word_end": we, "late_smax_bound": late_window_smax_bound(pp, we)}
+    for pp, wes in PHONEME_PAIR_TO_WORD_ENDS.items() for we in wes
+])
+print(f"late-window smax bounds (samples): {LATE_WINDOW_SMAX_BOUNDS.to_dicts()}")
+
+
 # %% [markdown]
 # ## B4 acoustic-qualified cell list (n_qualifying_steps ≥ 2)
 
@@ -335,11 +358,23 @@ if ac_per_cell.height:
 # 250ms transient acoustic response). We're especially interested in the
 # late acoustic/perceptual effect, and a cell's unrestricted best window can
 # land on/near the acoustic peak, masking a distinct later effect.
+#
+# Also caps smax at late_window_smax_bound (word offset + 100ms, matching
+# acoustic_late.py's prepare_decoder_bounds dec_smax) rather than inheriting
+# acoustic_search_range's PAIR_SMAX (200ms tail). PAIR_SMAX is a shared
+# search bound for the unrestricted searchlight; this variant is specifically
+# meant to land "briefly past word end" in the same sense as the acoustic_late
+# rule, not just anywhere short of the wider unrestricted bound.
 
 # %%
-ac_per_window_late = exclude_overlapping_windows(
-    ac_per_window, manifest_ok, CELL_KEYS,
-    excl_smin_col="phon_smin", excl_smax_col="phon_smax",
+ac_per_window_late = (
+    exclude_overlapping_windows(
+        ac_per_window, manifest_ok, CELL_KEYS,
+        excl_smin_col="phon_smin", excl_smax_col="phon_smax",
+    )
+    .join(LATE_WINDOW_SMAX_BOUNDS, on=["phoneme_pair", "word_end"], how="left")
+    .filter(pl.col("smax") <= pl.col("late_smax_bound"))
+    .drop("late_smax_bound")
 )
 ac_per_cell_late = per_cell_best(ac_per_window_late, CELL_KEYS)
 if ac_per_cell_late.height:
