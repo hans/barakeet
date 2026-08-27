@@ -9,6 +9,7 @@ from typing import Literal, TypeAlias
 
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mtick
+from matplotlib.typing import ColorType
 import mne
 import numpy as np
 import pandas as pd
@@ -49,6 +50,104 @@ word_end_enum = pl.Enum(list(OFFSET_DICT.keys()))
 Subject: TypeAlias = str
 PhonemePair: TypeAlias = str
 WordEnd: TypeAlias = str
+
+
+epoch_tmin = -0.4
+epoch_sfreq = 100
+
+# resampled_palette = sns.color_palette("cool", n_colors=6)
+resampled_cmap = {
+    1: "#b9529f",
+    2: "#9956a2",
+    3: "#7292cb",
+    4: "#7192cb",
+    5: "#49c8f3",
+    6: "#6fccdd",
+}
+
+@dataclass
+class Factor:
+    _levels: tuple[str, ...]
+    _colors: tuple[ColorType, ...] | None = None
+    _labels: tuple[str, ...] | None = None
+
+    @classmethod
+    def from_tuples(cls, *level_specs):
+        levels = [x[0] for x in level_specs]
+        colors = tuple(x[1] for x in level_specs)
+
+        labels = None
+        if len(level_specs[0]) > 2:
+            labels = tuple(x[2] for x in level_specs)
+
+        return cls(tuple(levels), colors, labels)
+
+    def __post_init__(self):
+        if self._colors is not None:
+            assert len(self._levels) == len(self._colors)
+        if self._labels is not None:
+            assert len(self._levels) == len(self._labels)
+
+    @property
+    def order(self):
+        return self._levels
+    @property
+    def label_order(self):
+        return self._labels
+    @property
+    def label_dict(self):
+        return dict(zip(self._levels, self._labels))
+    @property
+    def colors(self):
+        if self._colors is None:
+            return None
+        return {v: self._colors[k] for k, v in enumerate(self._levels)}
+    @property
+    def label_colors(self):
+        if self._labels is None or self._colors is None:
+            return None
+        return {v: self._colors[k] for k, v in enumerate(self._labels)}
+
+
+F_PHONEME_PAIR = Factor(("dn", "bm", "pb"))
+F_EARLY = Factor.from_tuples(
+    ("perceptual", "#4e79a7", "Perceptual"),
+    ("acoustic", "#f27200", "Acoustic"),
+)
+F_LATE = Factor(("absent", "one-sided", "two-sided"),
+                sns.color_palette("Set3", n_colors=3),
+                ["Absent", "One-sided", "Two-sided"])
+F_ACOUSTIC_TYPES = Factor(["early", "late"],
+                          sns.color_palette("tab10", n_colors=2),
+                          ["Early only", "Early + late"])
+
+CONJUNCTION_CATEGORIES = {
+    "Acoustic": {
+        "early_category": "acoustic",
+        "late_category":  "absent",
+    },
+    "Acoustic + integration": {
+        "early_category": "acoustic",
+        "late_category": ["two-sided", "one-sided"],
+    },
+    "Perceptual": {
+        "early_category": "perceptual",
+        "late_category":  "absent",
+    },
+    "Perceptual + integration": {
+        "early_category": "perceptual",
+        "late_category":  ["two-sided", "one-sided"],
+    }
+}
+
+# Highlight color for early and late perceptual effects
+EPP_COLOR = "#1b7837"
+LPP_COLOR = "#762a83"
+
+# purple for light accent elements
+ACCENT_COLOR = "#c2a5cf"        # light purple
+ACCENT_COLOR_STRONG = "#9970ab" # if it needs to survive a thin stroke
+ACCENT_COLOR_FILL = "#e7d4e8"   # span/shaded-region fills behind data
 
 
 @dataclass
@@ -187,12 +286,6 @@ class PaperData:
         )
 
 
-epoch_tmin = -0.4
-epoch_sfreq = 100
-
-resampled_palette = sns.color_palette("cool", n_colors=6)
-
-
 def p_to_stars(p):
     if p < 0.001:
         return "***"
@@ -291,7 +384,7 @@ def _plot_phon_controlled(
             True: "#D62728",  # controlled values
         }
     elif color_strategy == "resampled":
-        palette = resampled_palette
+        palette = resampled_cmap
     else:
         raise ValueError(f"Unknown color strategy: {color_strategy}")
 
@@ -436,7 +529,7 @@ def zoomin_hga(
     textgrid_dir,
     controlled=True,
     controlled_resampled_steps=(3,),
-    resampled_palette=resampled_palette,
+    resampled_palette=resampled_cmap,
     include_phonemes=True,
     include_offset=False,
     hide_bottom=False,
@@ -721,7 +814,7 @@ def plot_congruency_compressed(
     highlight_behav_window=False,
     phon_tmin=None,
     phon_tmax=None,
-    resampled_palette=resampled_palette,
+    resampled_palette=resampled_cmap,
     figsize=(8, 2.5),
     break_mark_size=0.015,
 ):
@@ -841,7 +934,7 @@ def plot_congruency_compressed(
             mean = epoch_i.mean(axis=0)
             sem = epoch_i.std(axis=0) / np.sqrt(epoch_i.shape[0])
             most_common_resampled = int(rows.resampled.mode().iloc[0])
-            color = resampled_palette[most_common_resampled - 1]
+            color = resampled_cmap[most_common_resampled]
             label = f"Chose /{label_behav}/"
             ax.plot(times, mean, label=label, color=color,
                     ls=linestyles[behav], linewidth=3)
@@ -2430,7 +2523,7 @@ def plot_behav_barplot(
     plot_word_end,
     plot_resampled_steps,
     figsize=(2.3, 2.3),
-    resampled_palette=resampled_palette,
+    resampled_palette=resampled_cmap,
     legend=True,
     legend_bbox_to_anchor=(1.75, 0.45),
     plot_values: Literal["count", "proportion"] = "proportion",

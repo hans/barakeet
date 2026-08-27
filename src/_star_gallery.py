@@ -2,15 +2,30 @@
 from __future__ import annotations
 
 import io
+import sys
 from pathlib import Path
+from typing import Optional
 
 import matplotlib.pyplot as plt
+import numpy as np
 import polars as pl
+import textgrid
+from matplotlib.patches import Rectangle
+from matplotlib.transforms import blended_transform_factory
 from tqdm.auto import tqdm
 
-from src.stimuli import OFFSET_DICT
+from src.stimuli import OFFSET_DICT, WORD_PHASES
 
-from _within_completion import matched_n_star_plot  # noqa: E402
+sys.path.insert(0, str(Path(".").resolve() / "notebooks" / "causal46_joined"))
+from _within_completion import (
+    extract_hga,
+    matched_n_star_plot,
+    per_step_class_counts,
+    resolve_behavior_col,
+    select_cell_trials_bootstrap,
+)
+
+from src.viz_paper import add_textgrid, epoch_sfreq, epoch_tmin
 
 try:
     from pypdf import PdfReader, PdfWriter
@@ -292,3 +307,305 @@ def write_annotated_pdfs(
         with out_path.open("wb") as fh:
             writer.write(fh)
     return n
+
+
+def matched_n_star_plot_paper(
+    subject,
+    electrode_idx,
+    phoneme_pair,
+    word_end,
+    qualifying_steps,
+    *,
+    epochs_dict,
+    phon_smin=None,
+    phon_smax=None,
+    phon_search_smin=None,
+    phon_search_smax=None,
+
+    textgrid_dir=None,
+    plot_phonemes=False,
+    plot_first_sound=True,
+
+    plot_pod=False,
+    pod_color="red",
+
+    figsize=(4.5, 4.5),
+    R_plot=200,
+
+    sig_windows=None,
+    top_sig_windows=None,
+
+    top_early_window=None,
+    top_early_color="#1b7837",
+    top_late_window=None,
+    top_late_color="#762a83",
+
+    bottom_early_window=None,
+    bottom_early_color="#1b7837",
+    bottom_late_window=None,
+    bottom_late_color="#762a83",
+    
+    xlim=None,
+    resampled_cmap: dict[int, str] | None = None,
+
+    top_include_traces=False,
+    bottom_include_traces=False,
+
+    top_only_plot_follows_acoustics=False,
+
+    axs=None,
+):
+    """Two-panel B4 star plot.
+
+    Top panel: unambiguous steps 1 & 6 (acoustic anchor).
+    Bottom panel: per-step class-balanced behavioral contrast shown as
+    bootstrap mean ± percentile CI (R_plot replicates, same trial-selection
+    rule as the main t-test bootstrap). Optionally overlays bootstrap mean
+    aligned diff + CI band, and significance bars.
+
+    Parameters
+    ----------
+    R_plot : int
+        Number of bootstrap replicates for the bottom-panel class curves.
+    ci_low, ci_high : float
+        Percentile bounds for the CI bands (default 2.5 / 97.5).
+    sig_windows : list of (tmin, tmax) float tuples, optional
+        Windows where the behavioral bootstrap CI excludes zero. Drawn as
+        gray bars at the top of ax_bot.
+    top_sig_windows : list of (tmin, tmax) float tuples, optional
+        Windows where the full-timecourse acoustic bootstrap CI excludes zero.
+        Drawn as gray bars at the top of ax_top.
+    mean_diff_arrays : dict, optional
+        Pre-computed bootstrap mean-diff overlay for ax_bot. Expected keys:
+        ``tcenter``, ``mean``, ``ci_lo``, ``ci_hi`` (all float arrays).
+    """
+
+    if xlim is None:
+        xlim = OFFSET_DICT.get(word_end, 1.0) + 0.1
+
+    if (plot_phonemes or plot_first_sound) and textgrid_dir is None:
+        raise ValueError("`textgrid_dir` must be provided if `plot_phonemes=True`")
+
+    ep = epochs_dict[subject]
+    md = ep.metadata
+    bhv_col = resolve_behavior_col(md)
+
+    if resampled_cmap is None:
+        resampled_cmap = {
+            1: "#85CBDB",
+            6: "#AC579C",
+        }
+
+    pp_mask = (md["phoneme_pair"] == phoneme_pair).values
+    ep_pp = ep[pp_mask]
+    md_pp = md[pp_mask].reset_index(drop=True)
+    hga = extract_hga(ep_pp, electrode_idx)
+    times = ep.times
+
+    we_mask = (md_pp["word_end"] == word_end).values
+
+    if axs is None:
+        fig, (ax_top, ax_bot) = plt.subplots(2, 1, figsize=figsize, sharex=True)
+    else:
+        assert len(axs) == 2
+        ax_top, ax_bot = axs
+        fig = ax_top.get_figure()
+
+    # prepare aesthetics
+    step_colors = {1: resampled_cmap[1], 6: resampled_cmap[6]}
+    bhv_styles = ["-", "--"]
+    bhv_vals = sorted(md_pp.loc[we_mask, bhv_col].dropna().unique())
+    bhv_style_map = {bhv: bhv_styles[i % len(bhv_styles)] for i, bhv in enumerate(bhv_vals)}
+
+    # Top: unambiguous step 1 & 6, restricted to this word_end.
+    for step, color in step_colors.items():
+        mask = we_mask & (md_pp["resampled"] == step).values
+
+        if top_only_plot_follows_acoustics:
+            mask = mask & (md_pp.follows_acoustics == True).values
+    
+        if not mask.any():
+            continue
+
+        bhv_val = bhv_vals[0] if step == 1 else bhv_vals[1]
+        style = bhv_style_map[bhv_val]
+
+        tr = hga[mask]
+        m = tr.mean(0)
+        se = tr.std(0) / np.sqrt(mask.sum())
+        ax_top.plot(times, m, color=color, lw=2, linestyle=style,
+                    label=f"step {step}  (n={mask.sum()})")
+        ax_top.fill_between(times, m - se, m + se, color=color, alpha=0.18,
+                            rasterized=True)
+
+        if top_include_traces:
+            plot_trace_count = mask.sum()
+            plot_trace_idxs = np.random.choice(np.where(mask)[0], size=plot_trace_count, replace=False)
+            for idx in plot_trace_idxs:
+                ax_top.plot(times, hga[idx], color=color, lw=0.5, alpha=0.3, zorder=1)
+
+    if phon_search_smin is not None and phon_search_smax is not None:
+        for s in (phon_search_smin, phon_search_smax):
+            ax_top.axvline(s / epoch_sfreq + epoch_tmin,
+                           color="k", lw=0.6, ls="--", alpha=0.5)
+    if phon_smin is not None:
+        t_phon = np.array([phon_smin, phon_smax]) / epoch_sfreq + epoch_tmin
+        ax_top.axvspan(*t_phon, color="#4dac26", alpha=0.20, label="acoustic peak")
+    ax_top.axhline(0, color="k", lw=0.5, ls=":")
+    ax_top.axvline(0, color="k", lw=0.5, ls=":")
+    ax_top.set_ylabel("HGA (z)")
+
+    # Bottom: bootstrap-estimated class mean HGA timecourses.
+    # R_plot replicates of per-step balanced sampling (same protocol as the
+    # main t-test bootstrap: both classes drawn with replacement to min_class[s]
+    # per step, concatenated across steps).
+    per_step = per_step_class_counts(
+        md_pp, word_end=word_end,
+        qualifying_steps=list(qualifying_steps),
+        group_col=bhv_col,
+    )
+    boot_traces: dict[int, list[np.ndarray]] = {bhv: [] for bhv in bhv_vals}
+    for r in range(R_plot):
+        draws = select_cell_trials_bootstrap(per_step, rng=np.random.default_rng(r))
+        for bhv in bhv_vals:
+            if bhv in draws:
+                boot_traces[bhv].append(hga[draws[bhv]].mean(0))
+
+    # Actual trials entering each bootstrap draw, per class (balanced = min per step).
+    n_draw_per_class = sum(
+        min(len(idx) for idx in counts.values())
+        for counts in per_step.values()
+    )
+
+    # Find the step which contributes the most to ambiguous trials -- this
+    # will determine the line color
+    per_step_counts = {step: sum(len(idx) for idx in counts.values())
+                       for step, counts in per_step.items()}
+    max_step = max(per_step_counts, key=per_step_counts.get)
+    color = resampled_cmap[max_step]
+
+    for i, bhv in enumerate(bhv_vals):
+        if not boot_traces[bhv]:
+            continue
+        bhv_label = phoneme_pair[bhv]
+
+        arr = np.array(boot_traces[bhv])   # (R_plot, n_times)
+        m = arr.mean(0)
+        se = arr.std(0)   # bootstrap SE ≈ sample SEM
+        style = bhv_style_map[bhv]
+        ax_bot.plot(times, m, color=color, lw=2, linestyle=style,
+                    label=f"Responds /{bhv_label}/ (n={n_draw_per_class})")
+        ax_bot.fill_between(times, m - se, m + se, color=color, alpha=0.18,
+                            rasterized=True)
+
+    if bottom_include_traces:
+        per_bhv = {int(bhv): np.concatenate([step_trials[bhv] for step_trials in per_step.values()
+                                            if bhv in step_trials])
+                for bhv in bhv_vals}
+        for bhv_val, trials in per_bhv.items():
+            if len(trials) == 0:
+                continue
+            plot_trace_count = len(trials)#min(5, len(trials))
+            plot_trace_idxs = np.random.choice(trials, size=plot_trace_count, replace=False)
+            trace_color = step_colors[1 if bhv_val == bhv_vals[0] else 6]
+            for idx in plot_trace_idxs:
+                ax_bot.plot(times, hga[idx], color=trace_color, lw=0.5, alpha=0.3, zorder=1)
+
+    ax_bot.axhline(0, color="k", lw=0.5, ls=":")
+    ax_bot.axvline(0, color="k", lw=0.5, ls=":")
+    ax_bot.set_ylabel("HGA (z)")
+    ax_bot.set_xlabel("Time from word onset (s)")
+
+    bar_h = 0.04
+    bar_y = 0.95 - bar_h
+    bar_kwargs = dict(edgecolor="none", alpha=0.6, zorder=5)
+    bar_trans_top = blended_transform_factory(ax_top.transData, ax_top.transAxes)
+    if top_early_window is not None:
+        t_top_early = np.array(top_early_window) / epoch_sfreq + epoch_tmin
+        ax_top.add_patch(Rectangle((t_top_early[0], bar_y), t_top_early[1] - t_top_early[0], bar_h,
+                                    transform=bar_trans_top,
+                                    facecolor=top_early_color, **bar_kwargs))
+    if top_late_window is not None:
+        t_top_late = np.array(top_late_window) / epoch_sfreq + epoch_tmin
+        ax_top.add_patch(Rectangle((t_top_late[0], bar_y), t_top_late[1] - t_top_late[0], bar_h,
+                                transform=bar_trans_top,
+                                facecolor=top_late_color, **bar_kwargs))
+
+    bar_trans_bot = blended_transform_factory(ax_bot.transData, ax_bot.transAxes)
+    if bottom_early_window is not None:
+        t_bottom_early = np.array(bottom_early_window) / epoch_sfreq + epoch_tmin
+        ax_bot.add_patch(Rectangle((t_bottom_early[0], bar_y), t_bottom_early[1] - t_bottom_early[0], bar_h,
+                                transform=bar_trans_bot, clip_on=False,
+                                facecolor=bottom_early_color, **bar_kwargs))
+    if bottom_late_window is not None:
+        t_bottom_late = np.array(bottom_late_window) / epoch_sfreq + epoch_tmin
+        ax_bot.add_patch(Rectangle((t_bottom_late[0], bar_y), t_bottom_late[1] - t_bottom_late[0], bar_h,
+                                transform=bar_trans_bot, clip_on=False,
+                                facecolor=bottom_late_color, **bar_kwargs))
+
+    if textgrid_dir is not None:
+        textgrid_file = next(iter(
+            Path(textgrid_dir).glob(f"*_{word_end}_{phoneme_pair}_*.TextGrid")
+        ))
+        # Plot extent of first sound on unambiguous panel
+        tg = textgrid.TextGrid.fromFile(textgrid_file)
+        assert tg.getNames() == ["phonemes"]
+        first_sound = next((interval for interval in tg.tiers[0].intervals
+                            if interval.mark is not None
+                            and interval.mark.strip()), None)
+        if plot_first_sound and first_sound is not None:
+            ax_top.axvspan(0, first_sound.maxTime,
+                           facecolor="k", edgecolor=None, alpha=0.1)
+
+        if plot_phonemes:
+            for ax in (ax_top, ax_bot):
+                add_textgrid(
+                    ax,
+                    textgrid_dir=textgrid_dir,
+                    textgrid_file=textgrid_file.name,
+                    vline_extent=1.0,
+                    tmax=xlim,
+                    include_phonemes=ax == ax_top,
+                    include_first_phoneme_offset=False,
+                )
+
+    if plot_pod:
+        for ax in (ax_top, ax_bot):
+            pod_time = WORD_PHASES[word_end]["pod"][0]
+            ax.axvline(pod_time, color=pod_color, ls="--", alpha=0.5)
+
+    ax_top.set_xlim(-0.05, xlim)
+    ax_bot.set_xlim(-0.05, xlim)
+
+    # Significance bars: gray horizontal bars at top of ax_bot for sig windows.
+    if sig_windows:
+        ymin, ymax = ax_bot.get_ylim()
+        bar_h = (ymax - ymin) * 0.04
+        bar_y = ymin + (ymax - ymin) * 0.95
+        for tmin_s, tmax_s in sig_windows:
+            ax_bot.barh(y=bar_y, width=tmax_s - tmin_s, left=tmin_s,
+                        height=bar_h, color="gray", alpha=0.6,
+                        edgecolor="none", zorder=5)
+
+    # Significance bars on ax_top: full-timecourse acoustic bootstrap.
+    if top_sig_windows:
+        ymin, ymax = ax_top.get_ylim()
+        bar_h = (ymax - ymin) * 0.04
+        bar_y = ymin + (ymax - ymin) * 0.95
+        for tmin_s, tmax_s in top_sig_windows:
+            ax_top.barh(y=bar_y, width=tmax_s - tmin_s, left=tmin_s,
+                        height=bar_h, color="gray", alpha=0.6,
+                        edgecolor="none", zorder=5)
+
+    for ax in (ax_top, ax_bot):
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+
+        ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:.1f}"))
+
+    ax_top.set_gid(f"subj-{subject}_e{electrode_idx}_p-{phoneme_pair}_we-{word_end}_top")
+    ax_bot.set_gid(f"subj-{subject}_e{electrode_idx}_p-{phoneme_pair}_we-{word_end}_bot")
+
+    fig.tight_layout()
+
+    return fig

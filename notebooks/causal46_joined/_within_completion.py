@@ -65,13 +65,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Sequence
 
+from matplotlib.patches import Rectangle
 import matplotlib.pyplot as plt
+from matplotlib.transforms import blended_transform_factory
 import numpy as np
 import pandas as pd
 import seaborn as sns
 from textgrid import textgrid
 
-from src.stimuli import OFFSET_DICT
+from src.stimuli import OFFSET_DICT, WORD_PHASES
 from src.viz_paper import add_textgrid, epoch_sfreq, epoch_tmin
 
 
@@ -1192,18 +1194,29 @@ def matched_n_star_plot_paper(
     phon_smax=None,
     phon_search_smin=None,
     phon_search_smax=None,
+
     textgrid_dir=None,
     plot_phonemes=False,
+    plot_first_sound=True,
+
+    plot_pod=False,
+    pod_color="red",
+
     figsize=(4.5, 4.5),
     R_plot=200,
 
     sig_windows=None,
     top_sig_windows=None,
 
-    epp_window=None,
-    epp_color="#1b7837",
-    lpp_window=None,
-    lpp_color="#762a83",
+    top_early_window=None,
+    top_early_color="#1b7837",
+    top_late_window=None,
+    top_late_color="#762a83",
+
+    bottom_early_window=None,
+    bottom_early_color="#1b7837",
+    bottom_late_window=None,
+    bottom_late_color="#762a83",
     
     xlim=None,
     resampled_cmap: Optional[dict[int, str]] = None,
@@ -1211,8 +1224,12 @@ def matched_n_star_plot_paper(
     bottom_legend_loc="lower right",
     behav_decoding_df=None,
     early_smax_s=None,
+
     top_include_traces=False,
     bottom_include_traces=False,
+
+    top_only_plot_follows_acoustics=False,
+
     axs=None,
 ):
     """Two-panel B4 star plot.
@@ -1243,7 +1260,7 @@ def matched_n_star_plot_paper(
     if xlim is None:
         xlim = OFFSET_DICT.get(word_end, 1.0) + 0.1
 
-    if plot_phonemes and textgrid_dir is None:
+    if (plot_phonemes or plot_first_sound) and textgrid_dir is None:
         raise ValueError("`textgrid_dir` must be provided if `plot_phonemes=True`")
 
     ep = epochs_dict[subject]
@@ -1280,6 +1297,10 @@ def matched_n_star_plot_paper(
     # Top: unambiguous step 1 & 6, restricted to this word_end.
     for step, color in step_colors.items():
         mask = we_mask & (md_pp["resampled"] == step).values
+
+        if top_only_plot_follows_acoustics:
+            mask = mask & (md_pp.follows_acoustics == True).values
+    
         if not mask.any():
             continue
 
@@ -1310,14 +1331,6 @@ def matched_n_star_plot_paper(
     ax_top.axhline(0, color="k", lw=0.5, ls=":")
     ax_top.axvline(0, color="k", lw=0.5, ls=":")
     ax_top.set_ylabel("HGA (z)")
-
-    # fig.suptitle(f"{subject} e{electrode_idx} {phoneme_pair}", fontsize=10, y=0.95)
-    # top_title = f"Unambiguous — {word_end}"
-    # if acoustic_peak_auc is not None:
-    #     top_title += f"  (ac={acoustic_peak_auc:.3f})"
-    # ax_top.set_title(top_title, fontsize=9, pad=20)
-
-    # ax_top.legend(fontsize=7, loc=top_legend_loc, framealpha=0.7)
 
     # Bottom: bootstrap-estimated class mean HGA timecourses.
     # R_plot replicates of per-step balanced sampling (same protocol as the
@@ -1379,47 +1392,33 @@ def matched_n_star_plot_paper(
     ax_bot.axvline(0, color="k", lw=0.5, ls=":")
     ax_bot.set_ylabel("HGA (z)")
     ax_bot.set_xlabel("Time from word onset (s)")
-    # ax_bot.set_title(
-    #     f"Ambiguous — {word_end}",
-    #     fontsize=9,
-    #     pad=20,
-    # )
 
-    # ax_bot.legend(fontsize=7, loc=bottom_legend_loc, framealpha=0.7)
+    bar_h = 0.04
+    bar_y = 0.95 - bar_h
+    bar_kwargs = dict(edgecolor="none", alpha=0.6, zorder=5)
+    bar_trans_top = blended_transform_factory(ax_top.transData, ax_top.transAxes)
+    if top_early_window is not None:
+        t_top_early = np.array(top_early_window) / epoch_sfreq + epoch_tmin
+        ax_top.add_patch(Rectangle((t_top_early[0], bar_y), t_top_early[1] - t_top_early[0], bar_h,
+                                    transform=bar_trans_top,
+                                    facecolor=top_early_color, **bar_kwargs))
+    if top_late_window is not None:
+        t_top_late = np.array(top_late_window) / epoch_sfreq + epoch_tmin
+        ax_top.add_patch(Rectangle((t_top_late[0], bar_y), t_top_late[1] - t_top_late[0], bar_h,
+                                transform=bar_trans_top,
+                                facecolor=top_late_color, **bar_kwargs))
 
-    if epp_window is not None or lpp_window is not None:
-        ymin_top, ymax_top = ax_top.get_ylim()
-        ymin_bot, ymax_bot = ax_bot.get_ylim()
-        bar_h_top = (ymax_top - ymin_top) * 0.04
-        bar_y_top = ymin_top + (ymax_top - ymin_top) * 0.95
-        bar_h_bot = (ymax_bot - ymin_bot) * 0.04
-        bar_y_bot = ymin_bot + (ymax_bot - ymin_bot) * 0.95
-
-        if epp_window is not None:
-            t_epp = np.array(epp_window) / epoch_sfreq + epoch_tmin
-            ax_top.barh(y=bar_y_top, width=t_epp[1] - t_epp[0], left=t_epp[0],
-                        height=bar_h_top, color=epp_color, alpha=0.6,
-                        edgecolor="none", zorder=5)
-            ax_bot.barh(y=bar_y_bot, width=t_epp[1] - t_epp[0], left=t_epp[0],
-                        height=bar_h_bot, color=epp_color, alpha=0.6,
-                        edgecolor="none", zorder=5)
-        if lpp_window is not None:
-            t_lpp = np.array(lpp_window) / epoch_sfreq + epoch_tmin
-            ax_top.barh(y=bar_y_top, width=t_lpp[1] - t_lpp[0], left=t_lpp[0],
-                        height=bar_h_top, color=lpp_color, alpha=0.6,
-                        edgecolor="none", zorder=5)
-            ax_bot.barh(y=bar_y_bot, width=t_lpp[1] - t_lpp[0], left=t_lpp[0],
-                        height=bar_h_bot, color=lpp_color, alpha=0.6,
-                        edgecolor="none", zorder=5)
-
-    #     # ax_top.axvspan(*t_epp, color=epp_color, alpha=0.30)
-    #     # ax_bot.axvspan(*t_epp, color=epp_color, alpha=0.30)
-
-    # if lpp_window is not None:
-    #     t_lpp = np.array(lpp_window) / epoch_sfreq + epoch_tmin
-
-    #     # ax_top.axvspan(*t_lpp, color=lpp_color, alpha=0.30)
-    #     # ax_bot.axvspan(*t_lpp, color=lpp_color, alpha=0.30)
+    bar_trans_bot = blended_transform_factory(ax_bot.transData, ax_bot.transAxes)
+    if bottom_early_window is not None:
+        t_bottom_early = np.array(bottom_early_window) / epoch_sfreq + epoch_tmin
+        ax_bot.add_patch(Rectangle((t_bottom_early[0], bar_y), t_bottom_early[1] - t_bottom_early[0], bar_h,
+                                transform=bar_trans_bot, clip_on=False,
+                                facecolor=bottom_early_color, **bar_kwargs))
+    if bottom_late_window is not None:
+        t_bottom_late = np.array(bottom_late_window) / epoch_sfreq + epoch_tmin
+        ax_bot.add_patch(Rectangle((t_bottom_late[0], bar_y), t_bottom_late[1] - t_bottom_late[0], bar_h,
+                                transform=bar_trans_bot, clip_on=False,
+                                facecolor=bottom_late_color, **bar_kwargs))
 
     if textgrid_dir is not None:
         textgrid_file = next(iter(
@@ -1431,9 +1430,9 @@ def matched_n_star_plot_paper(
         first_sound = next((interval for interval in tg.tiers[0].intervals
                             if interval.mark is not None
                             and interval.mark.strip()), None)
-        if first_sound is not None:
+        if plot_first_sound and first_sound is not None:
             ax_top.axvspan(0, first_sound.maxTime,
-                        color="k", alpha=0.1)
+                           facecolor="k", edgecolor=None, alpha=0.1)
 
         if plot_phonemes:
             for ax in (ax_top, ax_bot):
@@ -1446,6 +1445,11 @@ def matched_n_star_plot_paper(
                     include_phonemes=ax == ax_top,
                     include_first_phoneme_offset=False,
                 )
+
+    if plot_pod:
+        for ax in (ax_top, ax_bot):
+            pod_time = WORD_PHASES[word_end]["pod"][0]
+            ax.axvline(pod_time, color=pod_color, ls="--", alpha=0.5)
 
     ax_top.set_xlim(-0.05, xlim)
     ax_bot.set_xlim(-0.05, xlim)
@@ -1475,6 +1479,9 @@ def matched_n_star_plot_paper(
         ax.spines["right"].set_visible(False)
 
         ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:.1f}"))
+
+    ax_top.set_gid(f"subj-{subject}_e{electrode_idx}_p-{phoneme_pair}_we-{word_end}_top")
+    ax_bot.set_gid(f"subj-{subject}_e{electrode_idx}_p-{phoneme_pair}_we-{word_end}_bot")
 
     fig.tight_layout()
 
