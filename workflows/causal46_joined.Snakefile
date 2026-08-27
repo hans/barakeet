@@ -26,6 +26,7 @@ from pathlib import Path
 configfile: "config.yaml"
 include: "causal6.Snakefile"
 include: "plotters.smk"
+include: "causal46_joined_all_sr.Snakefile"
 
 
 # =============================================================================
