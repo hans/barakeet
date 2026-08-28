@@ -5,8 +5,8 @@ implemented as new notebooks under `notebooks/causal46_joined/all_sr/` (kept
 out of the already-large flat `notebooks/causal46_joined/` directory) +
 Snakefile rules (`workflows/causal46_joined_all_sr.Snakefile`, included from
 `causal46_joined.Snakefile`; existing AS-restricted pipeline untouched).
-Pure-Python cores (`compute_sr_site_universe`, `cell_maxstat_fdr_test`) live
-in `src/causal46_joined.py`, unit-tested in `tests/test_all_sr_perceptual.py`
+Pure-Python core (`compute_sr_site_universe`) lives in
+`src/causal46_joined.py`, unit-tested in `tests/test_all_sr_perceptual.py`
 (no epoch/pipeline data required). Not yet run end-to-end against production
 epoch data — epochs aren't available in this dev container; verified via
 `py_compile`, `snakemake -n` DAG resolution, and offline unit tests on
@@ -14,10 +14,18 @@ synthetic data + real `phon_peaks_all.parquet` / `find_speech_responsive`
 CSVs (see "Implementation notes" at the end of this doc). Someone with prod
 access needs to run the Snakemake targets and inspect
 `t_tests_all_sr_reconciliation`'s verdict before trusting Step 4's output.
+
 Went through one round of `/code-review` (Standards + Spec sub-agents) after
-the initial implementation; the significance-methodology finding it surfaced
-drove a rewrite documented below — this status line and the notes reflect
-the POST-review design, not the first draft.
+the initial implementation, which drove a significance-methodology rewrite
+(maxstat + BH-FDR) — **that rewrite was then itself reverted** after Jon
+corrected the premise it rested on (see "Implementation notes," final entry):
+`late_integration_maxstat_significance.py` is not wired into the Snakefile
+and doesn't feed `plot_for_paper`, so it was never real precedent for how
+this statistic should be treated. The headline is `mean_diff_raw` /
+`ci_raw_excludes_zero` — raw, uncorrected — matching the design doc's
+original Step 3 text and how `t_tests.py`'s output is actually consumed
+everywhere else in the pipeline. This status line and the notes below
+reflect that final, twice-corrected design.
 
 **Goal.** Test for within-completion perceptual effects across *all* speech-responsive
 sites, without first restricting to sites that have a significant early acoustic
@@ -116,53 +124,33 @@ decoding that already ran on the SR set), so the universe is a clean superset.
 
 ## Implementation notes (2026-08-27)
 
-- **Selection/circularity was promoted from caveat to blocker, then revised again after
-  `/code-review`.** Removing the AS pre-selection removes its side effect of keeping the
-  multiple-comparisons burden small — and Step 4's whole point is the
-  *perceptual-but-not-acoustic* cell, exactly where an uncorrected best-window search
-  would land false positives. A first pass added a bespoke paired-replicate maxstat
-  (`maxstat_replicate_test`) as the headline. Both review sub-agents flagged this as
-  reinventing machinery the codebase already has:
-  `notebooks/causal46_joined/late_integration_maxstat_significance.py` already runs a
-  max-|z| permutation correction per cell + BH-FDR across cells on this exact
-  `t_tests/b4_bootstrap.parquet` structure, with its own note that a self-selected
-  best-window count "must not be reported as a test." The fix (per advisor consult):
-  `cell_maxstat_fdr_test` (`src/causal46_joined.py`) now MIRRORS that method — z_obs =
-  |mean_r(mean_diff_raw)| / std_r(null) per window, obs_maxz = max over windows,
-  null_maxz per replicate the same way, `p = (#{null≥obs}+1)/(R+1)` (unbiased, never
-  exactly 0, unlike the first draft's plain fraction), then BH-FDR across all tested
-  cells (`statsmodels.stats.multitest.multipletests`) — rather than importing from that
-  notebook (which is part of the frozen AS-restricted pipeline this fork must not
-  touch) or inventing a third lookalike. The one real difference: that notebook
-  restricts windows to `smin >= phon_smax` (post-acoustic only), which doesn't apply
-  here — non-AS cells have no `phon_smax` to anchor to, so this fork searches the full
-  `behav_search_range` instead. `maxstat_reject` is the fork's headline per-cell call;
-  `best_ci_raw_excludes_zero` (naive, self-selected window) is kept alongside labeled
-  CIRCULAR, never as the headline, per that same notebook's own standard. This is still
-  an implementer decision beyond the design doc's literal Step 3 text and was not
-  confirmed with Jon synchronously before running — flagged as such in
-  `t_tests_all_sr.py`'s "NOTE ON HEADLINE CHOICE," in `perceptual_acoustic_partition.py`,
-  and here, not buried in a docstring only. BH-FDR is one family across all tested
-  cells; it is NOT further corrected across the electrode-level collapse
-  `perceptual_acoustic_partition.py` does downstream (an electrode with several tested
-  cells gets several independent chances to pass) — a second deferred decision, same
-  status.
-- **Permutation-floor adequacy check (second advisor pass).** Mirroring
-  `late_integration_maxstat_significance.py`'s method (above) but not its floor check
-  left a gap: a permutation p floors at `1/(R+1)`, and BH-FDR rejects a rank-1 p only if
-  `p <= alpha/n_cells`. Solving, a floor-pinned cell survives only if
-  `n_cells <= (R+1)*alpha` — at R=1000, alpha=0.05, that's `n_cells <= 50`. The all-SR
-  family (hundreds of qualifying cells, not late_integration's 187 AS-restricted ones)
-  is plausibly over that line, and unlike that notebook (a null result either way) this
-  fork is hunting a POSITIVE finding — the perceptual-not-acoustic cell. Undetected, a
-  "0 in the new cell" result would read as confirmation of co-localization when it could
-  be permutation censoring. `maxstat_floor_check` (`src/causal46_joined.py`) computes
-  `floor`, `min_p`, `n_at_floor`, and `floor_limits_rejection` (`floor >
-  alpha/n_cells`); `t_tests_all_sr.py` writes it to `maxstat_floor_check.csv` and prints
-  a loud warning when triggered; `perceptual_acoustic_partition.py` reads it and
-  attaches the same warning directly next to a "NEW CELL = 0" result, not just upstream.
-  If triggered on a real run, the fix is a higher `n_bootstrap` (e.g. 10000 → floor
-  1e-4, supports BH-FDR over a few-hundred-cell family), not a methodology change.
+- **Selection/circularity: promoted to blocker, "fixed" twice, then reverted — the
+  headline is raw `ci_raw_excludes_zero` after all.** Removing the AS pre-selection
+  removes its side effect of keeping the multiple-comparisons burden small, and this
+  looked like it needed correcting. Round 1: a bespoke paired-replicate maxstat
+  (`maxstat_replicate_test`) as the headline. Round 2, after `/code-review` flagged
+  round 1 as reinventing machinery: rewrote to mirror
+  `late_integration_maxstat_significance.py`'s max-|z| permutation + BH-FDR method
+  (`cell_maxstat_fdr_test`), plus a permutation-floor adequacy check
+  (`maxstat_floor_check`) added after a follow-up advisor pass caught that the mirror
+  had dropped that method's own floor-censoring safeguard. **Both rounds were wrong at
+  the root, per Jon's correction (2026-08-28):** `late_integration_maxstat_significance.py`
+  has no Snakefile rule and does not feed `plot_for_paper` — it is a standalone
+  diagnostic, not the pipeline's actual precedent for this statistic. Traced the real
+  `plot_for_paper` dependency chain and confirmed: `t_tests.py`'s raw, uncorrected
+  bootstrap CI (`ci_raw_excludes_zero`) is what the paper's B4-derived claims actually
+  use directly, with no maxstat/BH-FDR/TFCE correction anywhere in that path. The one
+  place real BH-FDR exists downstream (`late_perceptual_projection.py`) uses the raw CI
+  purely as a candidate GATE, then applies its own separate correction to its own
+  separate projection statistic — not relevant here since Step 4 isn't feeding a
+  projection step. `cell_maxstat_fdr_test` and `maxstat_floor_check` were removed
+  entirely from `src/causal46_joined.py` (confirmed with Jon: remove, don't keep as an
+  optional column); `t_tests_all_sr.py` and `perceptual_acoustic_partition.py` are back
+  to the plan's original literal design — `mean_diff_raw` / `ci_raw_excludes_zero` as
+  the sole, unqualified headline, matching how `t_tests.py`'s output is treated
+  everywhere else in the codebase. Lesson: "the codebase already has a method for this"
+  needs verifying against the actual DAG/consumer graph, not just grepping for a
+  notebook that operates on the same input file.
 - **`acoustic_significant` is a single source of truth.** `sr_site_universe.py` (Step 1)
   is the only place `ac_p_value_threshold` gets applied (via left join against
   `phon_peaks_all` filtered to `p_value < threshold`, exactly mirroring `t_tests.py`'s
@@ -188,11 +176,10 @@ decoding that already ran on the SR set), so the universe is a clean superset.
   `ci_raw_excludes_zero` with `atol=rtol=1e-9`, plus a cell-set diff). This is a blocking
   gate (raises `AssertionError` on any mismatch, not just a diagnostic) —
   `perceptual_acoustic_partition.py` (Step 4) reads `reconciliation_summary.csv` and
-  refuses to run if it didn't pass. This check is orthogonal to the maxstat/BH-FDR
-  rewrite above — it compares raw-field parity only, so changing the significance
-  METHOD (but not the raw bootstrap computation, which is unchanged and still a
-  documented near-verbatim copy of `t_tests.py`'s — see that file's "Duplicated Code"
-  note below) can't break it.
+  refuses to run if it didn't pass. This check compares raw-field parity only, so it
+  was unaffected by the significance-methodology churn above — the raw bootstrap
+  computation itself is unchanged throughout and still a documented near-verbatim copy
+  of `t_tests.py`'s (see the "Duplicated Code" note below).
 - **Duplicated bootstrap code, deliberately not extracted.** Standards review flagged
   `t_tests_all_sr.py`'s `bootstrap_cell` as a near-verbatim copy of `t_tests.py`'s (same
   RNG call order, same scratch-variable names, minus the aligned/`preferred`-class
@@ -208,15 +195,16 @@ decoding that already ran on the SR set), so the universe is a clean superset.
   reconciliation notebook with no Snakefile rule). Its two near-identical
   mismatch-finding loops (per-window, per-cell) were also collapsed into one
   `find_mismatches` helper.
-- **Don't hardcode 64.** The local dev snapshot of `phon_peaks_all.parquet` (a bind
-  mount of prod state, not a fresh run) gives 15/29/221 AS electrodes at
-  `p<{0.05,0.001,0.05}` depending on threshold and FDR-correction choice — nowhere near
-  CLAUDE.md's "64 electrodes" figure, which is presumably from a fuller
-  production run under different config. `perceptual_acoustic_partition.py` computes
-  and reports its own denominator from whatever `sr_site_universe_electrode_level.csv`
-  actually contains, and prints the paper's "64" figure alongside for reference
-  (`paper_reported_as_electrode_n`, never asserted against — spec review flagged the
-  first draft for dropping even this non-asserting reference).
+- **Don't hardcode the paper-reported AS denominator.** The local dev snapshot of
+  `phon_peaks_all.parquet` (a bind mount of prod state, not a fresh run) gives
+  15/29/221 AS electrodes at `p<{0.05,0.001,0.05}` depending on threshold and
+  FDR-correction choice — nowhere near CLAUDE.md's "64 electrodes" figure (presumably
+  from a fuller production run under different config). `perceptual_acoustic_partition.py`
+  computes and reports its own denominator from whatever
+  `sr_site_universe_electrode_level.csv` actually contains, and prints the paper-reported
+  figure alongside for reference only, never asserted against
+  (`paper_reported_as_electrode_n` — updated to 44 by Jon directly in the notebook,
+  2026-08-28, superseding the 64 placeholder used during initial implementation).
 - **Local verification ceiling.** `outputs/epochs_preprocessed/` isn't available in this
   dev container (only `outputs_prod/causal6` and `outputs_prod/causal46_joined` are
   bind-mounted, and neither contains raw/preprocessed epochs) — every rule from
@@ -226,17 +214,22 @@ decoding that already ran on the SR set), so the universe is a clean superset.
   `preprocess_epochs` missing-input wall, same as `joined_t_tests`); `compute_sr_site_universe`
   exercised directly against the real `outputs_prod/causal6/{acoustic_decoding_peaks,find_speech_responsive}`
   data (957 SR electrodes, 81 AS at p<0.01 — sane shape); the full
-  per_window→per_cell→maxstat→floor_check→partition-crosstab chain (the notebook
-  integration seam `py_compile` can't check — wrong-column-name bugs there wouldn't
-  surface any other way) exercised end-to-end against synthetic bootstrap frames
-  reproducing the shape `bootstrap_cell` emits, including at production scale (R=300,
-  3 cells across the AS/non-AS/null split, 300 replicates × 3 windows — correctly
-  separates the "new cell" from an AS cell and a null one, and separately at R=1000
-  with 3 windows / 2 cells). 23 unit tests in `tests/test_all_sr_perceptual.py`, all
-  passing; full `tests/` suite passes except one pre-existing unrelated failure
-  (`test_perm_idx_seeds.py`, confirmed pre-existing via `git stash`).
+  per_window→per_cell→partition-crosstab chain (the notebook integration seam
+  `py_compile` can't check — wrong-column-name bugs there wouldn't surface any other
+  way) exercised end-to-end against synthetic bootstrap frames reproducing the shape
+  `bootstrap_cell` emits, correctly separating the "new cell" (non-AS, significant)
+  from an AS cell and a null one. 6 unit tests in `tests/test_all_sr_perceptual.py`
+  (down from 23 after removing the maxstat/floor-check machinery and its tests — see
+  the reverted "Selection/circularity" note above), all passing; full `tests/` suite
+  passes except one pre-existing unrelated failure (`test_perm_idx_seeds.py`,
+  confirmed pre-existing via `git stash`).
 - **Reviewed via `/code-review since HEAD`** (Standards + Spec sub-agents, run against
   a scoped diff of only this fork's files — the branch itself is far ahead of `master`
   with unrelated prior work, so a `since master` diff would have reviewed hundreds of
   unrelated commits). Findings and how each was resolved are folded into the notes
-  above rather than kept as a separate review log.
+  above rather than kept as a separate review log. Note the irony worth flagging
+  explicitly: this review is what drove the maxstat/BH-FDR detour in the first place
+  (citing `late_integration_maxstat_significance.py` as established precedent without
+  checking whether it was wired into the DAG) — a lesson for weighting future
+  sub-agent findings that cite "existing codebase precedent": verify the precedent is
+  actually load-bearing, not just present.

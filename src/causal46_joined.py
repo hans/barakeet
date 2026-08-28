@@ -22,10 +22,8 @@ from __future__ import annotations
 
 from typing import Mapping, Sequence
 
-import numpy as np
 import pandas as pd
 import polars as pl
-from statsmodels.stats.multitest import multipletests
 
 # ---------------------------------------------------------------------------
 # Canonical site-type display constants
@@ -235,21 +233,11 @@ def compute_as_filter(
 # filtered) with acoustic significance, so downstream perceptual testing can
 # run unconditioned on acoustic response.
 #
-# `cell_maxstat_fdr_test` supplies the window-search + multiple-comparisons
-# correction that broader universe needs: per-cell best-window CIs are
-# self-selected (the window is chosen from the same data being tested) and
-# uncorrected across cells. `notebooks/causal46_joined/late_integration_maxstat_significance.py`
-# already established the method for exactly this problem on this exact B4
-# bootstrap+null structure (max-|z| permutation correction per cell, then
-# BH-FDR across cells) — its own note says the self-selected-window count
-# "must not be reported as a test". This function MIRRORS that method
-# (same statistic, same unbiased-p formula, same BH-FDR step) rather than
-# importing from it — `late_integration_maxstat_significance.py` is part of
-# the frozen AS-restricted pipeline the fork must not touch, and its search
-# range (`smin >= phon_smax`, post-acoustic only) doesn't apply here: non-AS
-# cells have no `phon_smax` to anchor to, so this fork searches the full
-# `behav_search_range` instead. Two call sites, one method, deliberately not
-# one shared import.
+# The fork's significance metric is the same raw, uncorrected bootstrap CI
+# (`ci_raw_excludes_zero`) that `t_tests.py`'s output is consumed as
+# everywhere downstream in the real pipeline (`plot_for_paper`,
+# `behavioral_discriminative_windows.py`, `late_perceptual_projection.py`'s
+# candidate gate) — no additional correction is computed here.
 
 
 def compute_sr_site_universe(
@@ -324,151 +312,3 @@ def compute_sr_site_universe(
     )
     return out
 
-
-def cell_maxstat_fdr_test(
-    boot: pl.DataFrame,
-    cell_keys: list[str],
-    *,
-    value_col: str = "mean_diff_raw",
-    null_col: str = "mean_diff_raw_null",
-    replicate_col: str = "replicate",
-    window_cols: tuple[str, str] = ("smin", "smax"),
-    alpha: float = 0.05,
-) -> pl.DataFrame:
-    """Max-|z| permutation correction per cell, then BH-FDR across cells.
-
-    Mirrors `late_integration_maxstat_significance.py`'s method on the same
-    B4 bootstrap+null structure:
-
-    1. Per (cell, window): `z_obs = |mean_r(value_col)| / std_r(null_col)` —
-       standardized by the null's own SD so the max over windows isn't
-       dominated by high-variance windows.
-    2. Per cell: `obs_maxz = max over windows of z_obs`.
-    3. Per (cell, replicate): `null_maxz = max over windows of
-       |null_col| / std_r(null_col)` (same per-window SD as step 1).
-    4. Per cell: `p = (#{null_maxz >= obs_maxz} + 1) / (R + 1)` — the
-       unbiased permutation p (never exactly 0, unlike a plain fraction).
-    5. BH-FDR across ALL cells in `boot` (one family — not split by any
-       other grouping; that's a modeling choice, surface it in the caller's
-       report rather than deciding it silently here).
-
-    Returns a polars DataFrame keyed by `cell_keys` with `maxstat_obs_maxz`,
-    `maxstat_p`, `maxstat_q`, `maxstat_reject` (`q < alpha`), and
-    `maxstat_r` (replicate count, for a permutation-floor sanity check:
-    `1 / (maxstat_r + 1)`). Cells where every window's null SD is 0 (no
-    replicate variance) are dropped — undefined z, same as
-    `late_integration_maxstat_significance.py`'s `sd_null > 0` filter.
-    Empty DataFrame if `boot` is empty or nothing survives that filter.
-    """
-    if boot.height == 0:
-        return pl.DataFrame()
-
-    smin_col, smax_col = window_cols
-    window_keys = cell_keys + [smin_col, smax_col]
-
-    per_window = (
-        boot
-        .group_by(window_keys)
-        .agg(
-            pl.col(value_col).mean().abs().alias("__obs_abs"),
-            pl.col(null_col).std().alias("__sd_null"),
-        )
-        .filter(pl.col("__sd_null") > 0)
-        .with_columns((pl.col("__obs_abs") / pl.col("__sd_null")).alias("__z_obs"))
-    )
-    if per_window.height == 0:
-        return pl.DataFrame()
-
-    obs = per_window.group_by(cell_keys).agg(pl.col("__z_obs").max().alias("__obs_maxz"))
-
-    null_z = (
-        boot
-        .join(per_window.select(window_keys + ["__sd_null"]), on=window_keys, how="inner")
-        .with_columns((pl.col(null_col).abs() / pl.col("__sd_null")).alias("__z_null"))
-    )
-    null_max = (
-        null_z
-        .group_by(cell_keys + [replicate_col])
-        .agg(pl.col("__z_null").max().alias("__null_maxz"))
-    )
-
-    obs_lookup = {
-        tuple(row[k] for k in cell_keys): row["__obs_maxz"]
-        for row in obs.iter_rows(named=True)
-    }
-    rows: list[dict] = []
-    for keys_df in null_max.partition_by(cell_keys, maintain_order=True):
-        keys = tuple(keys_df[k][0] for k in cell_keys)
-        obs_maxz = obs_lookup.get(keys)
-        if obs_maxz is None:
-            continue
-        null_vals = keys_df["__null_maxz"].to_numpy()
-        R = len(null_vals)
-        p = (int(np.sum(null_vals >= obs_maxz)) + 1) / (R + 1)
-        rows.append({
-            **dict(zip(cell_keys, keys)),
-            "maxstat_obs_maxz": float(obs_maxz),
-            "maxstat_p": p,
-            "maxstat_r": R,
-        })
-    if not rows:
-        return pl.DataFrame()
-
-    out = pl.DataFrame(rows)
-    p_arr = out["maxstat_p"].to_numpy()
-    reject, q, _, _ = multipletests(p_arr, method="fdr_bh", alpha=alpha)
-    out = out.with_columns([
-        pl.Series("maxstat_q", q),
-        pl.Series("maxstat_reject", reject),
-    ]).sort(cell_keys)
-    return out
-
-
-def maxstat_floor_check(maxstat: pl.DataFrame, *, alpha: float = 0.05) -> dict:
-    """Permutation-resolution diagnostic for `cell_maxstat_fdr_test`'s output.
-
-    Mirrors `late_integration_maxstat_significance.py`'s floor check: a
-    permutation p can resolve no finer than `1/(R+1)`. If the smallest
-    per-cell p sits well above that floor and no cell is pinned there, R is
-    sufficient and a null result is genuine, not a resolution artifact.
-
-    This fork needs the check MORE than that notebook did: BH-FDR rejects
-    the smallest p_(k) only if `p_(k) <= (k/m) * alpha`, so even a
-    maximally-significant cell pinned at the floor (`p = 1/(R+1)`) survives
-    rank-1 correction only if `1/(R+1) <= alpha/m`. Solve for m:
-    `m <= (R+1)*alpha`. At R=1000, alpha=0.05, that's m <= 50 — a family of
-    hundreds of all-SR cells can silently make it IMPOSSIBLE for BH-FDR to
-    ever reject anything, no matter how strong the true effect, and a "0 in
-    the new cell" partition result would look like confirmation when it's
-    actually permutation censoring. `floor_limits_rejection=True` flags
-    exactly that condition; the caller should surface it wherever a "0
-    survivors" result gets reported as a finding, not bury it.
-
-    Returns a dict: `floor` (best achievable p given R), `min_p` (smallest
-    observed per-cell p), `n_at_floor` (cells pinned at the floor), `n_cells`,
-    `rank1_bh_threshold` (`alpha / n_cells`, the p a rank-1 cell must clear),
-    `floor_limits_rejection` (bool). All fields are `None`/`0`/`nan` as
-    appropriate if `maxstat` is empty.
-    """
-    if maxstat.height == 0:
-        return {
-            "floor": float("nan"), "min_p": float("nan"), "n_at_floor": 0,
-            "n_cells": 0, "rank1_bh_threshold": float("nan"),
-            "floor_limits_rejection": None,
-        }
-    r_vals = maxstat["maxstat_r"].to_numpy().astype(float)
-    p_vals = maxstat["maxstat_p"].to_numpy()
-    floor_per_cell = 1.0 / (r_vals + 1.0)
-    n_at_floor = int(np.sum(np.isclose(p_vals, floor_per_cell)))
-    floor = float(np.min(floor_per_cell))
-    min_p = float(np.min(p_vals))
-    n_cells = int(maxstat.height)
-    rank1_bh_threshold = alpha / n_cells
-    return {
-        "floor": floor,
-        "min_p": min_p,
-        "n_at_floor": n_at_floor,
-        "n_cells": n_cells,
-        "rank1_bh_threshold": rank1_bh_threshold,
-        "floor_limits_rejection": floor > rank1_bh_threshold,
-    }

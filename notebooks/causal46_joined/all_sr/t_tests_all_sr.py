@@ -31,38 +31,20 @@
 # - **Polarity / aligned labelling is out of scope here** (per plan): it
 #   requires an acoustic window to align to, which is undefined for
 #   non-acoustic sites, and a constant per-cell sign flip leaves a two-sided
-#   CI test invariant anyway. `mean_diff_raw` is the sole headline contrast.
-# - Removing the AS pre-selection removes its side benefit of keeping the
-#   site count (and hence the multiple-comparisons burden) small. Per-window
-#   `ci_raw_excludes_zero` at the best window is self-selected (the window is
-#   chosen from the same data being tested) and uncorrected across cells —
-#   `late_integration_maxstat_significance.py`'s own note says exactly this
-#   kind of count "must not be reported as a test". `cell_maxstat_fdr_test`
-#   (`src.causal46_joined`) is that notebook's method (max-|z| permutation
-#   correction per cell, then BH-FDR across cells), reused here rather than
-#   reinvented — see its docstring for why it isn't a shared import (the
-#   frozen AS pipeline isn't touched) and for the one real difference (this
-#   fork's search range, since non-AS cells have no `phon_smax` to anchor a
-#   post-acoustic-only window like that notebook uses).
+#   CI test invariant anyway. `mean_diff_raw` / `ci_raw_excludes_zero` is the
+#   headline contrast — the same raw, uncorrected bootstrap CI that
+#   `t_tests.py`'s output is consumed as everywhere downstream in the real
+#   pipeline (`plot_for_paper`, `behavioral_discriminative_windows.py`,
+#   `late_perceptual_projection.py`'s candidate gate). No maxstat / BH-FDR /
+#   TFCE correction is applied — an earlier draft added a max-|z| + BH-FDR
+#   correction modeled on `late_integration_maxstat_significance.py`, but
+#   that notebook has no Snakefile rule and isn't part of what actually
+#   feeds `plot_for_paper`; it wasn't real precedent for this statistic.
+#   Matching how `t_tests.py`'s own output is used elsewhere keeps this
+#   fork consistent with the rest of the codebase.
 #
-# NOTE ON HEADLINE CHOICE: the design doc's Step 3 text names `mean_diff_raw`
-# / `ci_raw_excludes_zero` as the headline; its caveats section (written
-# before this file existed) flags window-search correction as a "decide
-# before running" item, not yet decided. This file decides it: the naive
-# best-window CI is circular (self-selected window) by this codebase's own
-# standard, so `maxstat_reject` (BH-FDR corrected) is reported as the
-# defensible call, with the naive count kept alongside and labeled
-# uncorrected/circular — not silently dropped. That is an implementer
-# decision made without a synchronous confirmation step, flagged here and in
-# every report this notebook writes for review before the partition
-# (Step 4) numbers are treated as final.
-#
-# BH-FDR is applied across cells (via `cell_maxstat_fdr_test`) but NOT across
-# electrodes or across the electrode-level collapse done downstream in
-# `perceptual_acoustic_partition.py` — an electrode with several tested cells
-# gets several chances to pass, uncorrected for that. No star-plot gallery /
-# cross-WE pooled pair statistic here either (both depend on the aligned
-# contrast, which is out of scope).
+# No star-plot gallery / cross-WE pooled pair statistic here (both depend on
+# the aligned contrast, which is out of scope).
 #
 # Outputs (mirrors `t_tests/` naming, sibling tree):
 # - `outputs/causal46_joined/t_tests_all_sr/b4_bootstrap.parquet`
@@ -85,7 +67,6 @@ import polars as pl
 from matplotlib.backends.backend_pdf import PdfPages
 from tqdm.auto import tqdm
 
-from src.causal46_joined import cell_maxstat_fdr_test, maxstat_floor_check
 from src.data import get_electrode_df
 from src.stimuli import PHONEME_PAIR_TO_WORD_ENDS, OFFSET_DICT
 from src.viz_paper import epoch_sfreq, epoch_tmin
@@ -110,7 +91,6 @@ min_class_k = 4
 window_size = 10
 stride = 10
 n_bootstrap = 1000
-maxstat_alpha = 0.05
 
 # %%
 REPO = Path(".").resolve()
@@ -130,7 +110,7 @@ CI_LOW, CI_HIGH = 2.5, 97.5
 print(f"REPO:      {REPO}")
 print(f"EPOCH_DIR: {EPOCH_DIR}  (exists: {EPOCH_DIR.exists()})")
 print(f"K = {K}   R = {R}   CI = [{CI_LOW}, {CI_HIGH}]")
-print(f"window={WINDOW_SIZE}  stride={STRIDE}  maxstat_alpha={maxstat_alpha}")
+print(f"window={WINDOW_SIZE}  stride={STRIDE}")
 
 # %% [markdown]
 # ## Load all-SR site universe, trial balance, and epochs
@@ -209,7 +189,8 @@ print(f"B4 qualifying cells (n_qualifying ≥ 1, n_per_class ≥ {K}): "
 #
 # Raw contrast only — no acoustic-aligned polarity (out of scope; see module
 # docstring). `mean_diff_raw_null` is a within-step label-permutation null on
-# the SAME bootstrap trial draw, used downstream by `cell_maxstat_fdr_test`.
+# the SAME bootstrap trial draw (kept for parity with `t_tests.py`'s row
+# shape; not consumed by any correction here).
 #
 # This is a trimmed copy of `t_tests.py`'s `bootstrap_cell` (same RNG call
 # order on `per_step`/`select_cell_trials_bootstrap`/label-permutation
@@ -496,61 +477,8 @@ b4_per_cell = per_cell_best(b4_per_window, b4_cell_keys)
 if b4_per_cell.height:
     b4_per_cell.write_parquet(OUT_DIR / "b4_per_cell.parquet")
 print(f"B4 per_cell rows: {b4_per_cell.height}")
-
-# %% [markdown]
-# ## Window-search + multiple-comparisons corrected significance (maxstat + BH-FDR)
-#
-# `cell_maxstat_fdr_test`'s `maxstat_reject` (BH-FDR, one family across ALL
-# tested cells here — that family-definition choice is itself part of the
-# "decide before running" item this file resolves; see module docstring) is
-# the DEFENSIBLE per-cell significance call. `best_ci_raw_excludes_zero`
-# (naive, self-selected window, no cross-cell correction) is kept alongside
-# for comparison — CIRCULAR per `late_integration_maxstat_significance.py`'s
-# own standard, not a corrected test, always reported as such.
-
-# %%
-maxstat = cell_maxstat_fdr_test(b4_boot, b4_cell_keys, alpha=maxstat_alpha)
-floor_check = maxstat_floor_check(maxstat, alpha=maxstat_alpha)
-if maxstat.height and b4_per_cell.height:
-    b4_per_cell = b4_per_cell.join(maxstat, on=b4_cell_keys, how="left")
-    b4_per_cell.write_parquet(OUT_DIR / "b4_per_cell.parquet")
-    n_naive = int(b4_per_cell["best_ci_raw_excludes_zero"].fill_null(False).sum())
-    n_maxstat = int(b4_per_cell["maxstat_reject"].fill_null(False).sum())
-    print(f"per-cell significance — naive best-window CI (CIRCULAR, not a test): "
-          f"{n_naive}/{b4_per_cell.height}  |  "
-          f"maxstat+BH-FDR (DEFENSIBLE, headline): {n_maxstat}/{b4_per_cell.height}")
-
-# %% [markdown]
-# ## Permutation-floor adequacy check
-#
-# A permutation p floors at `1/(R+1)`. BH-FDR rejects a rank-1 p only if
-# `p <= alpha/n_cells` — so if the floor itself exceeds that threshold, NO
-# cell can EVER survive correction, however strong the true effect, at this
-# (R, family size). A "0 survivors" result under that condition is not
-# evidence of a null; it's the permutation running out of resolution. This
-# fork needs this check MORE than `late_integration_maxstat_significance.py`
-# did (187 AS cells, a null result either way) — the all-SR family is larger
-# and this fork is hunting a POSITIVE finding (the perceptual-not-acoustic
-# cell). See module docstring / plan Implementation notes.
-
-# %%
-print(f"permutation floor 1/(R+1) = {floor_check['floor']:.2e}   "
-      f"(n_cells={floor_check['n_cells']}, alpha={maxstat_alpha})")
-print(f"rank-1 BH-FDR threshold (alpha/n_cells) = {floor_check['rank1_bh_threshold']:.2e}")
-print(f"min per-cell p = {floor_check['min_p']:.2e}   "
-      f"cells pinned at floor = {floor_check['n_at_floor']}")
-if floor_check["floor_limits_rejection"]:
-    print("*** FLOOR LIMITS REJECTION: even a maximally-significant "
-          "(floor-pinned) cell cannot survive BH-FDR at this family size. "
-          "A '0 survivors' result here is NOT evidence of a genuine null — "
-          "it may be permutation-censored. Increase n_bootstrap (R) before "
-          "trusting a null Step 4 partition count. ***")
-else:
-    print("floor does not limit rejection at this family size — a null "
-          "result would be genuine, not a resolution artifact.")
-
-pl.DataFrame({k: [v] for k, v in floor_check.items()}).write_csv(OUT_DIR / "maxstat_floor_check.csv")
-print(f"wrote {OUT_DIR / 'maxstat_floor_check.csv'}")
+n_sig = int(b4_per_cell["best_ci_raw_excludes_zero"].fill_null(False).sum()) if b4_per_cell.height else 0
+print(f"per-cell significance — best-window CI excludes zero: {n_sig}/{b4_per_cell.height}")
 
 # %% [markdown]
 # ## ROI lookup
@@ -588,11 +516,10 @@ print(f"ROI rows: {electrode_roi.height}")
 # %% [markdown]
 # ## Population summary
 #
-# Per (window × cut): fraction of cells with `ci_raw_excludes_zero` (naive,
-# uncorrected for the window search — see maxstat above for the corrected
-# per-cell call), median signed/|abs| raw effect. `acoustic_significant` is
-# an explicit cut — this is the number the fork exists to produce: does the
-# non-acoustic-significant slice show perceptual selectivity too?
+# Per (window × cut): fraction of cells with `ci_raw_excludes_zero`, median
+# signed/|abs| raw effect. `acoustic_significant` is an explicit cut — this
+# is the number the fork exists to produce: does the non-acoustic-significant
+# slice show perceptual selectivity too?
 
 # %%
 def population_summary(per_window: pl.DataFrame, mode_name: str) -> pl.DataFrame:
@@ -660,26 +587,13 @@ with PdfPages(pdf_path) as pdf:
             ha="center", va="center", fontsize=16)
     n_ok = cell_manifest.filter(pl.col("status") == "ok").height
     n_as_ok = int(b4_per_cell["acoustic_significant"].sum()) if b4_per_cell.height else 0
-    n_maxstat_sig = int(b4_per_cell["maxstat_reject"].fill_null(False).sum()) if b4_per_cell.height else 0
-    n_naive_sig = int(b4_per_cell["best_ci_raw_excludes_zero"].fill_null(False).sum()) if b4_per_cell.height else 0
-    floor_line = (
-        f"*** floor limits rejection at this family size ({floor_check['n_cells']} cells) — "
-        f"a null result may be permutation-censored, not genuine ***"
-        if floor_check["floor_limits_rejection"]
-        else f"floor does not limit rejection ({floor_check['n_cells']} cells) — null result would be genuine"
-    )
     ax.text(0.5, 0.55,
-            f"K = {K}   ·   R = {R}   ·   CI = {CI_LOW}–{CI_HIGH}%   ·   maxstat_alpha = {maxstat_alpha}\n"
+            f"K = {K}   ·   R = {R}   ·   CI = {CI_LOW}–{CI_HIGH}%\n"
             f"cells (ok): {n_ok}   (acoustic_significant: {n_as_ok})\n\n"
-            f"naive best-window CI-excludes-0:  {n_naive_sig} / {n_ok}  (CIRCULAR — self-selected\n"
-            f"  window, not a test; see late_integration_maxstat_significance.py)\n"
-            f"maxstat + BH-FDR significant:      {n_maxstat_sig} / {n_ok}  (DEFENSIBLE, headline)\n\n"
-            f"BH-FDR family = all {n_ok} tested cells (one family; NOT further corrected across\n"
-            f"electrodes — see perceptual_acoustic_partition.py's electrode-level collapse).\n\n"
-            f"permutation floor = {floor_check['floor']:.1e}   "
-            f"rank-1 BH threshold = {floor_check['rank1_bh_threshold']:.1e}\n"
-            f"{floor_line}",
-            ha="center", va="center", fontsize=9.5)
+            f"best-window CI-excludes-0:  {n_sig} / {n_ok}\n\n"
+            f"(raw, uncorrected bootstrap CI — matches how t_tests.py's output\n"
+            f"is used everywhere else downstream)",
+            ha="center", va="center", fontsize=10)
     pdf.savefig(fig); plt.close(fig)
 
     # Per-time frac-CI-excludes-0 curve, split by acoustic_significant
@@ -697,9 +611,9 @@ with PdfPages(pdf_path) as pdf:
         ax.plot(sub["tmin"].to_numpy(), sub["frac_ci_raw"].to_numpy(),
                 marker="o", color=color, lw=1.4, label=f"{label} (n={int(sub['n_cells'][0])})")
     ax.set_xlabel("Window start (s, post word onset)")
-    ax.set_ylabel("fraction of cells, naive CI excludes 0")
+    ax.set_ylabel("fraction of cells, CI excludes 0")
     ax.set_ylim(0, 1.02)
-    ax.set_title("B4 — naive per-window fraction significant, by acoustic_significant")
+    ax.set_title("B4 — per-window fraction significant, by acoustic_significant")
     ax.grid(alpha=0.3)
     ax.legend(fontsize=8, loc="upper right")
     fig.tight_layout()
@@ -746,31 +660,31 @@ with PdfPages(pdf_path) as pdf:
         fig.tight_layout()
         pdf.savefig(fig); plt.close(fig)
 
-    # Best-window timing scatter, colored by maxstat_reject
+    # Best-window timing scatter, colored by ci_raw_excludes_zero
     if b4_per_cell.height:
         fig, ax = plt.subplots(figsize=(7, 4))
         tmin_arr = b4_per_cell["best_tmin"].to_numpy().astype(float)
-        sig_mask = b4_per_cell["maxstat_reject"].fill_null(False).to_numpy().astype(bool)
+        sig_mask = b4_per_cell["best_ci_raw_excludes_zero"].fill_null(False).to_numpy().astype(bool)
         rng_jit = np.random.default_rng(42)
         y_jit = rng_jit.uniform(-0.4, 0.4, size=len(tmin_arr))
         ax.scatter(tmin_arr[~sig_mask], y_jit[~sig_mask],
                    color="#d9d9d9", s=22, alpha=0.8, linewidths=0.4,
-                   edgecolors="k", label="not maxstat significant", zorder=2)
+                   edgecolors="k", label="CI includes 0", zorder=2)
         ax.scatter(tmin_arr[sig_mask], y_jit[sig_mask],
                    color="#2166ac", s=30, alpha=0.85, linewidths=0.4,
-                   edgecolors="k", label="maxstat significant", zorder=3)
-        n_sig = int(sig_mask.sum())
+                   edgecolors="k", label="CI excludes 0", zorder=3)
+        n_sig_scatter = int(sig_mask.sum())
         n_tot = len(sig_mask)
         ax.axhline(0, color="k", lw=0.4, ls=":")
         ax.set_xlabel("Best-window tmin (s, post word onset)")
         ax.set_yticks([])
-        ax.set_title(f"B4 — {n_sig}/{n_tot} maxstat significant ({100*n_sig/max(n_tot,1):.0f}%)")
+        ax.set_title(f"B4 — {n_sig_scatter}/{n_tot} significant ({100*n_sig_scatter/max(n_tot,1):.0f}%)")
         ax.legend(fontsize=8, loc="lower left")
         ax.grid(axis="x", alpha=0.3)
         fig.tight_layout()
         pdf.savefig(fig); plt.close(fig)
 
-    # phoneme_pair / roi / acoustic_significant breakdowns (naive, for context)
+    # phoneme_pair / roi / acoustic_significant breakdowns
     fig, axes = plt.subplots(1, 3, figsize=(13, 4))
     for ax, cut in zip(axes, ("phoneme_pair", "roi", "acoustic_significant")):
         sub = population.filter((pl.col("mode") == "b4") & (pl.col("cut") == cut))
@@ -789,7 +703,7 @@ with PdfPages(pdf_path) as pdf:
         for y, (v, n) in enumerate(zip(vals, ns)):
             ax.text(v + 0.01, y, f"{v:.0%} (n={int(n)})", va="center", fontsize=8)
         ax.set_xlim(0, 1.05)
-        ax.set_xlabel("peak-window frac naive CI excludes 0")
+        ax.set_xlabel("peak-window frac CI excludes 0")
         ax.set_title(f"B4 — {cut}")
     fig.tight_layout()
     pdf.savefig(fig); plt.close(fig)
@@ -801,17 +715,11 @@ print(f"wrote {pdf_path}")
 
 # %%
 print("=" * 70)
-print(f"K = {K}   R = {R}   CI = {CI_LOW}–{CI_HIGH}%   maxstat_alpha = {maxstat_alpha}")
+print(f"K = {K}   R = {R}   CI = {CI_LOW}–{CI_HIGH}%")
 print(f"all-SR sites: {site_universe.height}  "
       f"(acoustic_significant: {int(site_universe['acoustic_significant'].sum())})")
 print(f"B4 cells (ok): {cell_manifest.filter(pl.col('status') == 'ok').height}")
 if b4_per_cell.height:
-    n_naive = int(b4_per_cell["best_ci_raw_excludes_zero"].fill_null(False).sum())
-    n_maxstat = int(b4_per_cell["maxstat_reject"].fill_null(False).sum())
-    print(f"naive best-window CI-excludes-0 (CIRCULAR, not a test): {n_naive}/{b4_per_cell.height}")
-    print(f"maxstat + BH-FDR significant (DEFENSIBLE, headline):    {n_maxstat}/{b4_per_cell.height}")
-    if floor_check["floor_limits_rejection"]:
-        print("*** permutation floor limits BH-FDR rejection at this family size — "
-              "a null result is NOT reliable evidence; see maxstat_floor_check.csv ***")
+    print(f"best-window CI-excludes-0: {n_sig}/{b4_per_cell.height}")
 print(f"See {pdf_path}")
 print("=" * 70)

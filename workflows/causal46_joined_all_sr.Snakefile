@@ -87,7 +87,7 @@ rule trial_balance_index_all_sr:
 rule t_tests_all_sr:
     """Step 3: B4 bootstrap CIs for within-completion HGA contrast at ALL
     speech-responsive sites (raw contrast only; acoustic_significant carried
-    as an annotation; window-search-corrected maxstat significance added)."""
+    as an annotation)."""
     input:
         sr_site_universe = "outputs/causal46_joined/sr_site_universe/sr_site_universe.parquet",
         trial_balance    = "outputs/causal46_joined/trial_balance_index_all_sr/trial_balance_index.csv",
@@ -105,7 +105,6 @@ rule t_tests_all_sr:
         cell_manifest      = "outputs/causal46_joined/t_tests_all_sr/cell_manifest.parquet",
         population_summary = "outputs/causal46_joined/t_tests_all_sr/population_summary.csv",
         population_pdf     = "outputs/causal46_joined/t_tests_all_sr/population_summary.pdf",
-        maxstat_floor_check = "outputs/causal46_joined/t_tests_all_sr/maxstat_floor_check.csv",
 
     run:
         C46 = config["causal46_joined"]
@@ -121,7 +120,6 @@ rule t_tests_all_sr:
                 window_size=C46["window_size"],
                 stride=C46["stride"],
                 n_bootstrap=C46.get("n_bootstrap", 1000),
-                maxstat_alpha=C46.get("maxstat_alpha", 0.05),
             ),
         )
 
@@ -165,13 +163,11 @@ rule perceptual_acoustic_partition:
         b4_per_cell               = "outputs/causal46_joined/t_tests_all_sr/b4_per_cell.parquet",
         sr_site_universe_electrode = "outputs/causal46_joined/sr_site_universe/sr_site_universe_electrode_level.csv",
         reconciliation_summary    = "outputs/causal46_joined/t_tests_all_sr_reconciliation/reconciliation_summary.csv",
-        maxstat_floor_check       = "outputs/causal46_joined/t_tests_all_sr/maxstat_floor_check.csv",
         notebook                  = "notebooks/causal46_joined/all_sr/perceptual_acoustic_partition.py",
 
     output:
         notebook                = "outputs/causal46_joined/perceptual_acoustic_partition/notebook.ipynb",
-        cell_headline            = "outputs/causal46_joined/perceptual_acoustic_partition/partition_cell_level_headline.csv",
-        cell_naive               = "outputs/causal46_joined/perceptual_acoustic_partition/partition_cell_level_naive.csv",
+        cell_level               = "outputs/causal46_joined/perceptual_acoustic_partition/partition_cell_level.csv",
         electrode_level          = "outputs/causal46_joined/perceptual_acoustic_partition/partition_electrode_level.csv",
         electrode_2x2            = "outputs/causal46_joined/perceptual_acoustic_partition/partition_electrode_level_2x2.csv",
         report_pdf               = "outputs/causal46_joined/perceptual_acoustic_partition/partition_report.pdf",
@@ -184,7 +180,6 @@ rule perceptual_acoustic_partition:
                 b4_per_cell_path=str(input.b4_per_cell),
                 sr_site_universe_electrode_path=str(input.sr_site_universe_electrode),
                 reconciliation_summary_path=str(input.reconciliation_summary),
-                maxstat_floor_check_path=str(input.maxstat_floor_check),
                 outdir=str(Path(output.notebook).parent),
             ),
         )
