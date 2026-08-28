@@ -71,6 +71,10 @@ b_windows_path = "outputs/causal46_joined/behavioral_discriminative_windows_all/
 # Reference: the B4 gate this notebook is paired against.
 late_perceptual_projection_results_path = "outputs/causal46_joined/late_perceptual_projection/results.csv"
 
+# Early perceptual projection per-site results (plot_for_paper's epp_path) —
+# used for the early x late cross-check at the end of this notebook.
+epp_path = "outputs/causal46_joined/early_perceptual_projection/all_sites.csv"
+
 epoch_dir = "outputs/epochs_preprocessed"
 outdir = "outputs/causal46_joined/single_step_perceptual_projection"
 min_class_k = 3
@@ -450,3 +454,102 @@ n_present = int((single_step_site["late_category"] != "absent").sum())
 print(f"Single-step sites late-present (>=1 completion): {n_present} / {n_sites}")
 print("(B4 reference: 11 / 31)")
 print(single_step_site["late_category"].value_counts())
+
+# %% [markdown]
+# ## Cross-check: early perceptual sites
+#
+# Replicates `plot_for_paper`'s early x late conjunction table
+# (`CONJUNCTION_CATEGORIES`: Acoustic / Late perceptual / Early perceptual /
+# Early + late perceptual — see `src/viz_paper.py`), substituting the
+# single-step site-level `late_category` for the pooled B4 one. This asks:
+# of the sites that show an early perceptual (type2_aligned) response, how
+# many still show a LATE response once the late percept contrast is
+# restricted to a single acoustic step? "Early + late perceptual" is the
+# reactivation-candidate cell — same code base for both windows is the
+# minimum bar reactivation needs to clear, and single-step is a stricter,
+# less pooled-power-dependent version of that bar.
+#
+# `epp` (early_category) universe and filter are byte-identical to
+# `plot_for_paper`: acoustic_only sites, plus type2_aligned sites that are
+# also uncorrected-significant (`p_one_tailed < 0.05`) — same early
+# perceptual gate the paper's flow table uses. This is a strictly larger
+# site universe than the B4/single-step cell pool (52 vs 31 in the
+# `outputs_prod` reference run): sites failing the B4-windows join
+# (`ci_excludes_zero & n_component_windows >= 2`) are absent from the cell
+# pool but still appear here with `late_category = "absent"` — matching
+# `plot_for_paper`'s outer-merge + fillna("absent") treatment.
+
+# %%
+from src.viz_paper import CONJUNCTION_CATEGORIES, F_EARLY, F_LATE  # noqa: E402
+
+epp_orig = pd.read_csv(epp_path)
+epp_orig["significant_uncorrected"] = epp_orig["p_one_tailed"] < fdr_alpha
+epp = epp_orig[
+    (epp_orig["early_response_class"] == "acoustic_only")
+    | ((epp_orig["early_response_class"] == "type2_aligned") & epp_orig["significant_uncorrected"])
+]
+early_cat = (
+    epp
+    .assign(early_category=lambda df: df["early_response_class"].replace({
+        "acoustic_only": "acoustic",
+        "type2_aligned": "perceptual",
+    }))
+    [SITE_KEYS + ["early_category"]]
+)
+print(f"Early-category site universe (epp): {len(early_cat)}")
+
+# B4 (pooled) site-level late_category — same recipe as plot_for_paper's
+# `late_pres`, for a side-by-side, apples-to-apples comparison.
+b4_site = (
+    b4_results
+    .groupby(SITE_KEYS)[["projection_significant_uncorrected"]]
+    .sum()
+    .rename(columns={"projection_significant_uncorrected": "n_we_sig"})
+)
+b4_site["late_category"] = b4_site["n_we_sig"].map(
+    {0: "absent", 1: "one-sided", 2: "two-sided"}
+)
+
+
+def _conjunction_table(late_df, label):
+    merged = pd.merge(
+        early_cat,
+        late_df[["late_category"]].reset_index(),
+        on=SITE_KEYS,
+        how="outer",
+    )
+    merged["late_category"] = merged["late_category"].fillna("absent")
+    n_dropped = merged["early_category"].isna().sum()
+    merged = merged.dropna(subset=["early_category"])
+
+    ct = (
+        merged
+        .groupby(["early_category", "late_category"])
+        .size()
+        .unstack(fill_value=0)
+        .reindex(F_EARLY.order, axis=0)
+        .reindex(list(F_LATE.order), axis=1, fill_value=0)
+    )
+    print(f"\n=== {label} ===")
+    print(f"Site x pair cells total: {len(merged)}  (dropped {n_dropped} with no early_category)")
+    print(ct)
+
+    conj_counts = {}
+    for cat_name, cat_def in CONJUNCTION_CATEGORIES.items():
+        late_type = cat_def["late_category"]
+        late_type = [late_type] if isinstance(late_type, str) else late_type
+        n = int((
+            (merged["early_category"] == cat_def["early_category"])
+            & (merged["late_category"].isin(late_type))
+        ).sum())
+        conj_counts[cat_name] = n
+    print(conj_counts)
+    return merged, ct, conj_counts
+
+
+_, ct_b4, conj_b4 = _conjunction_table(b4_site, "B4 (pooled) early x late")
+_, ct_single, conj_single = _conjunction_table(single_step_site, "Single-step early x late")
+
+print("\n=== 'Early + late perceptual' (reactivation-candidate) sites ===")
+print(f"B4 pooled:    {conj_b4['Early + late perceptual']}")
+print(f"Single-step:  {conj_single['Early + late perceptual']}")
