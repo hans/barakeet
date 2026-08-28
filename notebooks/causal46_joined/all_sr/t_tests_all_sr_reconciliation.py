@@ -59,12 +59,12 @@ all_sr_per_cell_path = "outputs/causal46_joined/t_tests_all_sr/b4_per_cell.parqu
 original_per_window_path = "outputs/causal46_joined/t_tests/b4_per_window.parquet"
 original_per_cell_path = "outputs/causal46_joined/t_tests/b4_per_cell.parquet"
 outdir = "outputs/causal46_joined/t_tests_all_sr_reconciliation"
-atol = 1e-9
-rtol = 1e-9
 
 # %%
 OUT_DIR = Path(outdir)
 OUT_DIR.mkdir(parents=True, exist_ok=True)
+atol = 1e-9
+rtol = 1e-9
 
 CELL_KEYS = ["subject", "electrode_idx", "phoneme_pair", "word_end"]
 

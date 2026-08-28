@@ -74,16 +74,11 @@ reconciliation_summary_path = "outputs/causal46_joined/t_tests_all_sr_reconcilia
 maxstat_floor_check_path = "outputs/causal46_joined/t_tests_all_sr/maxstat_floor_check.csv"
 outdir = "outputs/causal46_joined/perceptual_acoustic_partition"
 
-# CLAUDE.md: "64 electrodes across 10 participants show significant acoustic
-# selectivity" — the paper's reported AS denominator, from a production run
-# under config this fork's dev-container snapshot of phon_peaks_all.parquet
-# does not match (15-221 depending on threshold; see plan's Implementation
-# notes). Printed for reference only — never asserted against.
-paper_reported_as_electrode_n = 64
-
 # %%
 OUT_DIR = Path(outdir)
 OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+paper_reported_as_electrode_n = 44
 
 # %% [markdown]
 # ## Gate: reconciliation must have passed

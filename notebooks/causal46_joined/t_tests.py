@@ -69,6 +69,11 @@ import yaml
 from matplotlib.backends.backend_pdf import PdfPages
 from tqdm.auto import tqdm
 
+from src._star_gallery import (  # noqa: E402
+    HAS_PYPDF,
+    site_effect_fig,
+    write_annotated_pdfs,
+)
 from src.data import get_electrode_df
 from src.stimuli import OFFSET_DICT, PHONEME_PAIR_TO_WORD_ENDS
 from src.viz_paper import epoch_sfreq, epoch_tmin
@@ -84,7 +89,6 @@ from _within_completion import (  # noqa: E402
     searchlight_mean_diff,
     select_cell_trials_bootstrap,
 )
-from _star_gallery import HAS_PYPDF, site_effect_fig, write_annotated_pdfs  # noqa: E402
 
 # %% tags=["parameters"]
 phon_peaks_path = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet"

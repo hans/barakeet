@@ -126,19 +126,25 @@ CONJUNCTION_CATEGORIES = {
         "early_category": "acoustic",
         "late_category":  "absent",
     },
-    "Acoustic + integration": {
+    "Late perceptual": {
         "early_category": "acoustic",
         "late_category": ["two-sided", "one-sided"],
     },
-    "Perceptual": {
+    "Early perceptual": {
         "early_category": "perceptual",
         "late_category":  "absent",
     },
-    "Perceptual + integration": {
+    "Early + late perceptual": {
         "early_category": "perceptual",
         "late_category":  ["two-sided", "one-sided"],
     }
 }
+F_CONJ = Factor.from_tuples(
+    ("acoustic", "#E8842B", "Acoustic"),
+    ("late", "#17A2A2", "Late perceptual"),
+    ("early", "#7A5BB5", "Early perceptual"),
+    ("early+late", "#497FAC", "Early + late perceptual"),
+)
 
 # Highlight color for early and late perceptual effects
 EPP_COLOR = "#1b7837"
