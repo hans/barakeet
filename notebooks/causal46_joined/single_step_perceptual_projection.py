@@ -385,6 +385,40 @@ print(pd.crosstab(paired["b4_sig"], paired["single_step_sig"],
                    rownames=["B4 sig"], colnames=["single-step sig"]))
 
 # %% [markdown]
+# ### Plot
+
+# %%
+from src._star_gallery import matched_n_star_plot_paper
+from src.viz_paper import resampled_cmap
+
+# %%
+# cells which are sig in both b4 and single-step
+_to_plot = paired.query("b4_sig & single_step_sig")
+_to_plot = pd.merge(
+    _to_plot,
+    ma_testable,
+    on=CELL_KEYS,
+    how="left",).sort_values("projection_p_value")
+for _, row in tqdm(_to_plot.iterrows(), total=len(_to_plot)):
+    subject = row["subject"]
+    electrode_idx = row["electrode_idx"]
+    phoneme_pair = row["phoneme_pair"]
+    word_end = row["word_end"]
+    f = matched_n_star_plot_paper(
+        subject=subject,
+        electrode_idx=electrode_idx,
+        phoneme_pair=phoneme_pair,
+        word_end=word_end,
+        qualifying_steps=[row["step"]],
+        epochs_dict=epochs_dict,
+        bottom_late_window=(row["smin"], row["smax"]),
+        textgrid_dir="textgrids",
+        resampled_cmap=resampled_cmap,
+        figsize=(3, 3),
+    )
+    f.suptitle(f"{subject} {electrode_idx} {phoneme_pair} {word_end}@{row['step']}")
+
+# %% [markdown]
 # ### Site-level roll-up
 #
 # Replicates `plot_for_paper`'s `late_category` construction: sum
