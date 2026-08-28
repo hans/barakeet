@@ -76,7 +76,7 @@ late_perceptual_projection_results_path = "outputs/causal46_joined/late_perceptu
 epp_path = "outputs/causal46_joined/early_perceptual_projection/all_sites.csv"
 
 epoch_dir = "outputs/epochs_preprocessed"
-outdir = "outputs/causal46_joined/single_step_perceptual_projection"
+outdir = "outputs/causal46_joined/late_single_step_perceptual_projection"
 min_class_k = 3
 
 min_component_windows = 2

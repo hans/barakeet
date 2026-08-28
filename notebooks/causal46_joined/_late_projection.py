@@ -2,7 +2,7 @@
 
 Lifted verbatim from `late_perceptual_projection.py` (the B4/pooled-step gate),
 with one addition: `compute_p` takes an optional `restrict_steps` kwarg so the
-single-step notebook (`single_step_perceptual_projection.py`) can reuse the
+single-step notebook (`late_single_step_perceptual_projection.py`) can reuse the
 exact same gate logic, restricted to one acoustic step. `restrict_steps=None`
 reproduces the original pooled-step behavior exactly.
 
