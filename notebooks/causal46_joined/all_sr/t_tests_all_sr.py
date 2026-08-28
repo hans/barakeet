@@ -74,7 +74,6 @@ from src.viz_provisional import load_epochs_dict
 
 sys.path.insert(0, str(Path(".").resolve() / "notebooks" / "causal46_joined"))
 from _within_completion import (  # noqa: E402
-    extract_hga,
     n_per_class_from_per_step,
     per_step_class_counts,
     resolve_behavior_col,
@@ -283,78 +282,110 @@ def bootstrap_cell(
 
 # %% [markdown]
 # ## Run B4 cells
+#
+# `extract_hga` reads all channels from disk and applies baseline correction
+# per call (`epochs_dict` is loaded `preload=False` — see `load_epochs_dict`
+# — so `.get_data()` triggers a fresh full read every time, even with
+# `picks=[electrode_idx]`: MNE loads the whole per-epoch channel block from
+# disk, then subsets in memory). The underlying data only depends on
+# `(subject, phoneme_pair)`, not on `electrode_idx` or `word_end` — but a
+# naive per-row loop over `b4_qualified` calls it once per (electrode,
+# word_end) cell, redoing the same disk read + baseline correction for every
+# electrode and every word_end sharing that (subject, phoneme_pair). Over
+# the full SR universe (hundreds of electrodes × 2 word_ends per pair,
+# thousands of cells total) that dwarfs the actual bootstrap computation.
+# Group by (subject, phoneme_pair) instead: load + baseline ALL channels
+# ONCE per group, then slice out each electrode's HGA in memory (cheap numpy
+# indexing) for every cell in that group.
 
 # %%
 b4_boot_rows: list[dict] = []
 b4_cell_manifest: list[dict] = []
 b4_failures: list[dict] = []
 
-for row in tqdm(b4_qualified.iter_rows(named=True),
-                total=b4_qualified.height, desc="B4 all-SR bootstrap"):
-    subj = row["subject"]
+b4_groups: dict[tuple[str, str], list[dict]] = {}
+for row in b4_qualified.iter_rows(named=True):
+    b4_groups.setdefault((row["subject"], row["phoneme_pair"]), []).append(row)
+print(f"B4 qualifying cells: {b4_qualified.height}  "
+      f"grouped into {len(b4_groups)} (subject, phoneme_pair) loads")
+
+pbar = tqdm(total=b4_qualified.height, desc="B4 all-SR bootstrap")
+for (subj, pp), group_rows in b4_groups.items():
     if subj not in epochs_dict:
-        b4_failures.append({**row, "error": "no epochs for subject"})
+        for row in group_rows:
+            b4_failures.append({**row, "error": "no epochs for subject"})
+        pbar.update(len(group_rows))
         continue
     ep = epochs_dict[subj]
     md = ep.metadata
     bhv_col = resolve_behavior_col(md)
-    pp_mask = (md["phoneme_pair"] == row["phoneme_pair"]).values
+    pp_mask = (md["phoneme_pair"] == pp).values
     ep_pp = ep[pp_mask]
     md_pp = md[pp_mask].reset_index(drop=True)
-    hga = extract_hga(ep_pp, int(row["electrode_idx"]))
-    behav_smin, behav_smax = behav_search_range(row["phoneme_pair"])
-    steps = [int(s) for s in row["qualifying_steps"]]
-    manifest_base = {
-        "subject": subj,
-        "electrode_idx": int(row["electrode_idx"]),
-        "phoneme_pair": row["phoneme_pair"],
-        "word_end": row["word_end"],
-        "qualifying_steps": ",".join(str(s) for s in steps),
-        "n_per_class": int(row["n_per_class"]),
-        "acoustic_significant": bool(row["acoustic_significant"]),
-        "phon_smin": row["phon_smin"],
-        "phon_smax": row["phon_smax"],
-    }
-    if behav_smax - behav_smin < WINDOW_SIZE:
-        b4_cell_manifest.append({
-            **manifest_base,
-            "status": "search_range_too_narrow",
-            "behav_smin": behav_smin, "behav_smax": behav_smax,
-        })
-        continue
-    try:
-        rows, n_per_class = bootstrap_cell(
-            md_pp=md_pp, hga=hga, bhv_col=bhv_col,
-            word_end=row["word_end"], qualifying_steps=steps,
-            behav_smin=behav_smin, behav_smax=behav_smax,
-            R=R,
-        )
-        for r in rows:
-            b4_boot_rows.append({
-                "subject": subj,
-                "electrode_idx": int(row["electrode_idx"]),
-                "phoneme_pair": row["phoneme_pair"],
-                "word_end": row["word_end"],
-                "qualifying_steps": ",".join(str(s) for s in steps),
-                "n_qualifying_steps": len(steps),
-                "acoustic_significant": bool(row["acoustic_significant"]),
-                **r,
-            })
-        b4_cell_manifest.append({
-            **manifest_base,
-            "status": "ok",
-            "behav_smin": behav_smin, "behav_smax": behav_smax,
-        })
-    except Exception as exc:
-        tb = traceback.format_exc()
-        b4_failures.append({
-            **{k: row[k] for k in
-               ("subject", "electrode_idx", "phoneme_pair", "word_end")},
+    # Load + baseline-correct ALL channels once for this (subject, pp);
+    # electrode_idx indexes axis 1 the same way extract_hga's
+    # get_data(picks=[electrode_idx]) did.
+    all_hga = ep_pp.copy().apply_baseline((None, 0)).get_data()
+
+    for row in group_rows:
+        hga = all_hga[:, int(row["electrode_idx"]), :]
+        behav_smin, behav_smax = behav_search_range(row["phoneme_pair"])
+        steps = [int(s) for s in row["qualifying_steps"]]
+        manifest_base = {
+            "subject": subj,
+            "electrode_idx": int(row["electrode_idx"]),
+            "phoneme_pair": row["phoneme_pair"],
+            "word_end": row["word_end"],
             "qualifying_steps": ",".join(str(s) for s in steps),
-            "error": repr(exc), "traceback": tb,
-        })
-        print(f"FAILED B4: {subj} e{row['electrode_idx']} {row['phoneme_pair']} "
-              f"{row['word_end']}\n{tb}")
+            "n_per_class": int(row["n_per_class"]),
+            "acoustic_significant": bool(row["acoustic_significant"]),
+            "phon_smin": row["phon_smin"],
+            "phon_smax": row["phon_smax"],
+        }
+        if behav_smax - behav_smin < WINDOW_SIZE:
+            b4_cell_manifest.append({
+                **manifest_base,
+                "status": "search_range_too_narrow",
+                "behav_smin": behav_smin, "behav_smax": behav_smax,
+            })
+            pbar.update(1)
+            continue
+        try:
+            rows, n_per_class = bootstrap_cell(
+                md_pp=md_pp, hga=hga, bhv_col=bhv_col,
+                word_end=row["word_end"], qualifying_steps=steps,
+                behav_smin=behav_smin, behav_smax=behav_smax,
+                R=R,
+            )
+            for r in rows:
+                b4_boot_rows.append({
+                    "subject": subj,
+                    "electrode_idx": int(row["electrode_idx"]),
+                    "phoneme_pair": row["phoneme_pair"],
+                    "word_end": row["word_end"],
+                    "qualifying_steps": ",".join(str(s) for s in steps),
+                    "n_qualifying_steps": len(steps),
+                    "acoustic_significant": bool(row["acoustic_significant"]),
+                    **r,
+                })
+            b4_cell_manifest.append({
+                **manifest_base,
+                "status": "ok",
+                "behav_smin": behav_smin, "behav_smax": behav_smax,
+            })
+        except Exception as exc:
+            tb = traceback.format_exc()
+            b4_failures.append({
+                **{k: row[k] for k in
+                   ("subject", "electrode_idx", "phoneme_pair", "word_end")},
+                "qualifying_steps": ",".join(str(s) for s in steps),
+                "error": repr(exc), "traceback": tb,
+            })
+            print(f"FAILED B4: {subj} e{row['electrode_idx']} {row['phoneme_pair']} "
+                  f"{row['word_end']}\n{tb}")
+        pbar.update(1)
+
+pbar.close()
 
 # Underpowered candidates (n_qualifying < 1 or n_per_class < K) — for
 # completeness in the manifest, ALL SR cells, not just AS ones.
