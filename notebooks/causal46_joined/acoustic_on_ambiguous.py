@@ -52,13 +52,17 @@
 # %%
 from __future__ import annotations
 
+import json
 import sys
 import traceback
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import polars as pl
+import statsmodels.formula.api as smf
 import yaml
+from scipy import stats as scipy_stats
 from tqdm.auto import tqdm
 
 from src.stimuli import OFFSET_DICT, PHONEME_PAIR_TO_WORD_ENDS
@@ -68,6 +72,7 @@ from src.viz_provisional import load_epochs_dict
 sys.path.insert(0, str(Path(".").resolve() / "notebooks" / "causal46_joined"))
 from _within_completion import (  # noqa: E402
     extract_hga,
+    extract_hga_trials,
     resolve_behavior_col,
 )
 from _acoustic_step_bootstrap import (  # noqa: E402
@@ -85,6 +90,9 @@ epoch_dir = "outputs/epochs_preprocessed"
 trial_balance_path = "outputs/causal46_joined/trial_balance_index.csv"
 b4_per_window_path = "outputs/causal46_joined/t_tests/b4_per_window.parquet"
 b4_per_cell_path = "outputs/causal46_joined/t_tests/b4_per_cell.parquet"
+late_acoustic_summary_path = "outputs/causal46_joined/acoustic_late/acoustic_late_summary.csv"
+late_acoustic_results_path = "outputs/causal46_joined/acoustic_late/acoustic_late_results.csv"
+a_per_window_by_word_end_path = "outputs/causal46_joined/acoustic_bootstrap/a_per_window_by_word_end_all.parquet"
 outdir = "outputs/causal46_joined/acoustic_on_ambiguous"
 min_class_k = 4
 window_size = 10
@@ -420,6 +428,201 @@ if step_tuning_df.height:
     print(step_tuning_df.group_by("window_kind").agg(
         pl.col("subject").n_unique().alias("n_cells_x_steps_rows")
     ))
+
+# %% [markdown]
+# ## Late-region acoustic gradient regression (whole-window, behavior-controlled)
+#
+# `b4_step_tuning` above evaluates every step at ONE fixed narrow window per
+# cell (`window_size` samples, `causal46_joined.window_size` in config.yaml —
+# 20ms at 100Hz — the best_smin/best_smax picked by the s_lo/s_hi searchlight).
+# This section instead asks whether the late response scales gradedly with
+# acoustic step across a whole late-response REGION, mirroring the "late
+# acoustic regression" in plot_for_paper.ipynb:
+#
+# 1. Define each site's late-response region independently of the ambiguous
+#    trials: union the significant per-window bootstrap windows
+#    (`a_per_window_by_word_end`) that fall inside the site's significant
+#    late-acoustic decoder window (`acoustic_late`, fit on unambiguous
+#    step-1/step-6 trials only — see `run_acoustic_searchlight`'s
+#    `resampled_steps` default). Adjacent/same-sign windows (gap <= 2
+#    samples) are merged into one interval per site, exactly as in
+#    plot_for_paper's `late_acoustic_windows` construction. This region is
+#    defined entirely from UNAMBIGUOUS trials, so evaluating it on ambiguous
+#    trials below is not circular.
+# 2. Restrict to the same B4 acoustic-qualified cells used above
+#    (n_qualifying_steps >= 2, n_per_class >= K) — the "highly variable
+#    reports across multiple steps" subset.
+# 3. Extract per-trial mean HGA over the union region on each cell's
+#    qualifying ambiguous steps, sign-aligned by the union window's tuning
+#    direction (mean_diff_raw_med).
+# 4. Fit a mixed-effects regression of aligned HGA on acoustic step (centered,
+#    continuous) controlling for reported percept (behavior_dummy_forced),
+#    random intercept per site, and a likelihood-ratio test for the
+#    acoustic-step coefficient — a population-level test of graded acoustic
+#    tuning in the late region, independent of percept.
+#
+# Outputs:
+# - `late_acoustic_gradient_trial_df.parquet`
+# - `late_acoustic_gradient_lme_results.json`
+
+# %%
+late_results = pd.read_csv(late_acoustic_results_path)
+late_summary = pd.read_csv(late_acoustic_summary_path)
+
+late_sig_df = pd.merge(
+    late_summary,
+    late_results[["subject", "electrode_idx", "phoneme_pair", "word_end", "smin", "smax"]]
+        .drop_duplicates(),
+    how="left", on=["subject", "electrode_idx", "phoneme_pair", "word_end"], validate="m:1",
+).query("significant_target")
+print(f"late-acoustic significant sites (unambiguous step1/step6 decoder): {late_sig_df.shape[0]}")
+
+a_per_window_by_we = pl.read_parquet(a_per_window_by_word_end_path).to_pandas()
+
+# %% [markdown]
+# ### Union significant per-window bootstrap results into one late-region interval per site
+
+# %%
+_GRAD_GROUP_KEYS = ["subject", "electrode_idx", "phoneme_pair", "word_end"]
+_MAX_GAP = 2  # samples of separation tolerated within a union
+
+_late_windows = (
+    pd.merge(
+        late_sig_df, a_per_window_by_we,
+        how="left", on=_GRAD_GROUP_KEYS,
+        suffixes=("_decoder", "_bootstrap"),
+    )
+    .query("smin_bootstrap >= smin_decoder and smax_bootstrap <= smax_decoder")
+)
+_late_windows["mean_diff_raw_med_abs"] = _late_windows["mean_diff_raw_med"].abs()
+_late_windows = _late_windows.sort_values(_GRAD_GROUP_KEYS + ["smin_bootstrap"]).reset_index(drop=True)
+_late_windows["contrast_sign"] = np.sign(_late_windows["mean_diff_raw_med"])
+
+_run_max = _late_windows.groupby(_GRAD_GROUP_KEYS, sort=False)["smax_bootstrap"].cummax()
+_new_group = (_late_windows[_GRAD_GROUP_KEYS] != _late_windows[_GRAD_GROUP_KEYS].shift(1)).any(axis=1)
+_gap = _late_windows["smin_bootstrap"] > _run_max.shift(1) + _MAX_GAP
+_sign_flip = _late_windows["contrast_sign"] != _late_windows["contrast_sign"].shift(1)
+_starts_new = _new_group | _gap | _sign_flip
+_starts_new.iloc[0] = True
+_late_windows["union_id"] = _starts_new.cumsum()
+
+late_acoustic_windows = (
+    _late_windows
+    .groupby(_GRAD_GROUP_KEYS + ["union_id"])
+    .agg(
+        smin_bootstrap=("smin_bootstrap", "min"),
+        smax_bootstrap=("smax_bootstrap", "max"),
+        mean_diff_raw_med_abs=("mean_diff_raw_med_abs", "mean"),
+        mean_diff_raw_med=("mean_diff_raw_med", "mean"),
+        n_windows=("smin_bootstrap", "size"),
+    )
+    .reset_index()
+    # retain, per site, the union interval with the largest mean contrast
+    .sort_values("mean_diff_raw_med_abs")
+    .groupby(_GRAD_GROUP_KEYS).last().reset_index()
+)
+late_acoustic_windows["contrast_sign"] = np.sign(late_acoustic_windows["mean_diff_raw_med"])
+print(f"late-acoustic union windows (one per site): {late_acoustic_windows.shape[0]}")
+
+# %% [markdown]
+# ### Restrict to B4 acoustic-qualified cells, extract per-trial late-region HGA
+
+# %%
+manifest_ok = acoustic_cell_manifest.filter(pl.col("status") == "ok").to_pandas()
+gradient_cells = pd.merge(
+    late_acoustic_windows,
+    manifest_ok[_GRAD_GROUP_KEYS + ["qualifying_steps"]],
+    how="inner", on=_GRAD_GROUP_KEYS,
+)
+print(f"gradient-eligible cells (late-acoustic-significant ∩ B4-acoustic-qualified): "
+      f"{gradient_cells.shape[0]} / {late_acoustic_windows.shape[0]} late-acoustic union windows")
+
+gradient_trial_rows: list[pd.DataFrame] = []
+for row in tqdm(gradient_cells.itertuples(), total=gradient_cells.shape[0],
+                 desc="late-region gradient trials"):
+    subj = row.subject
+    if subj not in epochs_dict:
+        continue
+    ep = epochs_dict[subj]
+    hga_cell, md_cell = extract_hga_trials(ep, int(row.electrode_idx), row.phoneme_pair, row.word_end)
+    steps = [int(s) for s in row.qualifying_steps.split(",") if s]
+    step_mask = md_cell["resampled"].isin(steps).values
+    if not step_mask.any():
+        continue
+    bhv_col = resolve_behavior_col(md_cell)
+    smin_i, smax_i = int(row.smin_bootstrap), int(row.smax_bootstrap)
+    hga_region = hga_cell[:, smin_i:smax_i + 1].mean(axis=1)  # inclusive upper bound
+
+    gradient_trial_rows.append(pd.DataFrame({
+        "subject": subj,
+        "electrode_idx": int(row.electrode_idx),
+        "phoneme_pair": row.phoneme_pair,
+        "word_end": row.word_end,
+        "resampled": md_cell.loc[step_mask, "resampled"].values,
+        "behavior_dummy_forced": md_cell.loc[step_mask, bhv_col].values,
+        "hga_region": hga_region[step_mask],
+        # sign-flipped by the union window's tuning direction, so a pooled
+        # regression slope is interpretable across sites tuned in opposite
+        # directions (same convention as mean_diff_aligned elsewhere in this
+        # codebase).
+        "hga_region_aligned": hga_region[step_mask] * row.contrast_sign,
+        "smin_bootstrap": smin_i,
+        "smax_bootstrap": smax_i,
+    }))
+
+late_acoustic_gradient_trial_df = (
+    pd.concat(gradient_trial_rows, ignore_index=True) if gradient_trial_rows else pd.DataFrame()
+)
+if late_acoustic_gradient_trial_df.shape[0]:
+    late_acoustic_gradient_trial_df.to_parquet(OUT_DIR / "late_acoustic_gradient_trial_df.parquet")
+print(f"late-region gradient trial rows: {late_acoustic_gradient_trial_df.shape[0]}")
+
+# %% [markdown]
+# ### Population-level LME: graded acoustic-step effect, percept controlled
+#
+# Ambiguous steps only by construction (qualifying_steps never includes the
+# endpoints 1/6). `resampled_centered` is step minus the continuum midpoint
+# (3.5), so the coefficient is directly comparable to plot_for_paper's
+# late-acoustic regression.
+
+# %%
+gradient_lme_results: dict = {}
+if late_acoustic_gradient_trial_df.shape[0]:
+    reg_df = late_acoustic_gradient_trial_df.copy()
+    reg_df["resampled_centered"] = reg_df["resampled"] - 3.5
+    reg_df["site"] = (
+        reg_df["subject"].astype(str) + ":" + reg_df["electrode_idx"].astype(str) + ":"
+        + reg_df["phoneme_pair"] + ":" + reg_df["word_end"]
+    )
+    model_base = smf.mixedlm(
+        "hga_region_aligned ~ behavior_dummy_forced",
+        data=reg_df, groups=reg_df["site"],
+    ).fit(reml=False)  # ML, to match the LRT comparison
+    model_full = smf.mixedlm(
+        "hga_region_aligned ~ resampled_centered + behavior_dummy_forced",
+        data=reg_df, groups=reg_df["site"],
+    ).fit(reml=False)
+    lr_stat = 2 * (model_full.llf - model_base.llf)
+    lr_p = scipy_stats.chi2.sf(lr_stat, df=1)
+
+    gradient_lme_results = {
+        "n_trials": int(reg_df.shape[0]),
+        "n_sites": int(reg_df["site"].nunique()),
+        "acoustic_step_coef": float(model_full.params["resampled_centered"]),
+        "acoustic_step_se": float(model_full.bse["resampled_centered"]),
+        "acoustic_step_wald_p": float(model_full.pvalues["resampled_centered"]),
+        "lr_stat": float(lr_stat),
+        "lr_p": float(lr_p),
+    }
+    print(model_full.summary())
+    print(f"Likelihood ratio test for graded acoustic-step effect: "
+          f"χ²(1) = {lr_stat:.3f}, p = {lr_p:.3g}")
+else:
+    print("no gradient trial rows -- skipping LME")
+
+with (OUT_DIR / "late_acoustic_gradient_lme_results.json").open("w") as f:
+    json.dump(gradient_lme_results, f, indent=2)
+print(f"wrote late_acoustic_gradient_lme_results.json: {gradient_lme_results}")
 
 # %% [markdown]
 # ## Combined gallery (behavior + acoustic facets)

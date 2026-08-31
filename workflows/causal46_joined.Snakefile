@@ -1123,6 +1123,9 @@ rule acoustic_on_ambiguous:
         trial_balance   = "outputs/causal46_joined/trial_balance_index.csv",
         b4_per_window   = "outputs/causal46_joined/t_tests/b4_per_window.parquet",
         b4_per_cell     = "outputs/causal46_joined/t_tests/b4_per_cell.parquet",
+        late_acoustic_summary = "outputs/causal46_joined/acoustic_late/acoustic_late_summary.csv",
+        late_acoustic_results = "outputs/causal46_joined/acoustic_late/acoustic_late_results.csv",
+        a_per_window_by_word_end = "outputs/causal46_joined/acoustic_bootstrap/a_per_window_by_word_end_all.parquet",
         epoch_fifs      = expand(
             "outputs/epochs_preprocessed/{subject}_epo.fif",
             subject=config["data"]["subjects"],
@@ -1139,6 +1142,8 @@ rule acoustic_on_ambiguous:
         b4_acoustic_per_cell_late = "outputs/causal46_joined/acoustic_on_ambiguous/b4_acoustic_per_cell_late.parquet",
         acoustic_cell_manifest = "outputs/causal46_joined/acoustic_on_ambiguous/acoustic_cell_manifest.parquet",
         b4_step_tuning         = "outputs/causal46_joined/acoustic_on_ambiguous/b4_step_tuning.parquet",
+        late_acoustic_gradient_trial_df = "outputs/causal46_joined/acoustic_on_ambiguous/late_acoustic_gradient_trial_df.parquet",
+        late_acoustic_gradient_lme_results = "outputs/causal46_joined/acoustic_on_ambiguous/late_acoustic_gradient_lme_results.json",
         gallery_powered        = "outputs/causal46_joined/acoustic_on_ambiguous/star_plots_both/powered.pdf",
         gallery_powered_sig    = "outputs/causal46_joined/acoustic_on_ambiguous/star_plots_both/powered_significant.pdf",
 
@@ -1154,6 +1159,9 @@ rule acoustic_on_ambiguous:
                 trial_balance_path=str(input.trial_balance),
                 b4_per_window_path=str(input.b4_per_window),
                 b4_per_cell_path=str(input.b4_per_cell),
+                late_acoustic_summary_path=str(input.late_acoustic_summary),
+                late_acoustic_results_path=str(input.late_acoustic_results),
+                a_per_window_by_word_end_path=str(input.a_per_window_by_word_end),
                 outdir=str(outdir),
                 min_class_k=C46["min_class_k"],
                 window_size=C46["window_size"],
