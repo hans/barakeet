@@ -65,16 +65,12 @@ import yaml
 from scipy import stats as scipy_stats
 from tqdm.auto import tqdm
 
+from src._star_gallery import HAS_PYPDF, write_annotated_pdfs
 from src.stimuli import OFFSET_DICT, PHONEME_PAIR_TO_WORD_ENDS
 from src.viz_paper import epoch_sfreq, epoch_tmin
 from src.viz_provisional import load_epochs_dict
 
 sys.path.insert(0, str(Path(".").resolve() / "notebooks" / "causal46_joined"))
-from _within_completion import (  # noqa: E402
-    extract_hga,
-    extract_hga_trials,
-    resolve_behavior_col,
-)
 from _acoustic_step_bootstrap import (  # noqa: E402
     bootstrap_cell_acoustic,
     exclude_overlapping_windows,
@@ -82,7 +78,11 @@ from _acoustic_step_bootstrap import (  # noqa: E402
     per_window_summary,
     step_tuning_pass,
 )
-from _star_gallery import HAS_PYPDF, write_annotated_pdfs  # noqa: E402
+from _within_completion import (  # noqa: E402
+    extract_hga,
+    extract_hga_trials,
+    resolve_behavior_col,
+)
 
 # %% tags=["parameters"]
 phon_peaks_path = "outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet"
