@@ -36,9 +36,14 @@ trials), projection `π = ⟨p, â⟩` in the gated window, acoustic-label-shuff
   at/after `phon_smax` where the endpoint contrast returns to non-significance. A
   late run must therefore be a **re-emergence** of the endpoint contrast after
   the initial response has diminished — not the sustained tail of a multi-phase
-  early response leaking just past `phon_smax`. Sites whose contrast never
+  early response leaking just past `phon_smax`. Cells whose contrast never
   returns to non-significance past `phon_smax` (no dissociable late region) are
   dropped and reported.
+- **Runs built per word_end.** The endpoint bootstrap is read from
+  `a_per_window_by_word_end_all` (per completion), so the two completions can
+  carry **different** late endpoint windows — post-POD they diverge acoustically,
+  and the within-completion projection is per word_end anyway. `phon_smax` stays
+  per-site (pre-lexical); the offset is recomputed per word_end.
 - **Geometry is clean:** `â` and `p` are computed over the *same* late run
   window, so `⟨p, â⟩` is well defined (no cross-window template-transfer needed).
 - **Selection is honest:** the gate uses only endpoint trials, independent of the
@@ -56,21 +61,22 @@ per-window bootstrap over the **full** epoch, not the `phon_smax`-capped
 `scratchpad/late_endpoint_gate_search.py`, per-cell offset floor,
 `ci_raw_excludes_zero`, run ≥ 2 windows:
 
-| | current (middle-gated) | endpoint-gated, `phon_smax` floor | endpoint-gated, **offset floor** |
+| | current (middle-gated) | endpoint offset floor, pooled | endpoint offset floor, **per word_end** |
 |---|---|---|---|
-| Sites | 31 (38 cells) | 67 | **47** |
-| New sites vs current | — | 43 | **30** |
-| Recovers current 3 FDR | — | 3/3 | **2/3** |
-| Site classes | mostly type2 | 28 nei + 31 aco + 8 t2 | 21 nei + 20 aco + 6 t2 |
+| Sites | 31 | 47 | **76** |
+| Cells (site×word_end) | 38 | — | **114** |
+| New sites vs current | — | 30 | **49** |
+| Recovers current 3 FDR | — | 2/3 | **3/3** |
+| Site classes | mostly type2 | 21 nei + 20 aco + 6 t2 | 32 nei + 35 aco + 9 t2 |
 
-- 68 late endpoint runs; onsets span 0.26–1.04 s (genuinely post-response).
-- The offset floor tightens 67 → 47: it removes runs that were the sustained tail
-  of the initial acoustic response leaking just past `phon_smax`. 0 sites had a
-  fully-sustained contrast (all dissociable).
-- One current FDR site (EC250 e216 bm) loses its endpoint run under the offset
-  floor — its earlier "late" run was the initial-response tail. Expected under
-  this stricter definition; that site is still covered by the middle-gated result.
-- Reaches 21 `neither` + 20 `acoustic_only` sites the early perceptual detector
+- 165 late endpoint runs; onsets span 0.26–1.04 s. 0 cells had a fully-sustained
+  contrast (all dissociable).
+- **38 sites are gated in both completions, and in all 38 the two late windows
+  differ** — the reason for reading the endpoint bootstrap per word_end.
+- Per word_end is more permissive at the site level (a run in *either* completion
+  qualifies the cell), so it recovers all 3 current FDR sites where the pooled
+  offset floor recovered 2/3.
+- Reaches 32 `neither` + 35 `acoustic_only` sites the early perceptual detector
   ignores — a broader/different population.
 - **Still endpoint-locked:** this does NOT address ambiguous-only generators
   (sites with no endpoint response at all). That remains Option 1 (bootstrap on

@@ -80,8 +80,10 @@ from _late_projection import (  # noqa: E402
 
 # %% tags=["parameters"]
 # Endpoint per-window bootstrap over the FULL epoch range (step6 - step1,
-# unambiguous, pooled word_ends). Source of the late endpoint runs.
-a_per_window_full_path = "outputs/causal46_joined/acoustic_bootstrap/a_per_window_full_all.parquet"
+# unambiguous). Source of the late endpoint runs. Per word_end and full word
+# timecourse, so the late endpoint window may differ between the two completions
+# (post-POD the two words diverge acoustically).
+a_per_window_by_word_end_path = "outputs/causal46_joined/acoustic_bootstrap/a_per_window_by_word_end_all.parquet"
 
 # Computed site-type table; consumed ONLY for its A_significant column (site pool)
 # and phon_smax (post-acoustic boundary).
@@ -110,11 +112,15 @@ KEY = ["subject", "electrode_idx", "phoneme_pair"]
 SF, T0 = epoch_sfreq, epoch_tmin
 
 # %% [markdown]
-# ## Build the late-endpoint gate
+# ## Build the late-endpoint gate  (per word_end)
 #
-# Per A_significant site: significant endpoint windows unified into maximal
-# same-sign runs (same `_find_maximal_runs` as the discriminative-window
+# Per A_significant site **x word_end**: significant endpoint windows unified into
+# maximal same-sign runs (same `_find_maximal_runs` as the discriminative-window
 # notebooks). Each run of >= `min_component_windows` becomes a projection window.
+# The endpoint bootstrap is read per word_end (`a_per_window_by_word_end_all`), so
+# the two completions can carry **different** late endpoint windows — post-POD
+# they diverge acoustically, and the within-completion projection is per word_end
+# anyway.
 #
 # The run-candidate floor `smin` is set **per cell** to the *disappearance of the
 # initial acoustic response*: `find_early_offset_smin` (shared with
@@ -122,12 +128,12 @@ SF, T0 = epoch_sfreq, epoch_tmin
 # endpoint contrast has returned to non-significance. A late endpoint run must
 # therefore be a **re-emergence** of the endpoint contrast after the initial
 # response has diminished — not the sustained tail of a multi-phase early
-# response. Sites whose contrast never returns to non-significance past
-# `phon_smax` (no dissociable late region) are dropped from the gate and
-# reported.
+# response. `phon_smax` is per-site (pre-lexical); the offset is recomputed per
+# word_end. Cells whose contrast never returns to non-significance past
+# `phon_smax` (no dissociable late region) are dropped from the gate and reported.
 
 # %%
-a_per_window = pd.read_parquet(a_per_window_full_path)
+a_per_window = pd.read_parquet(a_per_window_by_word_end_path)
 a_windows = pd.read_parquet(a_windows_path)
 site_pool = pd.read_csv(site_pool_path)
 
@@ -141,54 +147,49 @@ print(f"A_significant sites: {len(included_sites)}  (phon_smax missing: {n_missi
 
 # %%
 run_rows = []
-no_offset_sites = []
+no_offset_cells = []
 for _, r in included_sites.iterrows():
     if pd.isna(r["phon_smax"]):
         continue
-    sub = a_per_window[(a_per_window.subject == r.subject)
-                       & (a_per_window.electrode_idx == r.electrode_idx)
-                       & (a_per_window.phoneme_pair == r.phoneme_pair)].sort_values("smin")
-    # Per-cell floor: disappearance of the initial acoustic response.
-    s_early_offset = find_early_offset_smin(sub, int(r["phon_smax"]))
-    if s_early_offset is None:
-        # Sustained endpoint contrast: no dissociable late region.
-        no_offset_sites.append({k: r[k] for k in KEY})
-        continue
-    cand = sub[sub.smin >= s_early_offset]
-    sig = cand[cand.ci_raw_excludes_zero]
-    if len(sig) == 0:
-        continue
-    sig_windows = [(int(a), int(b)) for a, b in zip(sig.smin, sig.smax)]
-    medians = {int(a): float(m) for a, m in zip(cand.smin, cand.mean_diff_raw_med)}
-    for run in _find_maximal_runs(sig_windows, medians):
-        if len(run) < min_component_windows:
+    for word_end in PHONEME_PAIR_TO_WORD_ENDS[r["phoneme_pair"]]:
+        sub = a_per_window[(a_per_window.subject == r.subject)
+                           & (a_per_window.electrode_idx == r.electrode_idx)
+                           & (a_per_window.phoneme_pair == r.phoneme_pair)
+                           & (a_per_window.word_end == word_end)].sort_values("smin")
+        if sub.empty:
             continue
-        run_rows.append({
-            "subject": r.subject, "electrode_idx": r.electrode_idx,
-            "phoneme_pair": r.phoneme_pair,
-            "s_early_offset": s_early_offset,
-            "smin": run[0][0], "smax": run[-1][1],
-            "n_component_windows": len(run),
-            "beta_endpoint_median": float(np.mean([medians[a] for a, _ in run])),
-            "sign": int(np.sign(medians[run[0][0]])),
-        })
+        # Per-cell floor: disappearance of the initial acoustic response.
+        s_early_offset = find_early_offset_smin(sub, int(r["phon_smax"]))
+        if s_early_offset is None:
+            # Sustained endpoint contrast: no dissociable late region.
+            no_offset_cells.append({**{k: r[k] for k in KEY}, "word_end": word_end})
+            continue
+        cand = sub[sub.smin >= s_early_offset]
+        sig = cand[cand.ci_raw_excludes_zero]
+        if len(sig) == 0:
+            continue
+        sig_windows = [(int(a), int(b)) for a, b in zip(sig.smin, sig.smax)]
+        medians = {int(a): float(m) for a, m in zip(cand.smin, cand.mean_diff_raw_med)}
+        for run in _find_maximal_runs(sig_windows, medians):
+            if len(run) < min_component_windows:
+                continue
+            run_rows.append({
+                "subject": r.subject, "electrode_idx": r.electrode_idx,
+                "phoneme_pair": r.phoneme_pair, "word_end": word_end,
+                "s_early_offset": s_early_offset,
+                "smin": run[0][0], "smax": run[-1][1],
+                "n_component_windows": len(run),
+                "beta_endpoint_median": float(np.mean([medians[a] for a, _ in run])),
+                "sign": int(np.sign(medians[run[0][0]])),
+            })
 
-runs_df = pd.DataFrame(run_rows)
-gated_sites = runs_df[KEY].drop_duplicates()
-print(f"Sites with no dissociable late region (dropped): {len(no_offset_sites)}")
-print(f"Gated sites (>=1 late endpoint run): {len(gated_sites)}")
-print(f"Total runs: {len(runs_df)}")
-
-# %%
-# Expand site-level runs to (site x word_end) cells -- p is within-completion.
-cell_rows = []
-for _, run in runs_df.iterrows():
-    for we in PHONEME_PAIR_TO_WORD_ENDS[run["phoneme_pair"]]:
-        cell_rows.append({**run.to_dict(), "word_end": we})
-cell_pool = pd.DataFrame(cell_rows)
-print(f"Projection cells (site x word_end x run): {len(cell_pool)}")
-print(f"Unique (site x word_end): "
-      f"{cell_pool[KEY + ['word_end']].drop_duplicates().shape[0]}")
+cell_pool = pd.DataFrame(run_rows)
+CELL_KEY = KEY + ["word_end"]
+gated_cells = cell_pool[CELL_KEY].drop_duplicates()
+print(f"Cells with no dissociable late region (dropped): {len(no_offset_cells)}")
+print(f"Gated cells (>=1 late endpoint run): {len(gated_cells)}")
+print(f"Gated sites: {cell_pool[KEY].drop_duplicates().shape[0]}")
+print(f"Total runs: {len(cell_pool)}")
 
 # %% [markdown]
 # ## Per-cell projection  (identical machinery to late_perceptual_projection.py)
@@ -300,7 +301,7 @@ results_df["tmin"] = results_df["smin"] / SF + T0
 results_df["tmax"] = results_df["smax"] / SF + T0
 
 results_df.to_csv(Path(outdir) / "results.csv", index=False)
-runs_df.to_parquet(Path(outdir) / "late_endpoint_runs.parquet", index=False)
+cell_pool.to_parquet(Path(outdir) / "late_endpoint_runs.parquet", index=False)
 
 # %%
 print("Cells tested                :", len(results_df))
