@@ -57,8 +57,9 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
+from matplotlib.backends.backend_pdf import PdfPages
 
-from src._star_gallery import write_annotated_pdfs
+from src._star_gallery import matched_n_star_plot_paper
 from src.data import get_electrode_df
 from src.stimuli import POD_dict
 from src.viz_provisional import load_epochs_dict
@@ -82,6 +83,7 @@ late_projection_results_path = "outputs/causal46_joined/late_perceptual_projecti
 # --- selection knobs ---
 n_per_class_min = 15    # drop underpowered cells (small n fakes large |mean_diff|)
 top_n_claimed = 16      # how many claimed cells to render (ranked by |mean_diff|)
+top_n_reference = 24    # cap on reference cells rendered (ranked by |mean_diff|)
 
 # --- environment ---
 EPOCH_DIR = "outputs/epochs_preprocessed"
@@ -162,6 +164,7 @@ elif reference_set == "late_projection":
 else:
     raise ValueError(f"unknown reference_set={reference_set!r}")
 
+reference = reference.sort("absmd", descending=True)
 print(f"REFERENCE ({reference_set}): {reference.height} cells across "
       f"{reference.select(['subject','electrode_idx']).unique().height} electrodes")
 
@@ -199,73 +202,97 @@ except Exception as e:  # electrode .mat files absent (e.g. dev container)
     print(f"[skipped ROI join: {e!r}]")
 
 # %% [markdown]
-# ## Render within-completion star plots (full HGA contrast time course)
+# ## Render within-completion star plots (`matched_n_star_plot_paper`)
 #
-# Reuses the AS gallery machinery (`write_annotated_pdfs` → `matched_n_star_plot`).
-# That code path reads the *aligned*-polarity columns, which the all-SR fork
-# dropped; we alias raw → aligned here (polarity is a per-cell sign flip and
-# does not change the trace's shape or the CI-excludes-zero verdict).
+# The paper renderer recomputes the bottom-panel per-step class-balanced
+# bootstrap contrast internally from the epochs (full HGA contrast time
+# course). For each cell we mark:
+#
+# - **acoustic window** (`phon_smin`/`phon_smax`, from the manifest — null for
+#   the non-acoustic claimed cells) on the top (acoustic) panel;
+# - the **self-selected perceptual window** (`best_smin`/`best_smax`) on the
+#   bottom (behavioral) panel, routed to the **EARLY** slot (green) when it
+#   falls before POD or the **LATE** slot (purple) otherwise — so the figure
+#   itself encodes the early/late plausibility split;
+# - **POD** (dashed) and the windows where the bootstrap CI excludes zero
+#   (`sig_windows`).
 
 # %%
 b4_per_window = pl.read_parquet(b4_per_window_path)
 cell_manifest = pl.read_parquet(cell_manifest_path)
 epochs_dict = load_epochs_dict(Path(EPOCH_DIR))
 
-RAW_TO_ALIGNED_CELL = {
-    "best_mean_diff_raw_med": "best_mean_diff_aligned_med",
-    "best_emp_p_raw": "best_emp_p_aligned",
-    "best_ci_raw_excludes_zero": "best_ci_aligned_excludes_zero",
+manifest_lut = {
+    (r["subject"], r["electrode_idx"], r["phoneme_pair"], r["word_end"]): r
+    for r in cell_manifest.iter_rows(named=True)
 }
 
 
-def alias_raw_to_aligned(df: pl.DataFrame, mapping: dict) -> pl.DataFrame:
-    exprs = [pl.col(src).alias(dst) for src, dst in mapping.items() if src in df.columns]
-    return df.with_columns(exprs)
+def _sig_windows_for(cell) -> list[tuple[float, float]]:
+    pw = b4_per_window.filter(
+        (pl.col("subject") == cell["subject"])
+        & (pl.col("electrode_idx") == cell["electrode_idx"])
+        & (pl.col("phoneme_pair") == cell["phoneme_pair"])
+        & (pl.col("word_end") == cell["word_end"])
+        & pl.col("ci_raw_excludes_zero")
+    )
+    return [(float(r["tmin"]), float(r["tmax"])) for r in pw.iter_rows(named=True)]
 
 
-# per_window needs ci_aligned_excludes_zero for the sig-bar overlay
-pw = b4_per_window
-if "ci_raw_excludes_zero" in pw.columns and "ci_aligned_excludes_zero" not in pw.columns:
-    pw = pw.with_columns(pl.col("ci_raw_excludes_zero").alias("ci_aligned_excludes_zero"))
+def render_gallery(cells: pl.DataFrame, out_pdf: Path) -> int:
+    n = 0
+    with PdfPages(out_pdf) as pdf:
+        for cell in cells.iter_rows(named=True):
+            key = (cell["subject"], cell["electrode_idx"],
+                   cell["phoneme_pair"], cell["word_end"])
+            mrow = manifest_lut.get(key)
+            if mrow is None or not mrow["qualifying_steps"]:
+                continue
+            qs = [int(s) for s in str(mrow["qualifying_steps"]).split(",") if s != ""]
+
+            # acoustic window (top panel) — null for non-acoustic claimed cells
+            phon_smin, phon_smax = mrow["phon_smin"], mrow["phon_smax"]
+            top_early = ((phon_smin, phon_smax)
+                         if phon_smin is not None and phon_smax is not None else None)
+
+            # self-selected perceptual window (bottom panel), routed early/late vs POD
+            best_win = (cell["best_smin"], cell["best_smax"])
+            before_pod = bool(cell.get("window_before_pod"))
+            bottom_early = best_win if before_pod else None
+            bottom_late = None if before_pod else best_win
+
+            fig = matched_n_star_plot_paper(
+                subject=cell["subject"],
+                electrode_idx=int(cell["electrode_idx"]),
+                phoneme_pair=cell["phoneme_pair"],
+                word_end=cell["word_end"],
+                qualifying_steps=qs,
+                epochs_dict=epochs_dict,
+                phon_smin=phon_smin, phon_smax=phon_smax,
+                top_early_window=top_early,
+                bottom_early_window=bottom_early,
+                bottom_late_window=bottom_late,
+                sig_windows=_sig_windows_for(cell),
+                plot_first_sound=False,
+                plot_pod=True,
+            )
+            md = cell["best_mean_diff_raw_med"]
+            fig.suptitle(
+                f"{cell['subject']} e{cell['electrode_idx']} {cell['phoneme_pair']} "
+                f"{cell['word_end']}  |md|={abs(md):.2f} p={cell['best_emp_p_raw']:.3f} "
+                f"n/cl={cell['n_per_class']}"
+                f"{'  [window<POD]' if before_pod else ''}",
+                fontsize=8,
+            )
+            pdf.savefig(fig)
+            plt.close(fig)
+            n += 1
+    return n
 
 
-def build_entries(cells: pl.DataFrame) -> list[dict]:
-    cells = alias_raw_to_aligned(cells, RAW_TO_ALIGNED_CELL)
-    entries = []
-    for row in cells.iter_rows(named=True):
-        mrow = cell_manifest.filter(
-            (pl.col("subject") == row["subject"])
-            & (pl.col("electrode_idx") == row["electrode_idx"])
-            & (pl.col("phoneme_pair") == row["phoneme_pair"])
-            & (pl.col("word_end") == row["word_end"])
-        )
-        qs = mrow["qualifying_steps"][0] if mrow.height else ""
-        entries.append({
-            "mode": "matched_n",
-            "subject": row["subject"], "electrode_idx": row["electrode_idx"],
-            "phoneme_pair": row["phoneme_pair"], "word_end": row["word_end"],
-            "resampled": None, "qualifying_steps": qs,
-            "best_smin": row["best_smin"], "best_smax": row["best_smax"],
-            "best_mean_diff_aligned_med": row.get("best_mean_diff_aligned_med"),
-            "best_emp_p_aligned": row.get("best_emp_p_aligned"),
-            "best_ci_aligned_excludes_zero": row.get("best_ci_aligned_excludes_zero", False),
-            "powered": True, "significant": bool(row.get("best_ci_aligned_excludes_zero")),
-            "pdf_path": "", "status": "ok",
-        })
-    return entries
-
-
-cell_keys = ["subject", "electrode_idx", "phoneme_pair", "word_end"]
-
-claimed_top = claimed.head(top_n_claimed)
-n_c = write_annotated_pdfs(
-    build_entries(claimed_top), pw, cell_keys,
-    OUT_DIR / "claimed_gallery.pdf", epochs_dict=epochs_dict,
-)
-n_r = write_annotated_pdfs(
-    build_entries(reference), pw, cell_keys,
-    OUT_DIR / f"reference_{reference_set}_gallery.pdf", epochs_dict=epochs_dict,
-)
+n_c = render_gallery(claimed.head(top_n_claimed), OUT_DIR / "claimed_gallery.pdf")
+n_r = render_gallery(reference.head(top_n_reference),
+                     OUT_DIR / f"reference_{reference_set}_gallery.pdf")
 print(f"claimed_gallery.pdf: {n_c} cells")
 print(f"reference_{reference_set}_gallery.pdf: {n_r} cells")
 
