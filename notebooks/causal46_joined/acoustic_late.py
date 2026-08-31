@@ -19,6 +19,7 @@
 
 # %%
 import json
+import sys
 from pathlib import Path
 
 from loguru import logger as L
@@ -28,6 +29,9 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 from tqdm.auto import tqdm
+
+sys.path.insert(0, str(Path(".").resolve() / "notebooks" / "causal46_joined"))
+from _acoustic_offset import find_early_offset_smin  # noqa: E402
 
 from src.data import add_metadata_features
 from src.models.causal6 import run_acoustic_searchlight, _resolve_target, _has_enough_per_class
@@ -126,39 +130,6 @@ to_study.early_response_class.value_counts()
 #     (subject, electrode_idx, phoneme_pair) — with a per-site `phon_smax`, also
 #     pre-lexical — is broadcast to both word_ends.
 a_per_window_full = pd.read_parquet(a_per_window_full_path)
-
-
-def find_early_offset_smin(site_windows, phon_smax):
-    """Window-start at which the early acoustic contrast has diminished — the
-    first non-significant window at or after the acoustic boundary `phon_smax`,
-    i.e. the start of the region past the early acoustic response.
-
-    `site_windows` is the per-window endpoint-contrast summary for one
-    (subject, electrode_idx, phoneme_pair): needs columns `smin` and
-    `ci_raw_excludes_zero` (bootstrap 95% CI of step6 - step1 excludes zero).
-    `phon_smax` is the per-site acoustic boundary (pre-lexical). Restricting the
-    search to `smin >= phon_smax` makes the offset robust to a multi-phase early
-    response whose contrast dips between phases before the boundary. When the
-    contrast is already non-significant at `phon_smax`, that boundary is returned
-    (the early response is done by the boundary); when it extends past
-    `phon_smax`, the data-driven drop past it is used.
-
-    Returns None only when the contrast is significant through the *entire*
-    post-`phon_smax` range (never returns to non-significance — a sustained
-    acoustic response that cannot be dissociated); such sites fall back to the
-    POD/phon_smax smin in `prepare_decoder_bounds` and are dropped from the
-    significance summary.
-    """
-    sw = site_windows.sort_values("smin")
-    sw = sw[sw["smin"] >= phon_smax]
-    if sw.empty:
-        return None
-    sig = sw["ci_raw_excludes_zero"].to_numpy().astype(bool)
-    smin = sw["smin"].to_numpy()
-    nonsig = np.flatnonzero(~sig)
-    if len(nonsig) == 0:
-        return None
-    return int(smin[nonsig[0]])
 
 
 # Precompute once per site and carry as a column, so the real decoder loop and
