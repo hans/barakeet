@@ -255,8 +255,8 @@ def run_notebook_gpu(input_path, output_path, parameters, gpu_device):
         env = os.environ.copy()
         if gpu_device is not None:
             env["CUDA_VISIBLE_DEVICES"] = str(gpu_device)
-        helper = Path(workflow.basedir) / "_gpu_notebook_runner.py"
-        venv_python = Path(workflow.basedir).parent / ".venv" / "bin" / "python"
+        helper = Path(workflow.basedir) / "workflows" / "_gpu_notebook_runner.py"
+        venv_python = Path(workflow.basedir) / ".venv" / "bin" / "python"
         subprocess.run(
             [str(venv_python), str(helper), str(input_path), str(output_path), params_path],
             env=env, check=True,
