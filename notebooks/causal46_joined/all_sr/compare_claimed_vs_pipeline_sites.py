@@ -8,7 +8,7 @@
 #       format_version: '1.3'
 #       jupytext_version: 1.19.1
 #   kernelspec:
-#     display_name: barakeet
+#     display_name: barakeet (3.12.13)
 #     language: python
 #     name: python3
 # ---
@@ -62,6 +62,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 from src._star_gallery import matched_n_star_plot_paper
 from src.data import get_electrode_df
 from src.stimuli import POD_dict
+from src.viz_paper import resampled_cmap
 from src.viz_provisional import load_epochs_dict
 
 # %% tags=["parameters"]
@@ -82,7 +83,7 @@ late_projection_results_path = "outputs/causal46_joined/late_perceptual_projecti
 
 # --- selection knobs ---
 n_per_class_min = 15    # drop underpowered cells (small n fakes large |mean_diff|)
-top_n_claimed = 16      # how many claimed cells to render (ranked by |mean_diff|)
+top_n_claimed = 30      # how many claimed cells to render (ranked by |mean_diff|)
 top_n_reference = 24    # cap on reference cells rendered (ranked by |mean_diff|)
 
 # --- environment ---
@@ -92,6 +93,9 @@ outdir = "outputs/causal46_joined/compare_claimed_vs_pipeline_sites"
 # %%
 OUT_DIR = Path(outdir)
 OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+# %%
+phon_peaks = pl.read_parquet("outputs/causal6/acoustic_decoding_peaks/phon_peaks_all.parquet")
 
 # %% [markdown]
 # ## Gate: reconciliation must have passed
@@ -181,7 +185,12 @@ def attach_roi(df: pl.DataFrame) -> pl.DataFrame:
     for subj in df["subject"].unique():
         edf = get_electrode_df(subj)  # pandas; roi in column "roi"
         for eidx in df.filter(pl.col("subject") == subj)["electrode_idx"].unique():
-            roi = edf["roi"].iloc[int(eidx)] if int(eidx) < len(edf) else "OOB"
+            if int(eidx) < len(edf):
+                roi = edf["roi"].iloc[int(eidx)]
+                if isinstance(roi, str):
+                    roi = roi.strip()
+                else:
+                    roi = "NA"
             rows.append({"subject": subj, "electrode_idx": int(eidx), "roi": roi})
     roi_map = pl.DataFrame(rows)
     return df.join(roi_map, on=["subject", "electrode_idx"], how="left")
@@ -275,12 +284,13 @@ def render_gallery(cells: pl.DataFrame, out_pdf: Path) -> int:
                 sig_windows=_sig_windows_for(cell),
                 plot_first_sound=False,
                 plot_pod=True,
+                resampled_cmap=resampled_cmap,
             )
             md = cell["best_mean_diff_raw_med"]
             fig.suptitle(
                 f"{cell['subject']} e{cell['electrode_idx']} {cell['phoneme_pair']} "
                 f"{cell['word_end']}  |md|={abs(md):.2f} p={cell['best_emp_p_raw']:.3f} "
-                f"n/cl={cell['n_per_class']}"
+                f"dec={cell['test_roc_auc']:.3f} "
                 f"{'  [window<POD]' if before_pod else ''}",
                 fontsize=8,
             )
@@ -290,11 +300,31 @@ def render_gallery(cells: pl.DataFrame, out_pdf: Path) -> int:
     return n
 
 
-n_c = render_gallery(claimed.head(top_n_claimed), OUT_DIR / "claimed_gallery.pdf")
-n_r = render_gallery(reference.head(top_n_reference),
+plot_claimed = (
+    claimed.head(top_n_claimed)
+    .join(phon_peaks.select(["subject", "electrode_idx", "phoneme_pair", "test_roc_auc", "p_value"]),
+          on=["subject", "electrode_idx", "phoneme_pair"])
+)
+plot_reference = (
+    reference.head(top_n_reference)
+    .join(phon_peaks.select(["subject", "electrode_idx", "phoneme_pair", "test_roc_auc", "p_value"]),
+          on=["subject", "electrode_idx", "phoneme_pair"])
+)
+n_c = render_gallery(plot_claimed, OUT_DIR / "claimed_gallery.pdf")
+n_r = render_gallery(plot_reference,
                      OUT_DIR / f"reference_{reference_set}_gallery.pdf")
 print(f"claimed_gallery.pdf: {n_c} cells")
 print(f"reference_{reference_set}_gallery.pdf: {n_r} cells")
+
+# %%
+render_gallery(
+    (claimed.join(phon_peaks.select(["subject", "electrode_idx", "phoneme_pair", "test_roc_auc", "p_value"]),
+                 on=["subject", "electrode_idx", "phoneme_pair"])
+    .filter(pl.col("test_roc_auc") < 0.6)
+    .sort("best_emp_p_raw")
+    .head(20)),
+    OUT_DIR / "claimed_gallery_only_bad_acoustic.pdf"
+)
 
 # %% [markdown]
 # ## Save the claimed-site table for reference
