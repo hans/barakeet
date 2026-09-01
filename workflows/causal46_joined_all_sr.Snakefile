@@ -183,3 +183,46 @@ rule perceptual_acoustic_partition:
                 outdir=str(Path(output.notebook).parent),
             ),
         )
+
+
+rule banded_perceptual_bootstrap:
+    """Sibling of t_tests_all_sr: within-completion B4 bootstrap over 3 fixed,
+    physiologically-motivated bands (pre-POD / post-POD / post-offset) per
+    (phoneme_pair, word_end), instead of the sliding searchlight. Removes the
+    within-cell window selection (honest per-cell Bonferroni over bands) and
+    keeps the label-permutation null for the population count-vs-null. Does NOT
+    feed the reconciliation / partition gate (it intentionally diverges from
+    t_tests.py's searchlight)."""
+    input:
+        sr_site_universe = "outputs/causal46_joined/sr_site_universe/sr_site_universe.parquet",
+        trial_balance    = "outputs/causal46_joined/trial_balance_index_all_sr/trial_balance_index.csv",
+        epoch_fifs       = expand(
+            "outputs/epochs_preprocessed/{subject}_epo.fif",
+            subject=config["data"]["subjects"],
+        ),
+        notebook         = "notebooks/causal46_joined/all_sr/banded_perceptual_bootstrap.py",
+
+    output:
+        notebook       = "outputs/causal46_joined/banded_perceptual_bootstrap/notebook.ipynb",
+        b4_bootstrap   = "outputs/causal46_joined/banded_perceptual_bootstrap/b4_bootstrap.parquet",
+        b4_per_band    = "outputs/causal46_joined/banded_perceptual_bootstrap/b4_per_band.parquet",
+        b4_per_cell    = "outputs/causal46_joined/banded_perceptual_bootstrap/b4_per_cell.parquet",
+        cell_manifest  = "outputs/causal46_joined/banded_perceptual_bootstrap/cell_manifest.parquet",
+        pop_count      = "outputs/causal46_joined/banded_perceptual_bootstrap/population_count_vs_null.csv",
+
+    run:
+        C46 = config["causal46_joined"]
+        run_notebook(
+            str(input.notebook),
+            str(output.notebook),
+            parameters=dict(
+                sr_site_universe_path=str(input.sr_site_universe),
+                epoch_dir=str(Path(input.epoch_fifs[0]).parent),
+                trial_balance_path=str(input.trial_balance),
+                outdir=str(Path(output.notebook).parent),
+                min_class_k=C46["min_class_k"],
+                n_bootstrap=C46.get("n_bootstrap", 1000),
+                band_a_early_s=0.050,
+                word_end_tail_samples=20,
+            ),
+        )
