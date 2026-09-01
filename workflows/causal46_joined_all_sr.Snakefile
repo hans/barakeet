@@ -186,12 +186,13 @@ rule perceptual_acoustic_partition:
 
 
 rule banded_perceptual_bootstrap:
-    """Sibling of t_tests_all_sr: within-completion B4 bootstrap over 3 fixed,
+    """Sibling of t_tests_all_sr: within-completion perceptual test over 3 fixed,
     physiologically-motivated bands (pre-POD / post-POD / post-offset) per
-    (phoneme_pair, word_end), instead of the sliding searchlight. Removes the
-    within-cell window selection (honest per-cell Bonferroni over bands) and
-    keeps the label-permutation null for the population count-vs-null. Does NOT
-    feed the reconciliation / partition gate (it intentionally diverges from
+    completion-specific (phoneme_pair, word_end) cell, instead of the sliding
+    searchlight. Per-cell permutation p (vs the within-step label-permutation
+    null) + BH-FDR across band-cells → localized significant sites. Summarized
+    inside the loop (storage O(cells), scales to R=1e4+). Does NOT feed the
+    reconciliation / partition gate (it intentionally diverges from
     t_tests.py's searchlight)."""
     input:
         sr_site_universe = "outputs/causal46_joined/sr_site_universe/sr_site_universe.parquet",
@@ -204,11 +205,11 @@ rule banded_perceptual_bootstrap:
 
     output:
         notebook       = "outputs/causal46_joined/banded_perceptual_bootstrap/notebook.ipynb",
-        b4_bootstrap   = "outputs/causal46_joined/banded_perceptual_bootstrap/b4_bootstrap.parquet",
         b4_per_band    = "outputs/causal46_joined/banded_perceptual_bootstrap/b4_per_band.parquet",
         b4_per_cell    = "outputs/causal46_joined/banded_perceptual_bootstrap/b4_per_cell.parquet",
         cell_manifest  = "outputs/causal46_joined/banded_perceptual_bootstrap/cell_manifest.parquet",
-        pop_count      = "outputs/causal46_joined/banded_perceptual_bootstrap/population_count_vs_null.csv",
+        significant    = "outputs/causal46_joined/banded_perceptual_bootstrap/significant_sites.csv",
+        population     = "outputs/causal46_joined/banded_perceptual_bootstrap/population_summary.csv",
 
     run:
         C46 = config["causal46_joined"]
@@ -221,8 +222,10 @@ rule banded_perceptual_bootstrap:
                 trial_balance_path=str(input.trial_balance),
                 outdir=str(Path(output.notebook).parent),
                 min_class_k=C46["min_class_k"],
-                n_bootstrap=C46.get("n_bootstrap", 1000),
+                n_bootstrap=C46.get("n_perm_banded", 10000),
+                alpha_fdr=C46.get("alpha_fdr", 0.05),
                 band_a_early_s=0.050,
                 word_end_tail_samples=20,
+                save_draws=False,
             ),
         )

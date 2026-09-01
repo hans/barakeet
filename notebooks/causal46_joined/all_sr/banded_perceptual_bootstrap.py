@@ -14,13 +14,12 @@
 # ---
 
 # %% [markdown]
-# # Banded within-completion bootstrap — all speech-responsive sites
+# # Banded within-completion perceptual test — all speech-responsive sites
 #
-# Sibling of `t_tests_all_sr.py`. Same all-SR site universe and same
-# per-step class-balanced within-completion bootstrap machinery
-# (`_within_completion.py`, unchanged), but **replaces the sliding
-# searchlight with 3 fixed, physiologically-motivated bands per
-# `(phoneme_pair, word_end)`**:
+# Sibling of `t_tests_all_sr.py`. Same all-SR site universe and the same
+# per-step class-balanced within-completion machinery (`_within_completion.py`,
+# unchanged), but **replaces the sliding searchlight with 3 fixed,
+# physiologically-motivated bands per `(phoneme_pair, word_end)`**:
 #
 # | band | span | rationale |
 # |------|------|-----------|
@@ -28,33 +27,45 @@
 # | `post_pod`    | `[POD, offset)`         | disambiguation / resolution |
 # | `post_offset` | `[offset, offset+tail)` | the diffuse perceptual tail |
 #
-# **Why a separate notebook, not an edit to `t_tests_all_sr.py`.** That
-# notebook is gated by `t_tests_all_sr_reconciliation.py`, which asserts it
-# reproduces `t_tests.py` bit-exact on the AS cells; `perceptual_acoustic_partition`
-# hard-fails if that gate doesn't pass. `t_tests.py` still uses the searchlight,
-# so a fixed-band scheme legitimately diverges from it — this is a *different*
-# test, not a bug. Kept sibling so the reconciled pipeline stays green.
+# **Cells stay completion-specific** — one per `(subject, electrode_idx,
+# phoneme_pair, word_end)`. Nothing is pooled or required to replicate across
+# word-ends: completion-specific responses are the hypothesis, not noise.
 #
-# **Why bands, not searchlight.** The searchlight selects its best window on
-# the perceptual contrast itself, then reads significance at that same window
-# (double-dip), and inflates the within-cell multiple-comparisons burden. A
-# small set of *pre-specified* bands removes the within-cell selection (a plain
-# Bonferroni over 3 bands is honest), matches the temporally-diffuse perceptual
-# response (better SNR than narrow bins), and — crucially — the `pre_pod` band
-# starts at 50 ms, not 0, so the pre-evoked baseline (the source of the 40–80 ms
-# artifact "sites") is excluded.
+# **Significance = per-cell permutation p, then BH-FDR** across all band-cells.
+# For each band-cell we draw `R` replicates; each replicate bootstraps the
+# per-step class-balanced trials (→ `mean_diff_raw`) and computes a within-step
+# label-permutation of the same draw (→ `mean_diff_raw_null`). The per-cell
+# statistics:
 #
-# **Kept for downstream use:** `mean_diff_raw_null` (per-replicate,
-# per-band label-permutation null) — this powers the population count-vs-null
-# (the co-localization headline), which does not need the per-cell permutation
-# floor.
+# - `observed`  = median of the `R` real `mean_diff_raw` draws (effect size);
+#   `ci_lo/hi`  = 2.5/97.5 percentiles (for reporting).
+# - `perm_p`    = `(1 + #{ |null| >= |observed| }) / (R + 1)` — a Monte-Carlo
+#   permutation p (floors at `1/(R+1)`). This REPLACES the earlier
+#   `null_ci_excludes_zero` readout, which was miscalibrated: the label-null is
+#   re-centered at ~0 every replicate, so its own CI straddles zero by
+#   construction and never "excludes zero" — it is not a valid benchmark.
+# - `z` = `observed / null_sd` — a floor-free ranking statistic (perm_p ties at
+#   the `1/(R+1)` floor for the strongest cells; rank by `|z|` / `|observed|`,
+#   decide inclusion by `q`).
 #
-# Outputs (sibling tree `outputs/causal46_joined/banded_perceptual_bootstrap/`):
-# - `b4_bootstrap.parquet`      — per (cell, band, replicate) raw + null draws
-# - `b4_per_band.parquet`       — per (cell, band) bootstrap CI + empirical p
-# - `b4_per_cell.parquet`       — per cell: best band + Bonferroni-over-bands p
+# **BH-FDR** over the whole band-cell family gives `q_value` / `significant`.
+# On this data the operative BH boundary is the rank-k threshold with ~100+
+# real effects (≈ `k/N · alpha`), not the rank-1 `alpha/N` — so `R ≈ 1e4`
+# resolves it with headroom (floor `1e-4` well below the ~`3.7e-4` boundary).
+# Bump `R` only if you want p-level *ranking* of the top sites; `|z|` already
+# orders them.
+#
+# **Scales in storage:** per-cell summaries are computed inside the trial loop;
+# the full per-replicate draws are discarded unless `save_draws=True`, so
+# storage is O(cells) regardless of `R`.
+#
+# Outputs (`outputs/causal46_joined/banded_perceptual_bootstrap/`):
+# - `b4_per_band.parquet`   — per (cell, band): observed, CI, perm_p, q, significant, z
+# - `b4_per_cell.parquet`   — per cell: most-significant band + its q / significant
+# - `significant_sites.csv` — BH-significant band-cells, ranked by |z|
+# - `population_summary.csv` — n significant per band x acoustic_significant
 # - `cell_manifest.parquet`
-# - `population_count_vs_null.csv` — observed vs null count of sig cells, per band
+# - `b4_bootstrap.parquet`  — only if save_draws=True (large at high R)
 
 # %%
 from __future__ import annotations
@@ -86,9 +97,11 @@ epoch_dir = "outputs/epochs_preprocessed"
 trial_balance_path = "outputs/causal46_joined/trial_balance_index_all_sr/trial_balance_index.csv"
 outdir = "outputs/causal46_joined/banded_perceptual_bootstrap"
 min_class_k = 4
-n_bootstrap = 1000
+n_bootstrap = 10000             # R: bootstrap + label-permutation replicates per band-cell
+alpha_fdr = 0.05                # BH-FDR level
 band_a_early_s = 0.050          # pre_pod band starts here (NOT 0 — skip baseline)
 word_end_tail_samples = 20      # +200 ms past word offset (sfreq=100)
+save_draws = False              # write the full per-replicate draws (large at high R)
 
 # %%
 OUT_DIR = Path(outdir)
@@ -101,9 +114,9 @@ CI_LOW, CI_HIGH = 2.5, 97.5
 WORD_END_TAIL_SAMPLES = word_end_tail_samples
 
 print(f"EPOCH_DIR: {EPOCH_DIR}  (exists: {EPOCH_DIR.exists()})")
-print(f"K = {K}   R = {R}   CI = [{CI_LOW}, {CI_HIGH}]")
+print(f"K = {K}   R = {R}   perm_p floor = {1/(R+1):.2e}   alpha_fdr = {alpha_fdr}")
 print(f"band_a starts at {band_a_early_s * 1000:.0f} ms; tail = "
-      f"{WORD_END_TAIL_SAMPLES} samples")
+      f"{WORD_END_TAIL_SAMPLES} samples;  save_draws = {save_draws}")
 
 
 # %% [markdown]
@@ -118,8 +131,8 @@ def _s(t_s: float) -> int:
 def behav_bands(phoneme_pair: str, word_end: str, n_times: int) -> list[tuple[str, int, int]]:
     """3 fixed bands as (name, smin, smax); dropped if degenerate / OOB.
 
-    pre_pod   = [band_a_early_s, POD)
-    post_pod  = [POD, offset)
+    pre_pod     = [band_a_early_s, POD)
+    post_pod    = [POD, offset)
     post_offset = [offset, offset + tail]
     """
     a0 = _s(band_a_early_s)
@@ -184,17 +197,16 @@ print(f"B4 qualifying cells: {b4_qualified.height}")
 
 
 # %% [markdown]
-# ## Bootstrap over the 3 bands
+# ## Per-band permutation test (summarized inside the loop)
 #
-# For each replicate: draw per-step class-balanced trials, evaluate raw
-# mean-diff on each fixed band, and a within-step label-permutation null on
-# the same draw (identical null construction to `t_tests_all_sr.py`). Each
-# band is scored by calling `searchlight_mean_diff` with a single window
+# Each band is scored by calling `searchlight_mean_diff` with a single window
 # spanning it (window_size == stride == band width -> exactly one window).
+# `bootstrap_cell_banded` returns one summary row per band (+ optionally the
+# raw draws), so global memory / storage is O(cells), not O(cells x R).
 
 # %%
 def _band_mean_diffs(hga, pos_idx, neg_idx, bands):
-    """{band_name: MeanDiffWindow} evaluating each fixed band as one window."""
+    """{band_name: mean_diff (float)} evaluating each fixed band as one window."""
     out = {}
     for name, smin, smax in bands:
         w = smax - smin
@@ -203,80 +215,103 @@ def _band_mean_diffs(hga, pos_idx, neg_idx, bands):
             search_smin=smin, search_smax=smax, window_size=w, stride=w,
         )
         if res:
-            out[name] = res[0]
+            out[name] = res[0].mean_diff
     return out
 
 
 def bootstrap_cell_banded(*, md_pp, hga, bhv_col, word_end, qualifying_steps,
-                          bands, R, base_seed=0):
+                          bands, R, base_seed=0, keep_draws=False):
+    """Return (summary_rows, n_per_class[, draw_rows]).
+
+    summary_rows: one dict per band with observed effect, CI, perm_p, z.
+    """
     per_step = per_step_class_counts(
         md_pp, word_end=word_end, qualifying_steps=qualifying_steps,
         group_col=bhv_col,
     )
     n_per_class = n_per_class_from_per_step(per_step)
-    rows: list[dict] = []
+
+    real = {name: np.empty(R) for name, _, _ in bands}
+    null = {name: np.empty(R) for name, _, _ in bands}
+    draw_rows: list[dict] = []
     for r in range(R):
         rng = np.random.default_rng(base_seed + r)
         draws = select_cell_trials_bootstrap(per_step, rng=rng)
         keys = sorted(draws.keys())
         raw_pos_key, raw_neg_key = keys[1], keys[0]
-        raw = _band_mean_diffs(hga, draws[raw_pos_key], draws[raw_neg_key], bands)
+        rvals = _band_mean_diffs(hga, draws[raw_pos_key], draws[raw_neg_key], bands)
 
-        # Within-step label-permutation null on the same draw (per-step balance
+        # within-step label-permutation null on the same draw (per-step balance
         # preserved) — identical construction to t_tests_all_sr.bootstrap_cell.
         _step_sizes = [
             min(len(v) for v in by_cls.values())
             for by_cls in per_step.values()
             if min(len(v) for v in by_cls.values()) > 0
         ]
-        _null_pos_parts, _null_neg_parts, _off = [], [], 0
+        _npos, _nneg, _off = [], [], 0
         for _ns in _step_sizes:
             _pool = np.concatenate([
                 draws[raw_pos_key][_off:_off + _ns],
                 draws[raw_neg_key][_off:_off + _ns],
             ])
             rng.shuffle(_pool)
-            _null_pos_parts.append(_pool[:_ns])
-            _null_neg_parts.append(_pool[_ns:])
+            _npos.append(_pool[:_ns])
+            _nneg.append(_pool[_ns:])
             _off += _ns
-        null = _band_mean_diffs(
-            hga, np.concatenate(_null_pos_parts), np.concatenate(_null_neg_parts), bands
-        )
+        nvals = _band_mean_diffs(hga, np.concatenate(_npos), np.concatenate(_nneg), bands)
+
         for name, smin, smax in bands:
-            if name not in raw:
-                continue
-            w = raw[name]
-            rows.append({
-                "replicate": r,
-                "band": name,
-                "smin": w.smin, "smax": w.smax,
-                "tmin": w.smin / epoch_sfreq + epoch_tmin,
-                "tmax": w.smax / epoch_sfreq + epoch_tmin,
-                "mean_diff_raw": w.mean_diff,
-                "mean_diff_raw_null": null[name].mean_diff if name in null else float("nan"),
-                "n_per_class": n_per_class,
-            })
-    return rows, n_per_class
+            real[name][r] = rvals.get(name, np.nan)
+            null[name][r] = nvals.get(name, np.nan)
+            if keep_draws:
+                draw_rows.append({
+                    "replicate": r, "band": name,
+                    "mean_diff_raw": rvals.get(name, np.nan),
+                    "mean_diff_raw_null": nvals.get(name, np.nan),
+                })
+
+    summary_rows = []
+    for name, smin, smax in bands:
+        rv, nv = real[name], null[name]
+        observed = float(np.nanmedian(rv))
+        null_sd = float(np.nanstd(nv))
+        n_null = np.sum(~np.isnan(nv))
+        n_exceed = int(np.sum(np.abs(nv) >= abs(observed)))
+        perm_p = (1 + n_exceed) / (n_null + 1) if n_null else np.nan
+        summary_rows.append({
+            "band": name, "smin": smin, "smax": smax,
+            "tmin": smin / epoch_sfreq + epoch_tmin,
+            "tmax": smax / epoch_sfreq + epoch_tmin,
+            "observed": observed,
+            "ci_lo": float(np.nanpercentile(rv, CI_LOW)),
+            "ci_hi": float(np.nanpercentile(rv, CI_HIGH)),
+            "null_sd": null_sd,
+            "z": observed / null_sd if null_sd > 0 else np.nan,
+            "perm_p": perm_p,
+            "n_per_class": n_per_class,
+        })
+    return (summary_rows, n_per_class, draw_rows) if keep_draws else (summary_rows, n_per_class)
 
 
 # %% [markdown]
 # ## Run — grouped by (subject, phoneme_pair) to load+baseline once
 
 # %%
-b4_boot_rows: list[dict] = []
-b4_cell_manifest: list[dict] = []
-b4_failures: list[dict] = []
+band_rows: list[dict] = []
+draw_rows_all: list[dict] = []
+cell_manifest_rows: list[dict] = []
+failures: list[dict] = []
 
-b4_groups: dict[tuple[str, str], list[dict]] = {}
+groups: dict[tuple[str, str], list[dict]] = {}
 for row in b4_qualified.iter_rows(named=True):
-    b4_groups.setdefault((row["subject"], row["phoneme_pair"]), []).append(row)
-print(f"grouped into {len(b4_groups)} (subject, phoneme_pair) loads")
+    groups.setdefault((row["subject"], row["phoneme_pair"]), []).append(row)
+print(f"grouped into {len(groups)} (subject, phoneme_pair) loads")
 
-pbar = tqdm(total=b4_qualified.height, desc="banded bootstrap")
-for (subj, pp), group_rows in b4_groups.items():
+pbar = tqdm(total=b4_qualified.height, desc=f"banded perm (R={R})")
+for (subj, pp), group_rows in groups.items():
     if subj not in epochs_dict:
         for row in group_rows:
-            b4_failures.append({**row, "error": "no epochs for subject"})
+            failures.append({**row, "error": "no epochs for subject"})
         pbar.update(len(group_rows))
         continue
     ep = epochs_dict[subj]
@@ -292,41 +327,38 @@ for (subj, pp), group_rows in b4_groups.items():
         hga = all_hga[:, int(row["electrode_idx"]), :]
         steps = [int(s) for s in row["qualifying_steps"]]
         bands = behav_bands(row["phoneme_pair"], row["word_end"], n_times)
-        manifest_base = {
-            "subject": subj,
-            "electrode_idx": int(row["electrode_idx"]),
-            "phoneme_pair": row["phoneme_pair"],
-            "word_end": row["word_end"],
+        base = {
+            "subject": subj, "electrode_idx": int(row["electrode_idx"]),
+            "phoneme_pair": row["phoneme_pair"], "word_end": row["word_end"],
             "qualifying_steps": ",".join(str(s) for s in steps),
             "n_per_class": int(row["n_per_class"]),
             "acoustic_significant": bool(row["acoustic_significant"]),
-            "phon_smin": row["phon_smin"],
-            "phon_smax": row["phon_smax"],
+            "phon_smin": row["phon_smin"], "phon_smax": row["phon_smax"],
             "n_bands": len(bands),
         }
         if not bands:
-            b4_cell_manifest.append({**manifest_base, "status": "no_valid_band"})
+            cell_manifest_rows.append({**base, "status": "no_valid_band"})
             pbar.update(1)
             continue
         try:
-            rows, n_per_class = bootstrap_cell_banded(
+            result = bootstrap_cell_banded(
                 md_pp=md_pp, hga=hga, bhv_col=bhv_col,
                 word_end=row["word_end"], qualifying_steps=steps,
-                bands=bands, R=R,
+                bands=bands, R=R, keep_draws=save_draws,
             )
-            for rr in rows:
-                b4_boot_rows.append({
-                    "subject": subj,
-                    "electrode_idx": int(row["electrode_idx"]),
-                    "phoneme_pair": row["phoneme_pair"],
-                    "word_end": row["word_end"],
-                    "acoustic_significant": bool(row["acoustic_significant"]),
-                    **rr,
-                })
-            b4_cell_manifest.append({**manifest_base, "status": "ok"})
+            summary_rows = result[0]
+            keys = {k: base[k] for k in
+                    ("subject", "electrode_idx", "phoneme_pair", "word_end",
+                     "acoustic_significant")}
+            for sr in summary_rows:
+                band_rows.append({**keys, **sr})
+            if save_draws:
+                for dr in result[2]:
+                    draw_rows_all.append({**keys, **dr})
+            cell_manifest_rows.append({**base, "status": "ok"})
         except Exception as exc:
             tb = traceback.format_exc()
-            b4_failures.append({
+            failures.append({
                 **{k: row[k] for k in
                    ("subject", "electrode_idx", "phoneme_pair", "word_end")},
                 "error": repr(exc), "traceback": tb,
@@ -336,137 +368,101 @@ for (subj, pp), group_rows in b4_groups.items():
         pbar.update(1)
 pbar.close()
 
-b4_boot = pl.DataFrame(b4_boot_rows) if b4_boot_rows else pl.DataFrame()
-if b4_boot.height:
-    b4_boot.write_parquet(OUT_DIR / "b4_bootstrap.parquet")
-print(f"bootstrap rows: {b4_boot.height}  (failures: {len(b4_failures)})")
-
-cell_manifest = pl.DataFrame(b4_cell_manifest)
+cell_manifest = pl.DataFrame(cell_manifest_rows)
 cell_manifest.write_parquet(OUT_DIR / "cell_manifest.parquet")
-print(cell_manifest.group_by(["status"]).len().sort("status"))
+print(cell_manifest.group_by("status").len().sort("status"))
+print(f"failures: {len(failures)}")
+
+if save_draws and draw_rows_all:
+    pl.DataFrame(draw_rows_all).write_parquet(OUT_DIR / "b4_bootstrap.parquet")
+    print(f"wrote b4_bootstrap.parquet ({len(draw_rows_all)} rows)")
+
 
 # %% [markdown]
-# ## Per-band aggregation (bootstrap CI + empirical p)
+# ## BH-FDR across the band-cell family
+#
+# The family is every tested band-cell (completion-specific, no pooling). BH
+# q-values on `perm_p`; `significant = q <= alpha_fdr`. Strongest cells tie at
+# the `perm_p` floor — rank them by `|z|` (and `|observed|`), not by p.
+
+# %%
+def bh_qvalues(p: np.ndarray) -> np.ndarray:
+    n = len(p)
+    order = np.argsort(p)
+    ranked = p[order]
+    q = ranked * n / (np.arange(n) + 1)
+    q = np.minimum.accumulate(q[::-1])[::-1]
+    out = np.empty(n)
+    out[order] = np.clip(q, 0.0, 1.0)
+    return out
+
+
+b4_per_band = pl.DataFrame(band_rows)
+if b4_per_band.height:
+    q = bh_qvalues(b4_per_band["perm_p"].to_numpy())
+    b4_per_band = b4_per_band.with_columns([
+        pl.Series("q_value", q),
+        (pl.Series("q_value", q) <= alpha_fdr).alias("significant"),
+        pl.col("observed").abs().alias("abs_effect"),
+        pl.col("z").abs().alias("abs_z"),
+    ]).sort(["subject", "electrode_idx", "phoneme_pair", "word_end", "smin"])
+    b4_per_band.write_parquet(OUT_DIR / "b4_per_band.parquet")
+    n_sig = int(b4_per_band["significant"].sum())
+    print(f"per_band rows: {b4_per_band.height}  BH-significant band-cells: {n_sig}")
+else:
+    print("no band-cells tested")
+
+# %% [markdown]
+# ## Per-cell: most-significant band
 
 # %%
 CELL_KEYS = ["subject", "electrode_idx", "phoneme_pair", "word_end"]
-
-
-def per_band_summary(boot: pl.DataFrame) -> pl.DataFrame:
-    if boot.height == 0:
-        return pl.DataFrame()
-    grouped = (
-        boot
-        .group_by(CELL_KEYS + ["band", "smin", "smax", "tmin", "tmax"])
-        .agg(
-            pl.col("mean_diff_raw").median().alias("mean_diff_raw_med"),
-            pl.col("mean_diff_raw").quantile(CI_LOW / 100).alias("mean_diff_raw_ci_lo"),
-            pl.col("mean_diff_raw").quantile(CI_HIGH / 100).alias("mean_diff_raw_ci_hi"),
-            (pl.col("mean_diff_raw") <= 0).cast(pl.Float64).mean().alias("frac_raw_le0"),
-            (pl.col("mean_diff_raw") >= 0).cast(pl.Float64).mean().alias("frac_raw_ge0"),
-            # null-band CI, from the label-permutation draws (for count-vs-null)
-            pl.col("mean_diff_raw_null").quantile(CI_LOW / 100).alias("null_ci_lo"),
-            pl.col("mean_diff_raw_null").quantile(CI_HIGH / 100).alias("null_ci_hi"),
-            pl.col("n_per_class").first().alias("n_per_class"),
-            pl.col("acoustic_significant").first().alias("acoustic_significant"),
-            pl.col("replicate").max().alias("R_replicates"),
-        )
-    )
-    return grouped.with_columns([
-        pl.min_horizontal(2 * pl.min_horizontal("frac_raw_le0", "frac_raw_ge0"),
-                          pl.lit(1.0)).alias("emp_p_raw"),
-        ((pl.col("mean_diff_raw_ci_lo") > 0) | (pl.col("mean_diff_raw_ci_hi") < 0))
-            .alias("ci_raw_excludes_zero"),
-        ((pl.col("null_ci_lo") > 0) | (pl.col("null_ci_hi") < 0))
-            .alias("null_ci_excludes_zero"),
-    ]).sort(CELL_KEYS + ["smin"])
-
-
-b4_per_band = per_band_summary(b4_boot)
 if b4_per_band.height:
-    b4_per_band.write_parquet(OUT_DIR / "b4_per_band.parquet")
-print(f"per_band rows: {b4_per_band.height}")
-
-# %% [markdown]
-# ## Per-cell: best band + Bonferroni over the (pre-specified) bands
-#
-# Because the bands are fixed a priori, a plain Bonferroni over the cell's
-# bands is an honest per-cell correction (no window selection to undo).
-# `bonferroni_emp_p = min(1, n_bands * min_band_emp_p)`.
-
-# %%
-def per_cell_banded(per_band: pl.DataFrame) -> pl.DataFrame:
-    if per_band.height == 0:
-        return pl.DataFrame()
-    best = (
-        per_band
-        .with_columns(pl.col("mean_diff_raw_med").abs().alias("__rank"))
-        .sort(CELL_KEYS + ["__rank"], descending=[False] * len(CELL_KEYS) + [True])
+    b4_per_cell = (
+        b4_per_band
+        .sort(CELL_KEYS + ["perm_p", "abs_z"], descending=[False] * 4 + [False, True])
         .group_by(CELL_KEYS, maintain_order=True)
         .head(1)
-        .drop("__rank")
         .rename({
-            "band": "best_band", "smin": "best_smin", "smax": "best_smax",
-            "tmin": "best_tmin", "tmax": "best_tmax",
-            "mean_diff_raw_med": "best_mean_diff_raw_med",
-            "emp_p_raw": "best_emp_p_raw",
-            "ci_raw_excludes_zero": "best_ci_raw_excludes_zero",
+            "band": "best_band", "observed": "best_observed", "z": "best_z",
+            "perm_p": "best_perm_p", "q_value": "best_q_value",
+            "significant": "best_significant",
         })
         .select(CELL_KEYS + [
-            "best_band", "best_smin", "best_smax", "best_tmin", "best_tmax",
-            "best_mean_diff_raw_med", "best_emp_p_raw", "best_ci_raw_excludes_zero",
-            "n_per_class", "acoustic_significant",
+            "best_band", "best_observed", "best_z", "best_perm_p",
+            "best_q_value", "best_significant", "n_per_class", "acoustic_significant",
         ])
     )
-    agg = (
-        per_band
-        .group_by(CELL_KEYS)
-        .agg(
-            pl.len().alias("n_bands"),
-            pl.col("emp_p_raw").min().alias("min_band_emp_p"),
-            pl.col("ci_raw_excludes_zero").any().alias("any_band_ci_excl_zero"),
-        )
-        .with_columns(
-            pl.min_horizontal(pl.col("n_bands") * pl.col("min_band_emp_p"), pl.lit(1.0))
-            .alias("bonferroni_emp_p")
-        )
-    )
-    return best.join(agg, on=CELL_KEYS, how="left")
-
-
-b4_per_cell = per_cell_banded(b4_per_band)
-if b4_per_cell.height:
     b4_per_cell.write_parquet(OUT_DIR / "b4_per_cell.parquet")
-print(f"per_cell rows: {b4_per_cell.height}")
+    print(f"per_cell rows: {b4_per_cell.height}  "
+          f"BH-significant cells: {int(b4_per_cell['best_significant'].sum())}")
 
 # %% [markdown]
-# ## Population count-vs-null (the co-localization headline)
-#
-# Per band, compare the observed number of cells whose bootstrap CI excludes
-# zero against the number under the label-permutation null (`null_ci_excludes_zero`).
-# A significant OBSERVED >> NULL excess is population evidence for
-# non-acoustic perceptual coding, independent of any single cell surviving
-# per-cell FDR. Split by `acoustic_significant` so the non-acoustic cell (the
-# scientifically load-bearing partition) is called out.
+# ## Significant-site list (ranked by |z|) + population summary
 
 # %%
 if b4_per_band.height:
+    sig = (
+        b4_per_band
+        .filter(pl.col("significant"))
+        .sort("abs_z", descending=True)
+        .select(CELL_KEYS + ["band", "tmin", "tmax", "observed", "z",
+                             "perm_p", "q_value", "n_per_class", "acoustic_significant"])
+    )
+    sig.write_csv(OUT_DIR / "significant_sites.csv")
+    print(f"significant_sites.csv: {sig.height} band-cells "
+          f"({sig.select(['subject','electrode_idx']).unique().height} electrodes, "
+          f"{sig.filter(~pl.col('acoustic_significant')).height} non-acoustic)")
+
     pop = (
         b4_per_band
         .group_by(["band", "acoustic_significant"])
         .agg(
             pl.len().alias("n_cells"),
-            pl.col("ci_raw_excludes_zero").sum().alias("n_observed_sig"),
-            pl.col("null_ci_excludes_zero").sum().alias("n_null_sig"),
+            pl.col("significant").sum().alias("n_significant"),
         )
-        .with_columns([
-            (pl.col("n_observed_sig") / pl.col("n_cells")).alias("obs_rate"),
-            (pl.col("n_null_sig") / pl.col("n_cells")).alias("null_rate"),
-            (pl.col("n_observed_sig") - pl.col("n_null_sig")).alias("excess"),
-        ])
+        .with_columns((pl.col("n_significant") / pl.col("n_cells")).alias("sig_rate"))
         .sort(["band", "acoustic_significant"])
     )
-    pop.write_csv(OUT_DIR / "population_count_vs_null.csv")
+    pop.write_csv(OUT_DIR / "population_summary.csv")
     print(pop)
-else:
-    print("no bootstrap output — skipping population count-vs-null")
