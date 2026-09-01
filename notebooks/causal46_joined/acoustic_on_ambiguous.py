@@ -57,16 +57,18 @@ import sys
 import traceback
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import polars as pl
 import statsmodels.formula.api as smf
 import yaml
+from matplotlib.backends.backend_pdf import PdfPages
 from scipy import stats as scipy_stats
 from tqdm.auto import tqdm
 
 from src.stimuli import OFFSET_DICT, PHONEME_PAIR_TO_WORD_ENDS
-from src.viz_paper import epoch_sfreq, epoch_tmin
+from src.viz_paper import epoch_sfreq, epoch_tmin, resampled_cmap
 from src.viz_provisional import load_epochs_dict
 
 sys.path.insert(0, str(Path(".").resolve() / "notebooks" / "causal46_joined"))
@@ -81,6 +83,7 @@ from _acoustic_step_bootstrap import (  # noqa: E402
     per_cell_best,
     per_window_summary,
     step_tuning_pass,
+    step_tuning_timecourse_pass,
 )
 from _star_gallery import HAS_PYPDF, write_annotated_pdfs  # noqa: E402
 
@@ -430,6 +433,69 @@ if step_tuning_df.height:
     ))
 
 # %% [markdown]
+# ## Step tuning, full timecourse (no window collapse)
+#
+# `step_tuning_df` above evaluates every qualifying step inside ONE fixed
+# window per cell (best_smin/best_smax). This section runs the same
+# per-step bootstrap draw but keeps the whole per-sample timecourse instead
+# of collapsing to a window, over the same B4 acoustic-qualified population
+# ("ok" cells in acoustic_cell_manifest) — so the step-tuning gradient (or
+# lack thereof) can be inspected across the entire epoch rather than at one
+# pre-selected slice.
+#
+# Outputs:
+# - `b4_step_tuning_timecourse.parquet`
+# - `step_tuning_timecourse.pdf` (one page per cell; mean +/- CI per step,
+#   colored by step, full epoch timecourse)
+
+# %%
+timecourse_rows = step_tuning_timecourse_pass(
+    manifest_ok, epochs_dict, cell_keys=CELL_KEYS, R=R,
+)
+step_tuning_timecourse_df = pl.DataFrame(timecourse_rows)
+if step_tuning_timecourse_df.height:
+    step_tuning_timecourse_df = step_tuning_timecourse_df.with_columns(
+        (pl.col("sample") / epoch_sfreq + epoch_tmin).alias("t")
+    )
+    step_tuning_timecourse_df.write_parquet(OUT_DIR / "b4_step_tuning_timecourse.parquet")
+print(f"step tuning (full timecourse) rows: {step_tuning_timecourse_df.height}"
+      f"  (cells: {manifest_ok.height})")
+
+# %% [markdown]
+# ### Plot: one page per cell, mean +/- CI HGA(t) per step
+
+# %%
+if step_tuning_timecourse_df.height:
+    _tc_pd = step_tuning_timecourse_df.to_pandas()
+    with PdfPages(GALLERY_DIR.parent / "step_tuning_timecourse.pdf") as pdf:
+        for (subj, eidx, pp, we), cell_df in tqdm(
+            _tc_pd.groupby(["subject", "electrode_idx", "phoneme_pair", "word_end"]),
+            desc="step tuning timecourse plots",
+        ):
+            f, ax = plt.subplots(figsize=(5, 3.5))
+            for step in sorted(cell_df["step"].unique()):
+                step_df = cell_df.query("step == @step").sort_values("t")
+                color = resampled_cmap.get(int(step), "#999999")
+                ax.plot(step_df["t"], step_df["mean"], color=color, lw=1.5,
+                        label=f"step {int(step)}")
+                ax.fill_between(step_df["t"], step_df["ci_lo"], step_df["ci_hi"],
+                                 color=color, alpha=0.2, linewidth=0)
+            ax.axvline(0, color="k", lw=0.8, linestyle=":")
+            we_offset = OFFSET_DICT.get(we)
+            if we_offset is not None:
+                ax.axvline(we_offset, color="k", lw=0.8, linestyle="--")
+            ax.set_xlabel("time (s)")
+            ax.set_ylabel("HGA (behavior-matched)")
+            ax.set_title(f"{subj} e{eidx} {pp} {we}", fontsize=9)
+            ax.legend(fontsize=7, frameon=False)
+            f.tight_layout()
+            pdf.savefig(f)
+            plt.close(f)
+    print(f"wrote step_tuning_timecourse.pdf ({_tc_pd.groupby(CELL_KEYS).ngroups} pages)")
+else:
+    print("no full-timecourse rows -- skipping plot")
+
+# %% [markdown]
 # ## Late-region acoustic gradient regression (whole-window, behavior-controlled)
 #
 # `b4_step_tuning` above evaluates every step at ONE fixed narrow window per
@@ -528,10 +594,10 @@ print(f"late-acoustic union windows (one per site): {late_acoustic_windows.shape
 # ### Restrict to B4 acoustic-qualified cells, extract per-trial late-region HGA
 
 # %%
-manifest_ok = acoustic_cell_manifest.filter(pl.col("status") == "ok").to_pandas()
+manifest_ok_pd = acoustic_cell_manifest.filter(pl.col("status") == "ok").to_pandas()
 gradient_cells = pd.merge(
     late_acoustic_windows,
-    manifest_ok[_GRAD_GROUP_KEYS + ["qualifying_steps"]],
+    manifest_ok_pd[_GRAD_GROUP_KEYS + ["qualifying_steps"]],
     how="inner", on=_GRAD_GROUP_KEYS,
 )
 print(f"gradient-eligible cells (late-acoustic-significant ∩ B4-acoustic-qualified): "

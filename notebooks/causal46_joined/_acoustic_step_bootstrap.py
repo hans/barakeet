@@ -21,6 +21,15 @@ Provides:
                              tagging output with a window_kind label. Used to
                              produce both the global-best and late-window
                              tuning curves from the same per_cell shape.
+  step_tuning_timecourse    — same per-step bootstrap draw as
+                             step_tuning_curve, but kept at full per-sample
+                             time resolution instead of collapsed to one
+                             window — for visualizing whether/where a
+                             gradient exists across the whole epoch, not just
+                             inside a single pre-selected window.
+  step_tuning_timecourse_pass — runs step_tuning_timecourse over every row of
+                             a cell table (manifest-shaped: cell_keys +
+                             qualifying_steps, no window columns needed).
 """
 from __future__ import annotations
 
@@ -435,6 +444,118 @@ def step_tuning_pass(
                 "window_kind": window_kind,
                 "best_smin": int(row["best_smin"]),
                 "best_smax": int(row["best_smax"]),
+                **d,
+            })
+    return rows
+
+
+def step_tuning_timecourse(
+    per_step: dict[int, dict[int, np.ndarray]],
+    hga: np.ndarray,
+    *,
+    R: int = 1000,
+    base_seed: int = 0,
+    ci_low: float = CI_LOW,
+    ci_high: float = CI_HIGH,
+) -> list[dict]:
+    """Bootstrap step-tuning curve at full per-sample time resolution.
+
+    Same per-replicate draw as step_tuning_curve (one
+    select_cell_trials_bootstrap_perstep call per replicate, identical RNG
+    call sequence under matching (per_step, base_seed) — an orthogonal
+    readout of the same replicates), but instead of averaging each
+    replicate's HGA over one fixed window, keeps the whole per-sample
+    timecourse. Aggregated to (mean, median, CI) per (step, sample) before
+    returning — the raw per-replicate traces (R x n_times x n_steps) are
+    never materialized as output rows, only used transiently to compute the
+    summary, to keep output size in line with step_tuning_summary.
+
+    Returns a flat list of dicts: {step, sample, mean, median, ci_lo, ci_hi,
+    std, n_replicates}, one row per (qualifying step, time sample).
+    """
+    steps_sorted = sorted(per_step.keys())
+    if not steps_sorted:
+        return []
+    n_times = hga.shape[1]
+    traces = {s: np.full((R, n_times), np.nan) for s in steps_sorted}
+    for r in range(R):
+        rng = np.random.default_rng(base_seed + r)
+        d = select_cell_trials_bootstrap_perstep(per_step, rng=rng)
+        for s in steps_sorted:
+            if s not in d:
+                continue
+            idx = np.concatenate(list(d[s].values()))
+            if len(idx) == 0:
+                continue
+            traces[s][r] = hga[idx, :].mean(axis=0)
+
+    rows: list[dict] = []
+    for s in steps_sorted:
+        arr = traces[s]
+        valid = ~np.isnan(arr).all(axis=1)
+        if not valid.any():
+            continue
+        arr = arr[valid]
+        mean = np.nanmean(arr, axis=0)
+        median = np.nanmedian(arr, axis=0)
+        ci_lo_arr = np.nanpercentile(arr, ci_low, axis=0)
+        ci_hi_arr = np.nanpercentile(arr, ci_high, axis=0)
+        std = np.nanstd(arr, axis=0)
+        n_rep = int(arr.shape[0])
+        for t_idx in range(n_times):
+            rows.append({
+                "step": s,
+                "sample": t_idx,
+                "mean": float(mean[t_idx]),
+                "median": float(median[t_idx]),
+                "ci_lo": float(ci_lo_arr[t_idx]),
+                "ci_hi": float(ci_hi_arr[t_idx]),
+                "std": float(std[t_idx]),
+                "n_replicates": n_rep,
+            })
+    return rows
+
+
+def step_tuning_timecourse_pass(
+    per_cell,
+    epochs_dict: dict,
+    *,
+    cell_keys: list[str],
+    R: int,
+    desc: str = "step tuning (full timecourse)",
+) -> list[dict]:
+    """Run step_tuning_timecourse for every row of `per_cell`.
+
+    `per_cell` needs columns: cell_keys + qualifying_steps (comma-joined
+    string) — no window columns, since nothing is collapsed to a window.
+
+    Returns a flat list of dicts: cell_keys + step_tuning_timecourse()'s
+    per-(step, sample) fields. Ready for pl.DataFrame(...).
+    """
+    rows: list[dict] = []
+    for row in tqdm(per_cell.iter_rows(named=True), total=per_cell.height, desc=desc):
+        subj = row["subject"]
+        if subj not in epochs_dict:
+            continue
+        ep = epochs_dict[subj]
+        md = ep.metadata
+        bhv_col = resolve_behavior_col(md)
+        pp_mask = (md["phoneme_pair"] == row["phoneme_pair"]).values
+        ep_pp = ep[pp_mask]
+        md_pp = md[pp_mask].reset_index(drop=True)
+        hga = extract_hga(ep_pp, int(row["electrode_idx"]))
+        steps = [int(s) for s in row["qualifying_steps"].split(",") if s]
+        per_step = per_step_class_counts(
+            md_pp, word_end=row["word_end"],
+            qualifying_steps=steps, group_col=bhv_col,
+        )
+        raw = step_tuning_timecourse(per_step, hga, R=R)
+        for d in raw:
+            rows.append({
+                "subject": subj,
+                "electrode_idx": int(row["electrode_idx"]),
+                "phoneme_pair": row["phoneme_pair"],
+                "word_end": row["word_end"],
                 **d,
             })
     return rows

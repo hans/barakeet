@@ -1142,6 +1142,8 @@ rule acoustic_on_ambiguous:
         b4_acoustic_per_cell_late = "outputs/causal46_joined/acoustic_on_ambiguous/b4_acoustic_per_cell_late.parquet",
         acoustic_cell_manifest = "outputs/causal46_joined/acoustic_on_ambiguous/acoustic_cell_manifest.parquet",
         b4_step_tuning         = "outputs/causal46_joined/acoustic_on_ambiguous/b4_step_tuning.parquet",
+        b4_step_tuning_timecourse = "outputs/causal46_joined/acoustic_on_ambiguous/b4_step_tuning_timecourse.parquet",
+        step_tuning_timecourse_pdf = "outputs/causal46_joined/acoustic_on_ambiguous/step_tuning_timecourse.pdf",
         late_acoustic_gradient_trial_df = "outputs/causal46_joined/acoustic_on_ambiguous/late_acoustic_gradient_trial_df.parquet",
         late_acoustic_gradient_lme_results = "outputs/causal46_joined/acoustic_on_ambiguous/late_acoustic_gradient_lme_results.json",
         gallery_powered        = "outputs/causal46_joined/acoustic_on_ambiguous/star_plots_both/powered.pdf",
