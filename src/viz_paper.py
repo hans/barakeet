@@ -111,10 +111,16 @@ class Factor:
 
 F_PHONEME_PAIR = Factor(("dn", "bm", "pb"))
 F_EARLY = Factor.from_tuples(
-    ("perceptual", "#4e79a7", "Perceptual"),
-    ("acoustic", "#f27200", "Acoustic"),
+    ("perceptual", "#7A5BB5", "Perceptual"),
+    ("acoustic", "#E8842B", "Acoustic"),
 )
-F_LATE = Factor(("absent", "one-sided", "two-sided"),
+F_LATE = Factor.from_tuples(
+    ("acoustic", "#E8842B", "Early acoustic"),
+    ("lpp", "#7A5BB5", "Late perceptual"),
+    ("lac", "#D6455B", "Late acoustic"),
+    ("lpp+lac", "#A85088", "Late perceptual + acoustic")
+)
+F_LATE_SIDEDNESS = Factor(("absent", "one-sided", "two-sided"),
                 sns.color_palette("Set3", n_colors=3),
                 ["Absent", "One-sided", "Two-sided"])
 F_ACOUSTIC_TYPES = Factor(["early", "late"],
