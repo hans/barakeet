@@ -404,6 +404,12 @@ for loop_idx, (_, row) in enumerate(tqdm(early_late_sites.iterrows(), total=earl
                            on=["subject", "electrode_idx"], how="left", indicator=True).query("_merge == 'left_only'").drop(columns="_merge")
     if alt_sites_i.empty:
         raise ValueError(f"Could not find any alternative site for {row.subject} {row.electrode_idx} {row.phoneme_pair} {row.word_end}")
+
+    # Sanity check: pick the same number of sites from the same subject which are NOT speech responsive
+    bad_alt_sites_i = speech_responsive_df.query("subject == @row.subject and electrode_idx != @row.electrode_idx and not speech_responsive")
+    bad_alt_sites_i = bad_alt_sites_i.sample(n=min(len(bad_alt_sites_i), len(alt_sites_i)), random_state=loop_idx)
+    if bad_alt_sites_i.empty:
+        raise ValueError(f"Could not find any bad alternative site for {row.subject} {row.electrode_idx} {row.phoneme_pair} {row.word_end}")
     
     # # (ideally also acoustically selective) but not a member of early_late_sites
     # # tier 1: responsive to THIS phoneme pair, but not in lpp
@@ -427,17 +433,21 @@ for loop_idx, (_, row) in enumerate(tqdm(early_late_sites.iterrows(), total=earl
     print(f"Found alternative site for {row.subject} {row.electrode_idx} {row.phoneme_pair} {row.word_end}: " +
           (", ".join(str(r.electrode_idx) for _, r in alt_sites_i.iterrows())))
 
-    data_i = ep_i.get_data(picks=row.electrode_idx).squeeze(1)
-    alt_data_i = ep_i.get_data(picks=alt_sites_i.electrode_idx)
+    all_data_i = ep_i.get_data()
+    data_i = all_data_i[:, row.electrode_idx, :]
+    alt_data_i = all_data_i[:, alt_sites_i.electrode_idx, :]
+    bad_alt_data_i = all_data_i[:, bad_alt_sites_i.electrode_idx, :]
 
     baseline_i = data_i[:, baseline_smin:baseline_smax + 1].mean(axis=1)
     alt_baseline_i = alt_data_i[:, :, baseline_smin:baseline_smax + 1].mean(axis=-1).mean(axis=-1)
+    bad_alt_baseline_i = bad_alt_data_i[:, :, baseline_smin:baseline_smax + 1].mean(axis=-1).mean(axis=-1)
 
     early_smin_i, early_smax_i = int(row.smin_early), int(row.smax_early)
     hga_early_i = data_i[:, early_smin_i:early_smax_i + 1].mean(axis=1)
 
     # mean over both electrodes and time
     hga_alt_early_i = alt_data_i[:, :, early_smin_i:early_smax_i + 1].mean(axis=-1).mean(axis=-1)
+    hga_bad_alt_early_i = bad_alt_data_i[:, :, early_smin_i:early_smax_i + 1].mean(axis=-1).mean(axis=-1)
 
     late_smin_i, late_smax_i = int(row.smin_late), int(row.smax_late)
     hga_late_i = data_i[:, late_smin_i:late_smax_i + 1].mean(axis=1)
@@ -480,9 +490,11 @@ for loop_idx, (_, row) in enumerate(tqdm(early_late_sites.iterrows(), total=earl
 
         "hga_baseline": baseline_i[we_mask],
         "hga_alt_baseline": alt_baseline_i[we_mask],
+        "hga_bad_alt_baseline": bad_alt_baseline_i[we_mask],
 
         "hga_early": hga_early_i[we_mask],
         "hga_alt_early": hga_alt_early_i[we_mask],
+        "hga_bad_alt_early": hga_bad_alt_early_i[we_mask],
         "hga_late": hga_late_i[we_mask],
 
         # peak amplitude (out-of-fold matched filter) and peak latency (centroid)
@@ -892,8 +904,8 @@ fwer["analyses_consistent"] = (fwer.r < 0) == fwer.early_late_sign_mismatch
 fwer[["subject", "electrode_idx", "word_end", "r", "survives", "sum_ambig_effect", "early_acoustic_mean_diff_raw_med"]]
 
 # %%
-# check_df = early_late_reg_df.query("subject == 'EC250' and electrode_idx == 185")
-check_df = early_late_reg_df.query("subject == 'EC260' and electrode_idx == 204")
+check_df = early_late_reg_df.query("subject == 'EC250' and electrode_idx == 185 and word_end == 'desolate'")
+# check_df = early_late_reg_df.query("subject == 'EC260' and electrode_idx == 204 and word_end == 'mountains'")
 
 # sns.scatterplot(data=check_df, x="hga_early", y="hga_late")
 print(stats.pearsonr(check_df.hga_early, check_df.hga_late))
@@ -901,29 +913,143 @@ print(partial_corr(check_df.hga_early, check_df.hga_late, check_df[["hga_baselin
 print(partial_corr(check_df.hga_early, check_df.hga_late, check_df[["hga_baseline", "epoch_idx", "resampled_centered",
                                                                     "hga_alt_baseline", "hga_alt_early"]]))
 
+f, axs = plt.subplots(1, 3, figsize=(3 * 2.5, 2), constrained_layout=True)
+
 # compute hga_late | controls, hga_alt_early | controls, then correlate those residuals
 Z = sm.add_constant(check_df[["hga_baseline", "epoch_idx", "resampled_centered", "hga_alt_baseline"]])
 hga_late_resid = _resid(check_df.hga_late, Z)
 hga_alt_early_resid = _resid(check_df.hga_alt_early, Z)
 print("late | controls ~ alt_early | controls", stats.pearsonr(hga_late_resid, hga_alt_early_resid))
-f, ax = plt.subplots(figsize=(2, 2))
-ax.set_title("late vs alt_early")
-ax.set_xlabel("alt_early | controls")
-ax.set_ylabel("late | controls")
-sns.regplot(x=hga_alt_early_resid, y=hga_late_resid, scatter_kws={"s": 10}, ax=ax)
+axs[0].set_title("late vs.\nearly @ responsive set")
+axs[0].set_xlabel("alt_early | controls")
+axs[0].set_ylabel("late | controls")
+sns.regplot(x=hga_alt_early_resid, y=hga_late_resid, scatter_kws={"s": 10}, ax=axs[0])
+
+# compute hga_late | controls, hga_bad_alt_early | controls, then correlate those residuals
+Z = sm.add_constant(check_df[["hga_baseline", "epoch_idx", "resampled_centered", "hga_bad_alt_baseline"]])
+hga_late_resid = _resid(check_df.hga_late, Z)
+hga_bad_alt_early_resid = _resid(check_df.hga_bad_alt_early, Z)
+print("late vs.\nearly @ unresponsive sites", stats.pearsonr(hga_late_resid, hga_bad_alt_early_resid))
+axs[1].set_title("late vs.\nearly @ unresponsive set")
+axs[1].set_xlabel("bad_alt_early | controls")
+axs[1].set_ylabel("late | controls")
+sns.regplot(x=hga_bad_alt_early_resid, y=hga_late_resid, scatter_kws={"s": 10}, ax=axs[1])
 
 # compute hga_early | controls, hga_late | controls, then correlate those residuals
 Z = sm.add_constant(check_df[["hga_baseline", "epoch_idx", "resampled_centered"]])
 hga_early_resid = _resid(check_df.hga_early, Z)
 hga_late_resid = _resid(check_df.hga_late, Z)
 print("late | controls ~ early | controls", stats.pearsonr(hga_late_resid, hga_early_resid))
-f, ax = plt.subplots(figsize=(2, 2))
-ax.set_title("late | controls ~ early | controls")
-ax.set_xlabel("early | controls")
-ax.set_ylabel("late | controls")
-sns.regplot(x=hga_early_resid, y=hga_late_resid, scatter_kws={"s": 10}, ax=ax)
+axs[2].set_title("late vs.\nearly @ same")
+axs[2].set_xlabel("early | controls")
+axs[2].set_ylabel("late | controls")
+sns.regplot(x=hga_early_resid, y=hga_late_resid, scatter_kws={"s": 10}, ax=axs[2])
 
-print(check_df.query("resampled in (1, 6)").groupby("resampled")[["hga_early", "hga_late"]].mean())
+for ax in axs:
+    sns.despine(ax=ax)
+
+# %%
+# %% Are the three predictors' couplings to late HGA actually different?
+# Williams' test for dependent correlations sharing one variable (late HGA).
+# All correlations must live in the same residual space, so use one common
+# control set for every variable rather than a per-panel design.
+
+COMMON_CONTROLS = ["hga_baseline", "epoch_idx", "resampled_centered",
+                   "hga_alt_baseline", "hga_bad_alt_baseline"]
+PREDICTORS = {"same site": "hga_early",
+              "responsive sites": "hga_alt_early",
+              "unresponsive sites": "hga_bad_alt_early"}
+
+
+def williams_t(r12, r13, r23, n, k=0):
+    """Compare dependent correlations r(y,x1) vs r(y,x2) sharing y.
+
+    r12 = corr(y, x1), r13 = corr(y, x2), r23 = corr(x1, x2).
+    k = number of controls already partialled out; df is reduced accordingly.
+    """
+    n_eff = n - k
+    detR = (1 - r12**2 - r13**2 - r23**2) + 2 * r12 * r13 * r23
+    df = n_eff - 3
+    num = (r12 - r13) * np.sqrt((n_eff - 1) * (1 + r23))
+    den = np.sqrt(2 * ((n_eff - 1) / df) * detR
+                  + ((r12 + r13) ** 2 / 4) * (1 - r23) ** 3)
+    t = num / den
+    return t, df, 2 * stats.t.sf(abs(t), df)
+
+
+def compare_predictors(df_cell, label="", n_boot=10_000, seed=0):
+    Z = sm.add_constant(df_cell[COMMON_CONTROLS].to_numpy(float))
+    k = Z.shape[1] - 1
+    n = len(df_cell)
+    assert np.linalg.matrix_rank(Z) == Z.shape[1], f"rank-deficient design ({label})"
+    assert n > k + 10, f"n={n} too small for k={k} controls"
+
+    y = _resid(df_cell["hga_late"].to_numpy(float), Z)
+    X = {name: _resid(df_cell[col].to_numpy(float), Z)
+         for name, col in PREDICTORS.items()}
+
+    print(f"\n=== {label}  (n={n}, k={k} controls) ===")
+    r_y = {}
+    for name, x in X.items():
+        r, p = stats.pearsonr(y, x)
+        r_y[name] = r
+        print(f"  late ~ {name:<18} r={r:+.3f}  p={p:.4f}")
+
+    names = list(PREDICTORS)
+    print("  predictor intercorrelations:")
+    for a, b in itertools.combinations(names, 2):
+        print(f"    {a} ~ {b}: r={stats.pearsonr(X[a], X[b])[0]:+.3f}")
+
+    rng_c = np.random.default_rng(seed)
+    rows = []
+    for a, b in itertools.combinations(names, 2):
+        r23 = stats.pearsonr(X[a], X[b])[0]
+        t, dfree, p = williams_t(r_y[a], r_y[b], r23, n, k=k)
+
+        # Bootstrap CI on the difference: Williams assumes multivariate normality,
+        # which single-trial HGA does not obviously satisfy.
+        diffs = np.empty(n_boot)
+        for i in range(n_boot):
+            idx = rng_c.integers(0, n, n)
+            diffs[i] = (stats.pearsonr(y[idx], X[a][idx])[0]
+                        - stats.pearsonr(y[idx], X[b][idx])[0])
+        lo, hi = np.percentile(diffs, [2.5, 97.5])
+        p_boot = 2 * min((diffs <= 0).mean(), (diffs >= 0).mean())
+
+        rows.append(dict(pair=f"{a} vs {b}", r_a=r_y[a], r_b=r_y[b],
+                         diff=r_y[a] - r_y[b], r_between=r23,
+                         t=t, df=dfree, p_williams=p,
+                         ci_lo=lo, ci_hi=hi, p_boot=p_boot))
+
+    out = pd.DataFrame(rows)
+    print(out.round(4).to_string(index=False))
+    return out
+
+
+import itertools
+
+check_df = early_late_reg_df.query(
+    "subject == 'EC250' and electrode_idx == 185 and word_end == 'desolate'")
+cmp_one = compare_predictors(check_df, label="EC250 e185 desolate")
+
+# ------------------------------------------------ same comparison across all cells
+all_rows = []
+for key, xs in early_late_reg_df.groupby(["subject", "electrode_idx", "word_end"]):
+    try:
+        res = compare_predictors(xs, label=" ".join(map(str, key)), n_boot=2_000)
+    except AssertionError as e:
+        print(f"  skip {key}: {e}")
+        continue
+    res[["subject", "electrode_idx", "word_end"]] = key
+    all_rows.append(res)
+
+cmp_all = pd.concat(all_rows, ignore_index=True)
+
+print("\n=== difference in coupling, pooled across cells ===")
+for pair, g in cmp_all.groupby("pair"):
+    w, p = stats.wilcoxon(g["diff"])
+    print(f"{pair:<40} median diff={g['diff'].median():+.3f}  "
+          f"{(g['diff'] > 0).sum()}/{len(g)} positive  W={w:.0f}, p={p:.4f}")
 
 # %%
 # %% Cross-temporal single-trial coupling matrices: survivors vs. counterfactual sites
@@ -998,7 +1124,8 @@ def _block_summary(R, i0, i1, j0, j1):
                 "block_valid": True, "block_reason": ""}
 
 
-def build_tg(subject, electrode_idx, word_end, kind, label_extra="", seed=0):
+def build_tg(subject, electrode_idx, word_end, kind, label_extra="", seed=0,
+             control_stimulus=True):
     """Cross-temporal single-trial correlation matrix for one cell.
 
     Controls: baseline, trial drift, continuum-step dummies. The local-gain and
@@ -1033,8 +1160,7 @@ def build_tg(subject, electrode_idx, word_end, kind, label_extra="", seed=0):
         np.ones(we_mask.sum()),
         baseline_i[we_mask],
         md_we.index.to_numpy(float),
-        step_dummies,
-    ])
+    ] + ([step_dummies] if control_stimulus else []))
     assert np.linalg.matrix_rank(Z) == Z.shape[1], f"rank-deficient design {subject} e{electrode_idx}"
 
     Y = data_i[we_mask][:, ::DECIM]
@@ -1133,23 +1259,25 @@ print(f"random lpp-negative draw: "
 GROUPS = ["late sig", "matched null", "random null"]
 mats, metas = [], []
 
+build_tg_kwargs = {"control_stimulus": True}
 for _, row in survivors.iterrows():
     R, m = build_tg(row.subject, row.electrode_idx, row.word_end,
-                    kind="late sig", label_extra=f"  (r={row.r:+.2f})")
+                    kind="late sig", label_extra=f"  (r={row.r:+.2f})", **build_tg_kwargs)
     mats.append(R); metas.append(m)
 
 for pick in counters:
     R, m = build_tg(pick.subject, pick.electrode_idx, pick.word_end,
-                    kind="matched null", label_extra="  (matched, no late)")
+                    kind="matched null", label_extra="  (matched, no late)", **build_tg_kwargs)
     mats.append(R); metas.append(m)
 
 for pick in randoms:
     R, m = build_tg(pick.subject, pick.electrode_idx, pick.word_end,
-                    kind="random null", label_extra="  (random, no late)")
+                    kind="random null", label_extra="  (random, no late)", **build_tg_kwargs)
     mats.append(R); metas.append(m)
 
 # ------------------------------------------------------------------------- plot
-vmax = max(np.abs(m - np.eye(len(m))).max() for m in mats)
+vmax = 0.9578158603273002
+# DEV max(np.abs(m - np.eye(len(m))).max() for m in mats)
 row_of = {g: i for i, g in enumerate(GROUPS)}
 ncols = max(sum(m["kind"] == g for m in metas) for g in GROUPS)
 fig, axes = plt.subplots(len(GROUPS), ncols,
