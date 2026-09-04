@@ -583,6 +583,16 @@ def demo_measure(measure_col, window, annotate_fn, title):
     # site (not the out-of-fold, per-fold template actually used in the analysis)
     template = data_i[cell_df.epoch_idx.to_numpy(), smin:smax + 1].mean(axis=0)
 
+    # Diagnostic: is the template's own temporal structure small relative to a
+    # single trial's noise range? If so a shared y-axis would visually flatten
+    # it even when it has real shape -- this disambiguates a plotting artifact
+    # from a genuinely close-to-flat (plateau-like) average response shape.
+    template_range = template.max() - template.min()
+    trial_ranges = traces.max(axis=1) - traces.min(axis=1)
+    print(f"  [{measure_col}] template range={template_range:.3f}  "
+          f"median single-trial range={np.median(trial_ranges):.3f}  "
+          f"ratio={template_range / np.median(trial_ranges):.3f}")
+
     win_lo_idx, win_hi_idx = smin - lo, smax - lo + 1
 
     n_show = len(picks)
@@ -610,7 +620,17 @@ def _annotate_mean(ax, win_times, win_trace, value, template):
 
 
 def _annotate_mf(ax, win_times, win_trace, value, template):
-    ax.plot(win_times, template, color="crimson", lw=1.4, ls="--", alpha=0.8)
+    # Template plotted on its own auto-scaled axis: it's an average over many
+    # trials, so its noise (and possibly its real structure) is suppressed
+    # ~1/sqrt(n) relative to a single trial -- sharing the raw trial's y-axis
+    # would flatten it visually regardless of whether it has real shape.
+    axt = ax.twinx()
+    rng_t = template.max() - template.min()
+    pad_t = 0.1 * rng_t if rng_t > 1e-9 else 0.1
+    axt.plot(win_times, template, color="crimson", lw=1.6, ls="--", alpha=0.9)
+    axt.set_ylim(template.min() - pad_t, template.max() + pad_t)
+    axt.tick_params(axis="y", labelsize=6, colors="crimson")
+    axt.set_ylabel("template (a.u.)", fontsize=7, color="crimson")
     ax.text(0.03, 0.95, f"peak={value:.2f}", transform=ax.transAxes, va="top", ha="left",
             fontsize=8, color="crimson")
 
