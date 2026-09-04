@@ -674,7 +674,7 @@ ALPHA_MAT = 0.05
 N_COUNTER = None          # None = one counterfactual per survivor
 
 N_RANDOM = 6              # random lpp-negative cells, unmatched
-RANDOM_SEED = 1
+RANDOM_SEED = 42
 
 baseline_smin, baseline_smax = 0, 40
 
@@ -689,6 +689,53 @@ def _unit_cols(R):
     nrm = np.linalg.norm(R, axis=0, keepdims=True)
     nrm[nrm == 0] = np.inf
     return R / nrm
+
+
+# ---------------------------------------------------------------- block helpers
+MIN_LAG_SAMP = 6          # decimated samples; excludes the autocorr ridge
+
+def _block_means(R, hl, he):
+    """B[j, i] = mean of R[j:j+hl, i:i+he] (integral image)."""
+    C = np.cumsum(np.cumsum(R, axis=0), axis=1)
+    C = np.pad(C, ((1, 0), (1, 0)))
+    return (C[hl:, he:] - C[:-hl, he:] - C[hl:, :-he] + C[:-hl, :-he]) / (hl * he)
+
+
+def _block_summary(R, i0, i1, j0, j1):
+    he, hl = i1 - i0, j1 - j0
+    d = j0 - i0
+
+    def _invalid(reason):
+        return {"r_block": np.nan, "lag_null": np.empty(0), "any_null": np.empty(0),
+                    "lag_pct": np.nan, "any_pct": np.nan, "block_shape": (hl, he),
+                    "lag_samp": d, "block_valid": False, "block_reason": reason}
+
+    if j0 <= i1:
+        return _invalid("late window overlaps or precedes early window")
+    if d < MIN_LAG_SAMP:
+        return _invalid(f"block lag {d} < MIN_LAG_SAMP ({MIN_LAG_SAMP})")
+
+    B = _block_means(R, hl, he)
+    if not (0 <= j0 < B.shape[0] and 0 <= i0 < B.shape[1]):
+        return _invalid("block runs off the matrix edge")
+    r_block = B[j0, i0]
+
+    idx = np.arange(B.shape[1])
+    ok = (idx + d >= 0) & (idx + d < B.shape[0]) & (idx != i0)
+    lag_null = B[idx[ok] + d, idx[ok]]
+    if lag_null.size <= 3:
+        return _invalid(f"matched-lag null too small (n={lag_null.size})")
+
+    jj, ii = np.indices(B.shape)
+    any_mask = (jj - ii) >= MIN_LAG_SAMP
+    any_mask[j0, i0] = False
+    any_null = B[any_mask]
+
+    return {"r_block": r_block, "lag_null": lag_null, "any_null": any_null,
+                "lag_pct": 100.0 * (lag_null < r_block).mean(),
+                "any_pct": 100.0 * (any_null < r_block).mean(),
+                "block_shape": (hl, he), "lag_samp": d,
+                "block_valid": True, "block_reason": ""}
 
 
 def build_tg(subject, electrode_idx, word_end, kind, label_extra="", seed=0):
@@ -746,15 +793,18 @@ def build_tg(subject, electrode_idx, word_end, kind, label_extra="", seed=0):
     e_lo, e_hi = to_t(cell.smin_early), to_t(cell.smax_early)
     l_lo, l_hi = to_t(cell.smin_late), to_t(cell.smax_late)
 
-    # --- quantitative summary: is the early/late pixel special, or just pedestal?
-    ti = np.searchsorted(times, np.mean([e_lo, e_hi]))
-    tj = np.searchsorted(times, np.mean([l_lo, l_hi]))
+    # --- quantitative summary: is the early/late block special, or just pedestal?
+    i0 = int(np.searchsorted(times, e_lo))
+    i1 = max(i0 + 1, int(np.searchsorted(times, e_hi)))
+    j0 = int(np.searchsorted(times, l_lo))
+    j1 = max(j0 + 1, int(np.searchsorted(times, l_hi)))
+    bs = _block_summary(R, i0, i1, j0, j1)
+    if not bs["block_valid"]:
+        print(f"  note: {subject} e{electrode_idx} {word_end} — {bs['block_reason']}; "
+              "no inset for this panel")
+
+    ti, tj = (i0 + i1) // 2, (j0 + j1) // 2
     r_cell = R[tj, ti]
-    lag = abs(tj - ti)
-    ii, jj = np.indices(R.shape)
-    lag_band = (np.abs(jj - ii) >= lag - 2) & (np.abs(jj - ii) <= lag + 2) & (jj > ii)
-    pedestal = R[lag_band]
-    pct = 100.0 * (pedestal < r_cell).mean()
     ridge = np.mean([R[k, k + 1] for k in range(R.shape[0] - 1)])
 
     meta = dict(
@@ -762,13 +812,14 @@ def build_tg(subject, electrode_idx, word_end, kind, label_extra="", seed=0):
         label=f"{subject} e{electrode_idx}\n{word_end}{label_extra}",
         times=times, crit=crit, n_trials=n_tr,
         early=(e_lo, e_hi), late=(l_lo, l_hi),
-        r_cell=r_cell, pedestal_med=np.median(pedestal), pedestal_pct=pct, ridge=ridge,
+        r_cell=r_cell, ridge=ridge, **bs,
         word_offset=WORD_PHASE_DF.query("word == @word_end and phase == 'offset'").iloc[0].start,
         pod=WORD_PHASE_DF.query("word == @word_end and phase == 'pod'").iloc[0].start,
     )
     print(f"[{kind:>7}] {subject} e{electrode_idx} {word_end}: n={n_tr}  "
-          f"r_cell={r_cell:+.3f}  lag-matched median={meta['pedestal_med']:+.3f} "
-          f"(pct {pct:.0f})  ridge={ridge:.3f}  crit={crit:.3f}")
+          f"r_block={bs['r_block']:+.3f}  lag-matched med={np.median(bs['lag_null']):+.3f} "
+          f"(pct {bs['lag_pct']:.0f})  any-block pct {bs['any_pct']:.0f}  "
+          f"ridge={ridge:.3f}  crit={crit:.3f}")
     return R, meta
 
 
@@ -867,6 +918,29 @@ for R, meta in zip(mats, metas):
         ax.axvline(v, color=c, lw=0.5, ls="--", alpha=0.5)
         ax.axhline(v, color=c, lw=0.5, ls="--", alpha=0.5)
 
+    # ---- inset: where does the highlighted block sit in the matrix's own distribution?
+    if meta["block_valid"]:
+        axin = ax.inset_axes([0.55, 0.10, 0.42, 0.26])
+        axin.patch.set_facecolor("white"); axin.patch.set_alpha(0.88)
+
+        lo = min(meta["any_null"].min(), meta["lag_null"].min(), meta["r_block"])
+        hi = max(meta["any_null"].max(), meta["lag_null"].max(), meta["r_block"])
+        bins = np.linspace(lo, hi, 26)
+        axin.hist(meta["any_null"], bins=bins, density=True, histtype="step",
+                color="0.45", lw=0.8)
+        axin.hist(meta["lag_null"], bins=bins, density=True,
+                color="0.75", edgecolor="none")
+        axin.axvline(meta["r_block"], color="crimson", lw=1.2)
+        axin.axvline(0, color="k", lw=0.4, ls=":")
+
+        axin.text(0.98, 0.95, f"{meta['lag_pct']:.0f}%", transform=axin.transAxes,
+                ha="right", va="top", fontsize=6, color="crimson")
+        axin.set_yticks([])
+        axin.tick_params(axis="x", labelsize=5.5, length=2, pad=1)
+        axin.set_xticks([round(lo, 1), 0, round(hi, 1)])
+        sns.despine(ax=axin, left=True, right=True, top=True)
+        axin.spines["bottom"].set_linewidth(0.5)
+
     ax.set_title(meta["label"], fontsize=7.5)
     ax.set_xlim(-0.1, 1.0); ax.set_ylim(-0.1, 1.0)
     ax.tick_params(labelsize=7)
@@ -885,9 +959,20 @@ cb.ax.tick_params(labelsize=7)
 
 print("\nsummary:")
 print(pd.DataFrame([{k: m[k] for k in
-                     ["kind", "label", "n_trials", "r_cell", "pedestal_med",
-                      "pedestal_pct", "ridge", "crit"]} for m in metas])
+                     ["kind", "label", "n_trials", "r_cell", "ridge", "crit",
+                     "r_block", "lag_pct", "any_pct"]} for m in metas])
       .assign(label=lambda d: d.label.str.replace("\n", " ")).round(3).to_string(index=False))
+
+# %%
+win = (early_late_trial_df
+       .groupby(["subject", "electrode_idx", "word_end"])
+       [["smin_early", "smax_early", "smin_late", "smax_late"]].first()
+       .reset_index())
+win["dur_early"] = win.smax_early - win.smin_early
+win["dur_late"]  = win.smax_late  - win.smin_late
+win["gap_samp"]  = win.smin_late  - win.smax_early
+print(win.sort_values("gap_samp").head(15).to_string(index=False))
+print(f"\n{(win.gap_samp <= 0).mean():.1%} of cells have overlapping early/late windows")
 
 # %% [markdown]
 # ## lmer regression
