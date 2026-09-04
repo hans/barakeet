@@ -314,6 +314,58 @@ def _design(xs, cols, steps):
     return np.column_stack(parts)
 
 
+def crossfit_matched_filter_peak(trials, n_folds=5, seed=0):
+    """Out-of-fold matched-filter peak amplitude, one value per trial.
+
+    Projects each trial onto the (uncentered) fold-averaged response shape,
+    scaled so the projection estimates trial gain under a fixed-shape/
+    varying-gain model. This is the least-variance *linear* peak-amplitude
+    estimator under that model -- a lower-noise sibling of the flat window
+    mean (hga_early/hga_late), weighted by the response's actual temporal
+    shape instead of uniformly. Held-out folds avoid template circularity.
+    A centered (DC-removed) template was tried and found to discard most of
+    the gain signal -- simulation showed it strictly underperforms the
+    uncentered version at every noise level tested.
+    """
+    n = trials.shape[0]
+    rng = np.random.default_rng(seed)
+    folds = rng.integers(0, n_folds, size=n)
+    out = np.full(n, np.nan)
+    for f in range(n_folds):
+        train = trials[folds != f]
+        test_idx = np.flatnonzero(folds == f)
+        if len(train) < 2 or len(test_idx) == 0:
+            continue
+        template = train.mean(axis=0)
+        denom = template @ template
+        if denom < 1e-8:
+            out[test_idx] = trials[test_idx].mean(axis=1)
+            continue
+        w = template / denom
+        out[test_idx] = trials[test_idx] @ w
+    return out
+
+
+def centroid_latency(trials, times):
+    """Amplitude-weighted mean time (center of mass) of each trial's window, in seconds.
+
+    Only positive-going signal is weighted (relu), since HGA fluctuates
+    around zero and negative weights would make "center of mass" ill-defined.
+    Unlike an argmax-based peak time, this integrates over the whole window
+    rather than depending on a single noisy sample, giving much lower
+    single-trial variance -- simulation showed centroid latency detects a
+    true early/late timing coupling ~1.5x more sensitively than argmax or
+    half-max rise time, at every noise level tested, with no inflation when
+    no true timing coupling is present. Trials with no positive signal in
+    the window (rare) return NaN and are dropped downstream.
+    """
+    pos = np.clip(trials, 0, None)
+    denom = pos.sum(axis=1)
+    denom = np.where(denom <= 1e-8, np.nan, denom)
+    weighted = pos @ times
+    return weighted / denom
+
+
 # %%
 # %% Per-trial HGA in each site's early-acoustic and late-perceptual windows
 early_late_sites = pd.merge(
@@ -339,7 +391,7 @@ early_late_trial_rows = []
 
 baseline_smin, baseline_smax = 0, 40
 
-for _, row in tqdm(early_late_sites.iterrows(), total=early_late_sites.shape[0], desc="Extracting early+late HGA"):
+for loop_idx, (_, row) in enumerate(tqdm(early_late_sites.iterrows(), total=early_late_sites.shape[0], desc="Extracting early+late HGA")):
     ep_i = epochs_dict[row.subject]
     md_i = ep_i.metadata
     we_mask = (md_i.word_end == row.word_end).values
@@ -390,6 +442,20 @@ for _, row in tqdm(early_late_sites.iterrows(), total=early_late_sites.shape[0],
     late_smin_i, late_smax_i = int(row.smin_late), int(row.smax_late)
     hga_late_i = data_i[:, late_smin_i:late_smax_i + 1].mean(axis=1)
 
+    # Peak-amplitude (matched filter) and peak-latency (centroid) measures, computed
+    # on the raw within-window traces of only this word_end's trials -- see
+    # crossfit_matched_filter_peak / centroid_latency docstrings for rationale.
+    early_window_we_i = data_i[we_mask][:, early_smin_i:early_smax_i + 1]
+    late_window_we_i = data_i[we_mask][:, late_smin_i:late_smax_i + 1]
+
+    mf_early_we_i = crossfit_matched_filter_peak(early_window_we_i, seed=2 * loop_idx)
+    mf_late_we_i = crossfit_matched_filter_peak(late_window_we_i, seed=2 * loop_idx + 1)
+
+    times_early_i = epoch_tmin + np.arange(early_smin_i, early_smax_i + 1) / epoch_sfreq
+    times_late_i = epoch_tmin + np.arange(late_smin_i, late_smax_i + 1) / epoch_sfreq
+    centroid_early_we_i = centroid_latency(early_window_we_i, times_early_i)
+    centroid_late_we_i = centroid_latency(late_window_we_i, times_late_i)
+
     gain_mask = np.ones(data_i.shape[-1], bool)
     gain_mask[baseline_smin:baseline_smax + 1] = False
     gain_mask[early_smin_i:early_smax_i + 1] = False
@@ -418,6 +484,12 @@ for _, row in tqdm(early_late_sites.iterrows(), total=early_late_sites.shape[0],
         "hga_early": hga_early_i[we_mask],
         "hga_alt_early": hga_alt_early_i[we_mask],
         "hga_late": hga_late_i[we_mask],
+
+        # peak amplitude (out-of-fold matched filter) and peak latency (centroid)
+        "mf_early": mf_early_we_i,
+        "mf_late": mf_late_we_i,
+        "centroid_early": centroid_early_we_i,
+        "centroid_late": centroid_late_we_i,
 
         # local gain control
         "hga_gain": hga_gain_i[we_mask],
@@ -451,6 +523,113 @@ early_late_reg_df["hga_early_aligned"] = early_late_reg_df["hga_early"] * early_
 early_late_reg_df["early_tuning"] = (early_late_reg_df.early_contrast_sign > 0).astype(int)
 early_late_reg_df["lexical_evidence"] = (early_late_reg_df.word_end.str[0] != early_late_reg_df.phoneme_pair.str[0]).astype(int)
 early_late_reg_df["congruent"] = (early_late_reg_df.lexical_evidence == early_late_reg_df.early_contrast_sign).astype(int)
+
+# %% [markdown]
+# ## Pedagogical check: what do these measures actually compute on single trials?
+#
+# Before running the coupling analysis: for each trial-level measure, find the
+# site where it varies most across trials, pick a handful of trials spanning
+# that range, and plot the raw HGA trace with the measure's value made visible
+# directly on the trace (flat mean -> horizontal line; matched-filter peak ->
+# fitted template shape; centroid -> shaded positive mass + its balance point).
+# This is a sanity check on real data, not part of the analysis itself.
+
+# %%
+DEMO_N_TRIALS = 4
+DEMO_PAD_S = 0.15  # context shown around the analysis window, in seconds
+
+
+def _demo_pick_cell(measure_col, min_n=40):
+    """(subject, electrode_idx, phoneme_pair, word_end) with the largest spread in measure_col."""
+    df = early_late_trial_df.query("late_significant_uncorrected")
+    spread = (
+        df.groupby(["subject", "electrode_idx", "phoneme_pair", "word_end"])[measure_col]
+        .apply(lambda s: (s.max() - s.min()) if s.notna().sum() >= min_n else np.nan)
+    )
+    keys = spread.idxmax()
+    return dict(zip(["subject", "electrode_idx", "phoneme_pair", "word_end"], keys))
+
+
+def _demo_pick_trials(cell_df, measure_col, n_show=DEMO_N_TRIALS):
+    """n_show trials spanning measure_col's range within one site."""
+    s = cell_df[["epoch_idx", measure_col]].dropna().sort_values(measure_col)
+    pick_pos = np.linspace(0, len(s) - 1, n_show).round().astype(int)
+    return s.iloc[pick_pos]
+
+
+def demo_measure(measure_col, window, annotate_fn, title):
+    cell = _demo_pick_cell(measure_col)
+    cell_mask = (
+        (early_late_trial_df.subject == cell["subject"])
+        & (early_late_trial_df.electrode_idx == cell["electrode_idx"])
+        & (early_late_trial_df.phoneme_pair == cell["phoneme_pair"])
+        & (early_late_trial_df.word_end == cell["word_end"])
+        & (early_late_trial_df.late_significant_uncorrected)
+    )
+    cell_df = early_late_trial_df.loc[cell_mask]
+    picks = _demo_pick_trials(cell_df, measure_col)
+
+    smin, smax = int(cell_df[f"smin_{window}"].iloc[0]), int(cell_df[f"smax_{window}"].iloc[0])
+    win_times = epoch_tmin + np.arange(smin, smax + 1) / epoch_sfreq
+
+    ep_i = epochs_dict[cell["subject"]]
+    data_i = ep_i.get_data(picks=cell["electrode_idx"]).squeeze(1)
+    pad = int(round(DEMO_PAD_S * epoch_sfreq))
+    lo, hi = max(0, smin - pad), min(data_i.shape[1] - 1, smax + pad)
+    times = epoch_tmin + np.arange(lo, hi + 1) / epoch_sfreq
+    traces = data_i[picks.epoch_idx.to_numpy(), lo:hi + 1]
+
+    # visualization-only template: average window shape over ALL trials at this
+    # site (not the out-of-fold, per-fold template actually used in the analysis)
+    template = data_i[cell_df.epoch_idx.to_numpy(), smin:smax + 1].mean(axis=0)
+
+    win_lo_idx, win_hi_idx = smin - lo, smax - lo + 1
+
+    n_show = len(picks)
+    fig, axes = plt.subplots(1, n_show, figsize=(3.0 * n_show, 2.6), sharey=True, constrained_layout=True)
+    axes = np.atleast_1d(axes)
+    for ax, (_, row), trace in zip(axes, picks.iterrows(), traces):
+        win_trace = trace[win_lo_idx:win_hi_idx]
+        ax.plot(times, trace, color="0.25", lw=1.1)
+        ax.axvspan(win_times[0], win_times[-1], color="C0", alpha=0.10, lw=0)
+        ax.axhline(0, color="k", lw=0.4, ls=":")
+        annotate_fn(ax, win_times, win_trace, row[measure_col], template)
+        ax.set_title(f"epoch {int(row.epoch_idx)}\n{measure_col}={row[measure_col]:.2f}", fontsize=8.5)
+        ax.set_xlabel("t (s)", fontsize=8)
+    axes[0].set_ylabel("HGA (z)", fontsize=8)
+    fig.suptitle(
+        f"{title}\n{cell['subject']} e{cell['electrode_idx']} {cell['word_end']} "
+        f"({window} window, {n_show} of {len(cell_df)} trials shown, chosen for max spread in {measure_col})",
+        fontsize=9.5,
+    )
+    return fig, cell
+
+
+def _annotate_mean(ax, win_times, win_trace, value, template):
+    ax.hlines(value, win_times[0], win_times[-1], color="crimson", lw=1.8)
+
+
+def _annotate_mf(ax, win_times, win_trace, value, template):
+    ax.plot(win_times, template, color="crimson", lw=1.4, ls="--", alpha=0.8)
+    ax.text(0.03, 0.95, f"peak={value:.2f}", transform=ax.transAxes, va="top", ha="left",
+            fontsize=8, color="crimson")
+
+
+def _annotate_centroid(ax, win_times, win_trace, value, template):
+    pos = np.clip(win_trace, 0, None)
+    ax.fill_between(win_times, 0, pos, color="crimson", alpha=0.35)
+    ax.axvline(value, color="crimson", lw=1.8)
+
+
+_ = demo_measure("hga_late", "late", _annotate_mean, "Flat window mean (existing measure)")
+
+# %%
+_ = demo_measure("mf_late", "late", _annotate_mf,
+                  "Out-of-fold matched-filter peak amplitude\n(dashed = across-trial template shape, for display only)")
+
+# %%
+_ = demo_measure("centroid_late", "late", _annotate_centroid,
+                  "Amplitude-weighted centroid peak latency\n(shaded = positive mass being weighted; line = its balance point)")
 
 # %%
 print("Sanity check: partial correlation between early HGA and resampled step, controlling for baseline HGA")
@@ -486,24 +665,34 @@ CONTROL_SETS = {
 PRIMARY = "full"
 
 
-def run_spec(df, name, cols, steps, n_perm=N_PERM, n_boot=0, seed=SEED):
+def run_spec(df, name, cols, steps, early_col="hga_early", late_col="hga_late",
+             n_perm=N_PERM, n_boot=0, seed=SEED):
     missing = [c for c in cols if c not in df.columns]
     if missing:
         raise KeyError(f"spec '{name}' missing columns: {missing}")
 
     rng = np.random.default_rng(seed)
     cells, keys = {}, []
+    n_dropped_total = 0
     for key, xs in df.groupby(GK, sort=True):
-        early = xs["hga_early"].to_numpy(float)
-        late = xs["hga_late"].to_numpy(float)
+        early_raw = xs[early_col].to_numpy(float)
+        late_raw = xs[late_col].to_numpy(float)
+        # centroid latency can be NaN for trials with no positive signal in the
+        # window (rare); drop those trials rather than assert on them.
+        finite_mask = np.isfinite(early_raw) & np.isfinite(late_raw)
+        n_dropped_total += (~finite_mask).sum()
+        xs = xs.loc[finite_mask]
+        early = early_raw[finite_mask]
+        late = late_raw[finite_mask]
         Z = _design(xs, cols, steps)
-        assert np.isfinite(early).all() and np.isfinite(late).all(), f"non-finite data {key}"
         assert np.isfinite(Z).all(), f"non-finite controls {key}"
         k_eff = Z.shape[1] - 1
         assert len(xs) > k_eff + 10, f"cell {key} n={len(xs)} too small for k={k_eff}"
         assert np.linalg.matrix_rank(Z) == Z.shape[1], f"rank-deficient design in {key}"
         cells[key] = (early, late, Z)
         keys.append(key)
+    if n_dropped_total:
+        print(f"  [{name}] dropped {n_dropped_total} trials with non-finite {early_col}/{late_col}")
 
     obs_r = np.array([_partial_r(*cells[k]) for k in keys])
     obs_n = np.array([len(cells[k][0]) for k in keys])
@@ -574,10 +763,31 @@ def run_spec(df, name, cols, steps, n_perm=N_PERM, n_boot=0, seed=SEED):
 
 
 # ------------------------------------------------------------------------- run
-results = {}
-for name, spec in CONTROL_SETS.items():
-    results[name] = run_spec(early_late_reg_df, name,
-                             n_boot=N_BOOT if name == PRIMARY else 0, **spec)
+# Three trial-level target measures, all run through the same nested
+# control-set / permutation-FWER machinery:
+#   amplitude_mean     -- existing flat-window mean (hga_early/hga_late)
+#   amplitude_peak     -- out-of-fold matched-filter peak amplitude (mf_early/mf_late)
+#   latency_centroid   -- amplitude-weighted peak-time centroid (centroid_early/centroid_late)
+MEASURES = {
+    "amplitude_mean": dict(early_col="hga_early", late_col="hga_late"),
+    "amplitude_peak": dict(early_col="mf_early", late_col="mf_late"),
+    "latency_centroid": dict(early_col="centroid_early", late_col="centroid_late"),
+}
+
+results_by_measure = {}
+for measure_name, measure_cols in MEASURES.items():
+    print(f"\n=== measure: {measure_name} ===")
+    results_by_measure[measure_name] = {
+        name: run_spec(early_late_reg_df, f"{measure_name}/{name}",
+                       n_boot=N_BOOT if name == PRIMARY else 0,
+                       **measure_cols, **spec)
+        for name, spec in CONTROL_SETS.items()
+    }
+
+# Downstream cells below were written against the amplitude-mean measure;
+# `results` keeps that behavior unchanged. The other two measures are
+# summarized separately just below and available via results_by_measure.
+results = results_by_measure["amplitude_mean"]
 
 fwer_raw = results[PRIMARY].sort_values("p_fwer")
 
@@ -601,6 +811,36 @@ for name in CONTROL_SETS:
 ever = surv.any(axis=1)
 print("\n|r| at ever-surviving cells:")
 print(pd.DataFrame({n: results[n].loc[ever, "r"] for n in CONTROL_SETS}).round(3).to_string())
+
+# %% [markdown]
+# ### Compare amplitude-mean vs. amplitude-peak vs. latency-centroid coupling
+#
+# Same nested control sets, same permutation-FWER machinery, evaluated at the
+# "full" control spec for each of the three trial-level target measures.
+
+# %%
+measure_summary_rows = []
+for measure_name in MEASURES:
+    res = results_by_measure[measure_name][PRIMARY]
+    measure_summary_rows.append({
+        "measure": measure_name,
+        "n_sites": len(res),
+        "n_survive_fwer": int(res["survives"].sum()),
+        "n_survive_uncorrected": int(res["survives_uncorrected"].sum()),
+        "median_abs_r": res["r"].abs().median(),
+        "max_abs_r": res["r"].abs().max(),
+    })
+measure_summary_df = pd.DataFrame(measure_summary_rows)
+print("\ncross-measure comparison (control set = 'full'):")
+print(measure_summary_df.round(3).to_string(index=False))
+
+# per-site r values side by side, so individual electrodes can be compared across measures
+measure_r_by_site = pd.concat(
+    {measure_name: results_by_measure[measure_name][PRIMARY]["r"] for measure_name in MEASURES},
+    axis=1,
+)
+print("\nper-site r under each measure (full control set):")
+print(measure_r_by_site.round(3).to_string())
 
 # %%
 fwer = (
