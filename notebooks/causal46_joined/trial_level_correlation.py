@@ -439,15 +439,27 @@ for loop_idx, (_, row) in enumerate(tqdm(early_late_sites.iterrows(), total=earl
     bad_alt_data_i = all_data_i[:, bad_alt_sites_i.electrode_idx, :]
 
     baseline_i = data_i[:, baseline_smin:baseline_smax + 1].mean(axis=1)
-    alt_baseline_i = alt_data_i[:, :, baseline_smin:baseline_smax + 1].mean(axis=-1).mean(axis=-1)
-    bad_alt_baseline_i = bad_alt_data_i[:, :, baseline_smin:baseline_smax + 1].mean(axis=-1).mean(axis=-1)
+
+    # mean over time only, retaining per-electrode values -- matches
+    # hga_alt_early_by_elec/hga_bad_alt_early_by_elec so a drawn electrode's own
+    # baseline can control for it (rather than the pooled-over-electrodes baseline)
+    alt_baseline_by_elec_i = alt_data_i[:, :, baseline_smin:baseline_smax + 1].mean(axis=-1)
+    bad_alt_baseline_by_elec_i = bad_alt_data_i[:, :, baseline_smin:baseline_smax + 1].mean(axis=-1)
+
+    alt_baseline_i = alt_baseline_by_elec_i.mean(axis=-1)
+    bad_alt_baseline_i = bad_alt_baseline_by_elec_i.mean(axis=-1)
 
     early_smin_i, early_smax_i = int(row.smin_early), int(row.smax_early)
     hga_early_i = data_i[:, early_smin_i:early_smax_i + 1].mean(axis=1)
 
+    # mean over time only, retaining per-electrode values (n_trials, n_alt_sites) --
+    # used to sample reliability of the early measure at matched N (see alt_r_at_n)
+    hga_alt_early_by_elec_i = alt_data_i[:, :, early_smin_i:early_smax_i + 1].mean(axis=-1)
+    hga_bad_alt_early_by_elec_i = bad_alt_data_i[:, :, early_smin_i:early_smax_i + 1].mean(axis=-1)
+
     # mean over both electrodes and time
-    hga_alt_early_i = alt_data_i[:, :, early_smin_i:early_smax_i + 1].mean(axis=-1).mean(axis=-1)
-    hga_bad_alt_early_i = bad_alt_data_i[:, :, early_smin_i:early_smax_i + 1].mean(axis=-1).mean(axis=-1)
+    hga_alt_early_i = hga_alt_early_by_elec_i.mean(axis=-1)
+    hga_bad_alt_early_i = hga_bad_alt_early_by_elec_i.mean(axis=-1)
 
     late_smin_i, late_smax_i = int(row.smin_late), int(row.smax_late)
     hga_late_i = data_i[:, late_smin_i:late_smax_i + 1].mean(axis=1)
@@ -495,6 +507,10 @@ for loop_idx, (_, row) in enumerate(tqdm(early_late_sites.iterrows(), total=earl
         "hga_early": hga_early_i[we_mask],
         "hga_alt_early": hga_alt_early_i[we_mask],
         "hga_bad_alt_early": hga_bad_alt_early_i[we_mask],
+        "hga_alt_early_by_elec": list(hga_alt_early_by_elec_i[we_mask]),
+        "hga_bad_alt_early_by_elec": list(hga_bad_alt_early_by_elec_i[we_mask]),
+        "hga_alt_baseline_by_elec": list(alt_baseline_by_elec_i[we_mask]),
+        "hga_bad_alt_baseline_by_elec": list(bad_alt_baseline_by_elec_i[we_mask]),
         "hga_late": hga_late_i[we_mask],
 
         # peak amplitude (out-of-fold matched filter) and peak latency (centroid)
@@ -949,10 +965,18 @@ for ax in axs:
     sns.despine(ax=ax)
 
 # %%
-# %% Are the three predictors' couplings to late HGA actually different?
+# %% Are the three predictors' couplings to late HGA actually different? (full-N diagnostic)
 # Williams' test for dependent correlations sharing one variable (late HGA).
 # All correlations must live in the same residual space, so use one common
 # control set for every variable rather than a per-panel design.
+#
+# CAVEAT: "responsive sites" / "unresponsive sites" here are pooled means over
+# ALL available alt electrodes, vs. a single same-site electrode -- N is not
+# matched, so part of any advantage for the pooled predictors is just averaging
+# out noise, not a difference in the information the sites carry. Williams' t
+# and the trial-bootstrap below are still valid full-N diagnostics of the raw
+# columns, but treat this section as descriptive, not the matched-N claim; see
+# the N-matched reliability sweep after this section for that.
 
 COMMON_CONTROLS = ["hga_baseline", "epoch_idx", "resampled_centered",
                    "hga_alt_baseline", "hga_bad_alt_baseline"]
@@ -1050,6 +1074,138 @@ for pair, g in cmp_all.groupby("pair"):
     w, p = stats.wilcoxon(g["diff"])
     print(f"{pair:<40} median diff={g['diff'].median():+.3f}  "
           f"{(g['diff'] > 0).sum()}/{len(g)} positive  W={w:.0f}, p={p:.4f}")
+
+# %%
+# %% N-matched reliability sweep: how much of the alt-site advantage is averaging?
+# Same-site is inherently N=1. Sweep the number of alt electrodes averaged
+# (1, 2, 4, 8, all-available) for the responsive and unresponsive populations and
+# see whether/where the pooled measure overtakes same-site, rather than reporting
+# only the (N-mismatched) full pooled mean. At each draw, the control set is
+# matched in depth to the predictor: the drawn electrodes' own averaged baseline
+# is used in place of the pooled hga_alt_baseline/hga_bad_alt_baseline column, so
+# the predictor and its nuisance control are averaged over the same N. Responsive
+# and unresponsive electrodes are drawn from independent RNG streams so the two
+# curves aren't coupled to the same draw sequence.
+
+SWEEP_NS = [1, 2, 4, 8, None]  # None = all available electrodes
+_sweep_x_labels = ["1", "2", "4", "8", "all"]
+_sweep_n_pos = {label: i for i, label in enumerate(_sweep_x_labels)}
+
+
+def _n_label(n_elec):
+    return "all" if n_elec is None else str(n_elec)
+
+
+def _matched_draw(by_elec, baseline_by_elec, n_elec, rng):
+    """Average a random draw of `n_elec` electrodes' early/baseline values per trial.
+
+    by_elec, baseline_by_elec: (n_trials, n_avail) arrays for one alt population,
+    drawn from the same rng, without replacement, capped at n_avail.
+    """
+    n_avail = by_elec.shape[1]
+    n_draw = n_avail if n_elec is None else min(n_elec, n_avail)
+    idx = rng.choice(n_avail, size=n_draw, replace=False)
+    return by_elec[:, idx].mean(axis=1), baseline_by_elec[:, idx].mean(axis=1)
+
+
+def sweep_alt_reliability(df_cell, ns=SWEEP_NS, n_draws=200, seed=0):
+    """Mean Fisher-z r(late, early | controls) vs. N electrodes averaged.
+
+    Returns one row per (population, N) with the same-site (N=1, fixed) r
+    attached as a reference column. Responsive/unresponsive draws use
+    independent rng streams so they aren't coupled to the same electrode picks.
+    """
+    base_controls = df_cell[["hga_baseline", "epoch_idx", "resampled_centered"]].to_numpy(float)
+    late = df_cell["hga_late"].to_numpy(float)
+
+    Z_same = sm.add_constant(base_controls)
+    r_same = stats.pearsonr(_resid(late, Z_same),
+                             _resid(df_cell["hga_early"].to_numpy(float), Z_same))[0]
+
+    pop_specs = {
+        "responsive": ("hga_alt_early_by_elec", "hga_alt_baseline_by_elec", np.random.default_rng(seed)),
+        "unresponsive": ("hga_bad_alt_early_by_elec", "hga_bad_alt_baseline_by_elec", np.random.default_rng(seed + 1)),
+    }
+
+    rows = []
+    for pop, (early_col, baseline_col, rng) in pop_specs.items():
+        early_arr = np.stack(df_cell[early_col].to_numpy())
+        baseline_arr = np.stack(df_cell[baseline_col].to_numpy())
+        for n_elec in ns:
+            n_used = early_arr.shape[1] if n_elec is None else min(n_elec, early_arr.shape[1])
+            zs = np.empty(n_draws)
+            for d in range(n_draws):
+                pred, base_ctrl = _matched_draw(early_arr, baseline_arr, n_elec, rng)
+                Z = sm.add_constant(np.column_stack([base_controls, base_ctrl]))
+                r = stats.pearsonr(_resid(late, Z), _resid(pred, Z))[0]
+                zs[d] = np.arctanh(np.clip(r, -0.999999, 0.999999))
+            rows.append(dict(population=pop, n_label=_n_label(n_elec), n_requested=n_elec, n_elec=n_used,
+                              mean_z=zs.mean(), mean_r=np.tanh(zs.mean()),
+                              se_z=zs.std(ddof=1) / np.sqrt(n_draws)))
+
+    out = pd.DataFrame(rows)
+    out["same_site_r"] = r_same
+    return out
+
+
+def plot_sweep(sweep_df, same_site_r, title="", ax=None):
+    if ax is None:
+        _, ax = plt.subplots(figsize=(4, 3), constrained_layout=True)
+    for pop, g in sweep_df.groupby("population"):
+        g = g.sort_values("n_label", key=lambda s: s.map(_sweep_n_pos))
+        ax.plot(g["n_label"].map(_sweep_n_pos), g["mean_r"], marker="o", label=pop)
+    ax.axhline(same_site_r, ls="--", color="k", label="same site (N=1)")
+    ax.set_xticks(range(len(SWEEP_NS)))
+    ax.set_xticklabels(_sweep_x_labels)
+    ax.set_xlabel("N electrodes averaged")
+    ax.set_ylabel("mean r (Fisher-z avg)\nlate ~ early | controls")
+    ax.set_title(title)
+    ax.legend(frameon=False, fontsize=8)
+    sns.despine(ax=ax)
+    return ax
+
+
+sweep_demo = sweep_alt_reliability(check_df)
+print(sweep_demo.round(4).to_string(index=False))
+plot_sweep(sweep_demo, sweep_demo["same_site_r"].iloc[0],
+           title="EC250 e185 desolate")
+
+# %% ------------------------------------------- sweep across all cells
+sweep_rows = []
+for key, xs in early_late_reg_df.groupby(["subject", "electrode_idx", "word_end"]):
+    if len(xs) < 30:
+        continue
+    try:
+        res = sweep_alt_reliability(xs)
+    except Exception as e:
+        print(f"  skip {key}: {e}")
+        continue
+    res[["subject", "electrode_idx", "word_end"]] = key
+    sweep_rows.append(res)
+
+sweep_all = pd.concat(sweep_rows, ignore_index=True)
+
+agg = (sweep_all.groupby(["population", "n_label"])
+       .agg(mean_z=("mean_z", "mean"), n_cells=("mean_z", "size"))
+       .reset_index())
+agg["mean_r"] = np.tanh(agg["mean_z"])
+same_site_r_mean = (sweep_all.drop_duplicates(["subject", "electrode_idx", "word_end"])["same_site_r"].mean())
+
+plot_sweep(agg, same_site_r_mean,
+           title=f"reliability sweep, pooled across {agg['n_cells'].max()} cells")
+
+# %% ------------------------------------------- matched-N (N=1) significance, pooled across cells
+# This is the size-matched replacement for the pooled-N wilcoxon test above:
+# same-site is N=1 by construction, so compare it to the N=1 (single random alt
+# electrode) draws for each population, rather than the pooled-over-all-electrodes
+# columns.
+print("\n=== matched-N (N=1) coupling difference vs. same-site, pooled across cells ===")
+n1 = sweep_all.query("n_label == '1'").copy()
+n1["diff_vs_same"] = n1["mean_r"] - n1["same_site_r"]
+for pop, g in n1.groupby("population"):
+    w, p = stats.wilcoxon(g["diff_vs_same"])
+    print(f"{pop:<15} median diff={g['diff_vs_same'].median():+.3f}  "
+          f"{(g['diff_vs_same'] > 0).sum()}/{len(g)} positive  W={w:.0f}, p={p:.4f}")
 
 # %%
 # %% Cross-temporal single-trial coupling matrices: survivors vs. counterfactual sites
