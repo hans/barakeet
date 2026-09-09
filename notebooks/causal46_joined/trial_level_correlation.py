@@ -367,6 +367,8 @@ def centroid_latency(trials, times):
 
 
 # %%
+early_all_acoustic_windows
+
 # %% Per-trial HGA in each site's early-acoustic and late-perceptual windows
 early_late_sites = pd.merge(
     (
@@ -405,6 +407,19 @@ for loop_idx, (_, row) in enumerate(tqdm(early_late_sites.iterrows(), total=earl
     if alt_sites_i.empty:
         raise ValueError(f"Could not find any alternative site for {row.subject} {row.electrode_idx} {row.phoneme_pair} {row.word_end}")
 
+    # Pick other electrodes from the same subject which are selective for the same phoneme pair,
+    # but not this site
+    # Retain sign information; we'll transform the activation by this value
+    alt2_sites_i = (
+        early_all_acoustic_windows
+        .query("subject == @row.subject and electrode_idx != @row.electrode_idx and phoneme_pair == @row.phoneme_pair and significant_target")
+        .assign(sign=lambda xs: np.sign(xs.mean_diff_raw_med))
+        [["subject", "electrode_idx", "phoneme_pair", "word_end", "sign"]]
+        .drop_duplicates()
+    )
+    if alt2_sites_i.empty:
+        print(f"No alternative site selective for the same phoneme pair for {row.subject} {row.electrode_idx} {row.phoneme_pair} {row.word_end}")
+
     # Sanity check: pick the same number of sites from the same subject which are NOT speech responsive
     bad_alt_sites_i = speech_responsive_df.query("subject == @row.subject and electrode_idx != @row.electrode_idx and not speech_responsive")
     bad_alt_sites_i = bad_alt_sites_i.sample(n=min(len(bad_alt_sites_i), len(alt_sites_i)), random_state=loop_idx)
@@ -414,9 +429,18 @@ for loop_idx, (_, row) in enumerate(tqdm(early_late_sites.iterrows(), total=earl
     print(f"Found alternative site for {row.subject} {row.electrode_idx} {row.phoneme_pair} {row.word_end}: " +
           (", ".join(str(r.electrode_idx) for _, r in alt_sites_i.iterrows())))
 
+    print(f"Found alternative site selective for the same phoneme pair for {row.subject} {row.electrode_idx} {row.phoneme_pair} {row.word_end}: " +
+              (", ".join(str(r.electrode_idx) for _, r in alt2_sites_i.iterrows())))
+
     all_data_i = ep_i.get_data()
     data_i = all_data_i[:, row.electrode_idx, :]
     alt_data_i = all_data_i[:, alt_sites_i.electrode_idx, :]
+    if alt2_sites_i.empty:
+        alt2_data_i = np.array([])
+        alt2_signs_by_elec_i = np.array([])
+    else:
+        alt2_data_i = all_data_i[:, alt2_sites_i.electrode_idx, :]
+        alt2_signs_by_elec_i = alt2_sites_i.sign.values
     bad_alt_data_i = all_data_i[:, bad_alt_sites_i.electrode_idx, :]
 
     baseline_i = data_i[:, baseline_smin:baseline_smax + 1].mean(axis=1)
@@ -425,9 +449,17 @@ for loop_idx, (_, row) in enumerate(tqdm(early_late_sites.iterrows(), total=earl
     # hga_alt_early_by_elec/hga_bad_alt_early_by_elec so a drawn electrode's own
     # baseline can control for it (rather than the pooled-over-electrodes baseline)
     alt_baseline_by_elec_i = alt_data_i[:, :, baseline_smin:baseline_smax + 1].mean(axis=-1)
+    if alt2_data_i.size == 0:
+        alt2_baseline_by_elec_i = np.array([])
+    else:
+        alt2_baseline_by_elec_i = alt2_data_i[:, :, baseline_smin:baseline_smax + 1].mean(axis=-1)
     bad_alt_baseline_by_elec_i = bad_alt_data_i[:, :, baseline_smin:baseline_smax + 1].mean(axis=-1)
 
     alt_baseline_i = alt_baseline_by_elec_i.mean(axis=-1)
+    if alt2_baseline_by_elec_i.size == 0:
+        alt2_baseline_i = np.array([])
+    else:
+        alt2_baseline_i = alt2_baseline_by_elec_i.mean(axis=-1)
     bad_alt_baseline_i = bad_alt_baseline_by_elec_i.mean(axis=-1)
 
     early_smin_i, early_smax_i = int(row.smin_early), int(row.smax_early)
@@ -436,10 +468,18 @@ for loop_idx, (_, row) in enumerate(tqdm(early_late_sites.iterrows(), total=earl
     # mean over time only, retaining per-electrode values (n_trials, n_alt_sites) --
     # used to sample reliability of the early measure at matched N (see alt_r_at_n)
     hga_alt_early_by_elec_i = alt_data_i[:, :, early_smin_i:early_smax_i + 1].mean(axis=-1)
+    if alt2_data_i.size == 0:
+        hga_alt2_early_by_elec_i = np.array([])
+    else:
+        hga_alt2_early_by_elec_i = alt2_data_i[:, :, early_smin_i:early_smax_i + 1].mean(axis=-1)
     hga_bad_alt_early_by_elec_i = bad_alt_data_i[:, :, early_smin_i:early_smax_i + 1].mean(axis=-1)
 
     # mean over both electrodes and time
     hga_alt_early_i = hga_alt_early_by_elec_i.mean(axis=-1)
+    if hga_alt2_early_by_elec_i.size == 0:
+        hga_alt2_early_i = np.array([])
+    else:
+        hga_alt2_early_i = hga_alt2_early_by_elec_i.mean(axis=-1)
     hga_bad_alt_early_i = hga_bad_alt_early_by_elec_i.mean(axis=-1)
 
     late_smin_i, late_smax_i = int(row.smin_late), int(row.smax_late)
@@ -483,15 +523,22 @@ for loop_idx, (_, row) in enumerate(tqdm(early_late_sites.iterrows(), total=earl
 
         "hga_baseline": baseline_i[we_mask],
         "hga_alt_baseline": alt_baseline_i[we_mask],
+        "hga_alt2_baseline": alt2_baseline_i[we_mask] if alt2_baseline_i.size > 0 else np.nan,
         "hga_bad_alt_baseline": bad_alt_baseline_i[we_mask],
 
         "hga_early": hga_early_i[we_mask],
         "hga_alt_early": hga_alt_early_i[we_mask],
+        "hga_alt2_early": hga_alt2_early_i[we_mask] if hga_alt2_early_i.size > 0 else np.nan,
         "hga_bad_alt_early": hga_bad_alt_early_i[we_mask],
         "hga_alt_early_by_elec": list(hga_alt_early_by_elec_i[we_mask]),
+        "hga_alt2_early_by_elec": list(hga_alt2_early_by_elec_i[we_mask]) if hga_alt2_early_by_elec_i.size > 0 else None,
         "hga_bad_alt_early_by_elec": list(hga_bad_alt_early_by_elec_i[we_mask]),
         "hga_alt_baseline_by_elec": list(alt_baseline_by_elec_i[we_mask]),
         "hga_bad_alt_baseline_by_elec": list(bad_alt_baseline_by_elec_i[we_mask]),
+        "hga_alt2_baseline_by_elec": list(alt2_baseline_by_elec_i[we_mask]) if alt2_baseline_by_elec_i.size > 0 else None,
+
+        "hga_alt2_signs_by_elec": [list(xs) for xs in np.tile(alt2_signs_by_elec_i[None, :], (we_mask.sum(), 1))],
+
         "hga_late": hga_late_i[we_mask],
 
         # peak amplitude (out-of-fold matched filter) and peak latency (centroid)
@@ -908,7 +955,7 @@ check_df = pd.concat([
 check_grouper = check_df.groupby(["subject", "electrode_idx", "word_end"])
 nchecks = check_grouper.ngroups
 
-f, axs_grid = plt.subplots(nchecks, 3, figsize=(3 * 2.5, nchecks * 2.5), constrained_layout=True,
+f, axs_grid = plt.subplots(nchecks, 4, figsize=(3 * 2.5, nchecks * 2.5), constrained_layout=True,
                       sharey=True)
 
 for i, ((subject, electrode_idx, word_end), group_df) in enumerate(check_grouper):
@@ -924,11 +971,29 @@ for i, ((subject, electrode_idx, word_end), group_df) in enumerate(check_grouper
     hga_alt_early_resid = _resid(group_df.hga_alt_early, Z)
     r_result = stats.pearsonr(hga_late_resid, hga_alt_early_resid)
     print("late | controls ~ alt_early | controls", r_result)
-    axs[0].set_title("@ responsive sites")
+    axs[0].set_title("@ responsive sites", fontsize=10)
     axs[0].text(0.975, 0.95, f"r = {r_result.statistic:.2f}\np = {r_result.pvalue:.3g}", transform=axs[0].transAxes,
                 va='top', ha='right')
     sns.regplot(x=hga_alt_early_resid, y=hga_late_resid, scatter_kws={"s": 10}, ax=axs[0])
     axs[0].set_xlabel("early | controls\n@ speech-responsive sites")
+
+    # compute hga_late | controls, hga_alt2_early | controls, then correlate those residuals
+    if not pd.isna(group_df.hga_alt2_early).all():
+        Z = sm.add_constant(np.concatenate([
+            group_df[["hga_baseline", "epoch_idx", "hga_alt2_baseline"]].to_numpy(),
+            resampled_dummies
+        ], axis=1))
+        hga_late_resid = _resid(group_df.hga_late, Z)
+        hga_alt2_early_resid = _resid(group_df.hga_alt2_early, Z)
+        r_result = stats.pearsonr(hga_late_resid, hga_alt2_early_resid)
+        print("late | controls ~ alt2_early | controls", r_result)
+        axs[1].set_title("@ same-phoneme sites", fontsize=10)
+        axs[1].text(0.975, 0.95, f"r = {r_result.statistic:.2f}\np = {r_result.pvalue:.3g}", transform=axs[1].transAxes,
+                    va='top', ha='right')
+        sns.regplot(x=hga_alt2_early_resid, y=hga_late_resid, scatter_kws={"s": 10}, ax=axs[1])
+        axs[1].set_xlabel("early | controls\n@ same-phoneme sites")
+    else:
+        print(f"No same-phoneme sites available for {subject} {electrode_idx} {word_end}")
 
     # compute hga_late | controls, hga_bad_alt_early | controls, then correlate those residuals
     Z = sm.add_constant(np.concatenate([
@@ -939,11 +1004,11 @@ for i, ((subject, electrode_idx, word_end), group_df) in enumerate(check_grouper
     hga_bad_alt_early_resid = _resid(group_df.hga_bad_alt_early, Z)
     r_result = stats.pearsonr(hga_late_resid, hga_bad_alt_early_resid)
     print("late vs.\nearly @ unresponsive sites", r_result)
-    axs[1].set_title("@ unresponsive sites")
-    axs[1].text(0.975, 0.95, f"r = {r_result.statistic:.2f}\np = {r_result.pvalue:.3g}", transform=axs[1].transAxes,
+    axs[2].set_title("@ unresponsive sites", fontsize=10)
+    axs[2].text(0.975, 0.95, f"r = {r_result.statistic:.2f}\np = {r_result.pvalue:.3g}", transform=axs[2].transAxes,
                 va='top', ha='right')
-    sns.regplot(x=hga_bad_alt_early_resid, y=hga_late_resid, scatter_kws={"s": 10}, ax=axs[1])
-    axs[1].set_xlabel("early | controls\n@ speech-unresponsive sites")
+    sns.regplot(x=hga_bad_alt_early_resid, y=hga_late_resid, scatter_kws={"s": 10}, ax=axs[2])
+    axs[2].set_xlabel("early | controls\n@ speech-unresponsive sites")
 
     # compute hga_early | controls, hga_late | controls, then correlate those residuals
     Z = sm.add_constant(np.concatenate([
@@ -954,11 +1019,11 @@ for i, ((subject, electrode_idx, word_end), group_df) in enumerate(check_grouper
     hga_late_resid = _resid(group_df.hga_late, Z)
     r_result = stats.pearsonr(hga_late_resid, hga_early_resid)
     print("late | controls ~ early | controls", r_result)
-    axs[2].set_title("@ same site")
-    axs[2].text(0.975, 0.95, f"r = {r_result.statistic:.2f}\np = {r_result.pvalue:.3g}", transform=axs[2].transAxes,
+    axs[3].set_title("@ same site", fontsize=10)
+    axs[3].text(0.975, 0.95, f"r = {r_result.statistic:.2f}\np = {r_result.pvalue:.3g}", transform=axs[3].transAxes,
                 va='top', ha='right')
-    sns.regplot(x=hga_early_resid, y=hga_late_resid, scatter_kws={"s": 10}, ax=axs[2])
-    axs[2].set_xlabel("early | controls\n@ same site")
+    sns.regplot(x=hga_early_resid, y=hga_late_resid, scatter_kws={"s": 10}, ax=axs[3])
+    axs[3].set_xlabel("early | controls\n@ same site")
 
     for ax in axs:
         sns.despine(ax=ax)
@@ -978,13 +1043,15 @@ site_test_results = []
 site_test_raw_corrs = {}
 
 site_test_early_sources = {
-    "same": ("hga_early", "hga_baseline"),
-    "speech_responsive": ("hga_alt_early_by_elec", "hga_alt_baseline_by_elec"),
-    "non_responsive": ("hga_bad_alt_early_by_elec", "hga_bad_alt_baseline_by_elec"),
+    "same": ("hga_early", "hga_baseline", None),
+    "speech_responsive": ("hga_alt_early_by_elec", "hga_alt_baseline_by_elec", None),
+    "phoneme_pair": ("hga_alt2_early_by_elec", "hga_alt2_baseline_by_elec", "hga_alt2_signs_by_elec"),
+    "non_responsive": ("hga_bad_alt_early_by_elec", "hga_bad_alt_baseline_by_elec", None),
 }
 
 site_test_differences = [
     ("same", "speech_responsive"),
+    ("same", "phoneme_pair"),
     ("same", "non_responsive"),
     ("speech_responsive", "non_responsive"),
 ]
@@ -1005,7 +1072,10 @@ for _, rows in tqdm(early_late_reg_df.groupby(["subject", "electrode_idx", "phon
     raw_corrs_i = {}
     results_i = {}
 
-    for source_name, (early_col, baseline_col) in site_test_early_sources.items():
+    for source_name, (early_col, baseline_col, sign_col) in site_test_early_sources.items():
+        if pd.isna(rows[early_col]).any():
+            continue
+    
         early_arr = np.stack(rows[early_col].to_numpy())
         baseline_arr = np.stack(rows[baseline_col].to_numpy())
         if early_arr.ndim == 1:
@@ -1013,14 +1083,24 @@ for _, rows in tqdm(early_late_reg_df.groupby(["subject", "electrode_idx", "phon
             baseline_arr = baseline_arr[:, None]
         assert early_arr.shape == baseline_arr.shape
 
+        if sign_col is not None:
+            sign_arr = np.stack(rows[sign_col].to_numpy())
+        else:
+            sign_arr = np.array([])
+
         # -> n_electrodes * n_epochs
         early_arr = early_arr.T
         baseline_arr = baseline_arr.T
+        sign_arr = sign_arr.T
 
         results_ij = []
         for j in range(early_arr.shape[0]):
             early_j = early_arr[j]
             baseline_j = baseline_arr[j]
+
+            if sign_arr.size > 0:
+                early_j = early_j * sign_arr[j]
+
             Z_j = sm.add_constant(np.concatenate([baseline_j[:, None], base_control_data], axis=1))
             corr_j = partial_corr(early_j, late_i, Z_j)
             z = np.arctanh(corr_j.statistic)
@@ -1028,37 +1108,47 @@ for _, rows in tqdm(early_late_reg_df.groupby(["subject", "electrode_idx", "phon
 
         raw_corrs_i[source_name] = np.array(results_ij)
 
-    z_same = np.abs(raw_corrs_i["same"][0, 1])
-    for pop in ("speech_responsive", "non_responsive"):
-        z_alt = np.abs(raw_corrs_i[pop][:, 1])
-        results_i[f"same_pct_{pop}"] = 100.0 * (z_alt < z_same).mean()
-        results_i[f"n_elec_{pop}"] = len(z_alt)
-
-        results_i[f"percentile_based_p_value_same_vs_{pop}"] = (1 + (z_alt >= z_same).sum()) / (1 + len(z_alt))
-
-    results_i["raw_corrs"] = raw_corrs_i
-    # compute mean correlation
-    for source_name, corrs in raw_corrs_i.items():
         # signed means
-        results_i[f"{source_name}_mean"] = corrs[:, 0].mean()
-        results_i[f"{source_name}_mean_z"] = corrs[:, 1].mean()
+        results_i[f"{source_name}_mean"] = raw_corrs_i[source_name][:, 0].mean()
+        results_i[f"{source_name}_mean_z"] = raw_corrs_i[source_name][:, 1].mean()
 
         # absolute-value means
-        results_i[f"{source_name}_mean_abs"] = np.abs(corrs[:, 0]).mean()
-        results_i[f"{source_name}_mean_z_abs"] = np.abs(corrs[:, 1]).mean()
+        results_i[f"{source_name}_mean_abs"] = np.abs(raw_corrs_i[source_name][:, 0]).mean()
+        results_i[f"{source_name}_mean_z_abs"] = np.abs(raw_corrs_i[source_name][:, 1]).mean()
+
+    results_i["raw_corrs"] = raw_corrs_i
+
+    z_same = np.abs(raw_corrs_i["same"][0, 1])
+    for pop in ("phoneme_pair", "speech_responsive", "non_responsive"):
+        try:
+            z_alt = np.abs(raw_corrs_i[pop][:, 1])
+            results_i[f"same_pct_{pop}"] = 100.0 * (z_alt < z_same).mean()
+            results_i[f"n_elec_{pop}"] = len(z_alt)
+
+            results_i[f"percentile_based_p_value_same_vs_{pop}"] = (1 + (z_alt >= z_same).sum()) / (1 + len(z_alt))
+        except KeyError:
+            # missing one of the populations
+            results_i[f"same_pct_{pop}"] = np.nan
+            results_i[f"n_elec_{pop}"] = 0
+            results_i[f"percentile_based_p_value_same_vs_{pop}"] = np.nan
 
     # compute differences
     for diff_name_1, diff_name_2 in site_test_differences:
         diff_key = f"{diff_name_1}_vs_{diff_name_2}"
 
-        results_i[diff_key] = (
-            results_i[f"{diff_name_1}_mean_z"]
-            - results_i[f"{diff_name_2}_mean_z"]
-        )
-        results_i[f"{diff_key}_abs"] = (
-            results_i[f"{diff_name_1}_mean_z_abs"]
-            - results_i[f"{diff_name_2}_mean_z_abs"]
-        )
+        try:
+            results_i[diff_key] = (
+                results_i[f"{diff_name_1}_mean_z"]
+                - results_i[f"{diff_name_2}_mean_z"]
+            )
+            results_i[f"{diff_key}_abs"] = (
+                results_i[f"{diff_name_1}_mean_z_abs"]
+                - results_i[f"{diff_name_2}_mean_z_abs"]
+            )
+        except KeyError:
+            # missing one of the populations
+            results_i[diff_key] = np.nan
+            results_i[f"{diff_key}_abs"] = np.nan
 
     subject = rows["subject"].iloc[0]
     electrode_idx = rows["electrode_idx"].iloc[0]
@@ -1080,10 +1170,15 @@ for _, rows in tqdm(early_late_reg_df.groupby(["subject", "electrode_idx", "phon
 site_test_results_df = pd.DataFrame(site_test_results)
 
 # %%
+site_test_results_df
+
+# %%
 single_site_eval_df = (
     site_test_results_df.sort_values("same_pct_speech_responsive")
     [["subject", "electrode_idx", "phoneme_pair", "word_end",
-       "percentile_based_p_value_same_vs_speech_responsive", "percentile_based_p_value_same_vs_non_responsive"]]
+       "percentile_based_p_value_same_vs_speech_responsive",
+       "percentile_based_p_value_same_vs_phoneme_pair",
+       "percentile_based_p_value_same_vs_non_responsive"]]
 )
 single_site_eval_df
 
@@ -1110,7 +1205,8 @@ for i, plot_single_site in enumerate(plot_single_site_df.itertuples()):
     do_legend = i == len(plot_single_site_df) - 1
     sns.swarmplot(data=plot_single_site_df_i.query("population != 'same'"),
                   x="population", y="corr",
-                  hue="population", palette={"speech_responsive": "black", "non_responsive": "gray"},
+                  hue="population", palette={"speech_responsive": "black", "non_responsive": "gray",
+                                             "phoneme_pair": "green"},
                   ax=ax, legend=do_legend)
     if do_legend:
         ax.legend(loc="center right", bbox_to_anchor=(1.6, 0.85))
@@ -1137,120 +1233,8 @@ stats.wilcoxon(site_test_results_df["same_vs_non_responsive_abs"])
 stats.wilcoxon(site_test_results_df["speech_responsive_vs_non_responsive_abs"])
 
 # %% [markdown]
-# ## Autogen -- ignore beneath this point
+# ## Correlation sweep N
 
-# %% Are the three predictors' couplings to late HGA actually different? (full-N diagnostic)
-# Williams' test for dependent correlations sharing one variable (late HGA).
-# All correlations must live in the same residual space, so use one common
-# control set for every variable rather than a per-panel design.
-#
-# CAVEAT: "responsive sites" / "unresponsive sites" here are pooled means over
-# ALL available alt electrodes, vs. a single same-site electrode -- N is not
-# matched, so part of any advantage for the pooled predictors is just averaging
-# out noise, not a difference in the information the sites carry. Williams' t
-# and the trial-bootstrap below are still valid full-N diagnostics of the raw
-# columns, but treat this section as descriptive, not the matched-N claim; see
-# the N-matched reliability sweep after this section for that.
-
-COMMON_CONTROLS = ["hga_baseline", "epoch_idx", "resampled_centered",
-                   "hga_alt_baseline", "hga_bad_alt_baseline"]
-PREDICTORS = {"same site": "hga_early",
-              "responsive sites": "hga_alt_early",
-              "unresponsive sites": "hga_bad_alt_early"}
-
-
-def williams_t(r12, r13, r23, n, k=0):
-    """Compare dependent correlations r(y,x1) vs r(y,x2) sharing y.
-
-    r12 = corr(y, x1), r13 = corr(y, x2), r23 = corr(x1, x2).
-    k = number of controls already partialled out; df is reduced accordingly.
-    """
-    n_eff = n - k
-    detR = (1 - r12**2 - r13**2 - r23**2) + 2 * r12 * r13 * r23
-    df = n_eff - 3
-    num = (r12 - r13) * np.sqrt((n_eff - 1) * (1 + r23))
-    den = np.sqrt(2 * ((n_eff - 1) / df) * detR
-                  + ((r12 + r13) ** 2 / 4) * (1 - r23) ** 3)
-    t = num / den
-    return t, df, 2 * stats.t.sf(abs(t), df)
-
-
-def compare_predictors(df_cell, label="", n_boot=10_000, seed=0):
-    Z = sm.add_constant(df_cell[COMMON_CONTROLS].to_numpy(float))
-    k = Z.shape[1] - 1
-    n = len(df_cell)
-    assert np.linalg.matrix_rank(Z) == Z.shape[1], f"rank-deficient design ({label})"
-    assert n > k + 10, f"n={n} too small for k={k} controls"
-
-    y = _resid(df_cell["hga_late"].to_numpy(float), Z)
-    X = {name: _resid(df_cell[col].to_numpy(float), Z)
-         for name, col in PREDICTORS.items()}
-
-    print(f"\n=== {label}  (n={n}, k={k} controls) ===")
-    r_y = {}
-    for name, x in X.items():
-        r, p = stats.pearsonr(y, x)
-        r_y[name] = r
-        print(f"  late ~ {name:<18} r={r:+.3f}  p={p:.4f}")
-
-    names = list(PREDICTORS)
-    print("  predictor intercorrelations:")
-    for a, b in itertools.combinations(names, 2):
-        print(f"    {a} ~ {b}: r={stats.pearsonr(X[a], X[b])[0]:+.3f}")
-
-    rng_c = np.random.default_rng(seed)
-    rows = []
-    for a, b in itertools.combinations(names, 2):
-        r23 = stats.pearsonr(X[a], X[b])[0]
-        t, dfree, p = williams_t(r_y[a], r_y[b], r23, n, k=k)
-
-        # Bootstrap CI on the difference: Williams assumes multivariate normality,
-        # which single-trial HGA does not obviously satisfy.
-        diffs = np.empty(n_boot)
-        for i in range(n_boot):
-            idx = rng_c.integers(0, n, n)
-            diffs[i] = (stats.pearsonr(y[idx], X[a][idx])[0]
-                        - stats.pearsonr(y[idx], X[b][idx])[0])
-        lo, hi = np.percentile(diffs, [2.5, 97.5])
-        p_boot = 2 * min((diffs <= 0).mean(), (diffs >= 0).mean())
-
-        rows.append(dict(pair=f"{a} vs {b}", r_a=r_y[a], r_b=r_y[b],
-                         diff=r_y[a] - r_y[b], r_between=r23,
-                         t=t, df=dfree, p_williams=p,
-                         ci_lo=lo, ci_hi=hi, p_boot=p_boot))
-
-    out = pd.DataFrame(rows)
-    print(out.round(4).to_string(index=False))
-    return out
-
-
-import itertools
-
-check_df = early_late_reg_df.query(
-    "subject == 'EC250' and electrode_idx == 185 and word_end == 'desolate'")
-cmp_one = compare_predictors(check_df, label="EC250 e185 desolate")
-
-# ------------------------------------------------ same comparison across all cells
-all_rows = []
-for key, xs in early_late_reg_df.groupby(["subject", "electrode_idx", "word_end"]):
-    try:
-        res = compare_predictors(xs, label=" ".join(map(str, key)), n_boot=2_000)
-    except AssertionError as e:
-        print(f"  skip {key}: {e}")
-        continue
-    res[["subject", "electrode_idx", "word_end"]] = key
-    all_rows.append(res)
-
-cmp_all = pd.concat(all_rows, ignore_index=True)
-
-print("\n=== difference in coupling, pooled across cells ===")
-for pair, g in cmp_all.groupby("pair"):
-    w, p = stats.wilcoxon(g["diff"])
-    print(f"{pair:<40} median diff={g['diff'].median():+.3f}  "
-          f"{(g['diff'] > 0).sum()}/{len(g)} positive  W={w:.0f}, p={p:.4f}")
-
-# %% [markdown]
-# ### Within-site scaling curves: compare correlation for different alt set sample sizes
 # %% N-matched reliability sweep: how much of the alt-site advantage is averaging?
 # Same-site is inherently N=1. Sweep the number of alt electrodes averaged
 # (1, 2, 4, 8, all-available) for the responsive and unresponsive populations and
@@ -1271,16 +1255,12 @@ def _n_label(n_elec):
     return "all" if n_elec is None else str(n_elec)
 
 
-def _matched_draw(by_elec, baseline_by_elec, n_elec, rng):
-    """Average a random draw of `n_elec` electrodes' early/baseline values per trial.
-
-    by_elec, baseline_by_elec: (n_trials, n_avail) arrays for one alt population,
-    drawn from the same rng, without replacement, capped at n_avail.
-    """
+def _matched_draw(by_elec, n_elec, rng):
+    """Random draw of `n_elec` electrodes' indices from the available set."""
     n_avail = by_elec.shape[1]
     n_draw = n_avail if n_elec is None else min(n_elec, n_avail)
     idx = rng.choice(n_avail, size=n_draw, replace=False)
-    return by_elec[:, idx].mean(axis=1), baseline_by_elec[:, idx].mean(axis=1)
+    return idx
 
 
 def sweep_alt_reliability(df_cell, ns=SWEEP_NS, n_draws=200, seed=0):
@@ -1301,19 +1281,51 @@ def sweep_alt_reliability(df_cell, ns=SWEEP_NS, n_draws=200, seed=0):
     z_same = np.arctanh(np.clip(r_same, -0.999999, 0.999999))
 
     pop_specs = {
-        "responsive": ("hga_alt_early_by_elec", "hga_alt_baseline_by_elec", np.random.default_rng(seed)),
-        "unresponsive": ("hga_bad_alt_early_by_elec", "hga_bad_alt_baseline_by_elec", np.random.default_rng(seed + 1)),
+        "phoneme_pair": (
+            "hga_alt2_early_by_elec",
+            "hga_alt2_baseline_by_elec",
+            "hga_alt2_signs_by_elec",
+            np.random.default_rng(seed)
+        ),
+        "responsive": (
+            "hga_alt_early_by_elec",
+            "hga_alt_baseline_by_elec",
+            None,
+            np.random.default_rng(seed + 1)
+        ),
+        "unresponsive": (
+            "hga_bad_alt_early_by_elec",
+            "hga_bad_alt_baseline_by_elec",
+            None,
+            np.random.default_rng(seed + 2)
+        ),
     }
 
     rows = []
-    for pop, (early_col, baseline_col, rng) in pop_specs.items():
+    for pop, (early_col, baseline_col, sign_col, rng) in pop_specs.items():
+        if pd.isna(df_cell[early_col]).any():
+            continue
+
         early_arr = np.stack(df_cell[early_col].to_numpy())
         baseline_arr = np.stack(df_cell[baseline_col].to_numpy())
+        if sign_col is not None:
+            sign_arr = np.stack(df_cell[sign_col].to_numpy())
+        else:
+            sign_arr = None
+    
         for n_elec in ns:
             n_used = early_arr.shape[1] if n_elec is None else min(n_elec, early_arr.shape[1])
             zs = np.empty(n_draws)
             for d in range(n_draws):
-                pred, base_ctrl = _matched_draw(early_arr, baseline_arr, n_elec, rng)
+                draw_idx = _matched_draw(early_arr, n_elec, rng)
+
+                pred = early_arr[:, draw_idx]
+                # if sign_arr is not None:
+                #     pred = pred * sign_arr[:, draw_idx]
+
+                pred = pred.mean(axis=1)
+                base_ctrl = baseline_arr[:, draw_idx].mean(axis=1)
+
                 Z = sm.add_constant(np.column_stack([base_controls, resampled_controls, base_ctrl]))
                 r = stats.pearsonr(_resid(late, Z), _resid(pred, Z))[0]
                 zs[d] = np.arctanh(np.clip(r, -0.999999, 0.999999))
@@ -1541,11 +1553,20 @@ speech_responsive_unresponsive_z_comparison_df.sort_values("p_value")
 # Plot per-population early--late correlations, sweeping over population pool size
 
 plot_df = sweep_all.assign(site=lambda xs: xs.subject.str.cat([xs.electrode_idx.astype(str), xs.word_end], sep=" "))
+
+# drop where n_requested > n_elec if it was already covered in the previous point
+plot_df["prev_requested"] = plot_df.groupby(["site"])["n_requested"].shift(1)
+plot_df = plot_df.query("prev_requested <= n_elec or prev_requested.isna() or n_label == 'all'")
+
 plot_order = plot_df.query("n_label == 'all'").set_index("population").groupby("site").apply(
     lambda xs: xs.loc["responsive", "mean_abs_z"] - xs.loc["unresponsive", "mean_abs_z"]
 ).sort_values(ascending=False).index
 g = sns.catplot(data=plot_df,
-                x="n_label", y="mean_abs_z", hue="population",
+                x="n_label", order=_sweep_x_labels,
+                y="mean_abs_z",
+                hue="population", palette={"responsive": "black",
+                                           "unresponsive": "gray",
+                                           "phoneme_pair": "green"},
                 col="site", col_wrap=3, col_order=plot_order,
                 kind="point", height=2.5, aspect=1.25,
                 sharex=False, sharey=False)
@@ -1564,7 +1585,8 @@ for (i, j, k), facet_data in g.facet_data():
     y2 = facet_data.query("population == 'unresponsive' and n_label == 'all'").mean_abs_z.iloc[0]
     ymin, ymax = (y1, y2) if y1 < y2 else (y2, y1)
     ax.plot([x_all, x_all], [ymin, ymax], ls="--", color="red", alpha=0.5)
-    ax.text(0.5, 0.9, f"p={sr_unr_z_comp_i.p_value:.3g}", color="red", transform=ax.transAxes, ha="center")
+    ax.text(1.0, 0.7, f"p={sr_unr_z_comp_i.p_value:.3g}",
+            color="red", transform=ax.transAxes, ha="right")
     # ax.errorbar(x=x_all, y=sr_unr_z_comp_i.mean_abs_z, yerr=sr_unr_z_comp_i.sem_abs_z, fmt="o", color="k", alpha=0.5)
 
 g.set_axis_labels("N electrodes pooled", "mean |corr|\nlate ~ early | controls")
