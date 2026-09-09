@@ -411,25 +411,6 @@ for loop_idx, (_, row) in enumerate(tqdm(early_late_sites.iterrows(), total=earl
     if bad_alt_sites_i.empty:
         raise ValueError(f"Could not find any bad alternative site for {row.subject} {row.electrode_idx} {row.phoneme_pair} {row.word_end}")
     
-    # # (ideally also acoustically selective) but not a member of early_late_sites
-    # # tier 1: responsive to THIS phoneme pair, but not in lpp
-    # alt_sites_i = epp.query("subject == @row.subject and phoneme_pair == @row.phoneme_pair and electrode_idx != @row.electrode_idx")
-    # alt_sites_i = pd.merge(alt_sites_i, lpp[["subject", "electrode_idx", "phoneme_pair"]], on=["subject", "electrode_idx", "phoneme_pair"],
-    #                        how="left", indicator=True).query("_merge == 'left_only'").drop(columns="_merge")
-    # alt_site_tier = 1
-    # if alt_sites_i.empty:
-    #     # tier 2: responsive to ANY phoneme pair, but not in lpp
-    #     alt_sites_i = epp.query("subject == @row.subject and electrode_idx != @row.electrode_idx")
-    #     alt_sites_i = pd.merge(alt_sites_i, lpp[["subject", "electrode_idx", "phoneme_pair"]], on=["subject", "electrode_idx", "phoneme_pair"],
-    #                            how="left", indicator=True).query("_merge == 'left_only'").drop(columns="_merge")
-    #     alt_site_tier = 2
-    # if alt_sites_i.empty:
-    #     # tier 3: speech responsive and not in lpp
-    #     alt_sites_i = speech_responsive_df.query("subject == @row.subject and electrode_idx != @row.electrode_idx and speech_responsive")
-    #     alt_sites_i = pd.merge(alt_sites_i, lpp[["subject", "electrode_idx"]], on=["subject", "electrode_idx"],
-    #                            how="left", indicator=True).query("_merge == 'left_only'").drop(columns="_merge")
-    #     alt_site_tier = 3
-
     print(f"Found alternative site for {row.subject} {row.electrode_idx} {row.phoneme_pair} {row.word_end}: " +
           (", ".join(str(r.electrode_idx) for _, r in alt_sites_i.iterrows())))
 
@@ -920,51 +901,244 @@ fwer["analyses_consistent"] = (fwer.r < 0) == fwer.early_late_sign_mismatch
 fwer[["subject", "electrode_idx", "word_end", "r", "survives", "sum_ambig_effect", "early_acoustic_mean_diff_raw_med"]]
 
 # %%
-check_df = early_late_reg_df.query("subject == 'EC250' and electrode_idx == 185 and word_end == 'desolate'")
-# check_df = early_late_reg_df.query("subject == 'EC260' and electrode_idx == 204 and word_end == 'mountains'")
+check_df = pd.concat([
+    early_late_reg_df.query("subject == 'EC250' and electrode_idx == 185 and word_end == 'desolate'"),
+    early_late_reg_df.query("subject == 'EC260' and electrode_idx == 204 and word_end == 'mountains'")
+], axis=0)
+check_grouper = check_df.groupby(["subject", "electrode_idx", "word_end"])
+nchecks = check_grouper.ngroups
 
-# sns.scatterplot(data=check_df, x="hga_early", y="hga_late")
-print(stats.pearsonr(check_df.hga_early, check_df.hga_late))
-print(partial_corr(check_df.hga_early, check_df.hga_late, check_df[["hga_baseline", "epoch_idx", "resampled_centered"]]))
-print(partial_corr(check_df.hga_early, check_df.hga_late, check_df[["hga_baseline", "epoch_idx", "resampled_centered",
-                                                                    "hga_alt_baseline", "hga_alt_early"]]))
+f, axs_grid = plt.subplots(nchecks, 3, figsize=(3 * 2.5, nchecks * 2.5), constrained_layout=True,
+                      sharey=True)
 
-f, axs = plt.subplots(1, 3, figsize=(3 * 2.5, 2), constrained_layout=True)
+for i, ((subject, electrode_idx, word_end), group_df) in enumerate(check_grouper):
+    axs = axs_grid[i]
+    resampled_dummies = pd.get_dummies(group_df.resampled.astype("category"), drop_first=True, dtype=float).to_numpy()
 
-# compute hga_late | controls, hga_alt_early | controls, then correlate those residuals
-Z = sm.add_constant(check_df[["hga_baseline", "epoch_idx", "resampled_centered", "hga_alt_baseline"]])
-hga_late_resid = _resid(check_df.hga_late, Z)
-hga_alt_early_resid = _resid(check_df.hga_alt_early, Z)
-print("late | controls ~ alt_early | controls", stats.pearsonr(hga_late_resid, hga_alt_early_resid))
-axs[0].set_title("late vs.\nearly @ responsive set")
-axs[0].set_xlabel("alt_early | controls")
-axs[0].set_ylabel("late | controls")
-sns.regplot(x=hga_alt_early_resid, y=hga_late_resid, scatter_kws={"s": 10}, ax=axs[0])
+    # compute hga_late | controls, hga_alt_early | controls, then correlate those residuals
+    Z = sm.add_constant(np.concatenate([
+        group_df[["hga_baseline", "epoch_idx", "hga_alt_baseline"]].to_numpy(),
+        resampled_dummies
+    ], axis=1))
+    hga_late_resid = _resid(group_df.hga_late, Z)
+    hga_alt_early_resid = _resid(group_df.hga_alt_early, Z)
+    r_result = stats.pearsonr(hga_late_resid, hga_alt_early_resid)
+    print("late | controls ~ alt_early | controls", r_result)
+    axs[0].set_title("@ responsive sites")
+    axs[0].text(0.975, 0.95, f"r = {r_result.statistic:.2f}\np = {r_result.pvalue:.3g}", transform=axs[0].transAxes,
+                va='top', ha='right')
+    sns.regplot(x=hga_alt_early_resid, y=hga_late_resid, scatter_kws={"s": 10}, ax=axs[0])
+    axs[0].set_xlabel("early | controls\n@ speech-responsive sites")
 
-# compute hga_late | controls, hga_bad_alt_early | controls, then correlate those residuals
-Z = sm.add_constant(check_df[["hga_baseline", "epoch_idx", "resampled_centered", "hga_bad_alt_baseline"]])
-hga_late_resid = _resid(check_df.hga_late, Z)
-hga_bad_alt_early_resid = _resid(check_df.hga_bad_alt_early, Z)
-print("late vs.\nearly @ unresponsive sites", stats.pearsonr(hga_late_resid, hga_bad_alt_early_resid))
-axs[1].set_title("late vs.\nearly @ unresponsive set")
-axs[1].set_xlabel("bad_alt_early | controls")
-axs[1].set_ylabel("late | controls")
-sns.regplot(x=hga_bad_alt_early_resid, y=hga_late_resid, scatter_kws={"s": 10}, ax=axs[1])
+    # compute hga_late | controls, hga_bad_alt_early | controls, then correlate those residuals
+    Z = sm.add_constant(np.concatenate([
+        group_df[["hga_baseline", "epoch_idx", "hga_bad_alt_baseline"]].to_numpy(),
+        resampled_dummies
+    ], axis=1))
+    hga_late_resid = _resid(group_df.hga_late, Z)
+    hga_bad_alt_early_resid = _resid(group_df.hga_bad_alt_early, Z)
+    r_result = stats.pearsonr(hga_late_resid, hga_bad_alt_early_resid)
+    print("late vs.\nearly @ unresponsive sites", r_result)
+    axs[1].set_title("@ unresponsive sites")
+    axs[1].text(0.975, 0.95, f"r = {r_result.statistic:.2f}\np = {r_result.pvalue:.3g}", transform=axs[1].transAxes,
+                va='top', ha='right')
+    sns.regplot(x=hga_bad_alt_early_resid, y=hga_late_resid, scatter_kws={"s": 10}, ax=axs[1])
+    axs[1].set_xlabel("early | controls\n@ speech-unresponsive sites")
 
-# compute hga_early | controls, hga_late | controls, then correlate those residuals
-Z = sm.add_constant(check_df[["hga_baseline", "epoch_idx", "resampled_centered"]])
-hga_early_resid = _resid(check_df.hga_early, Z)
-hga_late_resid = _resid(check_df.hga_late, Z)
-print("late | controls ~ early | controls", stats.pearsonr(hga_late_resid, hga_early_resid))
-axs[2].set_title("late vs.\nearly @ same")
-axs[2].set_xlabel("early | controls")
-axs[2].set_ylabel("late | controls")
-sns.regplot(x=hga_early_resid, y=hga_late_resid, scatter_kws={"s": 10}, ax=axs[2])
+    # compute hga_early | controls, hga_late | controls, then correlate those residuals
+    Z = sm.add_constant(np.concatenate([
+        group_df[["hga_baseline", "epoch_idx"]].to_numpy(),
+        resampled_dummies
+    ], axis=1))
+    hga_early_resid = _resid(group_df.hga_early, Z)
+    hga_late_resid = _resid(group_df.hga_late, Z)
+    r_result = stats.pearsonr(hga_late_resid, hga_early_resid)
+    print("late | controls ~ early | controls", r_result)
+    axs[2].set_title("@ same site")
+    axs[2].text(0.975, 0.95, f"r = {r_result.statistic:.2f}\np = {r_result.pvalue:.3g}", transform=axs[2].transAxes,
+                va='top', ha='right')
+    sns.regplot(x=hga_early_resid, y=hga_late_resid, scatter_kws={"s": 10}, ax=axs[2])
+    axs[2].set_xlabel("early | controls\n@ same site")
 
-for ax in axs:
+    for ax in axs:
+        sns.despine(ax=ax)
+        ax.set_ymargin(0.5)
+        ax.set_ylabel(None)
+
+    axs[0].set_ylabel("late HGA")
+
+    # add row title
+    axs[1].text(0.5, 1.2, f"{subject} {electrode_idx} {word_end}", transform=axs[1].transAxes,
+                va='bottom', ha='center', fontsize='large')
+
+# %%
+# Population level early--late correlation:
+# compare drawing early from same site vs. other speech-responsive site vs. non-responsive site, size-matched
+site_test_results = []
+site_test_raw_corrs = {}
+
+site_test_early_sources = {
+    "same": ("hga_early", "hga_baseline"),
+    "speech_responsive": ("hga_alt_early_by_elec", "hga_alt_baseline_by_elec"),
+    "non_responsive": ("hga_bad_alt_early_by_elec", "hga_bad_alt_baseline_by_elec"),
+}
+
+site_test_differences = [
+    ("same", "speech_responsive"),
+    ("same", "non_responsive"),
+    ("speech_responsive", "non_responsive"),
+]
+
+for _, rows in tqdm(early_late_reg_df.groupby(["subject", "electrode_idx", "phoneme_pair", "word_end"])):
+    controls = ["epoch_idx", "hga_baseline"]
+
+    # add resampled dummies
+    dummies = pd.get_dummies(rows["resampled"].astype("category"),
+                             drop_first=True, dtype=float).to_numpy()
+
+    base_control_data = np.concatenate([
+        rows[controls].to_numpy(),
+        dummies
+    ], axis=1)
+
+    late_i = rows["hga_late"].to_numpy()
+    raw_corrs_i = {}
+    results_i = {}
+
+    for source_name, (early_col, baseline_col) in site_test_early_sources.items():
+        early_arr = np.stack(rows[early_col].to_numpy())
+        baseline_arr = np.stack(rows[baseline_col].to_numpy())
+        if early_arr.ndim == 1:
+            early_arr = early_arr[:, None]
+            baseline_arr = baseline_arr[:, None]
+        assert early_arr.shape == baseline_arr.shape
+
+        # -> n_electrodes * n_epochs
+        early_arr = early_arr.T
+        baseline_arr = baseline_arr.T
+
+        results_ij = []
+        for j in range(early_arr.shape[0]):
+            early_j = early_arr[j]
+            baseline_j = baseline_arr[j]
+            Z_j = sm.add_constant(np.concatenate([baseline_j[:, None], base_control_data], axis=1))
+            corr_j = partial_corr(early_j, late_i, Z_j)
+            z = np.arctanh(corr_j.statistic)
+            results_ij.append((corr_j.statistic, z))
+
+        raw_corrs_i[source_name] = np.array(results_ij)
+
+    z_same = np.abs(raw_corrs_i["same"][0, 1])
+    for pop in ("speech_responsive", "non_responsive"):
+        z_alt = np.abs(raw_corrs_i[pop][:, 1])
+        results_i[f"same_pct_{pop}"] = 100.0 * (z_alt < z_same).mean()
+        results_i[f"n_elec_{pop}"] = len(z_alt)
+
+        results_i[f"percentile_based_p_value_same_vs_{pop}"] = (1 + (z_alt >= z_same).sum()) / (1 + len(z_alt))
+
+    results_i["raw_corrs"] = raw_corrs_i
+    # compute mean correlation
+    for source_name, corrs in raw_corrs_i.items():
+        # signed means
+        results_i[f"{source_name}_mean"] = corrs[:, 0].mean()
+        results_i[f"{source_name}_mean_z"] = corrs[:, 1].mean()
+
+        # absolute-value means
+        results_i[f"{source_name}_mean_abs"] = np.abs(corrs[:, 0]).mean()
+        results_i[f"{source_name}_mean_z_abs"] = np.abs(corrs[:, 1]).mean()
+
+    # compute differences
+    for diff_name_1, diff_name_2 in site_test_differences:
+        diff_key = f"{diff_name_1}_vs_{diff_name_2}"
+
+        results_i[diff_key] = (
+            results_i[f"{diff_name_1}_mean_z"]
+            - results_i[f"{diff_name_2}_mean_z"]
+        )
+        results_i[f"{diff_key}_abs"] = (
+            results_i[f"{diff_name_1}_mean_z_abs"]
+            - results_i[f"{diff_name_2}_mean_z_abs"]
+        )
+
+    subject = rows["subject"].iloc[0]
+    electrode_idx = rows["electrode_idx"].iloc[0]
+    phoneme_pair = rows["phoneme_pair"].iloc[0]
+    word_end = rows["word_end"].iloc[0]
+    site_test_results.append({
+        "subject": subject,
+        "electrode_idx": electrode_idx,
+        "phoneme_pair": phoneme_pair,
+        "word_end": word_end,
+
+        "late_significant_uncorrected": rows["late_significant_uncorrected"].iloc[0],
+
+        **{k: results_i[k] for k in results_i.keys() if k != "raw_corrs"}
+    })
+
+    site_test_raw_corrs[(subject, electrode_idx, phoneme_pair, word_end)] = results_i["raw_corrs"]
+
+site_test_results_df = pd.DataFrame(site_test_results)
+
+# %%
+single_site_eval_df = (
+    site_test_results_df.sort_values("same_pct_speech_responsive")
+    [["subject", "electrode_idx", "phoneme_pair", "word_end",
+       "percentile_based_p_value_same_vs_speech_responsive", "percentile_based_p_value_same_vs_non_responsive"]]
+)
+single_site_eval_df
+
+# %%
+plot_single_site_n = 6
+
+plot_single_site_df = single_site_eval_df.iloc[-plot_single_site_n:]
+ncols = 3
+nrows = (len(plot_single_site_df) + ncols - 1) // ncols
+
+f, axs = plt.subplots(nrows=nrows, ncols=ncols, figsize=(ncols*3.5, nrows*2.5))
+for i, plot_single_site in enumerate(plot_single_site_df.itertuples()):
+    ax = axs.flat[i]
+    ax.set_title(f"{plot_single_site.subject} {plot_single_site.electrode_idx} {plot_single_site.word_end}")
+
+    plot_single_site_corrs = {
+        pop: np.abs(results_i[:, 0]) for pop, results_i in site_test_raw_corrs[plot_single_site.subject, plot_single_site.electrode_idx, plot_single_site.phoneme_pair, plot_single_site.word_end].items()
+    }
+    plot_single_site_df_i = pd.concat([
+        pd.DataFrame({"corr": corrs_i}).assign(population=population)
+        for population, corrs_i in plot_single_site_corrs.items()
+    ])
+
+    do_legend = i == len(plot_single_site_df) - 1
+    sns.swarmplot(data=plot_single_site_df_i.query("population != 'same'"),
+                  x="population", y="corr",
+                  hue="population", palette={"speech_responsive": "black", "non_responsive": "gray"},
+                  ax=ax, legend=do_legend)
+    if do_legend:
+        ax.legend(loc="center right", bbox_to_anchor=(1.6, 0.85))
+    ax.axhline(plot_single_site_df_i.query("population == 'same'")["corr"].abs().iloc[0],
+               color="k", ls="--", alpha=0.6)
+    ax.set_xlabel(None)
+    if i % ncols == 0:
+        ax.set_ylabel("|corr|")
+    else:
+        ax.set_ylabel(None)
+    ax.set_xticklabels([])
+
     sns.despine(ax=ax)
 
 # %%
+stats.wilcoxon(site_test_results_df.same_pct_non_responsive, 50)
+
+# %%
+stats.wilcoxon(site_test_results_df["same_vs_speech_responsive_abs"])
+# %%
+stats.wilcoxon(site_test_results_df["same_vs_non_responsive_abs"])
+
+# %%
+stats.wilcoxon(site_test_results_df["speech_responsive_vs_non_responsive_abs"])
+
+# %% [markdown]
+# ## Autogen -- ignore beneath this point
+
 # %% Are the three predictors' couplings to late HGA actually different? (full-N diagnostic)
 # Williams' test for dependent correlations sharing one variable (late HGA).
 # All correlations must live in the same residual space, so use one common
@@ -1075,7 +1249,8 @@ for pair, g in cmp_all.groupby("pair"):
     print(f"{pair:<40} median diff={g['diff'].median():+.3f}  "
           f"{(g['diff'] > 0).sum()}/{len(g)} positive  W={w:.0f}, p={p:.4f}")
 
-# %%
+# %% [markdown]
+# ### Within-site scaling curves: compare correlation for different alt set sample sizes
 # %% N-matched reliability sweep: how much of the alt-site advantage is averaging?
 # Same-site is inherently N=1. Sweep the number of alt electrodes averaged
 # (1, 2, 4, 8, all-available) for the responsive and unresponsive populations and
@@ -1087,8 +1262,8 @@ for pair, g in cmp_all.groupby("pair"):
 # and unresponsive electrodes are drawn from independent RNG streams so the two
 # curves aren't coupled to the same draw sequence.
 
-SWEEP_NS = [1, 2, 4, 8, None]  # None = all available electrodes
-_sweep_x_labels = ["1", "2", "4", "8", "all"]
+SWEEP_NS = [1, 2, 4, 8, 16, 32, 64, 128, None]  # None = all available electrodes
+_sweep_x_labels = ["1", "2", "4", "8", "16", "32", "64", "128", "all"]
 _sweep_n_pos = {label: i for i, label in enumerate(_sweep_x_labels)}
 
 
@@ -1115,12 +1290,15 @@ def sweep_alt_reliability(df_cell, ns=SWEEP_NS, n_draws=200, seed=0):
     attached as a reference column. Responsive/unresponsive draws use
     independent rng streams so they aren't coupled to the same electrode picks.
     """
-    base_controls = df_cell[["hga_baseline", "epoch_idx", "resampled_centered"]].to_numpy(float)
+    base_controls = df_cell[["hga_baseline", "epoch_idx"]].to_numpy(float)
+    resampled_controls = pd.get_dummies(df_cell.resampled.astype("category"),
+                                        drop_first=True, dtype=float)
     late = df_cell["hga_late"].to_numpy(float)
 
-    Z_same = sm.add_constant(base_controls)
+    Z_same = sm.add_constant(np.concatenate([base_controls, resampled_controls], axis=1))
     r_same = stats.pearsonr(_resid(late, Z_same),
                              _resid(df_cell["hga_early"].to_numpy(float), Z_same))[0]
+    z_same = np.arctanh(np.clip(r_same, -0.999999, 0.999999))
 
     pop_specs = {
         "responsive": ("hga_alt_early_by_elec", "hga_alt_baseline_by_elec", np.random.default_rng(seed)),
@@ -1136,43 +1314,30 @@ def sweep_alt_reliability(df_cell, ns=SWEEP_NS, n_draws=200, seed=0):
             zs = np.empty(n_draws)
             for d in range(n_draws):
                 pred, base_ctrl = _matched_draw(early_arr, baseline_arr, n_elec, rng)
-                Z = sm.add_constant(np.column_stack([base_controls, base_ctrl]))
+                Z = sm.add_constant(np.column_stack([base_controls, resampled_controls, base_ctrl]))
                 r = stats.pearsonr(_resid(late, Z), _resid(pred, Z))[0]
                 zs[d] = np.arctanh(np.clip(r, -0.999999, 0.999999))
-            rows.append(dict(population=pop, n_label=_n_label(n_elec), n_requested=n_elec, n_elec=n_used,
-                              mean_z=zs.mean(), mean_r=np.tanh(zs.mean()),
-                              se_z=zs.std(ddof=1) / np.sqrt(n_draws)))
+            rows.append({
+                "population": pop,
+                "n_label": _n_label(n_elec),
+                "n_requested": n_elec,
+                "n_elec": n_used,
+                "mean_z": zs.mean(),
+                "mean_r": np.tanh(zs.mean()),
+                "se_z": zs.std(ddof=1) / np.sqrt(n_draws),
+                "mean_abs_z": np.abs(zs).mean()
+            })
 
     out = pd.DataFrame(rows)
     out["same_site_r"] = r_same
+    out["same_site_z"] = z_same
+    out["same_site_abs_z"] = np.abs(z_same)
     return out
 
 
-def plot_sweep(sweep_df, same_site_r, title="", ax=None):
-    if ax is None:
-        _, ax = plt.subplots(figsize=(4, 3), constrained_layout=True)
-    for pop, g in sweep_df.groupby("population"):
-        g = g.sort_values("n_label", key=lambda s: s.map(_sweep_n_pos))
-        ax.plot(g["n_label"].map(_sweep_n_pos), g["mean_r"], marker="o", label=pop)
-    ax.axhline(same_site_r, ls="--", color="k", label="same site (N=1)")
-    ax.set_xticks(range(len(SWEEP_NS)))
-    ax.set_xticklabels(_sweep_x_labels)
-    ax.set_xlabel("N electrodes averaged")
-    ax.set_ylabel("mean r (Fisher-z avg)\nlate ~ early | controls")
-    ax.set_title(title)
-    ax.legend(frameon=False, fontsize=8)
-    sns.despine(ax=ax)
-    return ax
-
-
-sweep_demo = sweep_alt_reliability(check_df)
-print(sweep_demo.round(4).to_string(index=False))
-plot_sweep(sweep_demo, sweep_demo["same_site_r"].iloc[0],
-           title="EC250 e185 desolate")
-
-# %% ------------------------------------------- sweep across all cells
+# %%
 sweep_rows = []
-for key, xs in early_late_reg_df.groupby(["subject", "electrode_idx", "word_end"]):
+for key, xs in tqdm(early_late_reg_df.groupby(["subject", "electrode_idx", "word_end"])):
     if len(xs) < 30:
         continue
     try:
@@ -1185,29 +1350,242 @@ for key, xs in early_late_reg_df.groupby(["subject", "electrode_idx", "word_end"
 
 sweep_all = pd.concat(sweep_rows, ignore_index=True)
 
-agg = (sweep_all.groupby(["population", "n_label"])
-       .agg(mean_z=("mean_z", "mean"), n_cells=("mean_z", "size"))
-       .reset_index())
-agg["mean_r"] = np.tanh(agg["mean_z"])
-same_site_r_mean = (sweep_all.drop_duplicates(["subject", "electrode_idx", "word_end"])["same_site_r"].mean())
-
-plot_sweep(agg, same_site_r_mean,
-           title=f"reliability sweep, pooled across {agg['n_cells'].max()} cells")
-
-# %% ------------------------------------------- matched-N (N=1) significance, pooled across cells
+# %%
 # This is the size-matched replacement for the pooled-N wilcoxon test above:
 # same-site is N=1 by construction, so compare it to the N=1 (single random alt
 # electrode) draws for each population, rather than the pooled-over-all-electrodes
 # columns.
 print("\n=== matched-N (N=1) coupling difference vs. same-site, pooled across cells ===")
 n1 = sweep_all.query("n_label == '1'").copy()
-n1["diff_vs_same"] = n1["mean_r"] - n1["same_site_r"]
+n1["diff_vs_same"] = n1["mean_abs_z"] - n1["same_site_abs_z"]
+
+wilcoxon_stats = {}
 for pop, g in n1.groupby("population"):
+    w, p = stats.wilcoxon(g["diff_vs_same"])
+    wilcoxon_stats[pop] = dict(median_diff=g["diff_vs_same"].median(), n=len(g),
+                                n_pos=int((g["diff_vs_same"] > 0).sum()), w=w, p=p)
+    print(f"{pop:<15} median diff={g['diff_vs_same'].median():+.3f}  "
+          f"{(g['diff_vs_same'] > 0).sum()}/{len(g)} positive  W={w:.0f}, p={p:.4f}")
+
+# %%
+print("=== N=all coupling difference vs. same-site, pooled across cells ===")
+nall = sweep_all.query("n_label == 'all'")
+nall["diff_vs_same"] = nall["mean_abs_z"] - nall["same_site_abs_z"]
+
+for pop, g in nall.groupby("population"):
     w, p = stats.wilcoxon(g["diff_vs_same"])
     print(f"{pop:<15} median diff={g['diff_vs_same'].median():+.3f}  "
           f"{(g['diff_vs_same'] > 0).sum()}/{len(g)} positive  W={w:.0f}, p={p:.4f}")
 
 # %%
+print("=== N=all coupling difference vs. speech-unresponsive, pooled across cells ===")
+nall = sweep_all.query("n_label == 'all'")
+
+piv = (nall.pivot_table(index=["subject", "electrode_idx", "word_end"],
+                        columns="population", values="mean_abs_z")
+       .dropna())
+d = piv["responsive"] - piv["unresponsive"]
+w, p = stats.wilcoxon(d)
+print(f"pooled responsive vs unresponsive: median |z| diff={d.median():+.3f}  "
+      f"{(d > 0).sum()}/{len(d)} positive  W={w:.0f}, p={p:.4f}")
+
+
+# %%
+def plot_sweep(sweep_df, same_site_r, title="", ax=None, wilcoxon_stats=None, site_diff=None):
+    if ax is None:
+        _, ax = plt.subplots(figsize=(4, 3), constrained_layout=True)
+    for pop, g in sweep_df.groupby("population"):
+        g = g.sort_values("n_label", key=lambda s: s.map(_sweep_n_pos))
+        ax.plot(g["n_label"].map(_sweep_n_pos), g["mean_abs_z"], marker="o", label=pop)
+    ax.axhline(same_site_r, ls="--", color="k", label="same site (N=1)")
+    ax.set_xticks(range(len(SWEEP_NS)))
+    ax.set_xticklabels(_sweep_x_labels)
+    ax.set_xlabel("N electrodes averaged")
+    ax.set_ylabel("mean r (Fisher-z avg)\nlate ~ early | controls")
+    ax.set_title(title)
+    ax.legend(frameon=False, fontsize=8)
+    if wilcoxon_stats is not None:
+        lines = []
+        for pop, st in wilcoxon_stats.items():
+            local = f", this site={site_diff[pop]:+.3f}" if site_diff and pop in site_diff else ""
+            lines.append(f"{pop}: pooled N=1 Δ={st['median_diff']:+.3f} "
+                          f"({st['n_pos']}/{st['n']}, p={st['p']:.3f}){local}")
+        ax.text(0.02, 0.02, "\n".join(lines), transform=ax.transAxes,
+                fontsize=6.5, va="bottom", ha="left")
+    sns.despine(ax=ax)
+    return ax
+
+
+# sweep_demo_df = next(iter(early_late_reg_df.groupby(["subject", "electrode_idx", "word_end"])))[1]
+# sweep_demo = sweep_alt_reliability(sweep_demo_df)
+# print(sweep_demo.round(4).to_string(index=False))
+
+# site_diff = (sweep_demo.query("n_label == '1'")
+#              .assign(diff_vs_same=lambda d: d["mean_r"] - d["same_site_r"])
+#              .set_index("population")["diff_vs_same"].to_dict())
+
+# plot_sweep(sweep_demo, sweep_demo["same_site_r"].iloc[0],
+#            wilcoxon_stats=wilcoxon_stats,
+#            site_diff=site_diff,
+#            title="EC250 e185 desolate")
+
+# %% [markdown]
+# ### Within-site test: speech-responsive vs speech-unresponsive
+
+# %%
+def speech_responsive_unresponsive_z_comparison(df_cell, n_perm=1_000_000, seed=0):
+    """
+    Compare fisher-Z transformed late--early partial correlation
+    at full size.
+    """
+    base_controls = df_cell[["hga_baseline", "epoch_idx"]].to_numpy(float)
+    resampled_controls = pd.get_dummies(df_cell.resampled.astype("category"),
+                                        drop_first=True, dtype=float)
+    late = df_cell["hga_late"].to_numpy(float)
+
+    Z_same = sm.add_constant(np.concatenate([base_controls, resampled_controls], axis=1))
+    r_same = stats.pearsonr(_resid(late, Z_same),
+                             _resid(df_cell["hga_early"].to_numpy(float), Z_same))[0]
+    z_same = np.arctanh(np.clip(r_same, -0.999999, 0.999999))
+
+    pop_specs = {
+        "responsive": ("hga_alt_early_by_elec", "hga_alt_baseline_by_elec", np.random.default_rng(seed)),
+        "unresponsive": ("hga_bad_alt_early_by_elec", "hga_bad_alt_baseline_by_elec", np.random.default_rng(seed + 1)),
+    }
+
+    pop_results = {}
+    for pop, (early_col, baseline_col, rng) in pop_specs.items():
+        early_arr = np.stack(df_cell[early_col].to_numpy())
+        baseline_arr = np.stack(df_cell[baseline_col].to_numpy())
+
+        elec_results = []
+        for elec_idx in range(early_arr.shape[1]):
+            Z = sm.add_constant(np.column_stack([base_controls, resampled_controls, baseline_arr[:, elec_idx]]))
+            r = stats.pearsonr(_resid(late, Z),
+                               _resid(early_arr[:, elec_idx], Z))[0]
+            z = np.arctanh(np.clip(r, -0.999999, 0.999999))
+            elec_results.append(z)
+        pop_results[pop] = elec_results
+
+    # Now evaluate difference of |z_responsive| vs |z_unresponsive|
+    # by permutation test
+    a = np.abs(pop_results["responsive"])
+    b = np.abs(pop_results["unresponsive"])
+    obs = a.mean() - b.mean()
+    
+    # permutation test: permute labels on pooled electrodes
+    pooled = np.concatenate([a, b])
+    n_responsive = len(a)
+    rng = np.random.default_rng(seed)
+    null_stats = np.empty(n_perm)
+    for i in range(n_perm):
+        p = rng.permutation(pooled)
+        null_stats[i] = p[:n_responsive].mean() - p[n_responsive:].mean()
+    null_ci_low, null_ci_high = np.percentile(null_stats, [2.5, 97.5])
+
+    p_value = (1 + (np.abs(null_stats) >= abs(obs)).sum()) / (1 + n_perm)
+    
+    return {
+        "obs": obs,
+        "null_mean": null_stats.mean(),
+        "null_std": null_stats.std(),
+        "null_ci_low": null_ci_low,
+        "null_ci_high": null_ci_high,
+
+        "p_value": p_value,
+        "mean_responsive": a.mean(),
+        "mean_unresponsive": b.mean(),
+    }
+
+        # for n_elec in ns:
+        #     n_used = early_arr.shape[1] if n_elec is None else min(n_elec, early_arr.shape[1])
+        #     zs = np.empty(n_draws)
+        #     for d in range(n_draws):
+        #         pred, base_ctrl = _matched_draw(early_arr, baseline_arr, n_elec, rng)
+        #         Z = sm.add_constant(np.column_stack([base_controls, resampled_controls, base_ctrl]))
+        #         r = stats.pearsonr(_resid(late, Z), _resid(pred, Z))[0]
+        #         zs[d] = np.arctanh(np.clip(r, -0.999999, 0.999999))
+        #     rows.append({
+        #         "population": pop,
+        #         "n_label": _n_label(n_elec),
+        #         "n_requested": n_elec,
+        #         "n_elec": n_used,
+        #         "mean_z": zs.mean(),
+        #         "mean_r": np.tanh(zs.mean()),
+        #         "se_z": zs.std(ddof=1) / np.sqrt(n_draws),
+        #         "mean_abs_z": np.abs(zs).mean()
+        #     })
+
+    # out = pd.DataFrame(rows)
+    # out["same_site_r"] = r_same
+    # out["same_site_z"] = z_same
+    # out["same_site_abs_z"] = np.abs(z_same)
+    # return out
+
+speech_responsive_unresponsive_z_comparison_df = []
+for (subject, electrode_idx, word_end), xs in tqdm(early_late_reg_df.groupby(["subject", "electrode_idx", "word_end"])):
+    speech_responsive_unresponsive_z_comparison_df.append(
+        {
+            **speech_responsive_unresponsive_z_comparison(xs),
+            "subject": subject,
+            "electrode_idx": electrode_idx,
+            "word_end": word_end
+        }
+    )
+speech_responsive_unresponsive_z_comparison_df = pd.DataFrame(speech_responsive_unresponsive_z_comparison_df)
+
+# %%
+speech_responsive_unresponsive_z_comparison_df.sort_values("p_value")
+
+# %%
+# Plot per-population early--late correlations, sweeping over population pool size
+
+plot_df = sweep_all.assign(site=lambda xs: xs.subject.str.cat([xs.electrode_idx.astype(str), xs.word_end], sep=" "))
+plot_order = plot_df.query("n_label == 'all'").set_index("population").groupby("site").apply(
+    lambda xs: xs.loc["responsive", "mean_abs_z"] - xs.loc["unresponsive", "mean_abs_z"]
+).sort_values(ascending=False).index
+g = sns.catplot(data=plot_df,
+                x="n_label", y="mean_abs_z", hue="population",
+                col="site", col_wrap=3, col_order=plot_order,
+                kind="point", height=2.5, aspect=1.25,
+                sharex=False, sharey=False)
+for (i, j, k), facet_data in g.facet_data():
+    ax = g.axes[j]
+    ax.axhline(facet_data.same_site_abs_z.iloc[0], ls="--", color="k", alpha=0.5)
+
+    # annotate results for N=all using `speech_responsive_unresponsive_z_comparison_df`
+    sr_unr_z_comp_i = speech_responsive_unresponsive_z_comparison_df.query(
+        f"subject == '{facet_data.subject.iloc[0]}' "
+        f"and electrode_idx == {facet_data.electrode_idx.iloc[0]} "
+        f"and word_end == '{facet_data.word_end.iloc[0]}'"
+    ).iloc[0]
+    x_all = 8
+    y1 = facet_data.query("population == 'responsive' and n_label == 'all'").mean_abs_z.iloc[0]
+    y2 = facet_data.query("population == 'unresponsive' and n_label == 'all'").mean_abs_z.iloc[0]
+    ymin, ymax = (y1, y2) if y1 < y2 else (y2, y1)
+    ax.plot([x_all, x_all], [ymin, ymax], ls="--", color="red", alpha=0.5)
+    ax.text(0.5, 0.9, f"p={sr_unr_z_comp_i.p_value:.3g}", color="red", transform=ax.transAxes, ha="center")
+    # ax.errorbar(x=x_all, y=sr_unr_z_comp_i.mean_abs_z, yerr=sr_unr_z_comp_i.sem_abs_z, fmt="o", color="k", alpha=0.5)
+
+g.set_axis_labels("N electrodes pooled", "mean |corr|\nlate ~ early | controls")
+
+# add to legend: dashed line
+from matplotlib.lines import Line2D
+same_site_handle = Line2D([0], [0], color="k", ls="--", alpha=0.5, label="same-site r")
+
+# grab existing hue handles/labels from the FacetGrid legend
+handles = getattr(g._legend, "legend_handles", None) or g._legend.legendHandles
+labels = [t.get_text() for t in g._legend.get_texts()]
+
+handles = list(handles) + [same_site_handle]
+labels = labels + ["same-site r"]
+
+g._legend.remove()
+g.fig.legend(handles=handles, labels=labels, loc="center left",
+             bbox_to_anchor=(0.86, 0.5), frameon=False, title="population")
+
+# %% [markdown]
+# ## Temporal generalization test
 # %% Cross-temporal single-trial coupling matrices: survivors vs. counterfactual sites
 
 DECIM = 2
